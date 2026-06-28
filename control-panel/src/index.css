@@ -1,0 +1,368 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ------------------------------------------------------------------ */
+/* CSS 变量 — 暗色主题（默认） */
+/* ------------------------------------------------------------------ */
+
+:root {
+  --color-primary: #3B82F6;
+  --color-primary-hover: #2563EB;
+  --color-primary-active: #1D4ED8;
+  --color-primary-light: #EFF6FF;
+  --color-primary-muted: #BFDBFE;
+  --color-primary-dark: #1E40AF;
+
+  --color-success: #10B981;
+  --color-warning: #F59E0B;
+  --color-danger: #EF4444;
+  --color-info: #3B82F6;
+  --color-neutral: #6B7280;
+
+  --color-text-primary: #F9FAFB;
+  --color-text-secondary: #D1D5DB;
+  --color-text-tertiary: #9CA3AF;
+  --color-text-quaternary: #6B7280;
+  --color-text-disabled: #4B5563;
+  --color-text-inverse: #111827;
+
+  --color-bg-base: #111827;
+  --color-bg-elevated: #1F2937;
+  --color-bg-overlay: #374151;
+  --color-bg-input: #374151;
+  --color-bg-table-header: #1F2937;
+  --color-bg-table-row-hover: #374151;
+  --color-bg-badge: #374151;
+
+  --color-border: #374151;
+  --color-border-light: #1F2937;
+  --color-border-focus: #3B82F6;
+
+  --font-size-xs: 11px;
+  --font-size-sm: 12px;
+  --font-size-md: 14px;
+  --font-size-base: 16px;
+  --font-size-lg: 18px;
+  --font-size-xl: 24px;
+  --font-size-2xl: 32px;
+  --font-size-3xl: 40px;
+
+  --nav-height: 56px;
+  --sidebar-width: 200px;
+  --sidebar-width-collapsed: 64px;
+}
+
+/* ------------------------------------------------------------------ */
+/* 浅色主题 */
+/* ------------------------------------------------------------------ */
+
+html.light {
+  --color-text-primary: #111827;
+  --color-text-secondary: #4B5563;
+  --color-text-tertiary: #9CA3AF;
+  --color-text-quaternary: #6B7280;
+  --color-text-disabled: #D1D5DB;
+
+  --color-bg-base: #F3F4F6;
+  --color-bg-elevated: #FFFFFF;
+  --color-bg-overlay: #F9FAFB;
+  --color-bg-input: #FFFFFF;
+  --color-bg-table-header: #F9FAFB;
+  --color-bg-table-row-hover: #F3F4F6;
+  --color-bg-badge: #E5E7EB;
+
+  --color-border: #E5E7EB;
+  --color-border-light: #F3F4F6;
+}
+
+/* ------------------------------------------------------------------ */
+/* 基础样式 */
+/* ------------------------------------------------------------------ */
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: var(--font-size-base);
+  color: var(--color-text-primary);
+  background-color: var(--color-bg-base);
+  transition: color 0.2s, background-color 0.2s;
+}
+
+body {
+  min-height: 100vh;
+}
+
+/* 滚动条 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-quaternary);
+}
+
+/* ------------------------------------------------------------------ */
+/* 卡片 */
+/* ------------------------------------------------------------------ */
+
+.card {
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  padding: 24px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  transition: box-shadow 0.2s, border-color 0.2s;
+}
+
+.card:hover {
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.4);
+  border-color: var(--color-primary-muted);
+}
+
+/* ------------------------------------------------------------------ */
+/* 按钮 */
+/* ------------------------------------------------------------------ */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  min-height: 40px;
+  border-radius: 8px;
+  font-size: var(--font-size-md);
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: all 0.15s;
+}
+
+.btn-primary {
+  background: var(--color-primary);
+  color: var(--color-text-inverse);
+}
+.btn-primary:hover {
+  background: var(--color-primary-hover);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+.btn-secondary {
+  background: transparent;
+  border-color: var(--color-border);
+  color: var(--color-text-secondary);
+}
+.btn-secondary:hover {
+  background: var(--color-bg-overlay);
+  border-color: var(--color-text-tertiary);
+}
+
+.btn-danger {
+  background: transparent;
+  border-color: var(--color-danger);
+  color: var(--color-danger);
+}
+.btn-danger:hover {
+  background: rgba(239, 68, 68, 0.2);
+}
+
+/* ------------------------------------------------------------------ */
+/* 表格 */
+/* ------------------------------------------------------------------ */
+
+.table-container {
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+thead th {
+  background: var(--color-bg-table-header);
+  padding: 12px 16px;
+  text-align: left;
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  border-bottom: 1px solid var(--color-border);
+  position: sticky;
+  top: 0;
+}
+
+tbody td {
+  padding: 12px 16px;
+  font-size: var(--font-size-md);
+  color: var(--color-text-primary);
+  border-bottom: 1px solid var(--color-border);
+  min-height: 44px;
+}
+
+tbody tr:hover {
+  background: var(--color-bg-table-row-hover);
+}
+
+/* ------------------------------------------------------------------ */
+/* 输入框 */
+/* ------------------------------------------------------------------ */
+
+.input {
+  height: 40px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-input);
+  color: var(--color-text-primary);
+  font-size: var(--font-size-md);
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.input:focus {
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.3);
+}
+
+.input::placeholder {
+  color: var(--color-text-quaternary);
+}
+
+/* ------------------------------------------------------------------ */
+/* 状态标签 */
+/* ------------------------------------------------------------------ */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+}
+
+.badge-success {
+  background: rgba(16, 185, 129, 0.15);
+  color: var(--color-success);
+}
+
+.badge-warning {
+  background: rgba(245, 158, 11, 0.15);
+  color: var(--color-warning);
+}
+
+.badge-danger {
+  background: rgba(239, 68, 68, 0.15);
+  color: var(--color-danger);
+}
+
+.badge-neutral {
+  background: rgba(107, 114, 128, 0.15);
+  color: var(--color-text-tertiary);
+}
+
+/* ------------------------------------------------------------------ */
+/* 开关 */
+/* ------------------------------------------------------------------ */
+
+.toggle {
+  position: relative;
+  width: 40px;
+  height: 22px;
+  cursor: pointer;
+}
+
+.toggle input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.toggle-slider {
+  position: absolute;
+  inset: 0;
+  background: var(--color-text-tertiary);
+  border-radius: 9999px;
+  transition: background 0.2s;
+}
+
+.toggle-slider::before {
+  content: '';
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  left: 3px;
+  top: 3px;
+  background: var(--color-bg-base);
+  border-radius: 50%;
+  transition: transform 0.2s;
+}
+
+.toggle input:checked + .toggle-slider {
+  background: var(--color-primary);
+}
+
+.toggle input:checked + .toggle-slider::before {
+  transform: translateX(18px);
+}
+
+/* ------------------------------------------------------------------ */
+/* 加载骨架屏 */
+/* ------------------------------------------------------------------ */
+
+.skeleton {
+  background: linear-gradient(90deg, var(--color-bg-overlay) 25%, var(--color-border) 50%, var(--color-bg-overlay) 75%);
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.5s infinite;
+  border-radius: 4px;
+}
+
+@keyframes skeleton-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* ------------------------------------------------------------------ */
+/* 空状态 */
+/* ------------------------------------------------------------------ */
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 64px 24px;
+  text-align: center;
+}
+
+.empty-state-icon {
+  width: 120px;
+  height: 120px;
+  color: var(--color-text-tertiary);
+  opacity: 0.4;
+  margin-bottom: 16px;
+}
+
+.empty-state-title {
+  font-size: var(--font-size-lg);
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  margin-bottom: 8px;
+}
+
+.empty-state-desc {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-tertiary);
+}
