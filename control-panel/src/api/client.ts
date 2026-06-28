@@ -242,3 +242,28 @@ export async function togglePlugin(name: string, enabled: boolean): Promise<ApiR
   if (!res.ok) throw new Error('Failed to toggle plugin')
   return res.json()
 }
+
+// ------------------------------------------------------------------
+// Admin: Global Config (Hot Reload, Debug Mode)
+// ------------------------------------------------------------------
+
+export interface GlobalConfigData {
+  hot_reload: boolean
+  debug_mode: boolean
+}
+
+export async function getGlobalConfig(): Promise<ApiResponse<GlobalConfigData>> {
+  const res = await fetch(`${API_BASE}/admin/global-config`)
+  if (!res.ok) throw new Error('Failed to fetch global config')
+  return res.json()
+}
+
+export async function updateGlobalConfig(config: { hot_reload: boolean; debug_mode: boolean }): Promise<ApiResponse<GlobalConfigData>> {
+  const res = await fetch(`${API_BASE}/admin/global-config`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(config),
+  })
+  if (!res.ok) throw new Error('Failed to update global config')
+  return res.json()
+}

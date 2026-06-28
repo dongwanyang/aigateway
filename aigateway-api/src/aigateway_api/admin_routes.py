@@ -517,3 +517,90 @@ async def get_quota(
         },
         "message": "success",
     }
+
+
+# ------------------------------------------------------------------
+# GET/PUT /admin/global-config — 全局配置（热重载、调试模式）
+# ------------------------------------------------------------------
+
+
+@router.get("/global-config")
+async def get_global_config(request: Request):
+    """返回全局配置（热重载、调试模式）。
+
+    直接从文件读取，避免多 worker 内存不一致。
+    """
+    import os
+    import yaml
+    from aigateway_api.main import app
+    s = app.state
+    config_manager = getattr(s, "config_manager")
+
+    hot_reload = False
+    debug_mode = False
+
+    if config_manager:
+        config_path = config_manager.config_path
+        if config_path and os.path.isfile(config_path):
+            with open(config_path, "r", encoding="utf-8") as f:
+                file_config = yaml.safe_load(f) or {}
+            hot_reload = file_config.get("hot_reload", False)
+            debug_mode = file_config.get("debug_mode", False)
+
+    return {
+        "data": {
+            "hot_reload": hot_reload,
+            "debug_mode": debug_mode,
+        },
+        "message": "success",
+    }
+
+
+@router.put("/global-config")
+async def update_global_config(request: Request):
+    """更新全局配置（热重载、调试模式）。"""
+    from aigateway_api.main import app
+    s = app.state
+    config_manager = getattr(s, "config_manager")
+    import yaml
+
+    if not config_manager:
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "ConfigManager not initialized"}})
+
+    raw = await request.json()
+    hot_reload = raw.get("hot_reload", False)
+    debug_mode = raw.get("debug_mode", False)
+
+    # 更新内存缓存
+    config_manager.set("hot_reload", hot_reload)
+    config_manager.set("debug_mode", debug_mode)
+
+    # 写回 config.yaml（只追加这两个键）
+    config_path = config_manager.config_path
+    if config_path:
+        import os
+        if os.path.isfile(config_path):
+            with open(config_path, "r", encoding="utf-8") as f:
+                file_config = yaml.safe_load(f) or {}
+            file_config["hot_reload"] = hot_reload
+            file_config["debug_mode"] = debug_mode
+            writable_keys = {"server", "auth", "plugins", "providers", "embedding", "observability", "hot_reload", "debug_mode"}
+            clean_config = {k: v for k, v in file_config.items() if k in writable_keys}
+            with open(config_path, "w", encoding="utf-8") as f:
+                yaml.dump(clean_config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+    # 根据 hot_reload 开关启停 Watchdog
+    if hot_reload:
+        config_manager.start_watching()
+    else:
+        config_manager.stop_watching()
+
+    # 根据 debug_mode 调整日志级别
+    if debug_mode:
+        from aigateway_core.logger import setup_logging
+        setup_logging(log_level="DEBUG")
+
+    return {
+        "data": {"hot_reload": hot_reload, "debug_mode": debug_mode},
+        "message": "success",
+    }

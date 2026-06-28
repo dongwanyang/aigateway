@@ -98,3 +98,5 @@ observability:
   otel_sample_rate: 0.1
   log_format: json
   log_level: info
+hot_reload: false
+debug_mode: false

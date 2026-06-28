@@ -277,8 +277,11 @@ async def chat_completions_non_stream(
             metrics_collector.record_tokens(pt, "prompt")
         if ct > 0:
             metrics_collector.record_tokens(ct, "completion")
-        if tt > 0 and cost > 0:
-            metrics_collector.record_cost(cost, model=body.model)
+        if tt > 0:
+            # 优先使用 LiteLLM 返回的真实成本，否则 fallback 到估算
+            final_cost = cost if cost > 0 else _estimate_cost(body.model, tt)
+            if final_cost > 0:
+                metrics_collector.record_cost(final_cost, model=body.model)
         tracker.__exit__(None, None, None)
 
     # 回填缓存（L1 + L2）

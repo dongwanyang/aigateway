@@ -1,17 +1,20 @@
 import { useEffect, useState } from 'react'
 import { Puzzle } from 'lucide-react'
 import Card from '@/components/Card'
-import { getPluginsConfig, togglePlugin } from '@/api/client'
+import { getPluginsConfig, togglePlugin, getGlobalConfig, updateGlobalConfig } from '@/api/client'
 import type { PluginConfigItem } from '@/api/client'
 
 export default function Plugins() {
   const [plugins, setPlugins] = useState<PluginConfigItem[]>([])
   const [loading, setLoading] = useState(true)
+  const [globalConfig, setGlobalConfig] = useState({ hot_reload: false, debug_mode: false })
+  const [globalLoading, setGlobalLoading] = useState(true)
 
   useEffect(() => {
-    getPluginsConfig()
-      .then(r => { setPlugins(r.data.plugins); setLoading(false) })
-      .catch(() => { setLoading(false) })
+    Promise.all([
+      getPluginsConfig().then(r => { setPlugins(r.data.plugins); setLoading(false) }),
+      getGlobalConfig().then(r => { setGlobalConfig(r.data); setGlobalLoading(false) }),
+    ]).catch(() => { setLoading(false); setGlobalLoading(false) })
   }, [])
 
   const toggle = async (name: string, currentEnabled: boolean) => {
@@ -24,6 +27,19 @@ export default function Plugins() {
     } catch {
       // Rollback on failure
       setPlugins(prev => prev.map(p => p.name === name ? { ...p, enabled: currentEnabled } : p))
+    }
+  }
+
+  const toggleGlobal = async (key: 'hot_reload' | 'debug_mode', currentValue: boolean) => {
+    const newValue = !currentValue
+    setGlobalConfig(prev => ({ ...prev, [key]: newValue }))
+    try {
+      await updateGlobalConfig({
+        hot_reload: key === 'hot_reload' ? newValue : globalConfig.hot_reload,
+        debug_mode: key === 'debug_mode' ? newValue : globalConfig.debug_mode,
+      })
+    } catch {
+      setGlobalConfig(prev => ({ ...prev, [key]: currentValue }))
     }
   }
 
@@ -107,7 +123,12 @@ export default function Plugins() {
               <div className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>修改 config.yaml 后自动生效</div>
             </div>
             <label className="toggle cursor-pointer">
-              <input type="checkbox" defaultChecked />
+              <input
+                type="checkbox"
+                checked={globalConfig.hot_reload}
+                onChange={() => toggleGlobal('hot_reload', globalConfig.hot_reload)}
+                disabled={globalLoading}
+              />
               <span className="toggle-slider" />
             </label>
           </div>
@@ -117,7 +138,12 @@ export default function Plugins() {
               <div className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>记录详细插件执行日志</div>
             </div>
             <label className="toggle cursor-pointer">
-              <input type="checkbox" />
+              <input
+                type="checkbox"
+                checked={globalConfig.debug_mode}
+                onChange={() => toggleGlobal('debug_mode', globalConfig.debug_mode)}
+                disabled={globalLoading}
+              />
               <span className="toggle-slider" />
             </label>
           </div>
