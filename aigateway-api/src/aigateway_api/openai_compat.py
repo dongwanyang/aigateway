@@ -253,11 +253,12 @@ async def chat_completions_non_stream(
         )
 
     # 记录用量（Redis + Prometheus 指标）
+    data_part = result.get("data", {})
+    usage = data_part.get("usage", {})
+    cost = result.get("_meta", {}).get("cost", 0.0)
+    tokens_total = usage.get("total_tokens", 0)
+
     if key_hash:
-        data_part = result.get("data", {})
-        usage = data_part.get("usage", {})
-        tokens_total = usage.get("total_tokens", 0)
-        cost = result.get("_meta", {}).get("cost", 0.0)
         await key_store.increment_usage(
             key_hash=key_hash,
             tokens=tokens_total,
@@ -269,8 +270,6 @@ async def chat_completions_non_stream(
 
     # Prometheus 指标
     if metrics_collector:
-        data_part = result.get("data", {})
-        usage = data_part.get("usage", {})
         pt = usage.get("prompt_tokens", 0)
         ct = usage.get("completion_tokens", 0)
         tt = usage.get("total_tokens", 0)
