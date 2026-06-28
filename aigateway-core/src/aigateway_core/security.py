@@ -226,10 +226,10 @@ class KeyStore:
         }
 
         # 设置日配额 TTL（当天 23:59:59 UTC）
-        await self.redis.set_quota(f"{key_hash}:daily:{today}", quota_base)
+        await self.redis.set_quota(key_hash, f"daily:{today}", quota_base)
 
         # 设置月配额 TTL（当月最后一天 23:59:59 UTC）
-        await self.redis.set_quota(f"{key_hash}:monthly:{month}", quota_base)
+        await self.redis.set_quota(key_hash, f"monthly:{month}", quota_base)
 
         # 通过 Pub/Sub 广播 Key 创建事件
         pub_msg = self._build_pubsub_message("key_created", key_id, user_id)

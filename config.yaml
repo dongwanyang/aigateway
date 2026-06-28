@@ -14,12 +14,12 @@ auth:
   distributed_mode: false
 plugins:
 - name: pii_detector
-  enabled: false
+  enabled: true
   depends_on: []
   config:
     strategy: sanitize
 - name: prompt_cache
-  enabled: false
+  enabled: true
   depends_on: []
   config: {}
 - name: semantic_cache
@@ -29,7 +29,7 @@ plugins:
   config:
     embedding_model: all-MiniLM-L6-v2
 - name: model_router
-  enabled: false
+  enabled: true
   depends_on: []
   config: {}
 - name: prompt_compress
