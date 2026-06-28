@@ -343,7 +343,14 @@ async def get_plugins_config(request: Request):
 
 @router.put("/plugins-config")
 async def update_plugins_config(request: Request):
-    """更新插件配置（启用/禁用）。"""
+    """更新插件配置（启用/禁用）。
+
+    多 worker 场景下，内存缓存可能过期，直接从文件读取最新配置。
+    使用文件锁防止并发写冲突。
+    """
+    import fcntl
+    import os
+    import yaml
     from pydantic import BaseModel, Field
 
     class PluginToggleRequest(BaseModel):
@@ -369,20 +376,43 @@ async def update_plugins_config(request: Request):
     if not config_manager:
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "ConfigManager not initialized"}})
 
-    # 更新 config.yaml 中的插件配置
-    plugins_cfg = config_manager.get("plugins", [])
-    updated = False
-    for p in plugins_cfg:
-        if isinstance(p, dict) and p.get("name") == name:
-            p["enabled"] = enabled
-            updated = True
-            break
+    # 从文件读取最新插件配置（绕过可能过期的内存缓存）
+    config_path = config_manager.config_path
+    if not config_path or not os.path.isfile(config_path):
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Config file not found"}})
 
-    if not updated:
-        raise HTTPException(status_code=404, detail={"error": {"code": "not_found", "message": f"Plugin '{name}' not found"}})
+    # 文件锁：确保同一时刻只有一个 worker 读写 config.yaml
+    lock_path = config_path + ".lock"
+    lock_fd = open(lock_path, "w")
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
 
-    # 保存回 config.yaml
-    config_manager.save("plugins", plugins_cfg)
+        with open(config_path, "r", encoding="utf-8") as f:
+            file_config = yaml.safe_load(f) or {}
+
+        plugins_cfg = file_config.get("plugins", [])
+        updated = False
+        for p in plugins_cfg:
+            if isinstance(p, dict) and p.get("name") == name:
+                p["enabled"] = enabled
+                updated = True
+                break
+
+        if not updated:
+            raise HTTPException(status_code=404, detail={"error": {"code": "not_found", "message": f"Plugin '{name}' not found"}})
+
+        # 写回文件（只写 plugins 节）
+        file_config["plugins"] = plugins_cfg
+        writable_keys = {"server", "auth", "plugins", "providers", "embedding", "observability"}
+        clean_config = {k: v for k, v in file_config.items() if k in writable_keys}
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.dump(clean_config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+        # 同步更新内存缓存
+        config_manager._set_nested(config_manager._config, "plugins", plugins_cfg)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        lock_fd.close()
 
     return {
         "data": {"name": name, "enabled": enabled},

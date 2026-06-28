@@ -61,6 +61,52 @@ class EmbeddingRequest(BaseModel):
 # ------------------------------------------------------------------
 
 
+def _estimate_cost(model: str, total_tokens: int) -> float:
+    """根据模型和 token 数估算成本（美元）。
+
+    与 litellm_bridge._estimate_cost() 定价表保持一致。
+    """
+    pricing = {
+        "gpt-4o": 0.000005,
+        "gpt-4o-mini": 0.00000015,
+        "claude-3-5-sonnet": 0.000003,
+        "claude-3-haiku": 0.00000025,
+        "gemini-1.5-pro": 0.0000025,
+    }
+    base = model.split("/")[-1] if "/" in model else model
+    return round(total_tokens * pricing.get(base, 0.000001), 6)
+
+
+async def _wrap_stream_for_metrics(
+    completion_gen: Any,
+    metrics_collector: Any,
+    model: str,
+) -> Any:
+    """包装流式生成器，从最后一个 chunk 提取 usage 并记录指标。"""
+    last_chunk: Dict[str, Any] = {}
+    async for chunk in completion_gen:
+        last_chunk = chunk
+        yield chunk
+
+    # 从最后一个 chunk 提取 usage 数据
+    usage = last_chunk.get("usage", {})
+    if not usage:
+        return
+
+    prompt_tokens = usage.get("prompt_tokens", 0)
+    completion_tokens = usage.get("completion_tokens", 0)
+    total_tokens = usage.get("total_tokens", 0)
+
+    if prompt_tokens > 0:
+        metrics_collector.record_tokens(prompt_tokens, "prompt")
+    if completion_tokens > 0:
+        metrics_collector.record_tokens(completion_tokens, "completion")
+    if total_tokens > 0:
+        cost = _estimate_cost(model, total_tokens)
+        if cost > 0:
+            metrics_collector.record_cost(cost, model=model)
+
+
 def _get_app_state() -> Dict[str, Any]:
     """从 FastAPI app.state 获取全局组件。"""
     from aigateway_api.main import app
@@ -142,6 +188,8 @@ async def chat_completions_non_stream(
         })
 
     # ===== 配额检查（缓存未命中时才检查，避免浪费） =====
+    if metrics_collector:
+        metrics_collector.inc_cache_misses()
     if key_hash and key_store:
         # 预估 token 消耗（基于输入消息大小）
         estimated_tokens = sum(len(json.dumps(m)) for m in body.messages) // 4
@@ -175,6 +223,11 @@ async def chat_completions_non_stream(
             status_code=500,
         )
 
+    # 用 RequestTracker 包裹：自动记录 active 请求数、请求总数、持续时间
+    tracker = metrics_collector.track_request("/v1/chat/completions", method="POST") if metrics_collector else None
+    if tracker:
+        tracker.__enter__()
+
     try:
         result = await litellm_bridge.completion(
             messages=body.messages,
@@ -192,12 +245,14 @@ async def chat_completions_non_stream(
         )
     except Exception as exc:
         logger.error("LLM completion failed: %s", exc, exc_info=True)
+        if tracker:
+            tracker.__exit__(type(exc), exc, exc.__traceback__)
         return JSONResponse(
             content={"error": {"code": "internal_error", "message": f"Upstream completion error: {exc}"}},
             status_code=500,
         )
 
-    # 记录用量
+    # 记录用量（Redis + Prometheus 指标）
     if key_hash:
         data_part = result.get("data", {})
         usage = data_part.get("usage", {})
@@ -211,6 +266,21 @@ async def chat_completions_non_stream(
             tokens_in=usage.get("prompt_tokens", 0),
             tokens_out=usage.get("completion_tokens", 0),
         )
+
+    # Prometheus 指标
+    if metrics_collector:
+        data_part = result.get("data", {})
+        usage = data_part.get("usage", {})
+        pt = usage.get("prompt_tokens", 0)
+        ct = usage.get("completion_tokens", 0)
+        tt = usage.get("total_tokens", 0)
+        if pt > 0:
+            metrics_collector.record_tokens(pt, "prompt")
+        if ct > 0:
+            metrics_collector.record_tokens(ct, "completion")
+        if tt > 0 and cost > 0:
+            metrics_collector.record_cost(cost, model=body.model)
+        tracker.__exit__(None, None, None)
 
     # 回填缓存（L1 + L2）
     # 当 value_fn=None 时，cache_manager.get() 返回 None 而非 MISS，
@@ -281,6 +351,8 @@ async def chat_completions_stream(
         return create_sse_response(stream_gen, chat_id=chat_id)
 
     # ===== 配额检查 =====
+    if metrics_collector:
+        metrics_collector.inc_cache_misses()
     if key_hash and key_store:
         estimated_tokens = sum(len(json.dumps(m)) for m in body.messages) // 4
         allowed, fail_msg, retry_after = await key_store.check_quota(
@@ -325,6 +397,10 @@ async def chat_completions_stream(
         tool_choice=body.tool_choice,
         stop=body.stop,
     )
+
+    # 包装生成器：消费完所有 chunk 后从最后一个提取 usage 并记录指标
+    if metrics_collector:
+        completion_gen = _wrap_stream_for_metrics(completion_gen, metrics_collector, body.model)
 
     return create_sse_response(completion_gen, chat_id=f"chatcmpl-{uuid.uuid4().hex[:12]}")
 
