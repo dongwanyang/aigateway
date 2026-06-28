@@ -379,24 +379,28 @@ class ConfigManager:
             with self._lock:
                 self._set_nested(self._config, path, value)
                 self._write_yaml()
-                # 写回后立即从文件重新加载，确保内存与磁盘一致
-                # 多 worker 场景下，其他 worker 的内存可能过期，
-                # 热重载（Watchdog）或下次请求时重新加载可保证一致性
-                self._config = self._load_yaml(self.config_path)
-                # 重新应用环境变量覆盖
-                self._config = self._apply_env_overrides(self._config)
-                self._config = self._resolve_env_vars_in_values(self._config)
-            logger.info("配置已保存并刷新: %s", path)
+            logger.info("配置已保存: %s", path)
             return True
         except Exception as exc:
             logger.error("保存配置失败: %s", exc)
             return False
 
     def _write_yaml(self) -> None:
-        """将当前配置写回到 YAML 文件。"""
+        """将当前配置写回到 YAML 文件。
+
+        只写入合法的配置节（server/auth/plugins/providers/embedding/observability），
+        过滤掉由环境变量覆盖产生的扁平键（如 api_keys, host, port 等），
+        避免污染 YAML 文件结构。
+        """
         if self.config_path and os.path.isfile(self.config_path):
+            # 合法配置节：这些键应该持久化到 YAML
+            writable_keys = {
+                "server", "auth", "plugins", "providers",
+                "embedding", "observability",
+            }
+            clean_config = {k: v for k, v in self._config.items() if k in writable_keys}
             with open(self.config_path, 'w', encoding='utf-8') as f:
-                yaml.dump(self._config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+                yaml.dump(clean_config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
     # ------------------------------------------------------------------
     # Watchdog 热重载

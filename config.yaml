@@ -14,12 +14,12 @@ auth:
   distributed_mode: false
 plugins:
 - name: pii_detector
-  enabled: true
+  enabled: false
   depends_on: []
   config:
     strategy: sanitize
 - name: prompt_cache
-  enabled: true
+  enabled: false
   depends_on: []
   config: {}
 - name: semantic_cache
@@ -29,11 +29,11 @@ plugins:
   config:
     embedding_model: all-MiniLM-L6-v2
 - name: model_router
-  enabled: true
+  enabled: false
   depends_on: []
   config: {}
 - name: prompt_compress
-  enabled: false
+  enabled: true
   depends_on: []
   config:
     compression_ratio: 0.5
@@ -98,14 +98,3 @@ observability:
   otel_sample_rate: 0.1
   log_format: json
   log_level: info
-api_keys: sk-dev-a1b2c3d4e5f6
-config_path: ./config.yaml
-embedding_backend: sentence_transformers
-host: 0.0.0.0
-log_level: info
-otel_sample_rate: 0.1
-port: 8000
-prometheus_enabled: true
-qdrant_url: http://qdrant:6333
-redis_url: redis://redis:6379/0
-workers: 4

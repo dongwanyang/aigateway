@@ -294,23 +294,46 @@ async def get_metrics_json(request: Request):
 
 @router.get("/plugins-config")
 async def get_plugins_config(request: Request):
-    """返回后端实际注册的插件配置。"""
+    """返回当前 config.yaml 中实际的插件配置。
+
+    多 worker 场景下，内存中的 _config 可能过期，
+    直接从文件读取确保返回最新值。
+    """
     from aigateway_api.main import app
     s = app.state
     config_manager = getattr(s, "config_manager")
-    plugin_registry = getattr(s, "plugin_registry")
 
+    # 直接从 YAML 文件读取最新配置（绕过可能有 stale 数据的内存缓存）
     plugins = []
     if config_manager:
-        plugins_cfg = config_manager.get("plugins", [])
-        for p in plugins_cfg:
-            if isinstance(p, dict):
-                plugins.append({
-                    "name": p.get("name", "unknown"),
-                    "enabled": p.get("enabled", True),
-                    "depends_on": p.get("depends_on", []),
-                    "config": p.get("config", {}),
-                })
+        try:
+            import os
+            import yaml
+            config_path = config_manager.config_path
+            if config_path and os.path.isfile(config_path):
+                with open(config_path, "r", encoding="utf-8") as f:
+                    raw = yaml.safe_load(f) or {}
+                raw_plugins = raw.get("plugins", [])
+                for p in raw_plugins:
+                    if isinstance(p, dict):
+                        plugins.append({
+                            "name": p.get("name", "unknown"),
+                            "enabled": p.get("enabled", True),
+                            "depends_on": p.get("depends_on", []),
+                            "config": p.get("config", {}),
+                        })
+        except Exception as exc:
+            logger.warning("读取插件配置失败，回退到内存缓存: %s", exc)
+            # 回退：从内存缓存读取
+            plugins_cfg = config_manager.get("plugins", [])
+            for p in plugins_cfg:
+                if isinstance(p, dict):
+                    plugins.append({
+                        "name": p.get("name", "unknown"),
+                        "enabled": p.get("enabled", True),
+                        "depends_on": p.get("depends_on", []),
+                        "config": p.get("config", {}),
+                    })
 
     return {
         "data": {"plugins": plugins},
