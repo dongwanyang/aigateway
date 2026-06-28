@@ -33,7 +33,7 @@ plugins:
   depends_on: []
   config: {}
 - name: prompt_compress
-  enabled: true
+  enabled: false
   depends_on: []
   config:
     compression_ratio: 0.5

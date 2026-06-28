@@ -379,7 +379,14 @@ class ConfigManager:
             with self._lock:
                 self._set_nested(self._config, path, value)
                 self._write_yaml()
-            logger.info("配置已保存: %s", path)
+                # 写回后立即从文件重新加载，确保内存与磁盘一致
+                # 多 worker 场景下，其他 worker 的内存可能过期，
+                # 热重载（Watchdog）或下次请求时重新加载可保证一致性
+                self._config = self._load_yaml(self.config_path)
+                # 重新应用环境变量覆盖
+                self._config = self._apply_env_overrides(self._config)
+                self._config = self._resolve_env_vars_in_values(self._config)
+            logger.info("配置已保存并刷新: %s", path)
             return True
         except Exception as exc:
             logger.error("保存配置失败: %s", exc)
