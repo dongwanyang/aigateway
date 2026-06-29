@@ -35,7 +35,7 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
     "server": {
         "host": "0.0.0.0",
         "port": 8000,
-        "workers": 4,
+        "workers": 1,
     },
     "auth": {
         "distributed_mode": False,

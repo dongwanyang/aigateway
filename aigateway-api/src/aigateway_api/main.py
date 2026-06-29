@@ -166,6 +166,13 @@ async def lifespan(app: "FastAPI"):
         key_store = KeyStore(redis=redis_mgr)
         logger.info("KeyStore 初始化完成")
 
+        # 从 config.yaml 导入 API Key 到 Redis
+        auth_config = config_manager.get("auth", {})
+        api_keys_config = auth_config.get("api_keys", [])
+        if api_keys_config:
+            seeded = await key_store.seed_from_config(api_keys_config)
+            logger.info("已从 config.yaml 导入 %d 个 API Key 到 Redis", seeded)
+
     # 初始化 CacheManager
     cache_config = config_manager.get("plugins", [])
     prompt_cache_cfg: Dict[str, Any] = {}
@@ -217,10 +224,6 @@ async def lifespan(app: "FastAPI"):
     app.state.cache_manager = cache_manager
     app.state.plugin_registry = plugin_registry
     app.state.circuit_breaker_factory = cb_factory
-
-    # 设置 multiprocess 数据目录（多 worker 指标聚合）
-    from aigateway_core.metrics import set_multiproc_dir
-    set_multiproc_dir("/tmp/prometheus")
 
     app.state.metrics_collector = get_metrics_collector()
     app.state.litellm_bridge = litellm_bridge

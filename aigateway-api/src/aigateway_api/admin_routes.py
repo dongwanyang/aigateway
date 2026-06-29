@@ -19,10 +19,12 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
+
+from .auth_middleware import authenticate_admin
 
 router = APIRouter()
 
@@ -100,6 +102,7 @@ async def list_api_keys(
     request: Request,
     page: int = Query(default=1, ge=1, description="页码"),
     page_size: int = Query(default=20, ge=1, le=100, description="每页数量"),
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
 ):
     """列出所有 API Key 及其配额使用情况。"""
     key_store, metrics = _get_keystore_and_metrics(request)
@@ -155,7 +158,9 @@ async def list_api_keys(
 async def create_api_key(
     request: Request,
     body: CreateApiKeyRequest,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
 ):
+
     """创建新的 API Key。"""
     key_store, _ = _get_keystore_and_metrics(request)
 
@@ -195,7 +200,9 @@ async def create_api_key(
 async def delete_api_key(
     request: Request,
     key_id: str,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
 ):
+
     """撤销指定的 API Key。"""
     key_store, _ = _get_keystore_and_metrics(request)
 
@@ -224,7 +231,11 @@ async def delete_api_key(
 
 
 @router.get("/metrics-json")
-async def get_metrics_json(request: Request):
+async def get_metrics_json(
+    request: Request,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+
     """返回 Prometheus 指标的 JSON 格式，供前端仪表板使用。"""
     from aigateway_api.main import app
     s = app.state
@@ -235,11 +246,12 @@ async def get_metrics_json(request: Request):
     # 收集 Prometheus 指标
     prom_samples: Dict[str, Any] = {}
     try:
-        from prometheus_client import CollectorRegistry, multiprocess, generate_latest
-        # 使用 multiprocess 聚合所有 worker 的指标
-        registry = CollectorRegistry()
-        multiprocess.MultiProcessCollector(registry)
-        raw = generate_latest(registry).decode("utf-8")
+        from prometheus_client import generate_latest
+        # 单 worker 模式：使用 MetricsCollector 持有的 registry
+        if metrics_collector and metrics_collector._registry is not None:
+            raw = generate_latest(metrics_collector._registry).decode("utf-8")
+        else:
+            raw = ""
         for line in raw.split("\n"):
             if not line or line.startswith("#"):
                 continue
@@ -296,7 +308,11 @@ async def get_metrics_json(request: Request):
 
 
 @router.get("/plugins-config")
-async def get_plugins_config(request: Request):
+async def get_plugins_config(
+    request: Request,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+
     """返回当前 config.yaml 中实际的插件配置。
 
     多 worker 场景下，内存中的 _config 可能过期，
@@ -345,7 +361,11 @@ async def get_plugins_config(request: Request):
 
 
 @router.put("/plugins-config")
-async def update_plugins_config(request: Request):
+async def update_plugins_config(
+    request: Request,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+
     """更新插件配置（启用/禁用）。
 
     多 worker 场景下，内存缓存可能过期，直接从文件读取最新配置。
@@ -427,7 +447,9 @@ async def update_plugins_config(request: Request):
 async def get_quota(
     request: Request,
     key_id: str,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
 ):
+
     """查询指定 API Key 的详细配额状态。"""
     key_store, _ = _get_keystore_and_metrics(request)
     redis_mgr = key_store.redis
@@ -528,7 +550,11 @@ async def get_quota(
 
 
 @router.get("/global-config")
-async def get_global_config(request: Request):
+async def get_global_config(
+    request: Request,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+
     """返回全局配置（热重载、调试模式）。
 
     直接从文件读取，避免多 worker 内存不一致。
@@ -560,7 +586,11 @@ async def get_global_config(request: Request):
 
 
 @router.put("/global-config")
-async def update_global_config(request: Request):
+async def update_global_config(
+    request: Request,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+
     """更新全局配置（热重载、调试模式）。"""
     from aigateway_api.main import app
     s = app.state
@@ -623,6 +653,7 @@ async def get_request_logs(
     model: Optional[str] = Query(default=None, description="按模型筛选"),
     status: Optional[str] = Query(default=None, description="按状态码筛选"),
     cache_only: bool = Query(default=False, description="仅缓存命中"),
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
 ):
     """从 Redis 查询最近的请求日志。"""
     from aigateway_api.main import app

@@ -143,9 +143,7 @@ def _get_redis_client() -> Any:
 
 
 async def _record_request_log(
-    request_id: str,
-    trace_id: str,
-    user_id: Optional[str],
+    request: Request,
     method: str,
     endpoint: str,
     status_code: int,
@@ -156,6 +154,16 @@ async def _record_request_log(
 ) -> None:
     """记录请求日志到 Redis ZSET，供前端 /admin/logs 查询。"""
     import time
+    import uuid
+
+    # 从 request.state 获取 request_id/trace_id/user_id
+    request_id = getattr(request.state, "request_id", "") or str(uuid.uuid4().hex[:12])
+    trace_id = getattr(request.state, "trace_id", "") or str(uuid.uuid4().hex[:12])
+    user_id = getattr(request.state, "user_id", "") or ""
+    if not user_id:
+        api_key_data = getattr(request.state, "api_key_data", None)
+        if api_key_data:
+            user_id = api_key_data.get("user_id", "")
 
     redis_client = _get_redis_client()
     if redis_client is None:
@@ -164,7 +172,7 @@ async def _record_request_log(
     log_entry = json.dumps({
         "request_id": request_id,
         "trace_id": trace_id,
-        "user_id": user_id or "",
+        "user_id": user_id,
         "method": method,
         "endpoint": endpoint,
         "status": status_code,
@@ -241,7 +249,7 @@ async def chat_completions_non_stream(
 
         # 记录缓存命中日志
         await _record_request_log(
-            request_id="", trace_id="", user_id=user_id,
+            request=request,
             method="POST", endpoint="/v1/chat/completions",
             status_code=200, duration_ms=0, model=body.model,
             cache_hit=True, cache_tier=hit_tier,
@@ -276,7 +284,7 @@ async def chat_completions_non_stream(
             elif "Monthly" in fail_msg:
                 code = "quota_exceeded_monthly_cost"
             await _record_request_log(
-                request_id="", trace_id="", user_id=user_id,
+                request=request,
                 method="POST", endpoint="/v1/chat/completions",
                 status_code=429, duration_ms=0, model=body.model,
                 cache_hit=False, cache_tier=None,
@@ -363,7 +371,7 @@ async def chat_completions_non_stream(
 
     # 记录请求日志到 Redis
     await _record_request_log(
-        request_id="unknown", trace_id="unknown", user_id=user_id,
+        request=request,
         method="POST", endpoint="/v1/chat/completions",
         status_code=200, duration_ms=0, model=body.model,
         cache_hit=cache_hit, cache_tier=cached.get("hit_tier") if cached else None,
@@ -429,6 +437,14 @@ async def chat_completions_stream(
 
         chat_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
         stream_gen = simulate_stream_from_cache(response_json)
+
+        # 记录缓存命中日志（流式）
+        await _record_request_log(
+            request=request,
+            method="POST", endpoint="/v1/chat/completions",
+            status_code=200, duration_ms=0, model=body.model,
+            cache_hit=True, cache_tier=hit_tier,
+        )
         return create_sse_response(stream_gen, chat_id=chat_id)
 
     # ===== 配额检查 =====
@@ -452,6 +468,12 @@ async def chat_completions_stream(
                 code = "quota_exceeded_daily_tokens"
             elif "Monthly" in fail_msg:
                 code = "quota_exceeded_monthly_cost"
+            await _record_request_log(
+                request=request,
+                method="POST", endpoint="/v1/chat/completions",
+                status_code=429, duration_ms=0, model=body.model,
+                cache_hit=False, cache_tier=None,
+            )
             return JSONResponse(
                 content={"error": {"code": code, "message": fail_msg}},
                 status_code=429,
@@ -563,8 +585,14 @@ async def create_embeddings(
     if embedding_backend == "sentence_transformers":
         try:
             from sentence_transformers import SentenceTransformer
-
-            st_model = SentenceTransformer(embedding_model)
+            # 模块级缓存，避免每请求加载模型
+            if not hasattr(openai_compat, "_st_model_cache"):
+                openai_compat._st_model_cache: Dict[str, Any] = {}  # type: ignore[attr-defined]
+            _cache = getattr(openai_compat, "_st_model_cache")  # type: ignore[attr-defined]
+            st_model = _cache.get(embedding_model)
+            if st_model is None:
+                st_model = SentenceTransformer(embedding_model)
+                _cache[embedding_model] = st_model
             embeddings = st_model.encode(input_texts, normalize_embeddings=True)
         except ImportError:
             return JSONResponse(
@@ -682,7 +710,8 @@ async def create_embeddings(
 
 def _setup_router() -> Any:
     """创建并配置 FastAPI router。"""
-    from fastapi import APIRouter
+    from fastapi import APIRouter, Depends, Request
+    from .auth_middleware import authenticate
 
     router_obj = APIRouter()
 
@@ -690,19 +719,21 @@ def _setup_router() -> Any:
     async def post_chat_completions(
         body: ChatCompletionRequest,
         request: Request,
+        _auth: Dict[str, Any] = Depends(authenticate),
     ):
         if body.stream:
             return await chat_completions_stream(body, request)
         return await chat_completions_non_stream(body, request)
 
     @router_obj.get("/models")
-    async def get_models(request: Request):
+    async def get_models(request: Request, _auth: Dict[str, Any] = Depends(authenticate)):
         return await list_models(request)
 
     @router_obj.post("/embeddings")
     async def post_embeddings(
         body: EmbeddingRequest,
         request: Request,
+        _auth: Dict[str, Any] = Depends(authenticate),
     ):
         return await create_embeddings(body, request)
 

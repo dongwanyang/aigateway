@@ -1,11 +1,12 @@
 server:
   host: 0.0.0.0
   port: 8000
-  workers: 4
+  workers: 1
 auth:
   api_keys:
-  - key: sk-dev-a1b2c3d4e5f6
-    user_id: dev-user
+  - key: sk-a1b2c3d4e5f6XDFDDSF12nco
+    user_id: admin
+    is_admin: true
     quotas:
       daily_tokens: 1000000
       monthly_cost: 50.0
@@ -48,14 +49,14 @@ providers:
       - gpt-3.5-turbo
       pricing:
         gpt-4o:
-          prompt: 0.000005
-          completion: 0.000015
+          prompt: 5.0e-06
+          completion: 1.5e-05
         gpt-4o-mini:
-          prompt: 0.00000015
-          completion: 0.0000006
+          prompt: 1.5e-07
+          completion: 6.0e-07
         gpt-3.5-turbo:
-          prompt: 0.0000015
-          completion: 0.000002
+          prompt: 1.5e-06
+          completion: 2.0e-06
     num_retries: 3
     retry_after: 1000
   anthropic:
@@ -67,11 +68,11 @@ providers:
       - claude-3-sonnet
       pricing:
         claude-3-5-sonnet:
-          prompt: 0.000003
-          completion: 0.000015
+          prompt: 3.0e-06
+          completion: 1.5e-05
         claude-3-sonnet:
-          prompt: 0.0000015
-          completion: 0.0000075
+          prompt: 1.5e-06
+          completion: 7.5e-06
     num_retries: 3
     retry_after: 1000
   agnes:
@@ -83,8 +84,8 @@ providers:
       fallback_models: []
       pricing:
         agnes-2.0-flash:
-          prompt: 0.000003
-          completion: 0.000015
+          prompt: 3.0e-06
+          completion: 1.5e-05
     num_retries: 3
     retry_after: 1000
 embedding:
@@ -98,5 +99,3 @@ observability:
   otel_sample_rate: 0.1
   log_format: json
   log_level: info
-hot_reload: true
-debug_mode: true

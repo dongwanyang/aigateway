@@ -21,6 +21,8 @@ import json
 import logging
 import os
 import re
+import secrets
+import string
 import uuid
 from datetime import datetime, timezone
 from re import Pattern
@@ -147,9 +149,23 @@ class KeyStore:
         if status == "suspended":
             raise AuthError(f"API key '{data.get('key_id')}' is suspended")
 
+        # 规范化 is_admin 字段（Redis 中存的是 string）
+        if "is_admin" in data:
+            data["is_admin"] = data["is_admin"] in ("True", "true", "1", True)
+
         # 更新 last_used_at
         data["last_used_at"] = self._now_iso()
-        await self.redis.set_api_key(key_hash, data)
+        # 写回 Redis 前确保所有值是 str 类型（bool 会导致 hset 报错）
+        # 注意: bool 是 int 的子类，所以要单独检查
+        serializable_data = {}
+        for k, v in data.items():
+            if isinstance(v, bool):
+                serializable_data[k] = str(v)
+            elif isinstance(v, (str, int, float, type(None))):
+                serializable_data[k] = v
+            else:
+                serializable_data[k] = str(v)
+        await self.redis.set_api_key(key_hash, serializable_data)
 
         return data
 
@@ -168,9 +184,9 @@ class KeyStore:
         if not user_id:
             raise ValueError("user_id is required")
 
-        # 生成唯一 Key 值
-        import uuid
-        raw_key = f"sk-{uuid.uuid4().hex[:16]}"
+        # 生成唯一 Key 值 (sk- + 24 位大小写字母+数字)
+        _ALPHABET = string.ascii_letters + string.digits  # a-zA-Z0-9
+        raw_key = f"sk-{''.join(secrets.choice(_ALPHABET) for _ in range(24))}"
 
         key_hash = self._hash_key(raw_key)
         key_prefix = self._prefix_key(raw_key)
@@ -251,6 +267,90 @@ class KeyStore:
                 "rate_limit_tpm": rate_tpm,
             },
         }
+
+    async def seed_from_config(self, keys_config: List[Dict[str, Any]]) -> int:
+        """从 config.yaml auth.api_keys 导入 API Key 到 Redis。
+
+        启动时调用，确保配置文件中的 key 写入 Redis。
+        已存在的 key 会更新配额和 is_admin 标记。
+
+        Args:
+            keys_config: 配置中的 api_keys 列表，每项包含 key/user_id/quotas/is_admin。
+
+        Returns:
+            成功导入的 key 数量。
+        """
+        if not keys_config:
+            return 0
+
+        imported = 0
+        now_iso = self._now_iso()
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        month = datetime.now(timezone.utc).strftime("%Y-%m")
+
+        quota_base = {
+            "tokens_in": "0",
+            "tokens_out": "0",
+            "cost_usd": "0.0",
+            "request_count": "0",
+            "model_usage": "{}",
+        }
+
+        for cfg in keys_config:
+            raw_key = cfg.get("key", "")
+            user_id = cfg.get("user_id", "")
+            if not raw_key or not user_id:
+                logger.warning("config api_keys 条目缺少 key 或 user_id，跳过: %s", cfg)
+                continue
+
+            key_hash = self._hash_key(raw_key)
+            key_prefix = raw_key[:8]
+            quotas = cfg.get("quotas", {})
+            is_admin = bool(cfg.get("is_admin", False))
+
+            # 检查是否已存在
+            existing = await self.redis.get_api_key(key_hash)
+            if existing:
+                # 更新配额和 is_admin
+                existing["user_id"] = user_id
+                existing["status"] = "active"
+                existing["daily_tokens_limit"] = str(quotas.get("daily_tokens", self.DEFAULT_DAILY_TOKENS))
+                existing["monthly_cost_limit"] = str(quotas.get("monthly_cost", self.DEFAULT_MONTHLY_COST))
+                existing["rate_limit_rpm"] = str(quotas.get("rate_limit_rpm", self.DEFAULT_RATE_LIMIT_RPM))
+                existing["rate_limit_tpm"] = str(quotas.get("rate_limit_tpm", self.DEFAULT_RATE_LIMIT_TPM))
+                existing["is_admin"] = str(is_admin)
+                await self.redis.set_api_key(key_hash, existing)
+                logger.info("API Key 已更新: user_id=%s, key_hash=%s, is_admin=%s", user_id, key_hash, is_admin)
+            else:
+                key_id = f"key_{uuid.uuid4().hex[:8]}"
+                key_data: Dict[str, str] = {
+                    "key_id": key_id,
+                    "key_prefix": key_prefix,
+                    "user_id": user_id,
+                    "status": "active",
+                    "created_at": now_iso,
+                    "last_used_at": "",
+                    "daily_tokens_limit": str(quotas.get("daily_tokens", self.DEFAULT_DAILY_TOKENS)),
+                    "daily_tokens_used": "0",
+                    "monthly_cost_limit": str(quotas.get("monthly_cost", self.DEFAULT_MONTHLY_COST)),
+                    "monthly_cost_used": "0.0",
+                    "rate_limit_rpm": str(quotas.get("rate_limit_rpm", self.DEFAULT_RATE_LIMIT_RPM)),
+                    "rate_limit_tpm": str(quotas.get("rate_limit_tpm", self.DEFAULT_RATE_LIMIT_TPM)),
+                    "rpm_window_start": str(self._now_unix()),
+                    "rpm_window_count": "0",
+                    "tpm_window_start": str(self._now_unix()),
+                    "tpm_window_count": "0",
+                    "is_admin": str(is_admin),
+                }
+                await self.redis.set_api_key(key_hash, key_data)
+                await self.redis.set_key_lookup(key_prefix, key_hash)
+                await self.redis.set_quota(key_hash, f"daily:{today}", quota_base)
+                await self.redis.set_quota(key_hash, f"monthly:{month}", quota_base)
+                logger.info("API Key 已创建: user_id=%s, key_hash=%s, is_admin=%s", user_id, key_hash, is_admin)
+
+            imported += 1
+
+        return imported
 
     async def revoke(self, key_id: str) -> bool:
         """撤销指定 API Key。

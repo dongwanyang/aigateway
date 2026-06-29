@@ -63,8 +63,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
 
       {/* 主内容区 */}
       <main
-        className="pt-[56px]"
-        style={{ marginLeft: 'var(--sidebar-width)', padding: '24px' }}
+        style={{ marginTop: '56px', marginLeft: 'var(--sidebar-width)', padding: '24px' }}
       >
         <div style={{ maxWidth: '1440px' }}>
           {children}

@@ -539,7 +539,13 @@ class SemanticCachePlugin:
         """使用 sentence-transformers 计算文本嵌入向量。"""
         try:
             from sentence_transformers import SentenceTransformer
-            model = SentenceTransformer(self.embedding_model)
+            # 模块级缓存，避免每请求加载模型
+            if not hasattr(SemanticCachePlugin, "_model_cache"):
+                SemanticCachePlugin._model_cache: Dict[str, Any] = {}
+            model = SemanticCachePlugin._model_cache.get(self.embedding_model)
+            if model is None:
+                model = SentenceTransformer(self.embedding_model)
+                SemanticCachePlugin._model_cache[self.embedding_model] = model
             embedding = model.encode(text, normalize_embeddings=True)
             return embedding.tolist()
         except ImportError:

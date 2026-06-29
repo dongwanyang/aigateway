@@ -37,21 +37,13 @@ logger = logging.getLogger(__name__)
 # ------------------------------------------------------------------
 
 _metrics_initialized = False
-_multiproc_dir: str = "/tmp/prometheus"
-
-
-def set_multiproc_dir(path: str) -> None:
-    """设置 multiprocess 数据目录（多 worker 指标聚合用）。"""
-    global _multiproc_dir
-    _multiproc_dir = path
-    os.makedirs(path, exist_ok=True)
-    os.environ["PROMETHEUS_MULTIPROC_DIR"] = path
 
 
 def _ensure_initialized() -> None:
     """确保 Prometheus SDK 已初始化。
 
     懒加载，在第一次创建指标时加载 prometheus_client。
+    单 worker 模式，直接使用默认 CollectorRegistry。
     """
     global _metrics_initialized
     if _metrics_initialized:
@@ -66,14 +58,8 @@ def _ensure_initialized() -> None:
         )
         return
 
-    # 使用 multiprocess 兼容的 Registry，支持多 worker 聚合
-    try:
-        from prometheus_client import multiprocess
-        _registry = CollectorRegistry()
-        multiprocess.MultiProcessCollector(_registry)
-    except Exception:
-        _registry = None  # fallback to default registry
-
+    # 单 worker 模式：直接使用默认 registry
+    _registry = CollectorRegistry()
     globals()["__registry"] = _registry
     _metrics_initialized = True
 
@@ -113,6 +99,7 @@ class MetricsCollector:
         self._circuit_breaker_gauge: Any = None
         self._active_requests_gauge: Any = None
         self._up_gauge: Any = None
+        self._registry: Any = None  # prometheus_client.CollectorRegistry
 
     # ------------------------------------------------------------------
     # 初始化
@@ -122,7 +109,7 @@ class MetricsCollector:
         """初始化所有 Prometheus 指标。
 
         使用懒加载策略，首次调用时创建底层 Counter/Histogram/Gauge 对象。
-        使用 multiprocess 兼容的 Registry，支持多 worker 指标聚合。
+        单 worker 模式，使用默认 CollectorRegistry。
         """
         if not self.enabled:
             logger.info("Prometheus 指标已禁用")
@@ -132,8 +119,9 @@ class MetricsCollector:
 
         from prometheus_client import Counter, Histogram, Gauge
 
-        # 获取 multiprocess 兼容的 registry
+        # 获取单 worker 模式的 registry
         registry = globals().get("__registry")
+        self._registry = registry  # 保存引用供 /metrics 端点使用
 
         # gateway_http_requests_total — counter
         self._requests_counter = Counter(

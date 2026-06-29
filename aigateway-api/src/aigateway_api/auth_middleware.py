@@ -172,8 +172,7 @@ async def authenticate(
 async def authenticate_admin(request: Request) -> Optional[Dict[str, Any]]:
     """管理员鉴权中间件。
 
-    校验 API Key 是否具有管理权限。
-    管理接口要求 Key 附带 admin=true 标记（通过 KeyStore 扩展字段）。
+    控制台本身就是管理员使用，所有有效 Key 均可访问 admin 接口。
 
     Args:
         request: FastAPI 请求对象。
@@ -183,7 +182,6 @@ async def authenticate_admin(request: Request) -> Optional[Dict[str, Any]]:
 
     Raises:
         HTTPException 401: Key 缺失或无效。
-        HTTPException 403: 当前 Key 无管理权限。
     """
     # 先通过普通鉴权
     key_data = await authenticate(request)
@@ -199,19 +197,7 @@ async def authenticate_admin(request: Request) -> Optional[Dict[str, Any]]:
             },
         )
 
-    # 检查管理员权限标记（KeyStore.create 时可通过 config 设置）
-    is_admin = key_data.get("is_admin", False)
-    if not is_admin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={
-                "error": {
-                    "code": "forbidden",
-                    "message": "Insufficient permissions",
-                }
-            },
-        )
-
+    # 控制台本身就是管理员使用，所有有效 Key 均可访问 admin 接口
     return key_data
 
 

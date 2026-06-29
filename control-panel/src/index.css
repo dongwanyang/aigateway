@@ -125,6 +125,9 @@ body {
   padding: 24px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
   transition: box-shadow 0.2s, border-color 0.2s;
+  /* Allow flex children to shrink/grow without being clipped */
+  overflow: visible;
+  min-width: 0;
 }
 
 .card:hover {
@@ -184,11 +187,14 @@ body {
 
 .table-container {
   overflow-x: auto;
+  overflow-y: visible;
+  min-width: 0;
 }
 
 table {
   width: 100%;
   border-collapse: collapse;
+  table-layout: auto;
 }
 
 thead th {
@@ -203,12 +209,52 @@ thead th {
   top: 0;
 }
 
+/* 列分隔线 — 每列右侧都有一条，hover 时高亮 */
+thead th:not(:last-child)::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  cursor: col-resize;
+  z-index: 1;
+}
+
+thead th:not(:last-child)::after {
+  background: transparent;
+}
+
+thead th:not(:last-child)::before {
+  content: '';
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--color-border);
+  transition: background 0.15s;
+  z-index: 0;
+}
+
+thead th:not(:last-child):hover::before {
+  background: var(--color-primary);
+}
+
+thead th {
+  position: relative;
+}
+
 tbody td {
   padding: 12px 16px;
   font-size: var(--font-size-md);
   color: var(--color-text-primary);
   border-bottom: 1px solid var(--color-border);
   min-height: 44px;
+}
+
+tbody tr:hover {
+  background: var(--color-bg-table-row-hover);
 }
 
 tbody tr:hover {

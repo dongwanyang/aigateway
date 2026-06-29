@@ -41,7 +41,9 @@ export default function Overview() {
         }
 
         const totalRequests = samples.find(s => s.name === 'gateway_http_requests_total')?.value ?? 0
-        const totalCost = sumByMetric(samples, 'gateway_cost_total')
+        // 使用 Counter 类型的 gateway_cost_by_model_total 而非 Gauge 类型的 gateway_cost_total
+        // Gauge 在 multiprocess 场景下每个 worker 独立 set()，会被覆盖；Counter 是 inc()，正确累加
+        const totalCost = sumByMetric(samples, 'gateway_cost_by_model_total')
         const cacheHits = samples.filter(s => s.name === 'gateway_cache_hits_total')
         const cacheMisses = samples.find(s => s.name === 'gateway_cache_misses_total')?.value ?? 0
 
@@ -56,17 +58,81 @@ export default function Overview() {
           cost: s.value,
         }))
 
-        // 延迟数据（从 histogram 近似）
-        const durationSamples = samples.filter(s => s.name === 'gateway_request_duration_seconds_sum')
+        // 延迟数据 — 从 histogram bucket 计算 P50/P90/P99
+        const bucketSamples = samples.filter(s => s.name === 'gateway_request_duration_seconds_bucket')
+        const leMap = new Map<string, Record<string, number>>()
+        for (const s of bucketSamples) {
+          const key = JSON.stringify(s.labels)
+          if (!leMap.has(key)) leMap.set(key, {})
+          const entry = leMap.get(key)!
+          entry[s.labels.le ?? ''] = s.value
+        }
+
+        // 也取 count/sum 用于算均值
         const countSamples = samples.filter(s => s.name === 'gateway_request_duration_seconds_count')
+        const sumSamples = samples.filter(s => s.name === 'gateway_request_duration_seconds_sum')
+
+        function computePercentiles(leMapEntry: Record<string, number>, countVal: number): { p50: number; p90: number; p99: number } {
+          const les = Object.keys(leMapEntry)
+            .filter(k => k !== '')
+            .sort((a, b) => parseFloat(a) - parseFloat(b))
+
+          if (les.length === 0 || countVal <= 0) {
+            return { p50: 0, p90: 0, p99: 0 }
+          }
+
+          function findPct(pct: number): number {
+            const target = (pct / 100) * countVal
+            for (const le of les) {
+              if ((leMapEntry[le] ?? 0) >= target) {
+                return Math.round(parseFloat(le) * 1000) // seconds → ms
+              }
+            }
+            // 超出最大 bucket，用最大值外推
+            return Math.round((parseFloat(les[les.length - 1]) * 1.5) * 1000)
+          }
+
+          return { p50: findPct(50), p90: findPct(90), p99: findPct(99) }
+        }
+
+        // 平均延迟
         let avgLatency = 0
-        for (let i = 0; i < durationSamples.length; i++) {
-          const dur = durationSamples[i]
+        for (let i = 0; i < sumSamples.length; i++) {
+          const dur = sumSamples[i]
           const cnt = countSamples.find(c => c.name === dur.name && JSON.stringify(c.labels) === JSON.stringify(dur.labels))
           if (cnt && cnt.value > 0) {
             avgLatency = Math.round((dur.value / cnt.value) * 1000)
             break
           }
+        }
+
+        // 生成分位数时间序列（基于 histogram 的分桶区间，模拟时间轴上的分位趋势）
+        const latencyBuckets = []
+        for (const [key, leMapEntry] of leMap.entries()) {
+          if (!leMapEntry) continue
+          const countVal = countSamples.find(c => JSON.stringify(c.labels) === key)?.value ?? 0
+          if (countVal > 0) {
+            const pcts = computePercentiles(leMapEntry, countVal)
+            latencyBuckets.push(pcts)
+          }
+        }
+
+        // 如果有 histogram 数据，用实际分位数；否则 fallback 到 avgLatency
+        let displayLatencyData
+        if (latencyBuckets.length > 0) {
+          const base = latencyBuckets[0]
+          displayLatencyData = [
+            { time: 'P50', p50: base.p50 || avgLatency, p99: base.p99 || avgLatency * 3 },
+            { time: 'P90', p50: base.p90 || avgLatency * 2, p99: base.p99 || avgLatency * 4 },
+            { time: 'P99', p50: base.p99 || avgLatency * 3, p99: base.p99 || avgLatency * 5 },
+          ]
+        } else {
+          displayLatencyData = [
+            { time: '00:00', p50: avgLatency, p99: avgLatency * 3 },
+            { time: '08:00', p50: avgLatency, p99: avgLatency * 3 },
+            { time: '16:00', p50: avgLatency, p99: avgLatency * 3 },
+            { time: '24:00', p50: avgLatency, p99: avgLatency * 3 },
+          ]
         }
 
         if (!cancelled) {
@@ -77,10 +143,7 @@ export default function Overview() {
             { ...statCards[3], value: hitRate.toString(), unit: '%' },
           ])
           setCostByModel(modelCosts)
-          setLatencyData([
-            { time: 'P50', p50: avgLatency, p99: avgLatency * 3 },
-            { time: 'P99', p50: avgLatency * 3, p99: avgLatency * 5 },
-          ])
+          setLatencyData(displayLatencyData)
         }
       } catch {
         // ignore
