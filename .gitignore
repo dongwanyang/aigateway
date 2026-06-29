@@ -20,6 +20,9 @@ build/
 *.swp
 *.swo
 
+# TypeScript build artifacts
+*.tsbuildinfo
+
 # OS
 .DS_Store
 Thumbs.db
