@@ -48,14 +48,14 @@ providers:
       - gpt-3.5-turbo
       pricing:
         gpt-4o:
-          prompt: 5.0e-06
-          completion: 1.5e-05
+          prompt: 0.000005
+          completion: 0.000015
         gpt-4o-mini:
-          prompt: 1.5e-07
-          completion: 6.0e-07
+          prompt: 0.00000015
+          completion: 0.0000006
         gpt-3.5-turbo:
-          prompt: 1.5e-06
-          completion: 2.0e-06
+          prompt: 0.0000015
+          completion: 0.000002
     num_retries: 3
     retry_after: 1000
   anthropic:
@@ -67,11 +67,11 @@ providers:
       - claude-3-sonnet
       pricing:
         claude-3-5-sonnet:
-          prompt: 3.0e-06
-          completion: 1.5e-05
+          prompt: 0.000003
+          completion: 0.000015
         claude-3-sonnet:
-          prompt: 1.5e-06
-          completion: 7.5e-06
+          prompt: 0.0000015
+          completion: 0.0000075
     num_retries: 3
     retry_after: 1000
   agnes:
@@ -83,8 +83,8 @@ providers:
       fallback_models: []
       pricing:
         agnes-2.0-flash:
-          prompt: 3.0e-06
-          completion: 1.5e-05
+          prompt: 0.000003
+          completion: 0.000015
     num_retries: 3
     retry_after: 1000
 embedding:
@@ -98,5 +98,5 @@ observability:
   otel_sample_rate: 0.1
   log_format: json
   log_level: info
-hot_reload: false
-debug_mode: false
+hot_reload: true
+debug_mode: true

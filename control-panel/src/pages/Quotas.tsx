@@ -1,57 +1,27 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Plus, Trash2, Eye, Search } from 'lucide-react'
 import Card from '@/components/Card'
-
-// Mock data
-const mockKeys: Array<{
-  id: string
-  key_prefix: string
-  user_id: string
-  created_at: string
-  last_used_at: string | null
-  status: 'active' | 'revoked' | 'suspended'
-  quotas: {
-    daily_tokens_used: number
-    daily_tokens_limit: number
-    monthly_cost_used: number
-    monthly_cost_limit: number
-    rpm_current: number
-    rpm_limit: number
-    tpm_current: number
-    tpm_limit: number
-  }
-  usage_percentage: {
-    daily_tokens: number
-    monthly_cost: number
-  }
-}> = [
-  {
-    id: 'key_abc123', key_prefix: 'sk-dev-a1b2', user_id: 'dev-user-1',
-    created_at: '2026-06-01T08:00:00Z', last_used_at: '2026-06-27T14:30:00Z',
-    status: 'active',
-    quotas: { daily_tokens_used: 50000, daily_tokens_limit: 1000000, monthly_cost_used: 2.50, monthly_cost_limit: 50.00, rpm_current: 5, rpm_limit: 60, tpm_current: 1000, tpm_limit: 100000 },
-    usage_percentage: { daily_tokens: 0.05, monthly_cost: 0.05 },
-  },
-  {
-    id: 'key_def456', key_prefix: 'sk-prod-x9y8', user_id: 'prod-service',
-    created_at: '2026-05-15T10:00:00Z', last_used_at: '2026-06-27T15:00:00Z',
-    status: 'active',
-    quotas: { daily_tokens_used: 850000, daily_tokens_limit: 1000000, monthly_cost_used: 42.30, monthly_cost_limit: 50.00, rpm_current: 45, rpm_limit: 60, tpm_current: 85000, tpm_limit: 100000 },
-    usage_percentage: { daily_tokens: 0.85, monthly_cost: 0.846 },
-  },
-  {
-    id: 'key_ghi789', key_prefix: 'sk-test-m3n4', user_id: 'test-user',
-    created_at: '2026-04-20T12:00:00Z', last_used_at: null,
-    status: 'revoked',
-    quotas: { daily_tokens_used: 0, daily_tokens_limit: 100000, monthly_cost_used: 0.00, monthly_cost_limit: 10.00, rpm_current: 0, rpm_limit: 30, tpm_current: 0, tpm_limit: 50000 },
-    usage_percentage: { daily_tokens: 0, monthly_cost: 0 },
-  },
-]
+import { listApiKeys, deleteApiKey, createApiKey } from '@/api/client'
+import type { ApiKeyItem, CreateApiKeyRequest } from '@/types'
 
 export default function Quotas() {
-  const [keys] = useState(mockKeys)
+  const [keys, setKeys] = useState<ApiKeyItem[]>([])
+  const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [showCreate, setShowCreate] = useState(false)
+  const [createForm, setCreateForm] = useState<CreateApiKeyRequest>({
+    user_id: '',
+    daily_tokens: 1_000_000,
+    monthly_cost: 50,
+    rate_limit_rpm: 60,
+    rate_limit_tpm: 100_000,
+  })
+
+  useEffect(() => {
+    listApiKeys()
+      .then(r => { setKeys(r.data.items); setLoading(false) })
+      .catch(() => { setLoading(false) })
+  }, [])
 
   const filtered = keys.filter(k =>
     k.user_id.includes(search.toLowerCase()) || k.key_prefix.includes(search.toLowerCase()),
@@ -63,6 +33,30 @@ export default function Quotas() {
       case 'revoked': return 'badge-neutral'
       case 'suspended': return 'badge-danger'
       default: return 'badge-neutral'
+    }
+  }
+
+  const handleCreate = async () => {
+    if (!createForm.user_id.trim()) return
+    try {
+      await createApiKey(createForm)
+      // Refresh list
+      const r = await listApiKeys()
+      setKeys(r.data.items)
+      setShowCreate(false)
+      setCreateForm({ user_id: '', daily_tokens: 1_000_000, monthly_cost: 50, rate_limit_rpm: 60, rate_limit_tpm: 100_000 })
+    } catch {
+      alert('创建 API Key 失败')
+    }
+  }
+
+  const handleDelete = async (keyId: string) => {
+    if (!confirm(`确定撤销 API Key ${keyId}?`)) return
+    try {
+      await deleteApiKey(keyId)
+      setKeys(prev => prev.filter(k => k.id !== keyId))
+    } catch {
+      alert('撤销失败')
     }
   }
 
@@ -82,23 +76,28 @@ export default function Quotas() {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm mb-1" style={{ color: 'var(--color-text-secondary)' }}>用户 ID *</label>
-              <input className="input w-full" placeholder="user-id" />
+              <input
+                className="input w-full"
+                placeholder="user-id"
+                value={createForm.user_id}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCreateForm((f: CreateApiKeyRequest) => ({ ...f, user_id: e.target.value }))}
+              />
             </div>
             <div>
               <label className="block text-sm mb-1" style={{ color: 'var(--color-text-secondary)' }}>日 token 上限</label>
-              <input className="input w-full" type="number" defaultValue={1000000} />
+              <input className="input w-full" type="number" value={createForm.daily_tokens} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCreateForm((f: CreateApiKeyRequest) => ({ ...f, daily_tokens: Number(e.target.value) }))} />
             </div>
             <div>
               <label className="block text-sm mb-1" style={{ color: 'var(--color-text-secondary)' }}>月成本上限 ($)</label>
-              <input className="input w-full" type="number" defaultValue={50} step={0.01} />
+              <input className="input w-full" type="number" value={createForm.monthly_cost} step={0.01} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCreateForm((f: CreateApiKeyRequest) => ({ ...f, monthly_cost: Number(e.target.value) }))} />
             </div>
             <div>
               <label className="block text-sm mb-1" style={{ color: 'var(--color-text-secondary)' }}>RPM 限制</label>
-              <input className="input w-full" type="number" defaultValue={60} />
+              <input className="input w-full" type="number" value={createForm.rate_limit_rpm} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCreateForm((f: CreateApiKeyRequest) => ({ ...f, rate_limit_rpm: Number(e.target.value) }))} />
             </div>
           </div>
           <div className="flex gap-2 mt-4">
-            <button className="btn btn-primary">创建</button>
+            <button className="btn btn-primary" onClick={handleCreate}>创建</button>
             <button className="btn btn-secondary" onClick={() => setShowCreate(false)}>取消</button>
           </div>
         </Card>
@@ -131,49 +130,55 @@ export default function Quotas() {
               </tr>
             </thead>
             <tbody>
-              {filtered.map(key => (
-                <tr key={key.id}>
-                  <td style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--font-size-sm)' }}>{key.user_id}</td>
-                  <td style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--font-size-sm)' }}>{key.key_prefix}...</td>
-                  <td><span className={`badge ${statusBadge(key.status)}`}>{key.status}</span></td>
-                  <td>
-                    <div className="flex items-center gap-2">
-                      <div className="flex-1 h-2 rounded-full overflow-hidden" style={{ backgroundColor: 'var(--color-bg-overlay)' }}>
-                        <div
-                          className="h-full rounded-full transition-all"
-                          style={{
-                            width: `${key.usage_percentage.daily_tokens * 100}%`,
-                            backgroundColor: key.usage_percentage.daily_tokens > 0.8 ? 'var(--color-danger)' : 'var(--color-success)',
-                          }}
-                        />
+              {loading ? (
+                <tr><td colSpan={7} className="text-center py-8">加载中...</td></tr>
+              ) : filtered.length === 0 ? (
+                <tr><td colSpan={7} className="text-center py-8" style={{ color: 'var(--color-text-tertiary)' }}>暂无 API Key</td></tr>
+              ) : (
+                filtered.map(key => (
+                  <tr key={key.id}>
+                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--font-size-sm)' }}>{key.user_id}</td>
+                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--font-size-sm)' }}>{key.key_prefix}...</td>
+                    <td><span className={`badge ${statusBadge(key.status)}`}>{key.status}</span></td>
+                    <td>
+                      <div className="flex items-center gap-2">
+                        <div className="flex-1 h-2 rounded-full overflow-hidden" style={{ backgroundColor: 'var(--color-bg-overlay)' }}>
+                          <div
+                            className="h-full rounded-full transition-all"
+                            style={{
+                              width: `${key.usage_percentage.daily_tokens * 100}%`,
+                              backgroundColor: key.usage_percentage.daily_tokens > 0.8 ? 'var(--color-danger)' : 'var(--color-success)',
+                            }}
+                          />
+                        </div>
+                        <span className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>
+                          {Math.round(key.usage_percentage.daily_tokens * 100)}%
+                        </span>
                       </div>
-                      <span className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>
-                        {Math.round(key.usage_percentage.daily_tokens * 100)}%
+                    </td>
+                    <td>
+                      <span style={{ color: key.usage_percentage.monthly_cost > 0.8 ? 'var(--color-danger)' : 'inherit' }}>
+                        ${key.quotas.monthly_cost_used.toFixed(2)} / ${key.quotas.monthly_cost_limit.toFixed(2)}
                       </span>
-                    </div>
-                  </td>
-                  <td>
-                    <span style={{ color: key.usage_percentage.monthly_cost > 0.8 ? 'var(--color-danger)' : 'inherit' }}>
-                      ${key.quotas.monthly_cost_used.toFixed(2)} / ${key.quotas.monthly_cost_limit.toFixed(2)}
-                    </span>
-                  </td>
-                  <td style={{ fontSize: 'var(--font-size-sm)', color: 'var(--color-text-tertiary)' }}>
-                    {key.last_used_at ? new Date(key.last_used_at).toLocaleDateString() : '—'}
-                  </td>
-                  <td>
-                    <div className="flex gap-1">
-                      <button className="p-1.5 rounded cursor-pointer transition-colors" style={{ color: 'var(--color-text-tertiary)' }} title="查看详情">
-                        <Eye size={16} />
-                      </button>
-                      {key.status === 'active' && (
-                        <button className="p-1.5 rounded cursor-pointer transition-colors" style={{ color: 'var(--color-danger)' }} title="撤销">
-                          <Trash2 size={16} />
+                    </td>
+                    <td style={{ fontSize: 'var(--font-size-sm)', color: 'var(--color-text-tertiary)' }}>
+                      {key.last_used_at ? new Date(key.last_used_at).toLocaleDateString() : '—'}
+                    </td>
+                    <td>
+                      <div className="flex gap-1">
+                        <button className="p-1.5 rounded cursor-pointer transition-colors" style={{ color: 'var(--color-text-tertiary)' }} title="查看详情">
+                          <Eye size={16} />
                         </button>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-              ))}
+                        {key.status === 'active' && (
+                          <button className="p-1.5 rounded cursor-pointer transition-colors" style={{ color: 'var(--color-danger)' }} title="撤销" onClick={() => handleDelete(key.id)}>
+                            <Trash2 size={16} />
+                          </button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                ))
+              )}
             </tbody>
           </table>
         </div>

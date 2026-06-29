@@ -1,16 +1,8 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Search, Filter } from 'lucide-react'
 import Card from '@/components/Card'
-
-// Mock log data
-const mockLogs = [
-  { id: 'req_a1b2c3', trace_id: 'trace_abc123', user_id: 'dev-user-1', timestamp: '2026-06-27T14:30:00Z', model: 'gpt-4o', status: 200, duration_ms: 234, cache_hit: true, tier: 'L1' },
-  { id: 'req_d4e5f6', trace_id: 'trace_def456', user_id: 'prod-service', timestamp: '2026-06-27T14:28:00Z', model: 'claude-3.5', status: 200, duration_ms: 567, cache_hit: false, tier: null },
-  { id: 'req_g7h8i9', trace_id: 'trace_ghi789', user_id: 'dev-user-1', timestamp: '2026-06-27T14:25:00Z', model: 'gpt-4o', status: 429, duration_ms: 2, cache_hit: false, tier: null },
-  { id: 'req_j0k1l2', trace_id: 'trace_jkl012', user_id: 'test-user', timestamp: '2026-06-27T14:20:00Z', model: 'gemini-pro', status: 200, duration_ms: 189, cache_hit: true, tier: 'L2' },
-  { id: 'req_m3n4o5', trace_id: 'trace_mno345', user_id: 'prod-service', timestamp: '2026-06-27T14:15:00Z', model: 'gpt-4o-mini', status: 504, duration_ms: 5000, cache_hit: false, tier: null },
-  { id: 'req_p6q7r8', trace_id: 'trace_pqr678', user_id: 'dev-user-1', timestamp: '2026-06-27T14:10:00Z', model: 'gpt-4o', status: 200, duration_ms: 312, cache_hit: true, tier: 'L3' },
-]
+import { getRequestLogs } from '@/api/client'
+import type { LogEntry } from '@/api/client'
 
 const statusColor = (status: number) => {
   if (status >= 200 && status < 300) return 'badge-success'
@@ -20,17 +12,31 @@ const statusColor = (status: number) => {
 }
 
 export default function Logs() {
+  const [logs, setLogs] = useState<LogEntry[]>([])
+  const [loading, setLoading] = useState(true)
   const [searchTerm, setSearchTerm] = useState('')
   const [filterStatus, setFilterStatus] = useState<string>('all')
+  const [filterCache, setFilterCache] = useState<boolean>(false)
 
-  const filtered = mockLogs.filter(log => {
+  useEffect(() => {
+    getRequestLogs({ pageSize: 100 })
+      .then(r => { setLogs(r.data.items); setLoading(false) })
+      .catch(() => { setLoading(false) })
+  }, [])
+
+  const filtered = logs.filter(log => {
     const matchSearch = !searchTerm ||
       log.trace_id.includes(searchTerm) ||
-      log.id.includes(searchTerm) ||
+      log.request_id.includes(searchTerm) ||
       log.user_id.includes(searchTerm)
     const matchStatus = filterStatus === 'all' || String(log.status) === filterStatus
-    return matchSearch && matchStatus
+    const matchCache = !filterCache || log.cache_hit
+    return matchSearch && matchStatus && matchCache
   })
+
+  const formatTime = (ts: number) => {
+    return new Date(ts * 1000).toLocaleString()
+  }
 
   return (
     <div className="space-y-6">
@@ -58,9 +64,17 @@ export default function Logs() {
             <option value="all">全部状态</option>
             <option value="200">200</option>
             <option value="429">429</option>
-            <option value="504">504</option>
+            <option value="500">500</option>
           </select>
         </div>
+        <label className="flex items-center gap-2 cursor-pointer" style={{ fontSize: 'var(--font-size-sm)' }}>
+          <input
+            type="checkbox"
+            checked={filterCache}
+            onChange={e => setFilterCache(e.target.checked)}
+          />
+          仅缓存命中
+        </label>
       </div>
 
       {/* 日志表格 */}
@@ -80,46 +94,45 @@ export default function Logs() {
               </tr>
             </thead>
             <tbody>
-              {filtered.map(log => (
-                <tr key={log.id}>
-                  <td style={{ fontSize: 'var(--font-size-sm)', color: 'var(--color-text-tertiary)' }}>
-                    {new Date(log.timestamp).toLocaleTimeString()}
-                  </td>
-                  <td style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--font-size-xs)' }}>
-                    {log.id}
-                  </td>
-                  <td style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--font-size-xs)' }}>
-                    <span className="cursor-pointer hover:underline" style={{ color: 'var(--color-primary)' }}>
-                      {log.trace_id}
-                    </span>
-                  </td>
-                  <td style={{ fontSize: 'var(--font-size-sm)' }}>{log.user_id}</td>
-                  <td>
-                    <span className="badge badge-neutral">{log.model}</span>
-                  </td>
-                  <td><span className={`badge ${statusColor(log.status)}`}>{log.status}</span></td>
-                  <td style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--font-size-sm)' }}>
-                    {log.duration_ms}ms
-                  </td>
-                  <td>
-                    {log.cache_hit ? (
-                      <span className={`badge badge-success`}>{log.tier}</span>
-                    ) : (
-                      <span style={{ color: 'var(--color-text-quaternary)', fontSize: 'var(--font-size-sm)' }}>—</span>
-                    )}
-                  </td>
-                </tr>
-              ))}
+              {loading ? (
+                <tr><td colSpan={8} className="text-center py-8">加载中...</td></tr>
+              ) : filtered.length === 0 ? (
+                <tr><td colSpan={8} className="text-center py-8" style={{ color: 'var(--color-text-tertiary)' }}>暂无请求日志</td></tr>
+              ) : (
+                filtered.map((log, idx) => (
+                  <tr key={`${log.request_id}-${idx}`}>
+                    <td style={{ fontSize: 'var(--font-size-sm)', color: 'var(--color-text-tertiary)' }}>
+                      {formatTime(log.timestamp)}
+                    </td>
+                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--font-size-xs)' }}>
+                      {log.request_id.slice(0, 12)}...
+                    </td>
+                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--font-size-xs)' }}>
+                      <span className="cursor-pointer hover:underline" style={{ color: 'var(--color-primary)' }}>
+                        {log.trace_id.slice(0, 12)}...
+                      </span>
+                    </td>
+                    <td style={{ fontSize: 'var(--font-size-sm)' }}>{log.user_id || '—'}</td>
+                    <td>
+                      <span className="badge badge-neutral">{log.model}</span>
+                    </td>
+                    <td><span className={`badge ${statusColor(log.status)}`}>{log.status}</span></td>
+                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--font-size-sm)' }}>
+                      {log.duration_ms}ms
+                    </td>
+                    <td>
+                      {log.cache_hit ? (
+                        <span className={`badge badge-success`}>{log.tier || 'L1'}</span>
+                      ) : (
+                        <span style={{ color: 'var(--color-text-quaternary)', fontSize: 'var(--font-size-sm)' }}>—</span>
+                      )}
+                    </td>
+                  </tr>
+                ))
+              )}
             </tbody>
           </table>
         </div>
-
-        {filtered.length === 0 && (
-          <div className="empty-state">
-            <div className="empty-state-title">没有找到匹配的日志</div>
-            <div className="empty-state-desc">尝试调整搜索条件或筛选器</div>
-          </div>
-        )}
       </Card>
     </div>
   )

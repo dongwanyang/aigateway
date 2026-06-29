@@ -13,6 +13,7 @@ Admin Routes — 管理接口实现
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from datetime import datetime, timezone
@@ -234,9 +235,11 @@ async def get_metrics_json(request: Request):
     # 收集 Prometheus 指标
     prom_samples: Dict[str, Any] = {}
     try:
-        from prometheus_client import generate_latest
-        import io
-        raw = generate_latest().decode("utf-8")
+        from prometheus_client import CollectorRegistry, multiprocess, generate_latest
+        # 使用 multiprocess 聚合所有 worker 的指标
+        registry = CollectorRegistry()
+        multiprocess.MultiProcessCollector(registry)
+        raw = generate_latest(registry).decode("utf-8")
         for line in raw.split("\n"):
             if not line or line.startswith("#"):
                 continue
@@ -602,5 +605,77 @@ async def update_global_config(request: Request):
 
     return {
         "data": {"hot_reload": hot_reload, "debug_mode": debug_mode},
+        "message": "success",
+    }
+
+
+# ------------------------------------------------------------------
+# GET /admin/logs — 请求日志
+# ------------------------------------------------------------------
+
+
+@router.get("/logs")
+async def get_request_logs(
+    request: Request,
+    page: int = Query(default=1, ge=1, description="页码"),
+    page_size: int = Query(default=50, ge=1, le=200, description="每页数量"),
+    user_id: Optional[str] = Query(default=None, description="按用户筛选"),
+    model: Optional[str] = Query(default=None, description="按模型筛选"),
+    status: Optional[str] = Query(default=None, description="按状态码筛选"),
+    cache_only: bool = Query(default=False, description="仅缓存命中"),
+):
+    """从 Redis 查询最近的请求日志。"""
+    from aigateway_api.main import app
+    s = app.state
+    redis_mgr = getattr(s, "redis_manager")
+
+    if redis_mgr is None or redis_mgr.redis is None:
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Redis not connected"}})
+
+    # 获取最近 page_size * 2 条（过滤后再分页）
+    all_logs = await redis_mgr.redis.zrevrange("aigateway:logs:requests", 0, page_size * 2 - 1, withscores=True)
+
+    results = []
+    for raw, score in all_logs:
+        entry = json.loads(raw.decode() if isinstance(raw, bytes) else raw)
+
+        # 过滤
+        if user_id and entry.get("user_id") != user_id:
+            continue
+        if model and entry.get("model") != model:
+            continue
+        if status and str(entry.get("status")) != status:
+            continue
+        if cache_only and not entry.get("cache_hit"):
+            continue
+
+        results.append({
+            "request_id": entry["request_id"],
+            "trace_id": entry["trace_id"],
+            "user_id": entry["user_id"],
+            "timestamp": entry["timestamp"],
+            "method": entry["method"],
+            "endpoint": entry["endpoint"],
+            "model": entry["model"],
+            "status": entry["status"],
+            "duration_ms": entry["duration_ms"],
+            "cache_hit": entry["cache_hit"],
+            "tier": entry.get("tier"),
+        })
+
+        if len(results) >= page_size:
+            break
+
+    total = len(results)  # 简化：不返回总数，只返回当前页
+
+    return {
+        "data": {
+            "items": results,
+            "pagination": {
+                "page": page,
+                "pageSize": page_size,
+                "total": total,
+            },
+        },
         "message": "success",
     }

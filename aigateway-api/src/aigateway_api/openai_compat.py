@@ -72,6 +72,7 @@ def _estimate_cost(model: str, total_tokens: int) -> float:
         "claude-3-5-sonnet": 0.000003,
         "claude-3-haiku": 0.00000025,
         "gemini-1.5-pro": 0.0000025,
+        "agnes-2.0-flash": 0.0000005,
     }
     base = model.split("/")[-1] if "/" in model else model
     return round(total_tokens * pricing.get(base, 0.000001), 6)
@@ -122,6 +123,62 @@ def _get_app_state() -> Dict[str, Any]:
         "redis_manager": getattr(s, "redis_manager"),
         "qdrant_manager": getattr(s, "qdrant_manager"),
     }
+
+
+def _get_redis_client() -> Any:
+    """获取 Redis 客户端（跨 worker 共享）。
+
+    多 worker 模式下 app.state 不共享，
+    直接从环境变量连接 Redis 保证每个 worker 都有独立的连接。
+    """
+    import os
+    import redis.asyncio as redis
+
+    url = os.environ.get("AI_GATEWAY_REDIS_URL", "redis://localhost:6379/0")
+    try:
+        r = redis.from_url(url, decode_responses=False)
+        return r
+    except Exception:
+        return None
+
+
+async def _record_request_log(
+    request_id: str,
+    trace_id: str,
+    user_id: Optional[str],
+    method: str,
+    endpoint: str,
+    status_code: int,
+    duration_ms: float,
+    model: str,
+    cache_hit: bool,
+    cache_tier: Optional[str],
+) -> None:
+    """记录请求日志到 Redis ZSET，供前端 /admin/logs 查询。"""
+    import time
+
+    redis_client = _get_redis_client()
+    if redis_client is None:
+        return
+    now = time.time()
+    log_entry = json.dumps({
+        "request_id": request_id,
+        "trace_id": trace_id,
+        "user_id": user_id or "",
+        "method": method,
+        "endpoint": endpoint,
+        "status": status_code,
+        "duration_ms": round(duration_ms, 1),
+        "model": model,
+        "cache_hit": cache_hit,
+        "tier": cache_tier,
+        "timestamp": now,
+    }, ensure_ascii=False)
+    try:
+        await redis_client.zadd("aigateway:logs:requests", {log_entry: now})
+        await redis_client.zremrangebyrank("aigateway:logs:requests", 0, -10001)
+    except Exception:
+        pass  # Non-critical: don't fail the request if logging fails
 
 
 # ------------------------------------------------------------------
@@ -182,6 +239,14 @@ async def chat_completions_non_stream(
         response_data["_meta"]["cache_hit"] = True
         response_data["_meta"]["cache_tier"] = hit_tier
 
+        # 记录缓存命中日志
+        await _record_request_log(
+            request_id="", trace_id="", user_id=user_id,
+            method="POST", endpoint="/v1/chat/completions",
+            status_code=200, duration_ms=0, model=body.model,
+            cache_hit=True, cache_tier=hit_tier,
+        )
+
         return JSONResponse(content={
             "data": response_data,
             "message": "success",
@@ -210,6 +275,12 @@ async def chat_completions_non_stream(
                 code = "quota_exceeded_daily_tokens"
             elif "Monthly" in fail_msg:
                 code = "quota_exceeded_monthly_cost"
+            await _record_request_log(
+                request_id="", trace_id="", user_id=user_id,
+                method="POST", endpoint="/v1/chat/completions",
+                status_code=429, duration_ms=0, model=body.model,
+                cache_hit=False, cache_tier=None,
+            )
             return JSONResponse(
                 content={"error": {"code": code, "message": fail_msg}},
                 status_code=429,
@@ -289,6 +360,14 @@ async def chat_completions_non_stream(
     # 所以这里总是回填未命中的数据
     value_str = json.dumps(result.get("data", {}))
     cache_manager.l1_set(cache_key, value_str)
+
+    # 记录请求日志到 Redis
+    await _record_request_log(
+        request_id="unknown", trace_id="unknown", user_id=user_id,
+        method="POST", endpoint="/v1/chat/completions",
+        status_code=200, duration_ms=0, model=body.model,
+        cache_hit=cache_hit, cache_tier=cached.get("hit_tier") if cached else None,
+    )
 
     return JSONResponse(content={
         "data": result.get("data", {}),

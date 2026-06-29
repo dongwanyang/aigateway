@@ -37,6 +37,15 @@ logger = logging.getLogger(__name__)
 # ------------------------------------------------------------------
 
 _metrics_initialized = False
+_multiproc_dir: str = "/tmp/prometheus"
+
+
+def set_multiproc_dir(path: str) -> None:
+    """设置 multiprocess 数据目录（多 worker 指标聚合用）。"""
+    global _multiproc_dir
+    _multiproc_dir = path
+    os.makedirs(path, exist_ok=True)
+    os.environ["PROMETHEUS_MULTIPROC_DIR"] = path
 
 
 def _ensure_initialized() -> None:
@@ -49,7 +58,7 @@ def _ensure_initialized() -> None:
         return
 
     try:
-        from prometheus_client import Counter, Histogram, Gauge
+        from prometheus_client import Counter, Histogram, Gauge, CollectorRegistry
     except ImportError:
         logger.warning(
             "prometheus-client 未安装，指标功能不可用。"
@@ -57,6 +66,15 @@ def _ensure_initialized() -> None:
         )
         return
 
+    # 使用 multiprocess 兼容的 Registry，支持多 worker 聚合
+    try:
+        from prometheus_client import multiprocess
+        _registry = CollectorRegistry()
+        multiprocess.MultiProcessCollector(_registry)
+    except Exception:
+        _registry = None  # fallback to default registry
+
+    globals()["__registry"] = _registry
     _metrics_initialized = True
 
 
@@ -104,6 +122,7 @@ class MetricsCollector:
         """初始化所有 Prometheus 指标。
 
         使用懒加载策略，首次调用时创建底层 Counter/Histogram/Gauge 对象。
+        使用 multiprocess 兼容的 Registry，支持多 worker 指标聚合。
         """
         if not self.enabled:
             logger.info("Prometheus 指标已禁用")
@@ -113,11 +132,15 @@ class MetricsCollector:
 
         from prometheus_client import Counter, Histogram, Gauge
 
+        # 获取 multiprocess 兼容的 registry
+        registry = globals().get("__registry")
+
         # gateway_http_requests_total — counter
         self._requests_counter = Counter(
             "gateway_http_requests_total",
             "Total number of HTTP requests",
             labelnames=["method", "endpoint", "status"],
+            registry=registry,
         )
 
         # gateway_request_duration_seconds — histogram
@@ -126,6 +149,7 @@ class MetricsCollector:
             "Request duration in seconds",
             labelnames=["endpoint"],
             buckets=[0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0],
+            registry=registry,
         )
 
         # gateway_cache_hits_total — counter
@@ -133,12 +157,14 @@ class MetricsCollector:
             "gateway_cache_hits_total",
             "Total cache hits by tier",
             labelnames=["tier"],
+            registry=registry,
         )
 
         # gateway_cache_misses_total — counter
         self._cache_misses_counter = Counter(
             "gateway_cache_misses_total",
             "Total cache misses",
+            registry=registry,
         )
 
         # gateway_tokens_total — counter
@@ -146,12 +172,14 @@ class MetricsCollector:
             "gateway_tokens_total",
             "Total tokens processed",
             labelnames=["type"],
+            registry=registry,
         )
 
         # gateway_cost_total — gauge
         self._cost_total_gauge = Gauge(
             "gateway_cost_total",
             "Total cost in USD",
+            registry=registry,
         )
 
         # gateway_cost_by_model — counter
@@ -159,6 +187,7 @@ class MetricsCollector:
             "gateway_cost_by_model",
             "Total cost by model",
             labelnames=["model"],
+            registry=registry,
         )
 
         # gateway_circuit_breaker_state — gauge
@@ -166,18 +195,21 @@ class MetricsCollector:
             "gateway_circuit_breaker_state",
             "Circuit breaker state per provider",
             labelnames=["provider"],
+            registry=registry,
         )
 
         # gateway_active_requests — gauge
         self._active_requests_gauge = Gauge(
             "gateway_active_requests",
             "Currently active requests",
+            registry=registry,
         )
 
         # gateway_up — gauge
         self._up_gauge = Gauge(
             "gateway_up",
             "Whether the gateway is healthy",
+            registry=registry,
         )
         self._up_gauge.set(1)
 

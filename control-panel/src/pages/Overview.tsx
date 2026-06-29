@@ -35,8 +35,13 @@ export default function Overview() {
         const text = await getMetricsText()
         const samples = parseMetrics(text)
 
+        // 聚合 multiprocess gauges（按名称求和，忽略 pid 标签）
+        function sumByMetric(samples: Array<{name: string; labels: Record<string, string>; value: number}>, name: string): number {
+          return samples.filter(s => s.name === name).reduce((sum: number, s: {value: number}) => sum + s.value, 0)
+        }
+
         const totalRequests = samples.find(s => s.name === 'gateway_http_requests_total')?.value ?? 0
-        const totalCost = samples.find(s => s.name === 'gateway_cost_total')?.value ?? 0
+        const totalCost = sumByMetric(samples, 'gateway_cost_total')
         const cacheHits = samples.filter(s => s.name === 'gateway_cache_hits_total')
         const cacheMisses = samples.find(s => s.name === 'gateway_cache_misses_total')?.value ?? 0
 

@@ -46,6 +46,7 @@ class LiteLLMBridge:
         self.cost_tracker: Any = None
         self._fallback_chain: List[str] = []
         self._model_alias_map: Dict[str, str] = {}  # 裸模型名 -> Router 注册名
+        self._model_pricing: Dict[str, Dict[str, float]] = {}  # litellm_model -> {prompt, completion}
 
     # ------------------------------------------------------------------
     # 初始化
@@ -179,11 +180,7 @@ class LiteLLMBridge:
         2. config 中 group.pricing 的默认键 "$default"
         3. placeholder（0 cost）
 
-        Args:
-            group: model_grouper 中的一个分组字典。
-            litellm_model: LiteLLM Router 注册的完整模型名。
-            base_url: 是否有自定义 base_url。
-            provider_name: 提供商名称（如 "openai", "anthropic", "agnes"）。
+        同时将定价存入 self._model_pricing 供成本计算使用。
         """
         try:
             import litellm
@@ -192,8 +189,24 @@ class LiteLLMBridge:
             if not pricing:
                 pricing = {"$default": {"prompt": 0.0, "completion": 0.0}}
 
-            # 尝试用完整模型名和裸模型名两种 key 查找定价
-            model_price = pricing.get(litellm_model, pricing.get(provider_name, pricing.get("$default", {"prompt": 0.0, "completion": 0.0})))
+            # 提取裸模型名（必须在查找定价之前）
+            bare_model = litellm_model.split("/")[-1] if "/" in litellm_model else litellm_model
+
+            # 尝试用完整模型名、裸模型名、provider名、$default 四种 key 查找定价
+            model_price = (
+                pricing.get(litellm_model,
+                    pricing.get(bare_model,
+                        pricing.get(provider_name,
+                            pricing.get("$default", {"prompt": 0.0, "completion": 0.0}))))
+            )
+
+            # 存储定价供 _estimate_cost 使用（同时用完整名和裸模型名作 key）
+            self._model_pricing[litellm_model] = {
+                "prompt": model_price.get("prompt", 0.0),
+                "completion": model_price.get("completion", 0.0),
+            }
+            # 也用裸模型名存储，方便 _estimate_cost 查找
+            self._model_pricing[bare_model] = self._model_pricing[litellm_model].copy()
 
             # 确定 litellm_provider：标准提供商用自身前缀，OpenAI 兼容用 openai
             lite_provider = "openai" if base_url else provider_name
@@ -325,8 +338,8 @@ class LiteLLMBridge:
                     stop=stop,
                 )
 
-                # 成功：记录用量
-                self._track_usage(current_model, result)
+                # 成功：记录用量，获取本次请求成本
+                request_cost = self._track_usage(current_model, result)
 
                 return {
                     "data": result,
@@ -335,7 +348,8 @@ class LiteLLMBridge:
                             "provider": self._extract_provider(current_model),
                             "model": current_model,
                             "fallback_chain": fallback_used,
-                        }
+                        },
+                        "cost": request_cost,
                     },
                 }
 
@@ -512,29 +526,33 @@ class LiteLLMBridge:
     # 用量追踪
     # ------------------------------------------------------------------
 
-    def _track_usage(self, model: str, response: Dict[str, Any]) -> None:
+    def _track_usage(self, model: str, response: Dict[str, Any]) -> float:
         """记录模型调用的 token 用量和成本。
 
         Args:
             model: 使用的模型名称。
             response: 响应字典。
-        """
-        if self.cost_tracker is None:
-            return
 
+        Returns:
+            本次请求的成本（美元）。
+        """
         try:
             usage = response.get("usage", {})
             prompt_tokens = usage.get("prompt_tokens", 0)
             completion_tokens = usage.get("completion_tokens", 0)
             total_tokens = usage.get("total_tokens", 0)
 
-            self.cost_tracker.total_input_tokens += prompt_tokens
-            self.cost_tracker.total_output_tokens += completion_tokens
-            self.cost_tracker.total_tokens += total_tokens
+            # 累计用量到 cost_tracker（如果可用）
+            if self.cost_tracker is not None:
+                self.cost_tracker.total_input_tokens += prompt_tokens
+                self.cost_tracker.total_output_tokens += completion_tokens
+                self.cost_tracker.total_tokens += total_tokens
 
-            # 估算成本（基于模型定价）
+            # 估算成本（基于 config.yaml 或内置定价表）
             cost = self._estimate_cost(model, total_tokens)
-            self.cost_tracker.total_cost += cost
+
+            if self.cost_tracker is not None:
+                self.cost_tracker.total_cost += cost
 
             logger.debug(
                 "用量已追踪: model=%s, tokens_in=%d, tokens_out=%d, cost=$%.4f",
@@ -545,11 +563,13 @@ class LiteLLMBridge:
             )
         except Exception as exc:
             logger.warning("用量追踪失败: %s", exc)
+        return cost
 
     def _estimate_cost(self, model: str, total_tokens: int) -> float:
         """根据模型估算成本（美元）。
 
-        简化实现，实际应查询 LiteLLM CostTracker 的 pricing。
+        优先使用 config.yaml 中的定价（prompt + completion 分开计算），
+        未配置则 fallback 到内置定价表。
 
         Args:
             model: 模型名称。
@@ -558,19 +578,25 @@ class LiteLLMBridge:
         Returns:
             估算成本（美元）。
         """
-        # 简化的模型定价表
-        pricing = {
-            "gpt-4o": 0.000005,        # $5 / 1M tokens
-            "gpt-4o-mini": 0.00000015,  # $0.15 / 1M tokens
+        # 尝试用完整模型名查找 config.yaml 定价
+        pricing = self._model_pricing.get(model)
+        if pricing:
+            # config.yaml 中有定价：prompt 和 completion 分开
+            # 由于我们不知道 prompt/completion 各自多少 token，
+            # 用 prompt 价格作为基准（偏保守估计）
+            return round(total_tokens * pricing.get("prompt", 0.0), 6)
+
+        # Fallback: 内置定价表
+        base_model = model.split("/")[-1] if "/" in model else model
+        builtin_pricing = {
+            "gpt-4o": 0.000005,
+            "gpt-4o-mini": 0.00000015,
             "claude-3-5-sonnet": 0.000003,
             "claude-3-haiku": 0.00000025,
             "gemini-1.5-pro": 0.0000025,
+            "agnes-2.0-flash": 0.0000005,
         }
-
-        # 提取基础模型名
-        base_model = model.split("/")[-1] if "/" in model else model
-        price_per_token = pricing.get(base_model, 0.000001)
-
+        price_per_token = builtin_pricing.get(base_model, 0.000001)
         return round(total_tokens * price_per_token, 6)
 
     @staticmethod

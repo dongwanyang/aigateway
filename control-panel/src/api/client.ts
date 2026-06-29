@@ -267,3 +267,46 @@ export async function updateGlobalConfig(config: { hot_reload: boolean; debug_mo
   if (!res.ok) throw new Error('Failed to update global config')
   return res.json()
 }
+
+// ------------------------------------------------------------------
+// Admin: Request Logs
+// ------------------------------------------------------------------
+
+export interface LogEntry {
+  request_id: string
+  trace_id: string
+  user_id: string
+  timestamp: number
+  method: string
+  endpoint: string
+  model: string
+  status: number
+  duration_ms: number
+  cache_hit: boolean
+  tier: string | null
+}
+
+export interface LogsData {
+  items: LogEntry[]
+  pagination: { page: number; pageSize: number; total: number }
+}
+
+export async function getRequestLogs(params: {
+  page?: number
+  pageSize?: number
+  user_id?: string
+  model?: string
+  status?: string
+  cache_only?: boolean
+}): Promise<ApiResponse<LogsData>> {
+  const qs = new URLSearchParams()
+  if (params.page) qs.set('page', String(params.page))
+  if (params.pageSize) qs.set('pageSize', String(params.pageSize))
+  if (params.user_id) qs.set('user_id', params.user_id)
+  if (params.model) qs.set('model', params.model)
+  if (params.status) qs.set('status', params.status)
+  if (params.cache_only !== undefined) qs.set('cache_only', String(params.cache_only))
+  const res = await fetch(`${API_BASE}/admin/logs?${qs}`)
+  if (!res.ok) throw new Error('Failed to fetch logs')
+  return res.json()
+}

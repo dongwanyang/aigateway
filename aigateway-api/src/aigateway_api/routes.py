@@ -40,6 +40,8 @@ async def get_metrics(request: Request) -> FastAPIResponse:
 
     API_CONTRACT.md: GET /metrics 成功响应
     Content-Type: text/plain; version=0.0.4; charset=utf-8
+
+    使用 multiprocess CollectorRegistry 聚合所有 worker 的指标。
     """
     from starlette.responses import Response as StarletteResponse
 
@@ -57,7 +59,11 @@ async def get_metrics(request: Request) -> FastAPIResponse:
                         state=breaker.get_state_value(),
                     )
 
-        raw = generate_latest()
+        # 使用 multiprocess 聚合所有 worker 的指标
+        from prometheus_client import CollectorRegistry, multiprocess
+        registry = CollectorRegistry()
+        multiprocess.MultiProcessCollector(registry)
+        raw = generate_latest(registry)
         return StarletteResponse(
             content=raw,
             status_code=200,

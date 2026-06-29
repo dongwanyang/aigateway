@@ -217,6 +217,11 @@ async def lifespan(app: "FastAPI"):
     app.state.cache_manager = cache_manager
     app.state.plugin_registry = plugin_registry
     app.state.circuit_breaker_factory = cb_factory
+
+    # 设置 multiprocess 数据目录（多 worker 指标聚合）
+    from aigateway_core.metrics import set_multiproc_dir
+    set_multiproc_dir("/tmp/prometheus")
+
     app.state.metrics_collector = get_metrics_collector()
     app.state.litellm_bridge = litellm_bridge
     app.state.redis_manager = redis_mgr
