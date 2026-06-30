@@ -474,7 +474,7 @@ class KeyStore:
         if monthly_used + cost > monthly_limit:
             return False, f"Monthly cost limit exceeded: ${monthly_used:.2f}/${monthly_limit:.2f}", 0
 
-        return True, None
+        return True, None, 0
 
     async def increment_usage(
         self,
