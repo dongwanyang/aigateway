@@ -10,4 +10,12 @@ export default defineConfig({
     },
   },
   base: process.env.VITE_BASE_URL ?? '/',
+  server: {
+    proxy: {
+      '/aigateway': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+    },
+  },
 })
