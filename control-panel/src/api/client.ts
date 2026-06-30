@@ -207,7 +207,8 @@ export interface MetricsJsonData {
 }
 
 export async function getMetricsJson(): Promise<ApiResponse<MetricsJsonData>> {
-  const res = await fetch(`${API_BASE}/admin/metrics-json`)
+  const headers = await ensureAuthHeaders()
+  const res = await fetch(`${API_BASE}/admin/metrics-json`, { headers })
   if (!res.ok) throw new Error('Failed to fetch metrics JSON')
   return res.json()
 }
@@ -228,15 +229,17 @@ export interface PluginsConfigData {
 }
 
 export async function getPluginsConfig(): Promise<ApiResponse<PluginsConfigData>> {
-  const res = await fetch(`${API_BASE}/admin/plugins-config`)
+  const headers = await ensureAuthHeaders()
+  const res = await fetch(`${API_BASE}/admin/plugins-config`, { headers })
   if (!res.ok) throw new Error('Failed to fetch plugins config')
   return res.json()
 }
 
 export async function togglePlugin(name: string, enabled: boolean): Promise<ApiResponse<{ name: string; enabled: boolean }>> {
+  const headers = await ensureAuthHeaders()
   const res = await fetch(`${API_BASE}/admin/plugins-config`, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { ...headers, 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, enabled }),
   })
   if (!res.ok) throw new Error('Failed to toggle plugin')
@@ -253,15 +256,17 @@ export interface GlobalConfigData {
 }
 
 export async function getGlobalConfig(): Promise<ApiResponse<GlobalConfigData>> {
-  const res = await fetch(`${API_BASE}/admin/global-config`)
+  const headers = await ensureAuthHeaders()
+  const res = await fetch(`${API_BASE}/admin/global-config`, { headers })
   if (!res.ok) throw new Error('Failed to fetch global config')
   return res.json()
 }
 
 export async function updateGlobalConfig(config: { hot_reload: boolean; debug_mode: boolean }): Promise<ApiResponse<GlobalConfigData>> {
+  const headers = await ensureAuthHeaders()
   const res = await fetch(`${API_BASE}/admin/global-config`, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { ...headers, 'Content-Type': 'application/json' },
     body: JSON.stringify(config),
   })
   if (!res.ok) throw new Error('Failed to update global config')
@@ -306,7 +311,8 @@ export async function getRequestLogs(params: {
   if (params.model) qs.set('model', params.model)
   if (params.status) qs.set('status', params.status)
   if (params.cache_only !== undefined) qs.set('cache_only', String(params.cache_only))
-  const res = await fetch(`${API_BASE}/admin/logs?${qs}`)
+  const headers = await ensureAuthHeaders()
+  const res = await fetch(`${API_BASE}/admin/logs?${qs}`, { headers })
   if (!res.ok) throw new Error('Failed to fetch logs')
   return res.json()
 }

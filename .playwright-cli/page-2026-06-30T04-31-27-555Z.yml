@@ -1,0 +1,102 @@
+- generic [ref=e1]:
+  - generic [ref=e3]:
+    - banner [ref=e4]:
+      - heading "AI Gateway Control Panel" [level=1] [ref=e5]
+      - button "亮色" [ref=e6] [cursor=pointer]:
+        - img [ref=e7]
+        - generic [ref=e13]: 亮色
+    - complementary [ref=e14]:
+      - navigation [ref=e15]:
+        - link "概览" [active] [ref=e16] [cursor=pointer]:
+          - /url: /
+          - img [ref=e17]
+          - text: 概览
+        - link "插件管理" [ref=e22] [cursor=pointer]:
+          - /url: /plugins
+          - img [ref=e23]
+          - text: 插件管理
+        - link "成本分析" [ref=e25] [cursor=pointer]:
+          - /url: /costs
+          - img [ref=e26]
+          - text: 成本分析
+        - link "配额管理" [ref=e28] [cursor=pointer]:
+          - /url: /quotas
+          - img [ref=e29]
+          - text: 配额管理
+        - link "缓存监控" [ref=e31] [cursor=pointer]:
+          - /url: /cache
+          - img [ref=e32]
+          - text: 缓存监控
+        - link "请求日志" [ref=e36] [cursor=pointer]:
+          - /url: /logs
+          - img [ref=e37]
+          - text: 请求日志
+    - main [ref=e40]:
+      - generic [ref=e416]:
+        - heading "概览" [level=2] [ref=e417]
+        - generic [ref=e418]:
+          - generic [ref=e419]:
+            - generic [ref=e420]:
+              - generic [ref=e421]: 总请求数
+              - img [ref=e422]
+            - generic [ref=e424]: "0"
+            - generic [ref=e425]: requests
+          - generic [ref=e426]:
+            - generic [ref=e427]:
+              - generic [ref=e428]: 平均延迟
+              - img [ref=e429]
+            - generic [ref=e432]: "0"
+            - generic [ref=e433]: ms
+          - generic [ref=e434]:
+            - generic [ref=e435]:
+              - generic [ref=e436]: 总成本
+              - img [ref=e437]
+            - generic [ref=e439]: $0.00
+            - generic [ref=e440]: USD
+          - generic [ref=e441]:
+            - generic [ref=e442]:
+              - generic [ref=e443]: 缓存命中率
+              - img [ref=e444]
+            - generic [ref=e446]: "0"
+            - generic [ref=e447]: "%"
+        - generic [ref=e448]:
+          - generic [ref=e449]:
+            - heading "延迟趋势 (ms)" [level=3] [ref=e450]
+            - img [ref=e453]:
+              - generic [ref=e458]:
+                - generic [ref=e460]: 00:00
+                - generic [ref=e462]: 08:00
+                - generic [ref=e464]: 16:00
+                - generic [ref=e466]: 24:00
+              - generic [ref=e468]:
+                - generic [ref=e470]: "0"
+                - generic [ref=e472]: "1"
+                - generic [ref=e474]: "2"
+                - generic [ref=e476]: "3"
+                - generic [ref=e478]: "4"
+          - generic [ref=e479]:
+            - heading "服务健康" [level=3] [ref=e480]
+            - generic [ref=e481]:
+              - generic [ref=e482]:
+                - generic [ref=e483]: 整体状态
+                - generic [ref=e484]: healthy
+              - generic [ref=e485]:
+                - generic [ref=e486]: 运行时间
+                - generic [ref=e487]: 1h 51m
+              - generic [ref=e488]:
+                - generic [ref=e489]: Redis
+                - generic [ref=e490]: connected (3.4ms)
+              - generic [ref=e491]:
+                - generic [ref=e492]: Qdrant
+                - generic [ref=e493]: connected (4.55ms)
+        - generic [ref=e494]:
+          - heading "成本分布 by 模型" [level=3] [ref=e495]
+          - img [ref=e498]:
+            - generic [ref=e505]: 暂无数据
+            - generic [ref=e507]:
+              - generic [ref=e509]: "0"
+              - generic [ref=e511]: "1"
+              - generic [ref=e513]: "2"
+              - generic [ref=e515]: "3"
+              - generic [ref=e517]: "4"
+  - generic [ref=e136]: "1.5"

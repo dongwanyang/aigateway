@@ -1,0 +1,101 @@
+- generic [ref=e1]:
+  - generic [ref=e3]:
+    - banner [ref=e4]:
+      - heading "AI Gateway Control Panel" [level=1] [ref=e5]
+      - button "亮色" [ref=e6] [cursor=pointer]:
+        - img [ref=e7]
+        - generic [ref=e13]: 亮色
+    - complementary [ref=e14]:
+      - navigation [ref=e15]:
+        - link "概览" [ref=e16] [cursor=pointer]:
+          - /url: /
+          - img [ref=e17]
+          - text: 概览
+        - link "插件管理" [active] [ref=e22] [cursor=pointer]:
+          - /url: /plugins
+          - img [ref=e23]
+          - text: 插件管理
+        - link "成本分析" [ref=e25] [cursor=pointer]:
+          - /url: /costs
+          - img [ref=e26]
+          - text: 成本分析
+        - link "配额管理" [ref=e28] [cursor=pointer]:
+          - /url: /quotas
+          - img [ref=e29]
+          - text: 配额管理
+        - link "缓存监控" [ref=e31] [cursor=pointer]:
+          - /url: /cache
+          - img [ref=e32]
+          - text: 缓存监控
+        - link "请求日志" [ref=e36] [cursor=pointer]:
+          - /url: /logs
+          - img [ref=e37]
+          - text: 请求日志
+    - main [ref=e40]:
+      - generic [ref=e148]:
+        - generic [ref=e149]:
+          - heading "插件管理" [level=2] [ref=e150]
+          - generic [ref=e151]: 5/5 已启用
+        - generic [ref=e152]:
+          - heading "安全" [level=3] [ref=e153]
+          - generic [ref=e155]:
+            - generic [ref=e156]:
+              - img [ref=e158]
+              - generic [ref=e160]:
+                - generic [ref=e161]: pii_detector
+                - generic [ref=e162]: "{\"strategy\":\"sanitize\"}"
+            - generic [ref=e163] [cursor=pointer]:
+              - checkbox [checked]
+        - generic [ref=e165]:
+          - heading "性能" [level=3] [ref=e166]
+          - generic [ref=e167]:
+            - generic [ref=e168]:
+              - generic [ref=e169]:
+                - img [ref=e171]
+                - generic [ref=e173]:
+                  - generic [ref=e174]: prompt_cache
+                  - generic [ref=e175]: 默认配置
+              - generic [ref=e176] [cursor=pointer]:
+                - checkbox [checked]
+            - generic [ref=e178]:
+              - generic [ref=e179]:
+                - img [ref=e181]
+                - generic [ref=e183]:
+                  - generic [ref=e184]: semantic_cache
+                  - generic [ref=e185]: "{\"embedding_model\":\"all-MiniLM-L6-v2\"}"
+              - generic [ref=e186] [cursor=pointer]:
+                - checkbox [checked]
+            - generic [ref=e188]:
+              - generic [ref=e189]:
+                - img [ref=e191]
+                - generic [ref=e193]:
+                  - generic [ref=e194]: prompt_compress
+                  - generic [ref=e195]: "{\"compression_ratio\":0.5}"
+              - generic [ref=e196] [cursor=pointer]:
+                - checkbox [checked]
+        - generic [ref=e198]:
+          - heading "路由" [level=3] [ref=e199]
+          - generic [ref=e201]:
+            - generic [ref=e202]:
+              - img [ref=e204]
+              - generic [ref=e206]:
+                - generic [ref=e207]: model_router
+                - generic [ref=e208]: 默认配置
+            - generic [ref=e209] [cursor=pointer]:
+              - checkbox [checked]
+        - generic [ref=e211]:
+          - heading "全局配置" [level=3] [ref=e212]
+          - generic [ref=e213]:
+            - generic [ref=e214]:
+              - generic [ref=e215]:
+                - generic [ref=e216]: 热重载
+                - generic [ref=e217]: 修改 config.yaml 后自动生效
+              - generic [ref=e218] [cursor=pointer]:
+                - checkbox [checked]
+            - generic [ref=e220]:
+              - generic [ref=e221]:
+                - generic [ref=e222]: 调试模式
+                - generic [ref=e223]: 记录详细插件执行日志
+              - generic [ref=e224] [cursor=pointer]:
+                - checkbox
+  - generic [ref=e147]: 08:00

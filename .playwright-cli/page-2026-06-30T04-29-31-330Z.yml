@@ -1,0 +1,57 @@
+- generic [ref=e1]:
+  - generic [ref=e3]:
+    - banner [ref=e4]:
+      - heading "AI Gateway Control Panel" [level=1] [ref=e5]
+      - button "亮色" [ref=e6] [cursor=pointer]:
+        - img [ref=e7]
+        - generic [ref=e13]: 亮色
+    - complementary [ref=e14]:
+      - navigation [ref=e15]:
+        - link "概览" [ref=e16] [cursor=pointer]:
+          - /url: /
+          - img [ref=e17]
+          - text: 概览
+        - link "插件管理" [ref=e22] [cursor=pointer]:
+          - /url: /plugins
+          - img [ref=e23]
+          - text: 插件管理
+        - link "成本分析" [ref=e25] [cursor=pointer]:
+          - /url: /costs
+          - img [ref=e26]
+          - text: 成本分析
+        - link "配额管理" [active] [ref=e28] [cursor=pointer]:
+          - /url: /quotas
+          - img [ref=e29]
+          - text: 配额管理
+        - link "缓存监控" [ref=e31] [cursor=pointer]:
+          - /url: /cache
+          - img [ref=e32]
+          - text: 缓存监控
+        - link "请求日志" [ref=e36] [cursor=pointer]:
+          - /url: /logs
+          - img [ref=e37]
+          - text: 请求日志
+    - main [ref=e40]:
+      - generic [ref=e243]:
+        - generic [ref=e244]:
+          - heading "配额管理" [level=2] [ref=e245]
+          - button "创建 API Key" [ref=e246] [cursor=pointer]:
+            - img [ref=e247]
+            - text: 创建 API Key
+        - generic [ref=e248]:
+          - img [ref=e249]
+          - textbox "搜索用户 ID 或 Key 前缀..." [ref=e252]
+        - table [ref=e255]:
+          - rowgroup [ref=e256]:
+            - row "User ID Key 前缀 状态 日 Token 月成本 最后使用 操作" [ref=e257]:
+              - columnheader "User ID" [ref=e258]
+              - columnheader "Key 前缀" [ref=e259]
+              - columnheader "状态" [ref=e260]
+              - columnheader "日 Token" [ref=e261]
+              - columnheader "月成本" [ref=e262]
+              - columnheader "最后使用" [ref=e263]
+              - columnheader "操作" [ref=e264]
+          - rowgroup [ref=e265]:
+            - row "暂无 API Key" [ref=e266]:
+              - cell "暂无 API Key" [ref=e267]
+  - generic [ref=e136]: 6/24

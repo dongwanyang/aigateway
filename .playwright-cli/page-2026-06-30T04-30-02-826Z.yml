@@ -1,0 +1,99 @@
+- generic [ref=e1]:
+  - generic [ref=e3]:
+    - banner [ref=e4]:
+      - heading "AI Gateway Control Panel" [level=1] [ref=e5]
+      - button "亮色" [ref=e6] [cursor=pointer]:
+        - img [ref=e7]
+        - generic [ref=e13]: 亮色
+    - complementary [ref=e14]:
+      - navigation [ref=e15]:
+        - link "概览" [ref=e16] [cursor=pointer]:
+          - /url: /
+          - img [ref=e17]
+          - text: 概览
+        - link "插件管理" [ref=e22] [cursor=pointer]:
+          - /url: /plugins
+          - img [ref=e23]
+          - text: 插件管理
+        - link "成本分析" [ref=e25] [cursor=pointer]:
+          - /url: /costs
+          - img [ref=e26]
+          - text: 成本分析
+        - link "配额管理" [ref=e28] [cursor=pointer]:
+          - /url: /quotas
+          - img [ref=e29]
+          - text: 配额管理
+        - link "缓存监控" [active] [ref=e31] [cursor=pointer]:
+          - /url: /cache
+          - img [ref=e32]
+          - text: 缓存监控
+        - link "请求日志" [ref=e36] [cursor=pointer]:
+          - /url: /logs
+          - img [ref=e37]
+          - text: 请求日志
+    - main [ref=e40]:
+      - generic [ref=e268]:
+        - heading "缓存监控" [level=2] [ref=e269]
+        - generic [ref=e270]:
+          - generic [ref=e271]:
+            - generic [ref=e272]:
+              - img [ref=e273]
+              - generic [ref=e277]: 总命中率
+            - generic [ref=e278]: 0%
+            - generic [ref=e279]: 0 / 6
+          - generic [ref=e280]:
+            - generic [ref=e282]: L1 命中
+            - generic [ref=e283]: "0"
+            - generic [ref=e284]: 0% / 2 misses
+          - generic [ref=e285]:
+            - generic [ref=e287]: L2 命中
+            - generic [ref=e288]: "0"
+            - generic [ref=e289]: 0% / 2 misses
+          - generic [ref=e290]:
+            - generic [ref=e292]: L3 语义命中
+            - generic [ref=e293]: "0"
+            - generic [ref=e294]: 0% / 2 misses
+        - generic [ref=e295]:
+          - generic [ref=e296]:
+            - heading "各级缓存命中/未命中" [level=3] [ref=e297]
+            - generic [ref=e299]:
+              - img [ref=e300]:
+                - generic [ref=e305]:
+                  - generic [ref=e307]: L1
+                  - generic [ref=e309]: L2
+                  - generic [ref=e311]: L3
+                - generic [ref=e313]:
+                  - generic [ref=e315]: "0"
+                  - generic [ref=e317]: "0.5"
+                  - generic [ref=e319]: "1"
+                  - generic [ref=e321]: "1.5"
+                  - generic [ref=e323]: "2"
+              - list [ref=e334]:
+                - listitem [ref=e335]:
+                  - img [ref=e336]
+                  - text: Hits
+                - listitem [ref=e338]:
+                  - img [ref=e339]
+                  - text: Misses
+          - generic [ref=e341]:
+            - heading "缓存活动" [level=3] [ref=e342]
+            - generic [ref=e344]:
+              - img [ref=e345]:
+                - generic [ref=e350]:
+                  - generic [ref=e352]: L1
+                  - generic [ref=e354]: L2
+                  - generic [ref=e356]: L3
+                - generic [ref=e358]:
+                  - generic [ref=e360]: "0"
+                  - generic [ref=e362]: "0.5"
+                  - generic [ref=e364]: "1"
+                  - generic [ref=e366]: "1.5"
+                  - generic [ref=e368]: "2"
+              - list [ref=e379]:
+                - listitem [ref=e380]:
+                  - img [ref=e381]
+                  - text: Hits
+                - listitem [ref=e383]:
+                  - img [ref=e384]
+                  - text: Misses
+  - generic [ref=e136]: "1.5"
