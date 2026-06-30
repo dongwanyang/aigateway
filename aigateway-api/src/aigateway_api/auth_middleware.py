@@ -183,8 +183,74 @@ async def authenticate_admin(request: Request) -> Optional[Dict[str, Any]]:
     Raises:
         HTTPException 401: Key 缺失或无效。
     """
-    # 先通过普通鉴权
-    key_data = await authenticate(request)
+    # 复用 authenticate 的完整逻辑（包括 Header 参数自动提取）
+    # 直接调用 authenticate(request) 会导致 Header 参数取默认值 None，
+    # 所以我们需要手动提取 header 并调用 authenticate 的核心逻辑
+    from .auth_middleware import _extract_api_key
+
+    key_value = _extract_api_key(
+        request.headers.get("authorization"),
+        request.headers.get("x-api-key"),
+    )
+
+    if not key_value:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={
+                "error": {
+                    "code": "unauthorized",
+                    "message": "Invalid or missing API key",
+                }
+            },
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    key_store = request.app.state.key_store
+    if key_store is None:
+        logger.error("KeyStore 未初始化，无法鉴权")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": {
+                    "code": "internal_error",
+                    "message": "Authentication service unavailable",
+                }
+            },
+        )
+
+    try:
+        key_data = await key_store.validate(key_value)
+    except Exception as e:
+        error_msg = str(e)
+        if "revoked" in error_msg.lower():
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "error": {
+                        "code": "forbidden",
+                        "message": f"API key '{key_value[:8]}...' has been revoked",
+                    }
+                },
+            )
+        if "suspended" in error_msg.lower():
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "error": {
+                        "code": "forbidden",
+                        "message": f"API key '{key_value[:8]}...' is suspended",
+                    }
+                },
+            )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={
+                "error": {
+                    "code": "unauthorized",
+                    "message": "Invalid or missing API key",
+                }
+            },
+        )
 
     if key_data is None:
         raise HTTPException(
@@ -197,7 +263,9 @@ async def authenticate_admin(request: Request) -> Optional[Dict[str, Any]]:
             },
         )
 
-    # 控制台本身就是管理员使用，所有有效 Key 均可访问 admin 接口
+    request.state.api_key_data = key_data
+    request.state.api_key_value = key_value
+
     return key_data
 
 

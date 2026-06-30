@@ -239,13 +239,20 @@ async def chat_completions_non_stream(
         # 缓存命中 -- 返回缓存的完整响应
         response_data = json.loads(cached["value"])
         hit_tier = cached.get("hit_tier", "L1")
-        metrics_collector.inc_cache_hits(tier=hit_tier)
+        if metrics_collector:
+            metrics_collector.inc_cache_hits(tier=hit_tier)
 
         # 回填 _meta 元数据（API_CONTRACT.md 要求）
         if "_meta" not in response_data:
             response_data["_meta"] = {}
         response_data["_meta"]["cache_hit"] = True
         response_data["_meta"]["cache_tier"] = hit_tier
+        # 缓存命中无 routed_to（未实际调用下游 LLM）
+        response_data["_meta"]["routed_to"] = {
+            "provider": "cache",
+            "model": body.model,
+            "tier": hit_tier,
+        }
 
         # 记录缓存命中日志
         await _record_request_log(
@@ -361,6 +368,8 @@ async def chat_completions_non_stream(
             final_cost = cost if cost > 0 else _estimate_cost(body.model, tt)
             if final_cost > 0:
                 metrics_collector.record_cost(final_cost, model=body.model)
+    # tracker.__exit__ 必须在 metrics_collector 块之外，确保无论如何都被调用
+    if tracker:
         tracker.__exit__(None, None, None)
 
     # 回填缓存（L1 + L2）
@@ -432,11 +441,12 @@ async def chat_completions_stream(
     if cached is not None and cached.get("hit_tier") in ("L1", "L2", "L3"):
         # 缓存命中 — 模拟流式响应（F15）
         hit_tier = cached.get("hit_tier", "L1")
-        metrics_collector.inc_cache_hits(tier=hit_tier)
+        if metrics_collector:
+            metrics_collector.inc_cache_hits(tier=hit_tier)
         response_json = cached["value"]
 
         chat_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-        stream_gen = simulate_stream_from_cache(response_json)
+        stream_gen = simulate_stream_from_cache(response_json, hit_tier=hit_tier)
 
         # 记录缓存命中日志（流式）
         await _record_request_log(
@@ -596,8 +606,8 @@ async def create_embeddings(
             embeddings = st_model.encode(input_texts, normalize_embeddings=True)
         except ImportError:
             return JSONResponse(
-                content={"error": {"code": "internal_error", "message": "sentence-transformers not installed"}},
-                status_code=500,
+                content={"error": {"code": "unsupported", "message": "sentence-transformers not installed"}},
+                status_code=501,
             )
         except Exception as exc:
             return JSONResponse(
@@ -698,8 +708,8 @@ async def create_embeddings(
 
     # 未知后端
     return JSONResponse(
-        content={"error": {"code": "internal_error", "message": f"Unknown embedding backend: {embedding_backend}"}},
-        status_code=500,
+        content={"error": {"code": "unsupported", "message": f"Unknown embedding backend: {embedding_backend}"}},
+        status_code=400,
     )
 
 

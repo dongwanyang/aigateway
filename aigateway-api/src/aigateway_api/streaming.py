@@ -79,6 +79,7 @@ def create_sse_response(
 async def simulate_stream_from_cache(
     response_json: str,
     chunk_delay_ms: int = 20,
+    hit_tier: str = "L1",
 ) -> AsyncIterator[Dict[str, Any]]:
     """将缓存的完整响应按 chunk 分块，模拟流式生成。
 
@@ -138,6 +139,16 @@ async def simulate_stream_from_cache(
             chunk_data["choices"][0]["finish_reason"] = "stop"
             if usage:
                 chunk_data["usage"] = usage
+            # 缓存命中流式：在最后一个 chunk 补充 _meta
+            chunk_data["_meta"] = {
+                "cache_hit": True,
+                "cache_tier": hit_tier,
+                "routed_to": {
+                    "provider": "cache",
+                    "model": model,
+                    "tier": hit_tier,
+                },
+            }
 
         yield chunk_data
         await asyncio.sleep(chunk_delay_ms / 1000.0)

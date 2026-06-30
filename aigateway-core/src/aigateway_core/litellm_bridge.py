@@ -637,15 +637,17 @@ class LiteLLMBridge:
             return []
 
         try:
-            models = await self.router.list_models()
+            model_list = self.router.get_model_list()
             result = []
-            for m in models:
-                model_id = m.get("id", m.get("model_name", ""))
+            for m in model_list:
+                model_name = m.get("model_name", "")
+                model_info = m.get("model_info", {})
                 result.append({
-                    "id": model_id,
+                    "id": model_name,
                     "object": "model",
                     "created": int(time.time()),
-                    "owned_by": self._extract_provider(model_id),
+                    "owned_by": self._extract_provider(model_name),
+                    **{k: v for k, v in model_info.items() if k not in ("id", "object", "created", "owned_by")},
                 })
             return result
         except Exception as exc:
