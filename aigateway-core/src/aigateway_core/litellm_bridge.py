@@ -642,8 +642,10 @@ class LiteLLMBridge:
             for m in model_list:
                 model_name = m.get("model_name", "")
                 model_info = m.get("model_info", {})
+                # 去掉 provider 前缀，只保留实际模型名
+                bare_model = model_name.split("/")[-1] if "/" in model_name else model_name
                 result.append({
-                    "id": model_name,
+                    "id": bare_model,
                     "object": "model",
                     "created": int(time.time()),
                     "owned_by": self._extract_provider(model_name),
