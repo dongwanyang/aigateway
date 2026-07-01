@@ -233,7 +233,7 @@ async def chat_completions_non_stream(
 
     # 检查缓存（L1 -> L2 -> L3）
     cached = await cache_manager.get(cache_key, value_fn=None, user_id=user_id)
-    cache_hit = cached is not None and cached.get("hit_tier") == "L1"
+    cache_hit = cached is not None and cached.get("hit_tier") in ("L1", "L2", "L3")
 
     if cache_hit and cached:
         # 缓存命中 -- 返回缓存的完整响应
@@ -242,16 +242,15 @@ async def chat_completions_non_stream(
         if metrics_collector:
             metrics_collector.inc_cache_hits(tier=hit_tier)
 
-        # 回填 _meta 元数据（API_CONTRACT.md 要求）
-        if "_meta" not in response_data:
-            response_data["_meta"] = {}
-        response_data["_meta"]["cache_hit"] = True
-        response_data["_meta"]["cache_tier"] = hit_tier
-        # 缓存命中无 routed_to（未实际调用下游 LLM）
-        response_data["_meta"]["routed_to"] = {
-            "provider": "cache",
-            "model": body.model,
-            "tier": hit_tier,
+        # 构建 _meta 元数据（API_CONTRACT.md 要求放在顶层）
+        meta = {
+            "cache_hit": True,
+            "cache_tier": hit_tier,
+            "routed_to": {
+                "provider": "cache",
+                "model": body.model,
+                "tier": hit_tier,
+            },
         }
 
         # 记录缓存命中日志
@@ -265,6 +264,7 @@ async def chat_completions_non_stream(
         return JSONResponse(content={
             "data": response_data,
             "message": "success",
+            "_meta": meta,
         })
 
     # ===== 配额检查（缓存未命中时才检查，避免浪费） =====
@@ -377,6 +377,11 @@ async def chat_completions_non_stream(
     # 所以这里总是回填未命中的数据
     value_str = json.dumps(result.get("data", {}))
     cache_manager.l1_set(cache_key, value_str)
+    # 同时回填 L2 Redis 缓存
+    try:
+        await cache_manager.l2_set(cache_key, value_str)
+    except Exception as exc:
+        logger.warning("L2 cache backfill failed: %s", exc)
 
     # 记录请求日志到 Redis
     await _record_request_log(
@@ -389,7 +394,7 @@ async def chat_completions_non_stream(
     return JSONResponse(content={
         "data": result.get("data", {}),
         "message": "success",
-        "_meta": result.get("_meta", {}),
+        "_meta": result.get("_meta", {"cache_hit": False, "cache_tier": None}),
     })
 
 

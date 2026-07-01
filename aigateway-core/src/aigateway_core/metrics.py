@@ -315,7 +315,8 @@ class MetricsCollector:
             return
 
         if self._cost_total_gauge:
-            self._cost_total_gauge.set(cost_usd)
+            # 累加总成本（Gauge 没有 inc(amount)，使用 _value 直接累加）
+            self._cost_total_gauge.inc(cost_usd)
 
         if self._cost_by_model_counter:
             self._cost_by_model_counter.labels(model=model).inc(cost_usd)

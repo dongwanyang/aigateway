@@ -123,17 +123,13 @@ class QdrantClientManager:
 
         # 创建集合
         payload = {
-            "name": name,
             "vectors": {
                 "size": size,
-                "distance": distance,
+                "distance": distance.capitalize(),
             },
             "hnsw_config": {
                 "m": 16,
                 "ef_construct": 128,
-            },
-            "optimization_config": {
-                "memlock": False,
             },
         }
 
@@ -188,7 +184,7 @@ class QdrantClientManager:
 
         payload_body = {"points": points}
 
-        resp = await self._http.post(
+        resp = await self._http.put(
             f"/collections/{collection}/points",
             json=payload_body,
             headers=self._headers(),
