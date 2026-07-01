@@ -40,7 +40,7 @@ async def create_semantic_cache(qmgr: QdrantClientManager) -> None:
     """创建 semantic_cache 集合（DB_SCHEMA Qdrant §1）。
 
     向量配置:
-    - size: 384（all-MiniLM-L6-v2 输出维度）
+    - size: 1024（Qwen3-Embedding-0.6B 输出维度）
     - distance: COSINE（余弦相似度）
     - hnsw_config.m: 16
     - hnsw_config.ef_construct: 128
@@ -49,14 +49,14 @@ async def create_semantic_cache(qmgr: QdrantClientManager) -> None:
 
     success = await qmgr.upsert_collection(
         name="semantic_cache",
-        size=384,
+        size=1024,
         distance="COSINE",
     )
 
     if success:
         print("  集合 'semantic_cache' 创建成功")
         print("  向量配置:")
-        print("    size:       384 (all-MiniLM-L6-v2)")
+        print("    size:       1024 (Qwen3-Embedding-0.6B)")
         print("    distance:   COSINE")
         print("    hnsw.m:     16")
         print("    hnsw.ef_construct: 128")
@@ -85,7 +85,7 @@ async def create_rag_collection(qmgr: QdrantClientManager) -> None:
 
     success = await qmgr.upsert_collection(
         name="rag_documents",
-        size=384,
+        size=1024,
         distance="COSINE",
     )
 

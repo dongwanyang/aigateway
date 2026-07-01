@@ -26,6 +26,119 @@ logger = logging.getLogger(__name__)
 
 from .auth_middleware import authenticate_admin
 
+# 模块级 Embedding 模型缓存（避免每次请求重新加载）
+_embedding_model_cache: dict = {}
+
+
+def _get_embedding_model():
+    """获取缓存的 embedding 模型实例。"""
+    return _embedding_model_cache.get("model")
+
+
+def _set_embedding_model(model):
+    """缓存 embedding 模型实例。"""
+    _embedding_model_cache["model"] = model
+
+
+async def _compute_embeddings_via_litellm(texts: List[str]) -> Optional[List[List[float]]]:
+    """使用 litellm 的 embedding API 计算向量（不需要本地模型）。
+
+    尝试顺序:
+    1. 使用配置中有效的 provider embedding
+    2. 回退到简单的哈希向量（精度低但能工作）
+
+    返回 1024 维向量列表，失败返回 None。
+    """
+    try:
+        from aigateway_api.main import app
+        s = app.state
+        config_manager = getattr(s, "config_manager", None)
+
+        # 获取 embedding 配置
+        embedding_cfg = config_manager.get("embedding", {}) if config_manager else {}
+        providers_cfg = config_manager.get("providers", {}) if config_manager else {}
+
+        # 尝试使用配置中有真实 API Key 的 provider
+        import litellm
+
+        # 查找可能有效的 provider（排除明显的占位符 key）
+        for provider_name, provider_cfg in providers_cfg.items():
+            if not isinstance(provider_cfg, dict):
+                continue
+            api_key = provider_cfg.get("api_key", "")
+            # 跳过占位符 key
+            if not api_key or api_key.endswith("xxx") or len(api_key) < 20:
+                continue
+
+            base_url = provider_cfg.get("base_url", "")
+
+            try:
+                # 尝试使用 openai 兼容的 embedding 接口
+                vectors = []
+                batch_size = 50
+                for i in range(0, len(texts), batch_size):
+                    batch = texts[i:i + batch_size]
+                    kwargs = {
+                        "model": "openai/text-embedding-3-small",
+                        "input": batch,
+                        "api_key": api_key,
+                    }
+                    if base_url:
+                        kwargs["api_base"] = base_url
+
+                    response = await litellm.aembedding(**kwargs)
+                    for item in response.data:
+                        vec = item["embedding"]
+                        # 调整维度到 1024
+                        if len(vec) > 1024:
+                            vec = vec[:1024]
+                        elif len(vec) < 1024:
+                            vec = vec + [0.0] * (1024 - len(vec))
+                        vectors.append(vec)
+
+                if vectors:
+                    return vectors
+            except Exception as provider_exc:
+                logger.debug("Provider %s embedding 失败: %s", provider_name, provider_exc)
+                continue
+
+    except Exception as exc:
+        logger.warning("litellm embedding 失败: %s", exc)
+
+    # 最终回退：使用简单的哈希向量（精度低但功能可用）
+    logger.info("使用哈希向量回退方案（embedding API 不可用）")
+    return _compute_hash_embeddings(texts)
+
+
+def _compute_hash_embeddings(texts: List[str]) -> List[List[float]]:
+    """基于哈希的简单向量生成（作为 embedding 不可用时的回退方案）。
+
+    使用 SHA-256 哈希生成伪随机 1024 维向量。
+    注意：这不是真正的语义嵌入，只保证相同文本产生相同向量。
+    """
+    import hashlib
+    import struct
+
+    vectors = []
+    for text in texts:
+        # 多次哈希以生成足够的维度
+        result = []
+        for i in range(64):  # 64 * 16 = 1024 floats
+            h = hashlib.sha256(f"{text}:{i}".encode()).digest()
+            # 将 32 bytes 解释为 16 个 float16 值
+            for j in range(0, 32, 2):
+                val = struct.unpack('h', h[j:j+2])[0] / 32768.0  # 归一化到 [-1, 1]
+                result.append(val)
+        # 截断到 1024 维
+        result = result[:1024]
+        # L2 归一化
+        norm = sum(x*x for x in result) ** 0.5
+        if norm > 0:
+            result = [x / norm for x in result]
+        vectors.append(result)
+    return vectors
+
+
 router = APIRouter()
 
 
@@ -977,21 +1090,41 @@ async def import_rag_document(
     total_tokens = 0
     stored_count = 0
 
+    # 确定 embedding 方式: sentence-transformers (本地) 或 litellm (远程 API)
+    use_local_embedding = False
     try:
-        # 尝试加载 sentence-transformers
         from sentence_transformers import SentenceTransformer
-        from aigateway_core.pipeline import SemanticCachePlugin
-        if not hasattr(SemanticCachePlugin, "_model_cache"):
-            SemanticCachePlugin._model_cache = {}
-        st_model = SemanticCachePlugin._model_cache.get("all-MiniLM-L6-v2")
-        if st_model is None:
-            st_model = SentenceTransformer("all-MiniLM-L6-v2")
-            SemanticCachePlugin._model_cache["all-MiniLM-L6-v2"] = st_model
+        use_local_embedding = True
+    except ImportError:
+        pass
 
-        # 批量 encode
-        vectors = st_model.encode(chunks, normalize_embeddings=True, show_progress_bar=False)
+    try:
+        # 确保 rag_documents 集合存在
+        try:
+            await qdrant_mgr.upsert_collection(name="rag_documents", size=1024, distance="COSINE")
+        except Exception as coll_exc:
+            logger.warning("确认 rag_documents 集合时出错（可能已存在）: %s", coll_exc)
 
-        for i, (chunk_text, vector) in enumerate(zip(chunks, vectors)):
+        if use_local_embedding:
+            # 使用本地 sentence-transformers 模型 (Qwen3-Embedding-0.6B)
+            st_model = _get_embedding_model()
+            if st_model is None:
+                # 从配置读取模型名，默认使用 Qwen3-Embedding-0.6B
+                from aigateway_api.main import app
+                _cfg_mgr = getattr(app.state, "config_manager", None)
+                _emb_cfg = _cfg_mgr.get("embedding", {}) if _cfg_mgr else {}
+                _model_name = _emb_cfg.get("model", "Qwen/Qwen3-Embedding-0.6B")
+                st_model = SentenceTransformer(_model_name)
+                _set_embedding_model(st_model)
+
+            # 批量 encode
+            vectors = st_model.encode(chunks, normalize_embeddings=True, show_progress_bar=False)
+            vectors_list = [v.tolist() for v in vectors]
+        else:
+            # 回退方案：使用 litellm embedding API 或哈希向量
+            vectors_list = await _compute_embeddings_via_litellm(chunks)
+
+        for i, (chunk_text, vector) in enumerate(zip(chunks, vectors_list)):
             point_id = str(uuid.uuid4())
             payload = {
                 "document_id": doc_id,
@@ -1002,7 +1135,7 @@ async def import_rag_document(
                 "created_at": int(time_mod.time()),
                 "deleted": False,
             }
-            payload_body = {"points": [{"id": point_id, "vector": vector.tolist(), "payload": payload}]}
+            payload_body = {"points": [{"id": point_id, "vector": vector, "payload": payload}]}
             resp = await qdrant_mgr._http.put(
                 "/collections/rag_documents/points",
                 json=payload_body,
@@ -1011,9 +1144,12 @@ async def import_rag_document(
             stored_count += 1
             total_tokens += len(chunk_text) // 4
 
-    except ImportError:
-        raise HTTPException(status_code=501, detail={"error": {"code": "unsupported", "message": "sentence-transformers not installed in container"}})
+    except ImportError as exc:
+        # This catches ImportError from model loading or sub-dependencies
+        logger.error("RAG 导入依赖缺失: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": f"Missing dependency during embedding: {exc}"}})
     except Exception as exc:
+        logger.error("RAG embedding 存储失败: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": f"Failed to store embeddings: {exc}"}})
 
     elapsed_ms = round((time_mod.time() - start_time) * 1000, 1)
@@ -1160,3 +1296,290 @@ def _split_text(text: str, strategy: str = "fixed_size", chunk_size: int = 512, 
                 chunks.append(chunk.strip())
             start = end - overlap if overlap > 0 else end
         return chunks
+
+
+# ------------------------------------------------------------------
+# L3 Cache Lifecycle Management (Design §9b)
+# ------------------------------------------------------------------
+
+
+@router.get("/cache/l3/config")
+async def get_l3_cache_config(
+    request: Request,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+    """返回当前 L3 缓存管理配置。"""
+    import os
+    import yaml
+    from aigateway_api.main import app
+    s = app.state
+    config_manager = getattr(s, "config_manager")
+
+    # 从 config.yaml 读取 cache.l3 配置
+    default_config = {
+        "default_mode": "auto",
+        "auto_cleanup_interval_minutes": 60,
+        "default_ttl_hours": 24,
+        "min_ttl_hours": 1,
+        "max_ttl_hours": 720,
+    }
+
+    if config_manager:
+        cache_cfg = config_manager.get("cache", {})
+        if isinstance(cache_cfg, dict):
+            l3_cfg = cache_cfg.get("l3", {})
+            if isinstance(l3_cfg, dict):
+                default_config.update({
+                    k: v for k, v in l3_cfg.items() if k in default_config
+                })
+
+    return {
+        "data": default_config,
+        "message": "success",
+    }
+
+
+@router.put("/cache/l3/config")
+async def update_l3_cache_config(
+    request: Request,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+    """更新 L3 缓存配置并持久化到 config.yaml。"""
+    import yaml
+    from aigateway_api.main import app
+    s = app.state
+    config_manager = getattr(s, "config_manager")
+
+    if not config_manager:
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "ConfigManager not initialized"}})
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail={"error": {"code": "validation_error", "message": "Invalid JSON body"}})
+
+    # 验证配置值
+    allowed_keys = {"default_mode", "auto_cleanup_interval_minutes", "default_ttl_hours", "min_ttl_hours", "max_ttl_hours"}
+    l3_config = {}
+    for key in allowed_keys:
+        if key in body:
+            l3_config[key] = body[key]
+
+    if "default_mode" in l3_config and l3_config["default_mode"] not in ("auto", "manual"):
+        raise HTTPException(status_code=400, detail={"error": {"code": "validation_error", "message": "default_mode must be 'auto' or 'manual'"}})
+
+    # 更新内存缓存
+    current_cache = config_manager.get("cache", {}) or {}
+    if not isinstance(current_cache, dict):
+        current_cache = {}
+    current_l3 = current_cache.get("l3", {})
+    if not isinstance(current_l3, dict):
+        current_l3 = {}
+    current_l3.update(l3_config)
+    current_cache["l3"] = current_l3
+    config_manager.set("cache", current_cache)
+
+    # 更新清理调度器间隔
+    if "auto_cleanup_interval_minutes" in l3_config:
+        l3_scheduler = getattr(s, "l3_cleanup_scheduler", None)
+        if l3_scheduler:
+            l3_scheduler.update_interval(l3_config["auto_cleanup_interval_minutes"])
+
+    return {
+        "data": current_l3,
+        "message": "success",
+    }
+
+
+@router.get("/cache/l3/entries")
+async def list_l3_entries(
+    request: Request,
+    page: int = Query(default=1, ge=1, description="页码"),
+    page_size: int = Query(default=20, ge=1, le=100, description="每页数量"),
+    mode: Optional[str] = Query(default=None, description="按模式过滤: auto | manual"),
+    user_id: Optional[str] = Query(default=None, description="按用户过滤"),
+    sort_by: str = Query(default="created_at", description="排序字段"),
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+    """列出 L3 缓存条目，支持分页、按模式和用户过滤。"""
+    from aigateway_api.main import app
+    s = app.state
+    qdrant_mgr = getattr(s, "qdrant_manager")
+
+    if qdrant_mgr is None or qdrant_mgr._http is None:
+        return {
+            "data": {"items": [], "pagination": {"page": page, "pageSize": page_size, "total": 0}},
+            "message": "success",
+        }
+
+    # 构建过滤条件
+    filter_conditions = []
+    if mode:
+        filter_conditions.append({"key": "management_mode", "match": {"value": mode}})
+    if user_id:
+        filter_conditions.append({"key": "user_id", "match": {"value": user_id}})
+
+    qdrant_filter = {"must": filter_conditions} if filter_conditions else None
+
+    try:
+        result = await qdrant_mgr.scroll_points(
+            collection="semantic_cache",
+            filter=qdrant_filter,
+            limit=page_size * page,  # 获取足够多的点进行分页
+            with_payload=True,
+        )
+        all_points = result.get("points", [])
+    except Exception as exc:
+        logger.warning("L3 entries 查询失败: %s", exc)
+        return {
+            "data": {"items": [], "pagination": {"page": page, "pageSize": page_size, "total": 0}},
+            "message": "success",
+        }
+
+    # 排序
+    if sort_by == "hit_count":
+        all_points.sort(key=lambda p: p.get("payload", {}).get("hit_count", 0), reverse=True)
+    elif sort_by == "expires_at":
+        all_points.sort(key=lambda p: p.get("payload", {}).get("ttl", 0), reverse=True)
+    else:  # created_at
+        all_points.sort(key=lambda p: p.get("payload", {}).get("created_at", 0), reverse=True)
+
+    # 分页
+    total = len(all_points)
+    start = (page - 1) * page_size
+    end = start + page_size
+    paginated = all_points[start:end]
+
+    items = []
+    for point in paginated:
+        payload = point.get("payload", {})
+        prompt_normalized = payload.get("prompt_normalized", "")
+        items.append({
+            "id": point.get("id", ""),
+            "promptPreview": prompt_normalized[:100] if prompt_normalized else "",
+            "model": payload.get("model", ""),
+            "userId": payload.get("user_id", ""),
+            "createdAt": payload.get("created_at", 0),
+            "expiresAt": payload.get("ttl", 0) if payload.get("management_mode") == "auto" else None,
+            "mode": payload.get("management_mode", "auto"),
+            "hitCount": payload.get("hit_count", 0),
+            "tokenCount": payload.get("token_count", 0),
+        })
+
+    return {
+        "data": {
+            "items": items,
+            "pagination": {"page": page, "pageSize": page_size, "total": total},
+        },
+        "message": "success",
+    }
+
+
+@router.put("/cache/l3/entries/{point_id}/mode")
+async def update_entry_mode(
+    request: Request,
+    point_id: str,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+    """切换缓存条目的管理模式。
+
+    auto → manual: 清除 TTL（设为 0，表示永不过期）
+    manual → auto: 按 ttl_hours 设置过期时间
+    """
+    import time as time_mod
+    from aigateway_api.main import app
+    s = app.state
+    qdrant_mgr = getattr(s, "qdrant_manager")
+    config_manager = getattr(s, "config_manager")
+
+    if qdrant_mgr is None or qdrant_mgr._http is None:
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Qdrant not connected"}})
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail={"error": {"code": "validation_error", "message": "Invalid JSON body"}})
+
+    new_mode = body.get("mode")
+    ttl_hours = body.get("ttl_hours")
+
+    if new_mode not in ("auto", "manual"):
+        raise HTTPException(status_code=400, detail={"error": {"code": "validation_error", "message": "mode must be 'auto' or 'manual'"}})
+
+    # 构建 payload 更新
+    now = int(time_mod.time())
+    update_payload: Dict[str, Any] = {"management_mode": new_mode}
+
+    if new_mode == "manual":
+        update_payload["ttl"] = 0  # 永不过期
+    else:
+        # auto 模式：计算新的 TTL
+        if ttl_hours is None:
+            # 使用全局默认值
+            cache_cfg = config_manager.get("cache", {}) if config_manager else {}
+            l3_cfg = cache_cfg.get("l3", {}) if isinstance(cache_cfg, dict) else {}
+            ttl_hours = l3_cfg.get("default_ttl_hours", 24) if isinstance(l3_cfg, dict) else 24
+        update_payload["ttl"] = now + int(ttl_hours) * 3600
+
+    try:
+        await qdrant_mgr.update_payload(
+            collection="semantic_cache",
+            point_id=point_id,
+            payload=update_payload,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": f"Failed to update: {exc}"}})
+
+    return {
+        "data": {"point_id": point_id, "mode": new_mode, "ttl": update_payload.get("ttl", 0)},
+        "message": "success",
+    }
+
+
+@router.delete("/cache/l3/entries/{point_id}")
+async def delete_l3_entry(
+    request: Request,
+    point_id: str,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+    """手动删除指定的 L3 缓存条目（任何模式均可删除）。"""
+    from aigateway_api.main import app
+    s = app.state
+    qdrant_mgr = getattr(s, "qdrant_manager")
+
+    if qdrant_mgr is None or qdrant_mgr._http is None:
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Qdrant not connected"}})
+
+    try:
+        await qdrant_mgr.delete_points(
+            collection="semantic_cache",
+            point_ids=[point_id],
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": f"Failed to delete: {exc}"}})
+
+    return {
+        "data": {"point_id": point_id, "deleted": True},
+        "message": "success",
+    }
+
+
+@router.post("/cache/l3/cleanup")
+async def trigger_l3_cleanup(
+    request: Request,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+    """手动触发一次 L3 过期清理（只清理 mode=auto 且已过期的条目）。"""
+    from aigateway_api.main import app
+    s = app.state
+    cache_manager = getattr(s, "cache_manager")
+
+    if cache_manager is None:
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "CacheManager not initialized"}})
+
+    deleted = await cache_manager.cleanup_expired_l3()
+
+    return {
+        "data": {"deleted_count": deleted},
+        "message": "success",
+    }

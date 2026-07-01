@@ -36,7 +36,15 @@ plugins:
   depends_on:
   - prompt_cache
   config:
-    embedding_model: all-MiniLM-L6-v2
+    embedding_model: Qwen/Qwen3-Embedding-0.6B
+    threshold: 0.95
+    ttl: 86400
+    rerank:
+      enabled: false
+      backend: lightweight
+      retrieve_top_k: 5
+      retrieve_threshold: 0.90
+      rerank_threshold: 0.85
 - name: model_router
   enabled: true
   depends_on: []
@@ -98,7 +106,8 @@ providers:
     retry_after: 1000
 embedding:
   backend: sentence_transformers
-  model: all-MiniLM-L6-v2
+  model: Qwen/Qwen3-Embedding-0.6B
+  vector_dim: 1024
   openai_model: text-embedding-3-small
 observability:
   prometheus_enabled: true
@@ -109,3 +118,11 @@ observability:
   log_level: info
 hot_reload: true
 debug_mode: true
+
+cache:
+  l3:
+    default_mode: auto
+    auto_cleanup_interval_minutes: 60
+    default_ttl_hours: 24
+    min_ttl_hours: 1
+    max_ttl_hours: 720

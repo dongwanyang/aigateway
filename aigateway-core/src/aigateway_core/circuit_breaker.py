@@ -105,6 +105,7 @@ class CircuitBreaker:
         self.failure_count = 0
         self.last_failure_time: float = 0.0
         self.last_success_time: float = 0.0
+        self._last_transition_time: float = time.time()
 
         # 保护锁（线程安全）
         import threading
@@ -159,12 +160,7 @@ class CircuitBreaker:
                 # 检查是否过了恢复超时
                 elapsed = time.time() - self.last_failure_time
                 if elapsed >= self.recovery_timeout:
-                    self.state = CircuitState.HALF_OPEN
-                    logger.info(
-                        "熔断器 %s: OPEN -> HALF_OPEN (超时 %ds 已到)",
-                        self.provider,
-                        self.recovery_timeout,
-                    )
+                    self._transition_state(CircuitState.OPEN, CircuitState.HALF_OPEN)
                     return True
                 return False
 
@@ -181,12 +177,8 @@ class CircuitBreaker:
             self.last_success_time = time.time()
 
             if self.state == CircuitState.HALF_OPEN:
-                self.state = CircuitState.CLOSED
+                self._transition_state(CircuitState.HALF_OPEN, CircuitState.CLOSED)
                 self.failure_count = 0
-                logger.info(
-                    "熔断器 %s: HALF_OPEN -> CLOSED (探测成功)",
-                    self.provider,
-                )
             elif self.state == CircuitState.CLOSED:
                 self.failure_count = 0
 
@@ -202,21 +194,68 @@ class CircuitBreaker:
 
             if self.state == CircuitState.HALF_OPEN:
                 # 探测请求也失败了，回到 OPEN
-                self.state = CircuitState.OPEN
-                logger.warning(
-                    "熔断器 %s: HALF_OPEN -> OPEN (探测失败)",
-                    self.provider,
-                )
+                self._transition_state(CircuitState.HALF_OPEN, CircuitState.OPEN)
             elif self.state == CircuitState.CLOSED:
                 if self.failure_count >= self.failure_threshold:
-                    self.state = CircuitState.OPEN
-                    logger.warning(
-                        "熔断器 %s: CLOSED -> OPEN "
-                        "(连续失败 %d 次, 阈值 %d)",
-                        self.provider,
-                        self.failure_count,
-                        self.failure_threshold,
-                    )
+                    self._transition_state(CircuitState.CLOSED, CircuitState.OPEN)
+
+    def _transition_state(self, from_state: CircuitState, to_state: CircuitState) -> None:
+        """处理状态转换，记录日志并上报指标。
+
+        Args:
+            from_state: 当前状态。
+            to_state: 目标状态。
+        """
+        self.state = to_state
+        self._last_transition_time = time.time()
+
+        # 上报 Prometheus 指标
+        try:
+            from .metrics import get_metrics_collector
+            metrics = get_metrics_collector()
+            metrics.set_circuit_breaker_state(self.provider, int(to_state))
+        except Exception:
+            pass
+
+        # 记录日志（不同级别）
+        if to_state == CircuitState.OPEN:
+            logger.error(
+                "熔断器 %s: %s -> OPEN (连续失败 %d 次)",
+                self.provider, from_state.name, self.failure_count,
+            )
+        elif to_state == CircuitState.HALF_OPEN:
+            logger.info(
+                "熔断器 %s: %s -> HALF_OPEN",
+                self.provider, from_state.name,
+            )
+        elif to_state == CircuitState.CLOSED:
+            logger.info(
+                "熔断器 %s: %s -> CLOSED (恢复正常)",
+                self.provider, from_state.name,
+            )
+
+    def check_long_open(self, threshold_seconds: int = 300) -> bool:
+        """检查熔断器是否持续 OPEN 超过阈值时间。
+
+        Args:
+            threshold_seconds: OPEN 状态持续时间阈值（秒），默认 300（5分钟）。
+
+        Returns:
+            是否超过阈值。
+        """
+        if self.state == CircuitState.OPEN:
+            duration = time.time() - self._last_transition_time
+            if duration >= threshold_seconds:
+                try:
+                    from .metrics import get_metrics_collector
+                    metrics = get_metrics_collector()
+                    # 通过记录计数器指标来告警
+                    if metrics._requests_counter:  # 简单检查是否初始化
+                        metrics.set_circuit_breaker_state(self.provider, 1)
+                except Exception:
+                    pass
+                return True
+        return False
 
     # ------------------------------------------------------------------
     # 装饰器 — 自动熔断
@@ -296,8 +335,13 @@ class CircuitBreaker:
         """获取熔断器的完整状态快照（用于健康检查 / 指标）。
 
         Returns:
-            状态字典。
+            状态字典，包含 last_transition_time 和 open_duration_seconds。
         """
+        now = time.time()
+        open_duration = None
+        if self.state == CircuitState.OPEN:
+            open_duration = now - self._last_transition_time
+
         return {
             "provider": self.provider,
             "state": self.state.name,
@@ -306,7 +350,8 @@ class CircuitBreaker:
             "failure_threshold": self.failure_threshold,
             "last_failure_time": self.last_failure_time,
             "last_success_time": self.last_success_time,
-            "last_transition_time": max(self.last_failure_time, self.last_success_time),
+            "last_transition_time": self._last_transition_time,
+            "open_duration_seconds": open_duration,
         }
 
 

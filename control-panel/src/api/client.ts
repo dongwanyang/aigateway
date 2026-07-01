@@ -459,3 +459,81 @@ export async function deleteRagDocument(docId: string): Promise<ApiResponse<{ de
   if (!res.ok) throw new Error(`Failed to delete document: ${res.status}`)
   return await res.json()
 }
+
+
+// ------------------------------------------------------------------
+// Admin: L3 Cache Lifecycle Management (Design §9b)
+// ------------------------------------------------------------------
+
+export interface L3CacheConfig {
+  default_mode: 'auto' | 'manual'
+  auto_cleanup_interval_minutes: number
+  default_ttl_hours: number
+  min_ttl_hours: number
+  max_ttl_hours: number
+}
+
+export interface L3CacheEntry {
+  id: string
+  promptPreview: string
+  model: string
+  userId: string
+  createdAt: number
+  expiresAt: number | null
+  mode: 'auto' | 'manual'
+  hitCount: number
+  tokenCount: number
+}
+
+export interface L3EntriesData {
+  items: L3CacheEntry[]
+  pagination: { page: number; pageSize: number; total: number }
+}
+
+export async function getL3CacheConfig(): Promise<ApiResponse<L3CacheConfig>> {
+  return fetchJson<L3CacheConfig>('/admin/cache/l3/config')
+}
+
+export async function updateL3CacheConfig(config: Partial<L3CacheConfig>): Promise<ApiResponse<L3CacheConfig>> {
+  return fetchJson<L3CacheConfig>('/admin/cache/l3/config', {
+    method: 'PUT',
+    body: JSON.stringify(config),
+  })
+}
+
+export async function listL3Entries(params: {
+  page?: number
+  pageSize?: number
+  mode?: string
+  userId?: string
+  sortBy?: string
+}): Promise<ApiResponse<L3EntriesData>> {
+  const qs = new URLSearchParams()
+  if (params.page) qs.set('page', String(params.page))
+  if (params.pageSize) qs.set('page_size', String(params.pageSize))
+  if (params.mode) qs.set('mode', params.mode)
+  if (params.userId) qs.set('user_id', params.userId)
+  if (params.sortBy) qs.set('sort_by', params.sortBy)
+  return fetchJson<L3EntriesData>(`/admin/cache/l3/entries?${qs}`)
+}
+
+export async function updateL3EntryMode(pointId: string, mode: 'auto' | 'manual', ttlHours?: number): Promise<ApiResponse<{ point_id: string; mode: string; ttl: number }>> {
+  const body: Record<string, unknown> = { mode }
+  if (ttlHours !== undefined) body.ttl_hours = ttlHours
+  return fetchJson<{ point_id: string; mode: string; ttl: number }>(`/admin/cache/l3/entries/${encodeURIComponent(pointId)}/mode`, {
+    method: 'PUT',
+    body: JSON.stringify(body),
+  })
+}
+
+export async function deleteL3Entry(pointId: string): Promise<ApiResponse<{ point_id: string; deleted: boolean }>> {
+  return fetchJson<{ point_id: string; deleted: boolean }>(`/admin/cache/l3/entries/${encodeURIComponent(pointId)}`, {
+    method: 'DELETE',
+  })
+}
+
+export async function triggerL3Cleanup(): Promise<ApiResponse<{ deleted_count: number }>> {
+  return fetchJson<{ deleted_count: number }>('/admin/cache/l3/cleanup', {
+    method: 'POST',
+  })
+}

@@ -10,6 +10,17 @@ export default defineConfig({
     },
   },
   base: process.env.VITE_BASE_URL ?? '/',
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          vendor: ['react', 'react-dom'],
+          router: ['react-router-dom'],
+          charts: ['recharts'],
+        },
+      },
+    },
+  },
   server: {
     proxy: {
       '/aigateway': {

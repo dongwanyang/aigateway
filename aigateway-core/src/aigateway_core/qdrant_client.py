@@ -89,18 +89,19 @@ class QdrantClientManager:
     async def upsert_collection(
         self,
         name: str,
-        size: int = 384,
+        size: int = 1024,
         distance: str = "COSINE",
     ) -> bool:
         """创建或确认 Qdrant 集合存在。
 
-        DB_SCHEMA §Qdrant 中定义的向量配置:
-        - size=384, distance=COSINE
+        向量配置:
+        - size=1024（Qwen3-Embedding-0.6B 输出维度）
+        - distance=COSINE（余弦相似度）
         - hnsw_config.m=16, ef_construct=128
 
         Args:
             name: 集合名称，如 "semantic_cache"。
-            size: 向量维度，默认 384。
+            size: 向量维度，默认 1024。
             distance: 距离度量方式，默认 "COSINE"。
 
         Returns:
@@ -162,7 +163,7 @@ class QdrantClientManager:
         Args:
             collection: 集合名称，如 "semantic_cache"。
             payload: 要附加的负载数据字典。
-            vector: 嵌入向量（384 维 float）。
+            vector: 嵌入向量（1024 维 float，Qwen3-Embedding-0.6B）。
 
         Returns:
             点（point）的 UUID 字符串 ID。
@@ -274,6 +275,219 @@ class QdrantClientManager:
         resp = await self._http.delete(f"/collections/{name}")
         resp.raise_for_status()
         logger.info("Qdrant 集合 '%s' 已删除", name)
+        return True
+
+    # ------------------------------------------------------------------
+    # 扩展接口 — Rerank 和批量清理支持
+    # ------------------------------------------------------------------
+
+    async def query_vector_multi(
+        self,
+        collection: str,
+        vector: List[float],
+        limit: int = 5,
+        score_threshold: float = 0.90,
+        user_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """向量相似度搜索 — 返回多个候选（供 rerank 使用）。
+
+        与 query_vector 的区别：返回 List 而非单个 Optional。
+
+        Args:
+            collection: 集合名称。
+            vector: 查询向量。
+            limit: 返回结果数量上限，默认 5。
+            score_threshold: 最小相似度阈值，默认 0.90。
+            user_id: 多租户隔离。
+
+        Returns:
+            匹配结果列表，每个元素含 {id, score, payload}。
+        """
+        if self._http is None:
+            raise RuntimeError("Qdrant 尚未连接，请先调用 connect()")
+
+        query_payload: Dict[str, Any] = {
+            "vector": vector,
+            "limit": limit,
+            "with_payload": True,
+            "score_threshold": score_threshold,
+        }
+
+        if user_id:
+            query_payload["filter"] = {
+                "must": [
+                    {"key": "user_id", "match": {"value": user_id}}
+                ]
+            }
+
+        resp = await self._http.post(
+            f"/collections/{collection}/points/search",
+            json=query_payload,
+            headers=self._headers(),
+        )
+        resp.raise_for_status()
+        result = resp.json().get("result", [])
+
+        candidates = []
+        for item in result:
+            candidates.append({
+                "id": item.get("id"),
+                "score": item.get("score"),
+                "payload": item.get("payload", {}),
+            })
+
+        return candidates
+
+    async def delete_by_filter(
+        self,
+        collection: str,
+        filter: Dict[str, Any],
+    ) -> int:
+        """按过滤条件批量删除向量点。
+
+        用于 L3 定期清理过期条目。
+
+        Args:
+            collection: 集合名称。
+            filter: Qdrant 过滤条件字典。
+
+        Returns:
+            删除的点数量。
+        """
+        if self._http is None:
+            raise RuntimeError("Qdrant 尚未连接，请先调用 connect()")
+
+        resp = await self._http.post(
+            f"/collections/{collection}/points/delete",
+            json={"filter": filter},
+            headers=self._headers(),
+        )
+        resp.raise_for_status()
+        # Qdrant API 返回格式可能因版本不同而异
+        result = resp.json().get("result", {})
+        if isinstance(result, dict):
+            return result.get("deleted_count", 0)
+        return 0
+
+    async def scroll_points(
+        self,
+        collection: str,
+        filter: Optional[Dict[str, Any]] = None,
+        limit: int = 20,
+        offset: Optional[str] = None,
+        with_payload: bool = True,
+    ) -> Dict[str, Any]:
+        """滚动获取集合中的点（分页浏览）。
+
+        Args:
+            collection: 集合名称。
+            filter: 可选的过滤条件。
+            limit: 每页数量。
+            offset: 分页偏移（上一页最后一个点的 ID）。
+            with_payload: 是否返回 payload。
+
+        Returns:
+            {points: [...], next_page_offset: str|None}
+        """
+        if self._http is None:
+            raise RuntimeError("Qdrant 尚未连接，请先调用 connect()")
+
+        body: Dict[str, Any] = {
+            "limit": limit,
+            "with_payload": with_payload,
+        }
+        if filter:
+            body["filter"] = filter
+        if offset:
+            body["offset"] = offset
+
+        resp = await self._http.post(
+            f"/collections/{collection}/points/scroll",
+            json=body,
+            headers=self._headers(),
+        )
+        resp.raise_for_status()
+        result = resp.json().get("result", {})
+        return {
+            "points": result.get("points", []),
+            "next_page_offset": result.get("next_page_offset"),
+        }
+
+    async def get_point(self, collection: str, point_id: str) -> Optional[Dict[str, Any]]:
+        """获取单个点的详情。
+
+        Args:
+            collection: 集合名称。
+            point_id: 点 ID。
+
+        Returns:
+            点的详情字典或 None。
+        """
+        if self._http is None:
+            raise RuntimeError("Qdrant 尚未连接，请先调用 connect()")
+
+        resp = await self._http.get(
+            f"/collections/{collection}/points/{point_id}",
+            headers=self._headers(),
+        )
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        result = resp.json().get("result", {})
+        return result
+
+    async def update_payload(
+        self,
+        collection: str,
+        point_id: str,
+        payload: Dict[str, Any],
+    ) -> bool:
+        """更新指定点的 payload 字段。
+
+        Args:
+            collection: 集合名称。
+            point_id: 点 ID。
+            payload: 要更新的 payload 字段。
+
+        Returns:
+            是否成功。
+        """
+        if self._http is None:
+            raise RuntimeError("Qdrant 尚未连接，请先调用 connect()")
+
+        body = {
+            "points": [point_id],
+            "payload": payload,
+        }
+
+        resp = await self._http.post(
+            f"/collections/{collection}/points/payload",
+            json=body,
+            headers=self._headers(),
+        )
+        resp.raise_for_status()
+        return True
+
+    async def delete_points(self, collection: str, point_ids: List[str]) -> bool:
+        """按 ID 列表删除向量点。
+
+        Args:
+            collection: 集合名称。
+            point_ids: 要删除的点 ID 列表。
+
+        Returns:
+            是否成功。
+        """
+        if self._http is None:
+            raise RuntimeError("Qdrant 尚未连接，请先调用 connect()")
+
+        body = {"points": point_ids}
+        resp = await self._http.post(
+            f"/collections/{collection}/points/delete",
+            json=body,
+            headers=self._headers(),
+        )
+        resp.raise_for_status()
         return True
 
 

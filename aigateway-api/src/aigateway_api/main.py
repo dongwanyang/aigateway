@@ -228,16 +228,26 @@ async def lifespan(app: "FastAPI"):
             prompt_cache_cfg = plugin.get("config", {})
             break
 
+    # 读取 L3 缓存容量配置
+    l3_cache_cfg = config_manager.get("cache", {})
+    l3_cfg = l3_cache_cfg.get("l3", {}) if isinstance(l3_cache_cfg, dict) else {}
+
     cache_manager = CacheManager(
         l1_maxsize=prompt_cache_cfg.get("l1_maxsize", 1000),
         l2_default_ttl=prompt_cache_cfg.get("ttl", 3600),
-        l3_default_ttl=prompt_cache_cfg.get("ttl", 86400) if prompt_cache_cfg else 86400,
+        l3_default_ttl=int(l3_cfg.get("default_ttl_hours", 24)) * 3600 if l3_cfg else 86400,
     )
     if redis_mgr is not None:
         cache_manager.set_redis_client(redis_mgr)
     if qdrant_mgr is not None:
         cache_manager.set_qdrant_client(qdrant_mgr)
     logger.info("CacheManager 初始化完成")
+
+    # 启动 L3 清理调度器
+    from aigateway_core.caching import L3CleanupScheduler
+    cleanup_interval = int(l3_cfg.get("auto_cleanup_interval_minutes", 60)) if l3_cfg else 60
+    l3_scheduler = L3CleanupScheduler(cache_manager, interval_minutes=cleanup_interval)
+    await l3_scheduler.start()
 
     # 初始化 PluginRegistry
     plugin_registry = PluginRegistry()
@@ -271,6 +281,7 @@ async def lifespan(app: "FastAPI"):
     app.state.cache_manager = cache_manager
     app.state.plugin_registry = plugin_registry
     app.state.circuit_breaker_factory = cb_factory
+    app.state.l3_cleanup_scheduler = l3_scheduler
 
     app.state.metrics_collector = get_metrics_collector()
     app.state.litellm_bridge = litellm_bridge
@@ -289,6 +300,10 @@ async def lifespan(app: "FastAPI"):
 
     # 关闭资源
     logger.info("AI Gateway API 关闭中...")
+    # 停止 L3 清理调度器
+    if hasattr(app.state, 'l3_cleanup_scheduler') and app.state.l3_cleanup_scheduler:
+        await app.state.l3_cleanup_scheduler.stop()
+
     if redis_mgr is not None:
         try:
             await redis_mgr.disconnect()

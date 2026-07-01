@@ -106,6 +106,7 @@ class ConfigManager:
         config = self._load_yaml(self.config_path)
         config = self._apply_env_overrides(config)
         config = self._resolve_env_vars_in_values(config)
+        config = self._apply_environment_mode(config)
 
         # 验证配置（宽容模式 — 仅日志警告，不阻止加载）
         self._validate_config(config)
@@ -120,6 +121,35 @@ class ConfigManager:
         )
         return self._config
 
+    def _apply_environment_mode(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """根据 AI_GATEWAY_ENV 环境变量应用环境模式覆盖。
+
+        - production: 强制关闭 debug_mode，日志级别不低于 INFO
+        - development: 启用 hot_reload 和 debug_mode
+
+        Args:
+            config: 配置字典。
+
+        Returns:
+            应用覆盖后的配置字典。
+        """
+        env = os.environ.get("AI_GATEWAY_ENV", "development")
+
+        if env == "production":
+            config["debug_mode"] = False
+            obs = config.setdefault("observability", {})
+            if isinstance(obs, dict) and obs.get("log_level", "info").lower() == "debug":
+                obs["log_level"] = "info"
+            logger.info("生产环境模式: debug_mode=False, log_level≥INFO")
+        elif env == "development":
+            config.setdefault("hot_reload", True)
+            config.setdefault("debug_mode", True)
+            logger.info("开发环境模式: hot_reload=True, debug_mode=True")
+        else:
+            logger.info("运行环境: %s", env)
+
+        return config
+
     def _validate_config(self, config: Dict[str, Any]) -> None:
         """验证配置结构和安全性（宽容模式）。
 
@@ -128,6 +158,7 @@ class ConfigManager:
         allowed_top_level = {
             "server", "auth", "plugins", "providers", "embedding",
             "observability", "hot_reload", "debug_mode", "infrastructure",
+            "cache",
         }
 
         # 检查未识别的顶层字段
@@ -442,15 +473,15 @@ class ConfigManager:
     def _write_yaml(self) -> None:
         """将当前配置写回到 YAML 文件。
 
-        只写入合法的配置节（server/auth/plugins/providers/embedding/observability），
-        过滤掉由环境变量覆盖产生的扁平键（如 api_keys, host, port 等），
+        只写入合法的配置节，过滤掉由环境变量覆盖产生的扁平键，
         避免污染 YAML 文件结构。
         """
         if self.config_path and os.path.isfile(self.config_path):
             # 合法配置节：这些键应该持久化到 YAML
             writable_keys = {
                 "server", "auth", "plugins", "providers",
-                "embedding", "observability",
+                "embedding", "observability", "infrastructure",
+                "hot_reload", "debug_mode", "cache",
             }
             clean_config = {k: v for k, v in self._config.items() if k in writable_keys}
             with open(self.config_path, 'w', encoding='utf-8') as f:
@@ -564,3 +595,122 @@ class ConfigManager:
                 callback(new_config)
             except Exception as exc:
                 logger.error("热重载回调执行失败: %s", exc)
+
+    # ------------------------------------------------------------------
+    # 安全热重载
+    # ------------------------------------------------------------------
+
+    async def safe_reload(self, key_store: Any = None) -> bool:
+        """安全热重载：先验证新配置再交换，确保不中断服务。
+
+        流程:
+        1. 从 YAML 重新加载配置
+        2. 应用环境变量覆盖
+        3. 验证新配置
+        4. 验证通过 → 原子交换
+        5. 验证失败 → 保持旧配置，记录 ERROR
+
+        Args:
+            key_store: 可选的 KeyStore 实例，用于广播配置变更。
+
+        Returns:
+            是否重载成功。
+        """
+        import time as _time
+
+        try:
+            new_config = self._load_yaml(self.config_path)
+            new_config = self._apply_env_overrides(new_config)
+            new_config = self._resolve_env_vars_in_values(new_config)
+        except Exception as exc:
+            logger.error("配置重载失败: 文件加载异常: %s", exc)
+            self._inc_reload_failure_metric()
+            return False
+
+        # 验证新配置
+        issues = self._validate_config_strict(new_config)
+        has_errors = any(i.get("level") == "ERROR" for i in issues)
+
+        if has_errors:
+            logger.error("配置重载失败: 验证不通过: %s", issues)
+            self._inc_reload_failure_metric()
+            return False
+
+        # 原子交换
+        self.atomic_swap(new_config)
+        self._inc_reload_success_metric()
+        logger.info("配置安全重载完成")
+
+        # 广播到其他实例
+        if key_store and hasattr(key_store, "broadcast_config_reload"):
+            try:
+                await key_store.broadcast_config_reload(
+                    config_version=str(_time.time())
+                )
+            except Exception as exc:
+                logger.warning("配置变更广播失败: %s", exc)
+
+        return True
+
+    def _validate_config_strict(self, config: Dict[str, Any]) -> list:
+        """严格验证配置，返回问题列表。
+
+        Returns:
+            问题列表 [{"level": "ERROR"|"WARNING", "message": "..."}]
+        """
+        issues = []
+        allowed_top_level = {
+            "server", "auth", "plugins", "providers", "embedding",
+            "observability", "hot_reload", "debug_mode", "infrastructure",
+            "cache",
+        }
+
+        # 检查未识别的顶层字段
+        unknown_fields = set(config.keys()) - allowed_top_level
+        if unknown_fields:
+            issues.append({"level": "WARNING", "message": f"未识别的顶层字段: {list(unknown_fields)}"})
+
+        # 检查 server.port 范围
+        server_cfg = config.get("server", {})
+        if isinstance(server_cfg, dict):
+            port = server_cfg.get("port")
+            if port is not None:
+                try:
+                    port_int = int(port)
+                    if not (1024 <= port_int <= 65535):
+                        issues.append({"level": "ERROR", "message": f"server.port 必须在 1024-65535 之间，当前值: {port}"})
+                except (TypeError, ValueError):
+                    issues.append({"level": "ERROR", "message": f"server.port 必须为整数，当前值: {port}"})
+
+        # 检查 provider api_key
+        providers = config.get("providers", {})
+        if isinstance(providers, dict):
+            for provider_name, provider_cfg in providers.items():
+                if isinstance(provider_cfg, dict):
+                    api_key = provider_cfg.get("api_key", "")
+                    if isinstance(api_key, str) and api_key.startswith("sk-") and len(api_key) > 10:
+                        if not api_key.startswith("${"):
+                            issues.append({
+                                "level": "WARNING",
+                                "message": f"providers.{provider_name}.api_key 疑似明文密钥",
+                            })
+
+        return issues
+
+    def _inc_reload_success_metric(self) -> None:
+        """增加配置重载成功计数器。"""
+        try:
+            from .metrics import get_metrics_collector
+            metrics = get_metrics_collector()
+            metrics.record_request("INTERNAL", "/config-reload", "200")
+        except Exception:
+            pass
+
+    def _inc_reload_failure_metric(self) -> None:
+        """增加配置重载失败计数器。"""
+        try:
+            from .metrics import get_metrics_collector
+            metrics = get_metrics_collector()
+            metrics.record_request("INTERNAL", "/config-reload", "500")
+        except Exception:
+            pass

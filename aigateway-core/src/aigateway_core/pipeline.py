@@ -476,7 +476,7 @@ class SemanticCachePlugin:
     def __init__(
         self,
         cache_manager: Optional[CacheManager] = None,
-        embedding_model: str = "all-MiniLM-L6-v2",
+        embedding_model: str = "Qwen/Qwen3-Embedding-0.6B",
     ) -> None:
         self.cache_manager = cache_manager
         self.embedding_model = embedding_model

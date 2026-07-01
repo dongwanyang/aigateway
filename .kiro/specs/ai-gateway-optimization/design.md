@@ -443,7 +443,7 @@ async def _safe_l3_backfill(self, key, response_json, normalized_prompt, model, 
 |------|---------|---------|-----------|---------|
 | L1 | 1,000 | ≤ 100KB | ≤ 100MB | LRU（cachetools 自动淘汰） |
 | L2 | ~100K（由 Redis maxmemory 决定） | ≤ 500KB（LZ4压缩后更小） | ≤ 256MB | allkeys-lru + TTL 过期 |
-| L3 | 无硬上限 | ~1.5KB payload + 384D vector | 磁盘存储 | TTL 过期 + 定时清理任务 + 手动管理 |
+| L3 | 无硬上限 | ~1.5KB payload + 1024D vector | 磁盘存储 | TTL 过期 + 定时清理任务 + 手动管理 |
 
 ### 9b. L3 Cache Lifecycle Management（语义缓存生命周期管理）
 
@@ -1249,3 +1249,59 @@ Each correctness property maps to exactly one property-based test. Properties ar
 5. **Frontend polling backoff** — test state machine logic with fast-check; mock timers
 6. **Build size** — smoke test only (run `vite build`, check output size)
 7. **Multi-worker metrics** — integration test with actual gunicorn + prometheus_client multiprocess dir
+
+## Embedding Model Upgrade: Qwen3-Embedding-0.6B
+
+### 背景
+
+原先使用 `all-MiniLM-L6-v2`（384维，~80MB），在中文语义检索场景精度不足。升级为 `Qwen/Qwen3-Embedding-0.6B` 以获得更好的多语言支持和检索精度。
+
+### 模型对比
+
+| 特性 | all-MiniLM-L6-v2 | Qwen3-Embedding-0.6B |
+|------|-------------------|----------------------|
+| 参数量 | 22M | 600M |
+| 向量维度 | 384 | 1024（支持 MRL: 32-1024） |
+| 上下文长度 | 256 tokens | 32K tokens |
+| MTEB 多语言 | ~0.56 | 0.6433 |
+| MTEB 英文 | ~0.63 | 0.7070 |
+| C-MTEB 中文 | ~0.45 | 0.6633 |
+| 模型大小 | ~80MB | ~1.2GB |
+| 推理速度(CPU) | ~5ms/query | ~50ms/query |
+| 支持语言 | 主要英文 | 100+ 语言 |
+| 指令感知 | 否 | 是（Instruct-aware） |
+| 许可证 | Apache 2.0 | Apache 2.0 |
+
+### 架构变更
+
+1. **Qdrant 集合维度**: 384 → 1024
+2. **config.yaml embedding 配置**:
+   ```yaml
+   embedding:
+     backend: sentence_transformers
+     model: Qwen/Qwen3-Embedding-0.6B
+     vector_dim: 1024
+   ```
+3. **Dockerfile**: 增加 sentence-transformers + CPU PyTorch 安装
+4. **回退机制**: 当 sentence-transformers 不可用时，使用哈希向量回退（1024维）
+
+### 使用方式
+
+```python
+from sentence_transformers import SentenceTransformer
+
+model = SentenceTransformer("Qwen/Qwen3-Embedding-0.6B")
+
+# 文档编码（无需 instruction）
+doc_embeddings = model.encode(documents)
+
+# 查询编码（使用 prompt_name="query" 获得更好检索效果）
+query_embeddings = model.encode(queries, prompt_name="query")
+```
+
+### 迁移注意事项
+
+- 升级后需重建 Qdrant 的 `semantic_cache` 和 `rag_documents` 集合（维度不兼容）
+- 首次启动会自动下载模型（~1.2GB），建议在构建镜像时预下载
+- CPU 推理约 50ms/query，批量处理时吞吐约 20 queries/s
+- 支持 MRL（Matryoshka Representation Learning），如需节省存储可降维到 512 或 256
