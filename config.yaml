@@ -2,6 +2,14 @@ server:
   host: 0.0.0.0
   port: 8000
   workers: 1
+  cors_origins:
+  - http://localhost:3000
+  - http://localhost:5173
+
+infrastructure:
+  redis_url: redis://localhost:6379/0
+  qdrant_url: http://localhost:6333
+
 auth:
   api_keys:
   - key: sk-a1b2c3d4e5f6XDFDDSF12nco

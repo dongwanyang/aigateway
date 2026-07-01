@@ -26,20 +26,11 @@
 
 ## Requirements
 
-### Requirement 1: Multi-Worker Prometheus 指标共享
+### Requirement 1: ~~Multi-Worker Prometheus 指标共享~~ (已取消)
 
-**User Story:** As a 运维工程师, I want 多 worker 部署时 Prometheus 指标在所有 worker 间正确共享和聚合, so that 监控数据准确反映整个服务的真实状态。
+**状态:** 已取消 — 保持单 worker 部署模式。
 
-**背景:** 当前每个 uvicorn worker 独立执行 lifespan，各自创建独立的 MetricsCollector 和 CollectorRegistry，导致 Counter 值只反映单个 worker 的数据，Gauge 值被最后写入的 worker 覆盖。
-
-#### Acceptance Criteria
-
-1. WHEN server.workers > 1 时, THE Gateway SHALL 使用 Prometheus multiprocess 模式，将每个 worker 的指标写入共享目录（PROMETHEUS_MULTIPROC_DIR）
-2. THE Gateway SHALL 在容器启动脚本中创建并清空 PROMETHEUS_MULTIPROC_DIR 临时目录，确保每次重启指标归零
-3. WHEN /metrics 端点被请求时, THE Gateway SHALL 使用 prometheus_client.multiprocess.MultiProcessCollector 合并所有 worker 的指标文件后返回
-4. WHILE 多 worker 模式运行时, THE Metrics_Collector SHALL 将 gateway_cost_total 从 Gauge 改为 Counter 类型（Counter 在 multiprocess 模式下正确累加，Gauge 会被覆盖）
-5. WHILE 单 worker 模式运行时, THE Gateway SHALL 使用当前的独立 CollectorRegistry 行为保持不变
-6. THE Gateway SHALL 在 docker-compose.yml 中使用 gunicorn + UvicornWorker 启动，workers 数量通过环境变量 AI_GATEWAY_WORKERS 配置，默认为 1
+~~**User Story:** As a 运维工程师, I want 多 worker 部署时 Prometheus 指标在所有 worker 间正确共享和聚合, so that 监控数据准确反映整个服务的真实状态。~~
 
 ### Requirement 2: 统一配置源 — 废除 .env 依赖
 

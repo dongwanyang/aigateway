@@ -107,6 +107,9 @@ class ConfigManager:
         config = self._apply_env_overrides(config)
         config = self._resolve_env_vars_in_values(config)
 
+        # 验证配置（宽容模式 — 仅日志警告，不阻止加载）
+        self._validate_config(config)
+
         with self._lock:
             self._config = copy.deepcopy(config)
 
@@ -116,6 +119,57 @@ class ConfigManager:
             list(config.keys()),
         )
         return self._config
+
+    def _validate_config(self, config: Dict[str, Any]) -> None:
+        """验证配置结构和安全性（宽容模式）。
+
+        仅记录 WARNING/ERROR 日志，不阻止配置加载。
+        """
+        allowed_top_level = {
+            "server", "auth", "plugins", "providers", "embedding",
+            "observability", "hot_reload", "debug_mode", "infrastructure",
+        }
+
+        # 检查未识别的顶层字段
+        unknown_fields = set(config.keys()) - allowed_top_level
+        if unknown_fields:
+            logger.warning("config.yaml 包含未识别的顶层字段: %s", list(unknown_fields))
+
+        # 检查 server.port 范围
+        server_cfg = config.get("server", {})
+        if isinstance(server_cfg, dict):
+            port = server_cfg.get("port")
+            if port is not None and not (1024 <= int(port) <= 65535):
+                logger.error("config.yaml server.port 值无效 (%s)，应为 1024-65535", port)
+
+        # 检查 provider api_key 明文警告
+        providers = config.get("providers", {})
+        if isinstance(providers, dict):
+            for provider_name, provider_cfg in providers.items():
+                if isinstance(provider_cfg, dict):
+                    api_key = provider_cfg.get("api_key", "")
+                    if isinstance(api_key, str) and api_key.startswith("sk-") and len(api_key) > 10:
+                        # 检查不是 ${ENV_VAR} 语法
+                        if not api_key.startswith("${"):
+                            logger.warning(
+                                "providers.%s.api_key 疑似明文密钥，建议使用 ${ENV_VAR} 语法引用环境变量",
+                                provider_name,
+                            )
+
+        # 检查 plugins depends_on 引用
+        plugins = config.get("plugins", [])
+        if isinstance(plugins, list):
+            plugin_names = {p.get("name") for p in plugins if isinstance(p, dict)}
+            for plugin in plugins:
+                if isinstance(plugin, dict):
+                    deps = plugin.get("depends_on", [])
+                    for dep in deps:
+                        if dep not in plugin_names:
+                            logger.warning(
+                                "插件 %s 的 depends_on 引用了不存在的插件: %s",
+                                plugin.get("name", "unknown"),
+                                dep,
+                            )
 
     def _load_yaml(self, path: str) -> Dict[str, Any]:
         """解析 YAML 文件。

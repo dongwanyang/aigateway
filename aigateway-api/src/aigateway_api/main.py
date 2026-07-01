@@ -47,15 +47,34 @@ def _register_exception_handlers(app_instance: "FastAPI") -> None:
 
     遵循 API_CONTRACT.md 统一错误格式:
     { "error": { "code": "error_code", "message": "人类可读描述" } }
+
+    所有错误响应包含 X-Request-ID 响应头。
     """
     from fastapi.responses import JSONResponse
     from fastapi import HTTPException
+    import uuid
 
     from aigateway_core.security import (
         AuthError,
         GatewayError,
         QuotaExceededError,
     )
+
+    def _get_request_id(request) -> str:
+        """获取或生成 request_id。"""
+        if hasattr(request, "state") and hasattr(request.state, "request_id"):
+            return request.state.request_id
+        return uuid.uuid4().hex[:12]
+
+    def _is_debug_mode() -> bool:
+        """检查当前是否为调试模式。"""
+        try:
+            config_manager = getattr(app_instance.state, "config_manager", None)
+            if config_manager:
+                return bool(config_manager.get("debug_mode", False))
+        except Exception:
+            pass
+        return False
 
     @app_instance.exception_handler(GatewayError)
     async def gateway_error_handler(
@@ -76,9 +95,19 @@ def _register_exception_handlers(app_instance: "FastAPI") -> None:
             status = 429
             msg = str(exc)
 
+        request_id = _get_request_id(request)
+        body = {"error": {"code": code, "message": msg}}
+
+        # 5xx 错误：调试模式下增加 detail
+        if status >= 500 and not _is_debug_mode():
+            body["error"]["message"] = "Internal server error"
+        elif status >= 500 and _is_debug_mode():
+            body["error"]["detail"] = f"{type(exc).__name__}: {msg}"
+
         return JSONResponse(
             status_code=status,
-            content={"error": {"code": code, "message": msg}},
+            content=body,
+            headers={"X-Request-ID": request_id},
         )
 
     @app_instance.exception_handler(HTTPException)
@@ -93,21 +122,28 @@ def _register_exception_handlers(app_instance: "FastAPI") -> None:
         else:
             body = {"error": {"code": "internal_error", "message": str(detail) if detail else "Internal error"}}
 
+        request_id = _get_request_id(request)
         return JSONResponse(
             status_code=exc.status_code,
             content=body,
+            headers={"X-Request-ID": request_id},
         )
 def _create_app() -> "FastAPI":
     """创建 FastAPI 应用实例。"""
     # 从环境变量读取 basePath（子路径部署）
     base_path = os.environ.get("AI_GATEWAY_BASE_PATH", "")
 
-    return FastAPI(
+    app_instance = FastAPI(
         title="AI Gateway API",
         description="OpenAI 兼容的多模型路由网关",
         version="1.0.0",
         lifespan=None,  # 使用自定义 lifespan
     )
+
+    # CORS 中间件必须在 app 启动前添加
+    _configure_cors(app_instance, config_manager=None)
+
+    return app_instance
 
 
 # ------------------------------------------------------------------
@@ -141,7 +177,8 @@ async def lifespan(app: "FastAPI"):
     logger.info("ConfigManager 初始化完成: %s", config_manager.config_path)
 
     # 初始化 Redis 连接
-    redis_url = os.environ.get("AI_GATEWAY_REDIS_URL", "redis://localhost:6379/0")
+    infra_cfg = config_manager.get("infrastructure", {})
+    redis_url = os.environ.get("AI_GATEWAY_REDIS_URL") or infra_cfg.get("redis_url", "redis://localhost:6379/0")
     redis_mgr = RedisClientManager()
     try:
         await redis_mgr.connect(url=redis_url)
@@ -151,7 +188,7 @@ async def lifespan(app: "FastAPI"):
         redis_mgr = None  # type: ignore[assignment]
 
     # 初始化 Qdrant 连接
-    qdrant_url = os.environ.get("AI_GATEWAY_QDRANT_URL", "http://localhost:6333")
+    qdrant_url = os.environ.get("AI_GATEWAY_QDRANT_URL") or infra_cfg.get("qdrant_url", "http://localhost:6333")
     qdrant_mgr = QdrantClientManager()
     try:
         await qdrant_mgr.connect(url=qdrant_url)
@@ -256,6 +293,40 @@ async def lifespan(app: "FastAPI"):
             logger.warning("关闭 Qdrant 连接时出错: %s", exc)
 
     logger.info("AI Gateway API 已关闭")
+
+
+# ------------------------------------------------------------------
+# CORS 配置
+# ------------------------------------------------------------------
+
+
+def _configure_cors(app: "FastAPI", config_manager: "ConfigManager") -> None:
+    """配置 CORS 中间件。
+
+    优先级: server.cors_origins (config.yaml) > AI_GATEWAY_CORS_ORIGINS (env) > 默认值
+    """
+    # 尝试从 config.yaml 读取
+    server_cfg = config_manager.get("server", {}) if config_manager else {}
+    cors_origins = server_cfg.get("cors_origins", None)
+
+    if not cors_origins:
+        # 尝试从环境变量读取
+        cors_env = os.environ.get("AI_GATEWAY_CORS_ORIGINS", "")
+        if cors_env:
+            cors_origins = [o.strip() for o in cors_env.split(",") if o.strip()]
+
+    if not cors_origins:
+        # 默认值
+        cors_origins = ["http://localhost:3000", "http://localhost:5173"]
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins,
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type", "X-API-Key"],
+        allow_credentials=True,
+    )
+    logger.info("CORS 中间件已配置: origins=%s", cors_origins)
 
 
 # ------------------------------------------------------------------

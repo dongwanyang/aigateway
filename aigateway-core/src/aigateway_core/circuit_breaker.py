@@ -306,6 +306,7 @@ class CircuitBreaker:
             "failure_threshold": self.failure_threshold,
             "last_failure_time": self.last_failure_time,
             "last_success_time": self.last_success_time,
+            "last_transition_time": max(self.last_failure_time, self.last_success_time),
         }
 
 

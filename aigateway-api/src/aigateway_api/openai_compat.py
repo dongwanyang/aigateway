@@ -142,6 +142,56 @@ def _get_redis_client() -> Any:
         return None
 
 
+async def _safe_l3_backfill(
+    cache_manager: Any,
+    cache_key: str,
+    value_str: str,
+    normalized_messages: str,
+    model: str,
+    user_id: str,
+    token_count: int,
+) -> None:
+    """异步回填 L3 语义缓存（fire-and-forget）。
+
+    使用 sentence-transformers 计算 embedding 向量后存入 Qdrant。
+    失败时仅记录 WARNING，不影响主请求。
+    """
+    try:
+        if cache_manager._qdrant_client is None:
+            return
+
+        # 计算 embedding 向量
+        try:
+            from sentence_transformers import SentenceTransformer
+            from aigateway_core.pipeline import SemanticCachePlugin
+            if not hasattr(SemanticCachePlugin, "_model_cache"):
+                SemanticCachePlugin._model_cache = {}
+            st_model = SemanticCachePlugin._model_cache.get("all-MiniLM-L6-v2")
+            if st_model is None:
+                st_model = SentenceTransformer("all-MiniLM-L6-v2")
+                SemanticCachePlugin._model_cache["all-MiniLM-L6-v2"] = st_model
+            vector = st_model.encode(normalized_messages, normalize_embeddings=True).tolist()
+        except ImportError:
+            return  # sentence-transformers not installed
+        except Exception as exc:
+            logger.warning("L3 backfill: embedding computation failed: %s", exc)
+            return
+
+        # 存入 Qdrant
+        await cache_manager.l3_store(
+            prompt_hash=cache_key,
+            prompt_normalized=normalized_messages[:500],  # 截断避免 payload 过大
+            model=model,
+            response_json=value_str,
+            user_id=user_id,
+            token_count=token_count,
+            vector=vector,
+        )
+        logger.debug("L3 backfill success: key=%s", cache_key[:16])
+    except Exception as exc:
+        logger.warning("L3 backfill failed: %s", exc)
+
+
 async def _record_request_log(
     request: Request,
     method: str,
@@ -375,9 +425,7 @@ async def chat_completions_non_stream(
     if tracker:
         tracker.__exit__(None, None, None)
 
-    # 回填缓存（L1 + L2）
-    # 当 value_fn=None 时，cache_manager.get() 返回 None 而非 MISS，
-    # 所以这里总是回填未命中的数据
+    # 回填缓存（L1 + L2 + 异步 L3）
     value_str = json.dumps(result.get("data", {}))
     cache_manager.l1_set(cache_key, value_str)
     # 同时回填 L2 Redis 缓存
@@ -385,6 +433,18 @@ async def chat_completions_non_stream(
         await cache_manager.l2_set(cache_key, value_str)
     except Exception as exc:
         logger.warning("L2 cache backfill failed: %s", exc)
+
+    # 异步回填 L3 语义缓存（不阻塞响应）
+    import asyncio
+    asyncio.create_task(_safe_l3_backfill(
+        cache_manager=cache_manager,
+        cache_key=cache_key,
+        value_str=value_str,
+        normalized_messages=normalized_messages,
+        model=body.model,
+        user_id=user_id or "",
+        token_count=usage.get("total_tokens", 0),
+    ))
 
     # 记录请求日志到 Redis
     total_duration_ms = round((time.time() - request_start_time) * 1000, 1)
