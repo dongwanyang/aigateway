@@ -26,9 +26,9 @@ export default function Logs() {
 
   const filtered = logs.filter(log => {
     const matchSearch = !searchTerm ||
-      log.trace_id.includes(searchTerm) ||
-      log.request_id.includes(searchTerm) ||
-      log.user_id.includes(searchTerm)
+      (log.trace_id || '').includes(searchTerm) ||
+      (log.request_id || '').includes(searchTerm) ||
+      (log.user_id || '').includes(searchTerm)
     const matchStatus = filterStatus === 'all' || String(log.status) === filterStatus
     const matchCache = !filterCache || log.cache_hit
     return matchSearch && matchStatus && matchCache

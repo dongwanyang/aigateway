@@ -87,7 +87,7 @@ export default function Cache() {
             {loading ? '...' : `${cacheData[0].hits}`}
           </div>
           <div className="text-sm mt-1" style={{ color: 'var(--color-text-tertiary)' }}>
-            {total > 0 ? `${Math.round(cacheData[0].hits / (cacheData[0].hits + cacheData[0].misses) * 100)}%` : '0%'} / {cacheData[0].misses} misses
+            {total > 0 ? `${Math.round(cacheData[0].hits / (cacheData[0].hits + cacheData[0].misses || 1) * 100)}%` : '0%'} / {cacheData[0].misses} misses
           </div>
         </Card>
         <Card>

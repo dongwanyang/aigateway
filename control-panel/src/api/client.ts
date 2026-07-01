@@ -30,12 +30,26 @@ const API_BASE = import.meta.env.VITE_API_BASE ?? ''
 
 async function ensureAuthHeaders(): Promise<Record<string, string>> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-  // 从 localStorage 读取当前 API Key（由登录页或设置页写入）
   const apiKey = localStorage.getItem('aigateway_api_key')
   if (apiKey) {
     headers['Authorization'] = `Bearer ${apiKey}`
   }
   return headers
+}
+
+/** 保存 API Key 到 localStorage */
+export function saveApiKey(key: string): void {
+  localStorage.setItem('aigateway_api_key', key)
+}
+
+/** 清除已保存的 API Key */
+export function clearApiKey(): void {
+  localStorage.removeItem('aigateway_api_key')
+}
+
+/** 获取已保存的 API Key（不含） */
+export function getSavedApiKey(): string | null {
+  return localStorage.getItem('aigateway_api_key')
 }
 
 async function fetchJson<T>(
@@ -49,9 +63,18 @@ async function fetchJson<T>(
   })
 
   if (!res.ok) {
-    const body = (await res.json()) as ApiError
-    const error = new Error(body.error.message)
-    ;(error as any).code = body.error.code
+    let code = 'unknown_error'
+    let message = `HTTP ${res.status}`
+    try {
+      const body = (await res.json()) as ApiError
+      code = body.error?.code ?? code
+      message = body.error?.message ?? message
+    } catch {
+      // Response body is not valid JSON (e.g., nginx 502 HTML page)
+      message = `Server error: ${res.status} ${res.statusText}`
+    }
+    const error = new Error(message)
+    ;(error as any).code = code
     ;(error as any).status = res.status
     throw error
   }
@@ -118,7 +141,7 @@ export async function listApiKeys(
   pageSize = 20,
 ): Promise<ApiResponse<ApiKeyListData>> {
   return fetchJson<ApiKeyListData>(
-    `/admin/api-keys?page=${page}&pageSize=${pageSize}`,
+    `/admin/api-keys?page=${page}&page_size=${pageSize}`,
   )
 }
 
@@ -152,8 +175,12 @@ export async function getQuota(keyId: string): Promise<ApiResponse<DetailedQuota
 export async function getHealth(): Promise<ApiResponse<HealthData>> {
   // 健康检查不需要鉴权
   const res = await fetch(`${API_BASE}/health`)
-  if (!res.ok) throw new Error('Health check failed')
-  return res.json()
+  if (!res.ok) throw new Error(`Health check failed: ${res.status}`)
+  try {
+    return await res.json()
+  } catch {
+    throw new Error('Health check returned invalid response')
+  }
 }
 
 // ------------------------------------------------------------------
@@ -162,7 +189,7 @@ export async function getHealth(): Promise<ApiResponse<HealthData>> {
 
 export async function getMetricsText(): Promise<string> {
   const res = await fetch(`${API_BASE}/metrics`)
-  if (!res.ok) throw new Error('Failed to fetch metrics')
+  if (!res.ok) throw new Error(`Failed to fetch metrics: ${res.status}`)
   return res.text()
 }
 
@@ -209,8 +236,12 @@ export interface MetricsJsonData {
 export async function getMetricsJson(): Promise<ApiResponse<MetricsJsonData>> {
   const headers = await ensureAuthHeaders()
   const res = await fetch(`${API_BASE}/admin/metrics-json`, { headers })
-  if (!res.ok) throw new Error('Failed to fetch metrics JSON')
-  return res.json()
+  if (!res.ok) throw new Error(`Failed to fetch metrics JSON: ${res.status}`)
+  try {
+    return await res.json()
+  } catch {
+    throw new Error('Metrics JSON returned invalid response')
+  }
 }
 
 // ------------------------------------------------------------------
@@ -231,8 +262,12 @@ export interface PluginsConfigData {
 export async function getPluginsConfig(): Promise<ApiResponse<PluginsConfigData>> {
   const headers = await ensureAuthHeaders()
   const res = await fetch(`${API_BASE}/admin/plugins-config`, { headers })
-  if (!res.ok) throw new Error('Failed to fetch plugins config')
-  return res.json()
+  if (!res.ok) throw new Error(`Failed to fetch plugins config: ${res.status}`)
+  try {
+    return await res.json()
+  } catch {
+    throw new Error('Plugins config returned invalid response')
+  }
 }
 
 export async function togglePlugin(name: string, enabled: boolean): Promise<ApiResponse<{ name: string; enabled: boolean }>> {
@@ -242,8 +277,12 @@ export async function togglePlugin(name: string, enabled: boolean): Promise<ApiR
     headers: { ...headers, 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, enabled }),
   })
-  if (!res.ok) throw new Error('Failed to toggle plugin')
-  return res.json()
+  if (!res.ok) throw new Error(`Failed to toggle plugin: ${res.status}`)
+  try {
+    return await res.json()
+  } catch {
+    throw new Error('Toggle plugin returned invalid response')
+  }
 }
 
 // ------------------------------------------------------------------
@@ -258,8 +297,12 @@ export interface GlobalConfigData {
 export async function getGlobalConfig(): Promise<ApiResponse<GlobalConfigData>> {
   const headers = await ensureAuthHeaders()
   const res = await fetch(`${API_BASE}/admin/global-config`, { headers })
-  if (!res.ok) throw new Error('Failed to fetch global config')
-  return res.json()
+  if (!res.ok) throw new Error(`Failed to fetch global config: ${res.status}`)
+  try {
+    return await res.json()
+  } catch {
+    throw new Error('Global config returned invalid response')
+  }
 }
 
 export async function updateGlobalConfig(config: { hot_reload: boolean; debug_mode: boolean }): Promise<ApiResponse<GlobalConfigData>> {
@@ -269,8 +312,12 @@ export async function updateGlobalConfig(config: { hot_reload: boolean; debug_mo
     headers: { ...headers, 'Content-Type': 'application/json' },
     body: JSON.stringify(config),
   })
-  if (!res.ok) throw new Error('Failed to update global config')
-  return res.json()
+  if (!res.ok) throw new Error(`Failed to update global config: ${res.status}`)
+  try {
+    return await res.json()
+  } catch {
+    throw new Error('Update global config returned invalid response')
+  }
 }
 
 // ------------------------------------------------------------------
@@ -306,13 +353,17 @@ export async function getRequestLogs(params: {
 }): Promise<ApiResponse<LogsData>> {
   const qs = new URLSearchParams()
   if (params.page) qs.set('page', String(params.page))
-  if (params.pageSize) qs.set('pageSize', String(params.pageSize))
+  if (params.pageSize) qs.set('page_size', String(params.pageSize))
   if (params.user_id) qs.set('user_id', params.user_id)
   if (params.model) qs.set('model', params.model)
   if (params.status) qs.set('status', params.status)
   if (params.cache_only !== undefined) qs.set('cache_only', String(params.cache_only))
   const headers = await ensureAuthHeaders()
   const res = await fetch(`${API_BASE}/admin/logs?${qs}`, { headers })
-  if (!res.ok) throw new Error('Failed to fetch logs')
-  return res.json()
+  if (!res.ok) throw new Error(`Failed to fetch logs: ${res.status}`)
+  try {
+    return await res.json()
+  } catch {
+    throw new Error('Logs returned invalid response')
+  }
 }

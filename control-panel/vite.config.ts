@@ -15,6 +15,7 @@ export default defineConfig({
       '/aigateway': {
         target: 'http://localhost:8000',
         changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/aigateway/, ''),
       },
     },
   },
