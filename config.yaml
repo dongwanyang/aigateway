@@ -5,11 +5,6 @@ server:
   cors_origins:
   - http://localhost:3000
   - http://localhost:5173
-
-infrastructure:
-  redis_url: redis://localhost:6379/0
-  qdrant_url: http://localhost:6333
-
 auth:
   api_keys:
   - key: sk-a1b2c3d4e5f6XDFDDSF12nco
@@ -43,7 +38,7 @@ plugins:
       enabled: false
       backend: lightweight
       retrieve_top_k: 5
-      retrieve_threshold: 0.90
+      retrieve_threshold: 0.9
       rerank_threshold: 0.85
 - name: model_router
   enabled: true
@@ -117,12 +112,4 @@ observability:
   log_format: json
   log_level: info
 hot_reload: true
-debug_mode: true
-
-cache:
-  l3:
-    default_mode: auto
-    auto_cleanup_interval_minutes: 60
-    default_ttl_hours: 24
-    min_ttl_hours: 1
-    max_ttl_hours: 720
+debug_mode: false

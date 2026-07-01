@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import Layout from '@/components/Layout'
 import PageErrorBoundary from '@/components/PageErrorBoundary'
 import Overview from '@/pages/Overview'
+import Models from '@/pages/Models'
 import Plugins from '@/pages/Plugins'
 import Costs from '@/pages/Costs'
 import Quotas from '@/pages/Quotas'
@@ -18,6 +19,7 @@ export default function App() {
         <Layout>
           <Routes>
             <Route path="/" element={<PageErrorBoundary><Overview /></PageErrorBoundary>} />
+            <Route path="/models" element={<PageErrorBoundary><Models /></PageErrorBoundary>} />
             <Route path="/plugins" element={<PageErrorBoundary><Plugins /></PageErrorBoundary>} />
             <Route path="/costs" element={<PageErrorBoundary><Costs /></PageErrorBoundary>} />
             <Route path="/quotas" element={<PageErrorBoundary><Quotas /></PageErrorBoundary>} />

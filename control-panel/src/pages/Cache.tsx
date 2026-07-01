@@ -165,13 +165,23 @@ export default function Cache() {
         <div className="flex gap-2">
           <button
             onClick={() => setActiveTab('overview')}
-            className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${activeTab === 'overview' ? 'bg-blue-600 text-white' : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300'}`}
+            className="px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+            style={{
+              backgroundColor: activeTab === 'overview' ? 'var(--color-primary)' : 'var(--color-bg-overlay)',
+              color: activeTab === 'overview' ? 'white' : 'var(--color-text-secondary)',
+              border: activeTab === 'overview' ? 'none' : '1px solid var(--color-border)',
+            }}
           >
             概览
           </button>
           <button
             onClick={() => setActiveTab('l3-manage')}
-            className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${activeTab === 'l3-manage' ? 'bg-blue-600 text-white' : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300'}`}
+            className="px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+            style={{
+              backgroundColor: activeTab === 'l3-manage' ? 'var(--color-primary)' : 'var(--color-bg-overlay)',
+              color: activeTab === 'l3-manage' ? 'white' : 'var(--color-text-secondary)',
+              border: activeTab === 'l3-manage' ? 'none' : '1px solid var(--color-border)',
+            }}
           >
             L3 缓存管理
           </button>
@@ -273,7 +283,7 @@ export default function Cache() {
                 value={l3ModeFilter}
                 onChange={(e) => { setL3ModeFilter(e.target.value); setL3Page(1) }}
                 className="px-3 py-2 rounded-lg border text-sm"
-                style={{ borderColor: 'var(--color-border)', backgroundColor: 'var(--color-bg-primary)', color: 'var(--color-text-primary)' }}
+                style={{ borderColor: 'var(--color-border)', backgroundColor: 'var(--color-bg-elevated)', color: 'var(--color-text-primary)' }}
               >
                 <option value="">全部模式</option>
                 <option value="auto">自动过期</option>
@@ -287,14 +297,15 @@ export default function Cache() {
               <button
                 onClick={() => setShowConfigPanel(!showConfigPanel)}
                 className="flex items-center gap-1 px-3 py-2 rounded-lg text-sm border"
-                style={{ borderColor: 'var(--color-border)', color: 'var(--color-text-secondary)' }}
+                style={{ borderColor: 'var(--color-border)', color: 'var(--color-text-secondary)', backgroundColor: 'var(--color-bg-elevated)' }}
               >
                 <Settings size={14} /> 配置
               </button>
               <button
                 onClick={handleCleanup}
                 disabled={cleanupRunning}
-                className="flex items-center gap-1 px-3 py-2 rounded-lg text-sm bg-orange-500 text-white hover:bg-orange-600 disabled:opacity-50"
+                className="flex items-center gap-1 px-3 py-2 rounded-lg text-sm disabled:opacity-50"
+                style={{ backgroundColor: 'var(--color-warning)', color: 'white' }}
               >
                 <RefreshCw size={14} className={cleanupRunning ? 'animate-spin' : ''} />
                 {cleanupRunning ? '清理中...' : '立即清理过期'}
@@ -336,28 +347,43 @@ export default function Cache() {
                       </td>
                       <td className="py-2 px-2">{entry.model}</td>
                       <td className="py-2 px-2">
-                        <span className={`px-2 py-0.5 rounded text-xs font-medium ${entry.mode === 'manual' ? 'bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300' : 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300'}`}>
-                          {entry.mode === 'auto' ? '自动' : '手动'}
+                        <span
+                          className="px-2 py-0.5 rounded text-xs font-medium"
+                          style={{
+                            backgroundColor: entry.mode === 'manual'
+                              ? 'rgba(139, 92, 246, 0.15)'
+                              : 'rgba(16, 185, 129, 0.15)',
+                            color: entry.mode === 'manual'
+                              ? 'var(--color-info, #8b5cf6)'
+                              : 'var(--color-success)',
+                          }}
+                        >
+                          {entry.mode === 'auto' ? '🔄 自动' : '📌 手动'}
                         </span>
                       </td>
                       <td className="py-2 px-2">{entry.hitCount}</td>
                       <td className="py-2 px-2">{entry.tokenCount}</td>
                       <td className="py-2 px-2 text-xs" style={{ color: 'var(--color-text-tertiary)' }}>
-                        {entry.expiresAt ? new Date(entry.expiresAt * 1000).toLocaleString() : '永不过期'}
+                        {entry.expiresAt ? new Date(entry.expiresAt * 1000).toLocaleString() : '♾️ 永不过期'}
                       </td>
                       <td className="py-2 px-2">
                         <div className="flex items-center gap-1">
                           <button
                             onClick={() => handleToggleMode(entry)}
-                            className="px-2 py-1 text-xs rounded border hover:bg-gray-100 dark:hover:bg-gray-700"
-                            style={{ borderColor: 'var(--color-border)' }}
-                            title={entry.mode === 'auto' ? '切换为手动' : '切换为自动'}
+                            className="px-2 py-1 text-xs rounded border"
+                            style={{
+                              borderColor: 'var(--color-border)',
+                              backgroundColor: 'var(--color-bg-overlay)',
+                              color: 'var(--color-text-secondary)',
+                            }}
+                            title={entry.mode === 'auto' ? '切换为手动（永不过期）' : '切换为自动（按 TTL 过期）'}
                           >
-                            {entry.mode === 'auto' ? '→手动' : '→自动'}
+                            {entry.mode === 'auto' ? '→ 手动' : '→ 自动'}
                           </button>
                           <button
                             onClick={() => handleDeleteEntry(entry)}
-                            className="p-1 text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded"
+                            className="p-1 rounded"
+                            style={{ color: 'var(--color-danger)' }}
                             title="删除"
                           >
                             <Trash2 size={14} />
@@ -381,7 +407,7 @@ export default function Cache() {
                     onClick={() => setL3Page(p => Math.max(1, p - 1))}
                     disabled={l3Page === 1}
                     className="px-3 py-1 text-sm rounded border disabled:opacity-40"
-                    style={{ borderColor: 'var(--color-border)' }}
+                    style={{ borderColor: 'var(--color-border)', backgroundColor: 'var(--color-bg-overlay)', color: 'var(--color-text-secondary)' }}
                   >
                     上一页
                   </button>
@@ -389,7 +415,7 @@ export default function Cache() {
                     onClick={() => setL3Page(p => p + 1)}
                     disabled={l3Page >= Math.ceil(l3Total / 20)}
                     className="px-3 py-1 text-sm rounded border disabled:opacity-40"
-                    style={{ borderColor: 'var(--color-border)' }}
+                    style={{ borderColor: 'var(--color-border)', backgroundColor: 'var(--color-bg-overlay)', color: 'var(--color-text-secondary)' }}
                   >
                     下一页
                   </button>
@@ -420,11 +446,14 @@ function L3ConfigForm({ config, onSave, onCancel }: {
             value={form.default_mode}
             onChange={(e) => setForm({ ...form, default_mode: e.target.value as 'auto' | 'manual' })}
             className="w-full px-3 py-2 rounded-lg border text-sm"
-            style={{ borderColor: 'var(--color-border)', backgroundColor: 'var(--color-bg-primary)', color: 'var(--color-text-primary)' }}
+            style={{ borderColor: 'var(--color-border)', backgroundColor: 'var(--color-bg-elevated)', color: 'var(--color-text-primary)' }}
           >
             <option value="auto">自动过期 (auto)</option>
             <option value="manual">手动管理 (manual)</option>
           </select>
+          <p className="text-xs mt-1" style={{ color: 'var(--color-text-quaternary)' }}>
+            手动模式的条目不会被自动清理
+          </p>
         </div>
         <div>
           <label className="block text-sm font-medium mb-1" style={{ color: 'var(--color-text-secondary)' }}>清理间隔 (分钟)</label>
@@ -434,7 +463,7 @@ function L3ConfigForm({ config, onSave, onCancel }: {
             onChange={(e) => setForm({ ...form, auto_cleanup_interval_minutes: Number(e.target.value) })}
             min={1}
             className="w-full px-3 py-2 rounded-lg border text-sm"
-            style={{ borderColor: 'var(--color-border)', backgroundColor: 'var(--color-bg-primary)', color: 'var(--color-text-primary)' }}
+            style={{ borderColor: 'var(--color-border)', backgroundColor: 'var(--color-bg-elevated)', color: 'var(--color-text-primary)' }}
           />
         </div>
         <div>
@@ -446,7 +475,7 @@ function L3ConfigForm({ config, onSave, onCancel }: {
             min={form.min_ttl_hours}
             max={form.max_ttl_hours}
             className="w-full px-3 py-2 rounded-lg border text-sm"
-            style={{ borderColor: 'var(--color-border)', backgroundColor: 'var(--color-bg-primary)', color: 'var(--color-text-primary)' }}
+            style={{ borderColor: 'var(--color-border)', backgroundColor: 'var(--color-bg-elevated)', color: 'var(--color-text-primary)' }}
           />
         </div>
         <div>
@@ -457,15 +486,23 @@ function L3ConfigForm({ config, onSave, onCancel }: {
             onChange={(e) => setForm({ ...form, max_ttl_hours: Number(e.target.value) })}
             min={1}
             className="w-full px-3 py-2 rounded-lg border text-sm"
-            style={{ borderColor: 'var(--color-border)', backgroundColor: 'var(--color-bg-primary)', color: 'var(--color-text-primary)' }}
+            style={{ borderColor: 'var(--color-border)', backgroundColor: 'var(--color-bg-elevated)', color: 'var(--color-text-primary)' }}
           />
         </div>
       </div>
       <div className="flex justify-end gap-2">
-        <button onClick={onCancel} className="px-4 py-2 text-sm rounded-lg border" style={{ borderColor: 'var(--color-border)' }}>
+        <button
+          onClick={onCancel}
+          className="px-4 py-2 text-sm rounded-lg border"
+          style={{ borderColor: 'var(--color-border)', backgroundColor: 'var(--color-bg-overlay)', color: 'var(--color-text-secondary)' }}
+        >
           取消
         </button>
-        <button onClick={() => onSave(form)} className="px-4 py-2 text-sm rounded-lg bg-blue-600 text-white hover:bg-blue-700">
+        <button
+          onClick={() => onSave(form)}
+          className="px-4 py-2 text-sm rounded-lg"
+          style={{ backgroundColor: 'var(--color-primary)', color: 'white' }}
+        >
           保存
         </button>
       </div>

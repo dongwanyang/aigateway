@@ -1583,3 +1583,191 @@ async def trigger_l3_cleanup(
         "data": {"deleted_count": deleted},
         "message": "success",
     }
+
+
+# ------------------------------------------------------------------
+# POST /admin/providers/{provider}/test — 提供商连通性测试
+# ------------------------------------------------------------------
+
+
+@router.post("/providers/{provider}/test")
+async def test_provider_connectivity(
+    request: Request,
+    provider: str,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+    """测试指定提供商的 API 连通性。
+
+    发送一个轻量请求（models list 或简单 completion）来验证 API Key 和网络是否可用。
+    """
+    import os
+    import time as time_mod
+    import yaml
+
+    from aigateway_api.main import app
+    s = app.state
+    config_manager = getattr(s, "config_manager")
+
+    if not config_manager:
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "ConfigManager not initialized"}})
+
+    # 从配置文件读取 provider 信息
+    config_path = config_manager.config_path
+    if not config_path or not os.path.isfile(config_path):
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Config file not found"}})
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        file_config = yaml.safe_load(f) or {}
+
+    providers_cfg = file_config.get("providers", {})
+    if provider not in providers_cfg:
+        raise HTTPException(status_code=404, detail={"error": {"code": "not_found", "message": f"Provider '{provider}' not found in config"}})
+
+    provider_cfg = providers_cfg[provider]
+    api_key = provider_cfg.get("api_key", "")
+    base_url = provider_cfg.get("base_url", "")
+
+    # 确定 base_url
+    if not base_url:
+        default_urls = {
+            "openai": "https://api.openai.com/v1",
+            "anthropic": "https://api.anthropic.com/v1",
+        }
+        base_url = default_urls.get(provider, "")
+
+    if not base_url:
+        return {
+            "data": {
+                "provider": provider,
+                "success": False,
+                "latency_ms": 0,
+                "error": "No base_url configured for this provider",
+            },
+            "message": "success",
+        }
+
+    start = time_mod.time()
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            # 尝试调用 /models 端点
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            }
+            resp = await client.get(f"{base_url}/models", headers=headers)
+            latency_ms = round((time_mod.time() - start) * 1000, 1)
+
+            if resp.status_code < 400:
+                return {
+                    "data": {
+                        "provider": provider,
+                        "success": True,
+                        "latency_ms": latency_ms,
+                    },
+                    "message": "success",
+                }
+            else:
+                return {
+                    "data": {
+                        "provider": provider,
+                        "success": False,
+                        "latency_ms": latency_ms,
+                        "error": f"HTTP {resp.status_code}: {resp.text[:200]}",
+                    },
+                    "message": "success",
+                }
+    except Exception as exc:
+        latency_ms = round((time_mod.time() - start) * 1000, 1)
+        return {
+            "data": {
+                "provider": provider,
+                "success": False,
+                "latency_ms": latency_ms,
+                "error": str(exc)[:300],
+            },
+            "message": "success",
+        }
+
+
+# ------------------------------------------------------------------
+# GET /admin/providers/{provider}/models — 获取提供商可用模型列表
+# ------------------------------------------------------------------
+
+
+@router.get("/providers/{provider}/models")
+async def get_provider_models(
+    request: Request,
+    provider: str,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+    """从提供商 API 获取可用的模型列表。"""
+    import os
+    import yaml
+
+    from aigateway_api.main import app
+    s = app.state
+    config_manager = getattr(s, "config_manager")
+
+    if not config_manager:
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "ConfigManager not initialized"}})
+
+    config_path = config_manager.config_path
+    if not config_path or not os.path.isfile(config_path):
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Config file not found"}})
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        file_config = yaml.safe_load(f) or {}
+
+    providers_cfg = file_config.get("providers", {})
+    if provider not in providers_cfg:
+        raise HTTPException(status_code=404, detail={"error": {"code": "not_found", "message": f"Provider '{provider}' not found in config"}})
+
+    provider_cfg = providers_cfg[provider]
+    api_key = provider_cfg.get("api_key", "")
+    base_url = provider_cfg.get("base_url", "")
+
+    if not base_url:
+        default_urls = {
+            "openai": "https://api.openai.com/v1",
+            "anthropic": "https://api.anthropic.com/v1",
+        }
+        base_url = default_urls.get(provider, "")
+
+    if not base_url:
+        raise HTTPException(status_code=400, detail={"error": {"code": "validation_error", "message": f"No base_url configured for provider '{provider}'"}})
+
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            }
+            resp = await client.get(f"{base_url}/models", headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+
+            # OpenAI 兼容格式: {"data": [{"id": "gpt-4o", ...}]}
+            models = []
+            if isinstance(data, dict) and "data" in data:
+                for m in data["data"]:
+                    if isinstance(m, dict) and "id" in m:
+                        models.append(m["id"])
+            elif isinstance(data, list):
+                for m in data:
+                    if isinstance(m, dict) and "id" in m:
+                        models.append(m["id"])
+                    elif isinstance(m, str):
+                        models.append(m)
+
+            models.sort()
+            return {
+                "data": {
+                    "provider": provider,
+                    "models": models,
+                },
+                "message": "success",
+            }
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail={"error": {"code": "upstream_error", "message": f"Failed to fetch models from {provider}: {exc}"}})

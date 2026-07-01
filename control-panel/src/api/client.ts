@@ -537,3 +537,29 @@ export async function triggerL3Cleanup(): Promise<ApiResponse<{ deleted_count: n
     method: 'POST',
   })
 }
+
+// ------------------------------------------------------------------
+// Admin: Provider Connectivity Test & Model List
+// ------------------------------------------------------------------
+
+export interface ConnectivityTestResult {
+  provider: string
+  success: boolean
+  latency_ms: number
+  error?: string
+}
+
+export async function testProviderConnectivity(provider: string): Promise<ApiResponse<ConnectivityTestResult>> {
+  return fetchJson<ConnectivityTestResult>(`/admin/providers/${encodeURIComponent(provider)}/test`, {
+    method: 'POST',
+  })
+}
+
+export interface ProviderModelsResult {
+  provider: string
+  models: string[]
+}
+
+export async function fetchProviderModels(provider: string): Promise<ApiResponse<ProviderModelsResult>> {
+  return fetchJson<ProviderModelsResult>(`/admin/providers/${encodeURIComponent(provider)}/models`)
+}

@@ -91,9 +91,21 @@ export default function Plugins() {
 
   const getCategory = (name: string): string => {
     if (name.includes('pii') || name.includes('detect')) return '安全'
-    if (name.includes('cache') || name.includes('compress')) return '性能'
+    if (name.includes('cache')) return '缓存'
+    if (name.includes('compress')) return '性能'
     if (name.includes('router')) return '路由'
     return '其他'
+  }
+
+  const getPluginDescription = (name: string): string => {
+    const descriptions: Record<string, string> = {
+      pii_detector: 'PII 敏感信息检测与脱敏',
+      prompt_cache: 'Prompt 精确匹配缓存 (L1 进程 + L2 Redis)',
+      semantic_cache: '语义相似度向量缓存 (L3 Qdrant)',
+      model_router: '多模型智能路由分发',
+      prompt_compress: 'Prompt 压缩以降低 Token 消耗',
+    }
+    return descriptions[name] ?? '默认配置'
   }
 
   // 如果还没有保存的 API Key，显示输入界面
@@ -291,7 +303,7 @@ export default function Plugins() {
           </div>
         </Card>
       ) : (
-        ['安全', '性能', '路由', '其他'].map(catLabel => {
+        ['缓存', '安全', '性能', '路由', '其他'].map(catLabel => {
           const catPlugins = plugins.filter(p => getCategory(p.name) === catLabel)
           if (catPlugins.length === 0) return null
           return (
@@ -308,8 +320,8 @@ export default function Plugins() {
                       </div>
                       <div>
                         <div className="font-medium">{plugin.name}</div>
-                        <div className="text-sm" style={{ color: 'var(--color-text-tertiary)' }}>
-                          {Object.keys(plugin.config).length > 0 ? JSON.stringify(plugin.config) : '默认配置'}
+                        <div className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>
+                          {getPluginDescription(plugin.name)}
                         </div>
                       </div>
                     </div>
