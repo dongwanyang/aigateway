@@ -48,7 +48,7 @@ services:
       - "6379:6379"
     volumes:
       - redis-data:/data
-    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy volatile-lru
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -81,9 +81,11 @@ services:
       - "9090:9090"
     volumes:
       - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.retention.time=30d"
+      - "--storage.tsdb.path=/prometheus"
     restart: unless-stopped
     networks:
       - gateway-net
@@ -116,3 +118,4 @@ volumes:
   redis-data:
   qdrant-data:
   grafana-data:
+  prometheus-data:
