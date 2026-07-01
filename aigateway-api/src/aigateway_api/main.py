@@ -143,6 +143,16 @@ def _create_app() -> "FastAPI":
     # CORS 中间件必须在 app 启动前添加
     _configure_cors(app_instance, config_manager=None)
 
+    # 速率限制中间件 (Req 9)
+    from .rate_limiter import RateLimiterMiddleware
+    app_instance.add_middleware(
+        RateLimiterMiddleware,
+        max_requests=30,
+        window_seconds=60,
+        protected_prefixes=("/admin",),
+        exempt_paths={"/health", "/metrics"},
+    )
+
     return app_instance
 
 

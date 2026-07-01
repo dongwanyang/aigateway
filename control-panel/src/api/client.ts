@@ -381,3 +381,81 @@ export async function deleteAllLogs(): Promise<ApiResponse<{ deleted: boolean }>
     throw new Error('Delete logs returned invalid response')
   }
 }
+
+
+// ------------------------------------------------------------------
+// Admin: Full Config (Req 15)
+// ------------------------------------------------------------------
+
+export async function getFullConfig(): Promise<ApiResponse<Record<string, unknown>>> {
+  const headers = await ensureAuthHeaders()
+  const res = await fetch(`${API_BASE}/admin/config`, { headers })
+  if (!res.ok) throw new Error(`Failed to fetch config: ${res.status}`)
+  return await res.json()
+}
+
+export async function updateFullConfig(config: Record<string, unknown>): Promise<ApiResponse<{ updated: boolean }>> {
+  const headers = await ensureAuthHeaders()
+  const res = await fetch(`${API_BASE}/admin/config`, {
+    method: 'PUT',
+    headers: { ...headers, 'Content-Type': 'application/json' },
+    body: JSON.stringify(config),
+  })
+  if (!res.ok) throw new Error(`Failed to update config: ${res.status}`)
+  return await res.json()
+}
+
+// ------------------------------------------------------------------
+// Admin: RAG Documents (Req 18)
+// ------------------------------------------------------------------
+
+export interface RagDocument {
+  doc_id: string
+  filename: string
+  file_type: string
+  chunk_count: number
+  chunk_strategy: string
+  chunk_size: number
+  chunk_overlap: number
+  total_tokens: number
+  created_at: number
+  url: string
+}
+
+export async function listRagDocuments(): Promise<ApiResponse<{ documents: RagDocument[] }>> {
+  const headers = await ensureAuthHeaders()
+  const res = await fetch(`${API_BASE}/admin/rag/documents`, { headers })
+  if (!res.ok) throw new Error(`Failed to fetch RAG documents: ${res.status}`)
+  return await res.json()
+}
+
+export async function importRagDocument(params: {
+  url?: string
+  content?: string
+  filename?: string
+  chunk_strategy?: string
+  chunk_size?: number
+  chunk_overlap?: number
+}): Promise<ApiResponse<{ doc_id: string; filename: string; chunk_count: number; total_tokens: number; elapsed_ms: number }>> {
+  const headers = await ensureAuthHeaders()
+  const res = await fetch(`${API_BASE}/admin/rag/documents`, {
+    method: 'POST',
+    headers: { ...headers, 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  })
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: { message: `HTTP ${res.status}` } }))
+    throw new Error(body.error?.message || `Failed: ${res.status}`)
+  }
+  return await res.json()
+}
+
+export async function deleteRagDocument(docId: string): Promise<ApiResponse<{ deleted: boolean }>> {
+  const headers = await ensureAuthHeaders()
+  const res = await fetch(`${API_BASE}/admin/rag/documents/${encodeURIComponent(docId)}`, {
+    method: 'DELETE',
+    headers,
+  })
+  if (!res.ok) throw new Error(`Failed to delete document: ${res.status}`)
+  return await res.json()
+}

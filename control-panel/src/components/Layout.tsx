@@ -1,4 +1,4 @@
-import { LayoutDashboard, Puzzle, DollarSign, Shield, Database, FileText, Sun, Moon } from 'lucide-react'
+import { LayoutDashboard, Puzzle, DollarSign, Shield, Database, FileText, Sun, Moon, BookOpen, Settings } from 'lucide-react'
 import { Link, useLocation } from 'react-router-dom'
 import { useTheme } from '@/hooks/useTheme'
 
@@ -9,6 +9,8 @@ const navItems = [
   { path: '/quotas', label: '配额管理', icon: Shield },
   { path: '/cache', label: '缓存监控', icon: Database },
   { path: '/logs', label: '请求日志', icon: FileText },
+  { path: '/knowledge', label: '知识库', icon: BookOpen },
+  { path: '/config', label: '系统配置', icon: Settings },
 ]
 
 export default function Layout({ children }: { children: React.ReactNode }) {

@@ -761,3 +761,402 @@ async def delete_all_logs(
         "data": {"deleted": bool(deleted_count)},
         "message": "success",
     }
+
+# ------------------------------------------------------------------
+# GET/PUT /admin/config — 完整配置编辑 (Req 15)
+# ------------------------------------------------------------------
+
+
+@router.get("/config")
+async def get_full_config(
+    request: Request,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+    """返回当前 config.yaml 的完整内容（脱敏 API Key）。"""
+    import os
+    import yaml
+    from aigateway_api.main import app
+    s = app.state
+    config_manager = getattr(s, "config_manager")
+
+    if not config_manager:
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "ConfigManager not initialized"}})
+
+    config_path = config_manager.config_path
+    if not config_path or not os.path.isfile(config_path):
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Config file not found"}})
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        file_config = yaml.safe_load(f) or {}
+
+    # 脱敏 providers 中的 api_key（只返回前 8 位 + ***）
+    safe_config = json.loads(json.dumps(file_config, default=str))
+    if "providers" in safe_config:
+        for provider_name, provider_cfg in safe_config["providers"].items():
+            if isinstance(provider_cfg, dict) and "api_key" in provider_cfg:
+                key_val = provider_cfg["api_key"]
+                if isinstance(key_val, str) and len(key_val) > 8 and not key_val.startswith("${"):
+                    provider_cfg["api_key"] = key_val[:8] + "***"
+
+    return {
+        "data": safe_config,
+        "message": "success",
+    }
+
+
+@router.put("/config")
+async def update_full_config(
+    request: Request,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+    """更新 config.yaml 配置（部分更新，仅支持安全字段）。"""
+    import fcntl
+    import os
+    import yaml
+    from aigateway_api.main import app
+    s = app.state
+    config_manager = getattr(s, "config_manager")
+
+    if not config_manager:
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "ConfigManager not initialized"}})
+
+    config_path = config_manager.config_path
+    if not config_path or not os.path.isfile(config_path):
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Config file not found"}})
+
+    try:
+        new_config = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail={"error": {"code": "validation_error", "message": "Invalid JSON body"}})
+
+    # 安全字段白名单（不允许通过 API 修改 auth.api_keys 中的密钥明文）
+    writable_keys = {"server", "plugins", "providers", "embedding", "observability", "infrastructure", "hot_reload", "debug_mode"}
+
+    lock_path = config_path + ".lock"
+    lock_fd = open(lock_path, "w")
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+
+        with open(config_path, "r", encoding="utf-8") as f:
+            file_config = yaml.safe_load(f) or {}
+
+        # 合并更新（只更新白名单内的字段）
+        for key in writable_keys:
+            if key in new_config:
+                # 对 providers，保留原始 api_key（前端传来的是脱敏的）
+                if key == "providers" and isinstance(new_config[key], dict):
+                    for pname, pcfg in new_config[key].items():
+                        if isinstance(pcfg, dict) and "api_key" in pcfg:
+                            if pcfg["api_key"].endswith("***"):
+                                # 保留原始 key
+                                orig = file_config.get("providers", {}).get(pname, {})
+                                pcfg["api_key"] = orig.get("api_key", pcfg["api_key"])
+                file_config[key] = new_config[key]
+
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.dump(file_config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+        # 触发热重载
+        config_manager.load()
+
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        lock_fd.close()
+
+    return {
+        "data": {"updated": True},
+        "message": "success",
+    }
+
+
+# ------------------------------------------------------------------
+# RAG 知识库管理 (Req 18)
+# ------------------------------------------------------------------
+
+
+@router.get("/rag/documents")
+async def list_rag_documents(
+    request: Request,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+    """列出已导入的 RAG 文档。"""
+    from aigateway_api.main import app
+    s = app.state
+    redis_mgr = getattr(s, "redis_manager")
+
+    if redis_mgr is None or redis_mgr.redis is None:
+        return {"data": {"documents": []}, "message": "success"}
+
+    # 从 Redis 获取文档元数据列表
+    raw = await redis_mgr.redis.lrange("aigateway:rag:documents", 0, -1)
+    documents = []
+    for item in raw:
+        try:
+            doc = json.loads(item.decode() if isinstance(item, bytes) else item)
+            documents.append(doc)
+        except Exception:
+            continue
+
+    return {
+        "data": {"documents": documents},
+        "message": "success",
+    }
+
+
+@router.post("/rag/documents")
+async def import_rag_document(
+    request: Request,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+    """导入文档到 RAG 知识库。
+
+    支持两种方式:
+    - JSON body: {"url": "https://...", "chunk_strategy": "paragraph", "chunk_size": 512, "chunk_overlap": 64}
+    - JSON body: {"content": "文本内容", "filename": "doc.txt", ...}
+    """
+    import time as time_mod
+    import uuid
+    import hashlib
+
+    from aigateway_api.main import app
+    s = app.state
+    redis_mgr = getattr(s, "redis_manager")
+    qdrant_mgr = getattr(s, "qdrant_manager")
+
+    if qdrant_mgr is None or qdrant_mgr._http is None:
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Qdrant not connected"}})
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail={"error": {"code": "validation_error", "message": "Invalid JSON body"}})
+
+    url = body.get("url")
+    content = body.get("content", "")
+    filename = body.get("filename", "")
+    chunk_strategy = body.get("chunk_strategy", "fixed_size")  # paragraph | fixed_size | sentence
+    chunk_size = int(body.get("chunk_size", 512))
+    chunk_overlap = int(body.get("chunk_overlap", 64))
+
+    start_time = time_mod.time()
+
+    # 获取文本内容
+    if url:
+        # 抓取网页内容
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                html = resp.text
+
+            # 简单提取正文（去除 HTML 标签）
+            import re as re_mod
+            # 移除 script/style 标签
+            html = re_mod.sub(r'<script[^>]*>.*?</script>', '', html, flags=re_mod.DOTALL | re_mod.IGNORECASE)
+            html = re_mod.sub(r'<style[^>]*>.*?</style>', '', html, flags=re_mod.DOTALL | re_mod.IGNORECASE)
+            # 移除所有标签
+            content = re_mod.sub(r'<[^>]+>', ' ', html)
+            # 清理空白
+            content = re_mod.sub(r'\s+', ' ', content).strip()
+            filename = filename or url.split("/")[-1][:50] or "webpage"
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail={"error": {"code": "validation_error", "message": f"Failed to fetch URL: {exc}"}})
+
+    if not content:
+        raise HTTPException(status_code=400, detail={"error": {"code": "validation_error", "message": "No content provided (use 'url' or 'content' field)"}})
+
+    # 分块
+    chunks = _split_text(content, strategy=chunk_strategy, chunk_size=chunk_size, overlap=chunk_overlap)
+
+    if not chunks:
+        raise HTTPException(status_code=400, detail={"error": {"code": "validation_error", "message": "Content too short to create chunks"}})
+
+    # 计算 embeddings 并存入 Qdrant
+    doc_id = f"doc_{uuid.uuid4().hex[:8]}"
+    total_tokens = 0
+    stored_count = 0
+
+    try:
+        # 尝试加载 sentence-transformers
+        from sentence_transformers import SentenceTransformer
+        from aigateway_core.pipeline import SemanticCachePlugin
+        if not hasattr(SemanticCachePlugin, "_model_cache"):
+            SemanticCachePlugin._model_cache = {}
+        st_model = SemanticCachePlugin._model_cache.get("all-MiniLM-L6-v2")
+        if st_model is None:
+            st_model = SentenceTransformer("all-MiniLM-L6-v2")
+            SemanticCachePlugin._model_cache["all-MiniLM-L6-v2"] = st_model
+
+        # 批量 encode
+        vectors = st_model.encode(chunks, normalize_embeddings=True, show_progress_bar=False)
+
+        for i, (chunk_text, vector) in enumerate(zip(chunks, vectors)):
+            point_id = str(uuid.uuid4())
+            payload = {
+                "document_id": doc_id,
+                "filename": filename,
+                "chunk_index": i,
+                "chunk_text": chunk_text,
+                "user_id": "admin",
+                "created_at": int(time_mod.time()),
+                "deleted": False,
+            }
+            payload_body = {"points": [{"id": point_id, "vector": vector.tolist(), "payload": payload}]}
+            resp = await qdrant_mgr._http.put(
+                "/collections/rag_documents/points",
+                json=payload_body,
+            )
+            resp.raise_for_status()
+            stored_count += 1
+            total_tokens += len(chunk_text) // 4
+
+    except ImportError:
+        raise HTTPException(status_code=501, detail={"error": {"code": "unsupported", "message": "sentence-transformers not installed in container"}})
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": f"Failed to store embeddings: {exc}"}})
+
+    elapsed_ms = round((time_mod.time() - start_time) * 1000, 1)
+
+    # 保存文档元数据到 Redis
+    doc_meta = {
+        "doc_id": doc_id,
+        "filename": filename,
+        "file_type": "url" if url else "text",
+        "chunk_count": stored_count,
+        "chunk_strategy": chunk_strategy,
+        "chunk_size": chunk_size,
+        "chunk_overlap": chunk_overlap,
+        "total_tokens": total_tokens,
+        "created_at": int(time_mod.time()),
+        "url": url or "",
+    }
+
+    if redis_mgr and redis_mgr.redis:
+        await redis_mgr.redis.rpush("aigateway:rag:documents", json.dumps(doc_meta))
+
+    return {
+        "data": {
+            "doc_id": doc_id,
+            "filename": filename,
+            "chunk_count": stored_count,
+            "total_tokens": total_tokens,
+            "elapsed_ms": elapsed_ms,
+        },
+        "message": "success",
+    }
+
+
+@router.delete("/rag/documents/{doc_id}")
+async def delete_rag_document(
+    request: Request,
+    doc_id: str,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+    """删除指定 RAG 文档及其在 Qdrant 中的所有向量。"""
+    from aigateway_api.main import app
+    s = app.state
+    redis_mgr = getattr(s, "redis_manager")
+    qdrant_mgr = getattr(s, "qdrant_manager")
+
+    if qdrant_mgr is None or qdrant_mgr._http is None:
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Qdrant not connected"}})
+
+    # 从 Qdrant 删除所有匹配 document_id 的 points
+    try:
+        delete_payload = {
+            "filter": {
+                "must": [
+                    {"key": "document_id", "match": {"value": doc_id}}
+                ]
+            }
+        }
+        resp = await qdrant_mgr._http.post(
+            "/collections/rag_documents/points/delete",
+            json=delete_payload,
+        )
+        resp.raise_for_status()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": f"Failed to delete from Qdrant: {exc}"}})
+
+    # 从 Redis 移除文档元数据
+    if redis_mgr and redis_mgr.redis:
+        raw_list = await redis_mgr.redis.lrange("aigateway:rag:documents", 0, -1)
+        for item in raw_list:
+            try:
+                doc = json.loads(item.decode() if isinstance(item, bytes) else item)
+                if doc.get("doc_id") == doc_id:
+                    await redis_mgr.redis.lrem("aigateway:rag:documents", 1, item)
+                    break
+            except Exception:
+                continue
+
+    return {
+        "data": {"doc_id": doc_id, "deleted": True},
+        "message": "success",
+    }
+
+
+# ------------------------------------------------------------------
+# 文本分块辅助函数
+# ------------------------------------------------------------------
+
+
+def _split_text(text: str, strategy: str = "fixed_size", chunk_size: int = 512, overlap: int = 64) -> List[str]:
+    """将文本按策略分块。
+
+    Args:
+        text: 原始文本。
+        strategy: 分块策略 - "fixed_size" | "paragraph" | "sentence"
+        chunk_size: 每块最大字符数。
+        overlap: 相邻块重叠字符数。
+
+    Returns:
+        文本块列表。
+    """
+    if not text or len(text) < 10:
+        return []
+
+    if strategy == "paragraph":
+        # 按段落分割（双换行符）
+        paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+        chunks = []
+        current = ""
+        for para in paragraphs:
+            if len(current) + len(para) + 2 > chunk_size and current:
+                chunks.append(current)
+                # 重叠：保留当前块末尾部分
+                current = current[-overlap:] + "\n\n" + para if overlap > 0 else para
+            else:
+                current = current + "\n\n" + para if current else para
+        if current:
+            chunks.append(current)
+        return chunks
+
+    elif strategy == "sentence":
+        # 按句子分割
+        import re as re_mod
+        sentences = re_mod.split(r'(?<=[.!?。！？])\s+', text)
+        chunks = []
+        current = ""
+        for sent in sentences:
+            if len(current) + len(sent) + 1 > chunk_size and current:
+                chunks.append(current)
+                current = current[-overlap:] + " " + sent if overlap > 0 else sent
+            else:
+                current = current + " " + sent if current else sent
+        if current:
+            chunks.append(current)
+        return chunks
+
+    else:
+        # fixed_size: 按固定字符数分块
+        chunks = []
+        start = 0
+        while start < len(text):
+            end = start + chunk_size
+            chunk = text[start:end]
+            if chunk.strip():
+                chunks.append(chunk.strip())
+            start = end - overlap if overlap > 0 else end
+        return chunks

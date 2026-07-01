@@ -7,6 +7,8 @@ import Costs from '@/pages/Costs'
 import Quotas from '@/pages/Quotas'
 import Cache from '@/pages/Cache'
 import Logs from '@/pages/Logs'
+import Knowledge from '@/pages/Knowledge'
+import Config from '@/pages/Config'
 import { ThemeProvider } from '@/hooks/useTheme'
 
 export default function App() {
@@ -21,6 +23,8 @@ export default function App() {
             <Route path="/quotas" element={<PageErrorBoundary><Quotas /></PageErrorBoundary>} />
             <Route path="/cache" element={<PageErrorBoundary><Cache /></PageErrorBoundary>} />
             <Route path="/logs" element={<PageErrorBoundary><Logs /></PageErrorBoundary>} />
+            <Route path="/knowledge" element={<PageErrorBoundary><Knowledge /></PageErrorBoundary>} />
+            <Route path="/config" element={<PageErrorBoundary><Config /></PageErrorBoundary>} />
           </Routes>
         </Layout>
       </BrowserRouter>
