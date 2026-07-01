@@ -306,20 +306,92 @@ function usePoll<T>(
 }
 ```
 
-### 9. Cache Backfill Manager (`aigateway-core/caching.py` enhancement)
+### 9. Cache Backfill & Capacity Management (`aigateway-core/caching.py` enhancement)
 
-**Responsibility**: Complete cross-tier cache backfill with async L3 population.
+**Responsibility**: Selective cross-tier cache backfill with capacity protection.
+
+#### Backfill Strategy（回填策略）
+
+| 命中层 | 回填目标 | 是否执行 | 理由 |
+|--------|---------|---------|------|
+| L2 命中 | → L1 | ✅ 执行 | L1 延迟 <1ms vs L2 <5ms，热点请求回填后直接 L1 命中 |
+| L3 命中 | → L1 | ✅ 执行 | 避免后续相同请求重复计算 embedding + 查 Qdrant |
+| L3 命中 | → L2 | ❌ 不执行 | L3 是语义匹配（近似），L2 是精确 hash 匹配。L3 命中的响应对应的 cache_key 与当前请求不同，回填 L2 会导致错误的 key 映射到近似响应 |
+| MISS | → L1 + L2 | ✅ 执行 | 新响应进入热缓存是核心功能 |
+| MISS | → L3 | ⚠️ 有条件 | 仅当 token_count > min_l3_tokens 时回填（省 embedding 计算开销） |
+
+#### Capacity Protection（容量保护）
+
+**L1 容量保护**：LRU 自动淘汰 + 大对象过滤
+```python
+# L1 配置
+L1_MAX_SIZE = 1000           # 最大条目数（LRU 自动淘汰冷数据）
+L1_MAX_VALUE_BYTES = 102400  # 单条最大 100KB，超过不进 L1
+
+def l1_set(self, key: str, value: str, ttl: Optional[int] = None) -> None:
+    """写入 L1 缓存，带大对象过滤。"""
+    if len(value.encode("utf-8")) > self.l1_max_value_bytes:
+        logger.debug("L1 跳过: value 过大 (%d bytes)", len(value))
+        return
+    with self._l1_lock:
+        self._l1[key] = value
+```
+
+**L2 容量保护**：Redis maxmemory + TTL + 大对象过滤
+```python
+# L2 配置
+L2_MAX_VALUE_BYTES = 512000  # 单条最大 500KB，超过不进 L2
+L2_DEFAULT_TTL = 3600        # 默认 1 小时过期
+
+async def l2_set(self, key: str, value: str, ttl: Optional[int] = None) -> None:
+    """写入 L2 缓存，带大对象过滤。"""
+    if len(value.encode("utf-8")) > self.l2_max_value_bytes:
+        logger.debug("L2 跳过: value 过大 (%d bytes)", len(value))
+        return
+    # ... LZ4 压缩后写入 Redis with TTL
+```
+
+Redis 侧配置（防止 OOM）：
+```
+# redis.conf
+maxmemory 256mb
+maxmemory-policy allkeys-lru
+```
+
+**L3 容量保护**：定期清理过期向量
+```python
+# L3 配置
+L3_MIN_TOKEN_COUNT = 100     # 仅 token_count > 100 的请求才写入 L3（过滤短请求）
+L3_DEFAULT_TTL = 86400       # 24 小时过期
+L3_CLEANUP_INTERVAL = 3600   # 每小时清理一次过期向量
+
+async def cleanup_expired_l3(self) -> int:
+    """定期清理 Qdrant 中已过期的缓存向量。"""
+    if self._qdrant_client is None:
+        return 0
+    now = int(time.time())
+    deleted = await self._qdrant_client.delete_by_filter(
+        collection="semantic_cache",
+        filter={"must": [{"key": "ttl", "range": {"lt": now}}]},
+    )
+    logger.info("L3 清理完成: 删除 %d 条过期向量", deleted)
+    return deleted
+```
+
+#### 修正后的回填实现
 
 ```python
-async def backfill_on_l3_hit(
-    self,
-    key: str,
-    response_json: str,
-    ttl: Optional[int] = None,
-) -> None:
-    """When L3 hits, backfill L1 (sync) and L2 (async)."""
+async def backfill_on_l2_hit(self, key: str, response_json: str) -> None:
+    """L2 命中时回填 L1。"""
     self.l1_set(key, response_json)
-    await self.l2_set(key, response_json, ttl=ttl)
+
+async def backfill_on_l3_hit(self, key: str, response_json: str) -> None:
+    """L3 命中时仅回填 L1，不回填 L2。
+    
+    原因：L3 是语义近似匹配，其响应的 cache_key 与当前请求的精确 key 不同。
+    将近似响应写入 L2 会导致后续精确匹配时返回错误结果。
+    """
+    self.l1_set(key, response_json)
 
 async def backfill_on_miss(
     self,
@@ -331,21 +403,443 @@ async def backfill_on_miss(
     token_count: int,
     compute_embedding_fn: Callable[[str], Awaitable[List[float]]],
 ) -> None:
-    """On full miss: backfill L1+L2 sync, L3 async via create_task."""
+    """全部未命中时回填：L1 + L2 同步，L3 有条件异步。"""
+    # L1 回填（带大对象过滤）
     self.l1_set(key, response_json)
+    # L2 回填（带大对象过滤 + TTL）
     await self.l2_set(key, response_json)
     
-    # L3 backfill is fire-and-forget
-    asyncio.create_task(
-        self._safe_l3_backfill(key, response_json, normalized_prompt, model, user_id, token_count, compute_embedding_fn)
-    )
+    # L3 回填：仅对 token 消耗较高的请求执行（节省 embedding 计算）
+    if token_count >= self.l3_min_token_count:
+        asyncio.create_task(
+            self._safe_l3_backfill(
+                key, response_json, normalized_prompt,
+                model, user_id, token_count, compute_embedding_fn,
+            )
+        )
+    else:
+        logger.debug("L3 跳过回填: token_count=%d < 阈值 %d", token_count, self.l3_min_token_count)
 
-async def _safe_l3_backfill(self, ...):
+async def _safe_l3_backfill(self, key, response_json, normalized_prompt, model, user_id, token_count, compute_embedding_fn):
+    """L3 异步回填，失败不影响主流程。"""
     try:
         vector = await compute_embedding_fn(normalized_prompt)
-        await self.l3_store(...)
+        await self.l3_store(
+            prompt_hash=key,
+            prompt_normalized=normalized_prompt,
+            model=model,
+            response_json=response_json,
+            user_id=user_id,
+            token_count=token_count,
+            vector=vector,
+        )
     except Exception as exc:
-        logger.warning("L3 backfill failed (embedding error): %s", exc)
+        logger.warning("L3 backfill failed: %s", exc)
+```
+
+#### 容量预估
+
+| 层级 | 条目上限 | 单条大小 | 总内存占用 | 淘汰策略 |
+|------|---------|---------|-----------|---------|
+| L1 | 1,000 | ≤ 100KB | ≤ 100MB | LRU（cachetools 自动淘汰） |
+| L2 | ~100K（由 Redis maxmemory 决定） | ≤ 500KB（LZ4压缩后更小） | ≤ 256MB | allkeys-lru + TTL 过期 |
+| L3 | 无硬上限 | ~1.5KB payload + 384D vector | 磁盘存储 | TTL 过期 + 定时清理任务 + 手动管理 |
+
+### 9b. L3 Cache Lifecycle Management（语义缓存生命周期管理）
+
+**Responsibility**: 提供前端可配置的 L3 缓存清理策略，支持自动过期和手动管理两种模式。
+
+#### 管理模式
+
+每个缓存条目可以独立选择管理模式：
+
+| 模式 | 行为 | 适用场景 |
+|------|------|---------|
+| `auto` | 按控制台配置的 TTL 自动过期，定时任务清理 | 普通缓存，无需人工干预 |
+| `manual` | 不自动过期，只有用户手动删除才移除 | 重要的参考文档、常用问答、知识库条目 |
+
+#### 前端配置界面
+
+控制面板新增 **Cache Management** 页面：
+
+```typescript
+// 全局 L3 缓存配置
+interface L3CacheConfig {
+  defaultMode: "auto" | "manual"         // 新条目默认模式
+  autoCleanupIntervalMinutes: number     // 自动清理间隔（分钟），默认 60
+  defaultTtlHours: number                // 默认 TTL（小时），默认 24
+  minTtlHours: number                    // 最小 TTL，默认 1
+  maxTtlHours: number                    // 最大 TTL，默认 720 (30天)
+}
+
+// 单条缓存条目的管理视图
+interface L3CacheEntry {
+  id: string                             // Qdrant point ID
+  promptPreview: string                  // prompt 前 100 字符预览
+  model: string
+  userId: string
+  createdAt: string                      // ISO 时间
+  expiresAt: string | null               // auto 模式有值，manual 模式为 null
+  mode: "auto" | "manual"               // 当前管理模式
+  hitCount: number                       // 命中次数
+  tokenCount: number                     // 原始请求 token 数
+  similarityScore: number                // 最后一次命中时的相似度
+}
+```
+
+#### Admin API 接口
+
+```python
+# GET /admin/cache/l3/config — 获取 L3 缓存配置
+@router.get("/cache/l3/config")
+async def get_l3_cache_config(...) -> dict:
+    """返回当前 L3 缓存管理配置。"""
+    return {
+        "data": {
+            "default_mode": "auto",
+            "auto_cleanup_interval_minutes": 60,
+            "default_ttl_hours": 24,
+            "min_ttl_hours": 1,
+            "max_ttl_hours": 720,
+        }
+    }
+
+# PUT /admin/cache/l3/config — 更新 L3 缓存配置
+@router.put("/cache/l3/config")
+async def update_l3_cache_config(body: L3CacheConfigRequest, ...) -> dict:
+    """更新 L3 缓存配置并持久化到 config.yaml。
+    
+    修改 auto_cleanup_interval_minutes 后重新调度定时清理任务。
+    """
+    ...
+
+# GET /admin/cache/l3/entries — 列出 L3 缓存条目（分页）
+@router.get("/cache/l3/entries")
+async def list_l3_entries(
+    page: int = 1,
+    page_size: int = 20,
+    mode: Optional[str] = None,      # "auto" | "manual" 过滤
+    user_id: Optional[str] = None,
+    sort_by: str = "created_at",     # "created_at" | "hit_count" | "expires_at"
+) -> dict:
+    """列出 L3 缓存条目，支持按模式和用户过滤。"""
+    ...
+
+# PUT /admin/cache/l3/entries/{point_id}/mode — 切换单条条目的管理模式
+@router.put("/cache/l3/entries/{point_id}/mode")
+async def update_entry_mode(
+    point_id: str,
+    body: {"mode": "auto" | "manual", "ttl_hours": Optional[int]},
+) -> dict:
+    """切换缓存条目的管理模式。
+    
+    auto → manual: 清除 TTL（设为 0，表示永不过期）
+    manual → auto: 按 ttl_hours（或全局默认值）设置过期时间
+    """
+    ...
+
+# DELETE /admin/cache/l3/entries/{point_id} — 手动删除单条条目
+@router.delete("/cache/l3/entries/{point_id}")
+async def delete_l3_entry(point_id: str) -> dict:
+    """手动删除指定的 L3 缓存条目（任何模式均可删除）。"""
+    ...
+
+# POST /admin/cache/l3/cleanup — 立即触发一次清理
+@router.post("/cache/l3/cleanup")
+async def trigger_l3_cleanup() -> dict:
+    """手动触发一次 L3 过期清理（只清理 mode=auto 且已过期的条目）。"""
+    ...
+```
+
+#### Qdrant Payload 扩展
+
+```python
+# L3 存储时增加 management_mode 字段
+payload = {
+    # ...existing fields...
+    "management_mode": "auto",       # "auto" | "manual"
+    "ttl": now + ttl_seconds,        # auto 模式: 过期时间戳; manual 模式: 0
+}
+```
+
+#### 定时清理任务
+
+```python
+class L3CleanupScheduler:
+    """L3 缓存定时清理调度器。"""
+
+    def __init__(self, cache_manager: CacheManager, interval_minutes: int = 60):
+        self._cache_manager = cache_manager
+        self._interval_minutes = interval_minutes
+        self._task: Optional[asyncio.Task] = None
+
+    async def start(self) -> None:
+        """启动定时清理任务。"""
+        self._task = asyncio.create_task(self._cleanup_loop())
+
+    async def stop(self) -> None:
+        """停止定时清理任务。"""
+        if self._task:
+            self._task.cancel()
+
+    def update_interval(self, interval_minutes: int) -> None:
+        """动态更新清理间隔（前端配置变更时调用）。"""
+        self._interval_minutes = interval_minutes
+
+    async def _cleanup_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self._interval_minutes * 60)
+            await self._do_cleanup()
+
+    async def _do_cleanup(self) -> int:
+        """执行清理：只删除 mode=auto 且 ttl < now 的条目。"""
+        now = int(time.time())
+        deleted = await self._cache_manager._qdrant_client.delete_by_filter(
+            collection="semantic_cache",
+            filter={
+                "must": [
+                    {"key": "management_mode", "match": {"value": "auto"}},
+                    {"key": "ttl", "range": {"lt": now, "gt": 0}},
+                ]
+            },
+        )
+        logger.info("L3 自动清理完成: 删除 %d 条过期条目", deleted)
+        return deleted
+```
+
+#### config.yaml 配置
+
+```yaml
+# config.yaml 新增节
+cache:
+  l3:
+    default_mode: auto              # 新条目默认管理模式
+    auto_cleanup_interval_minutes: 60
+    default_ttl_hours: 24
+    min_ttl_hours: 1
+    max_ttl_hours: 720
+```
+
+### 9c. Semantic Cache Reranking Optimization（语义缓存重排序优化）
+
+**Responsibility**: 通过 rerank 对语义缓存的候选结果进行精排，减少低质量匹配导致的 token 浪费。
+
+#### 问题背景
+
+当前 L3 语义缓存查询 `limit=1, score_threshold=0.95`：
+- 只取 top-1 结果，如果该结果质量不够好（虽然向量相似度 > 0.95 但语义不完全对应），会返回一个"差不多但不对"的缓存响应
+- 用户看到不准确的响应后重新提问 → 白白消耗了 token
+- 无法区分"高相似度但不同意图"的请求
+
+#### 方案：Retrieve + Rerank
+
+```
+原始查询向量
+    │
+    ▼
+Qdrant 粗检索（top-K=5, threshold=0.90）    ← 放宽阈值，召回更多候选
+    │
+    ▼
+Reranker 精排（cross-encoder 或轻量 LLM）   ← 对候选进行语义精排
+    │
+    ▼
+取 top-1 且 rerank_score > 阈值              ← 只有精排得分够高才命中
+    │
+    ▼
+命中 → 返回缓存    /    未命中 → 调 LLM
+```
+
+#### 接口设计
+
+```python
+class SemanticCacheWithRerank:
+    """带 rerank 的语义缓存查询。"""
+
+    def __init__(
+        self,
+        cache_manager: CacheManager,
+        reranker: Optional[Reranker] = None,
+        retrieve_top_k: int = 5,          # 粗检索候选数
+        retrieve_threshold: float = 0.90, # 粗检索阈值（比原来松）
+        rerank_threshold: float = 0.85,   # 精排阈值
+    ):
+        self._cache_manager = cache_manager
+        self._reranker = reranker
+        self._retrieve_top_k = retrieve_top_k
+        self._retrieve_threshold = retrieve_threshold
+        self._rerank_threshold = rerank_threshold
+
+    async def query_with_rerank(
+        self,
+        query_text: str,
+        vector: List[float],
+        user_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Retrieve + Rerank 两阶段语义缓存查询。"""
+        # Stage 1: 粗检索 — Qdrant 向量召回 top-K
+        candidates = await self._cache_manager._qdrant_client.query_vector_multi(
+            collection="semantic_cache",
+            vector=vector,
+            limit=self._retrieve_top_k,
+            score_threshold=self._retrieve_threshold,
+            user_id=user_id,
+        )
+
+        if not candidates:
+            return None
+
+        # Stage 2: 精排 — 用 reranker 对候选做 cross-attention 打分
+        if self._reranker and len(candidates) > 1:
+            candidate_texts = [
+                c["payload"].get("prompt_normalized", "") for c in candidates
+            ]
+            rerank_scores = await self._reranker.rerank(
+                query=query_text,
+                documents=candidate_texts,
+            )
+            # 按 rerank score 排序
+            scored = sorted(
+                zip(candidates, rerank_scores),
+                key=lambda x: x[1],
+                reverse=True,
+            )
+            best_candidate, best_score = scored[0]
+        else:
+            # 无 reranker 或只有一个候选，直接用向量相似度
+            best_candidate = candidates[0]
+            best_score = best_candidate.get("score", 0)
+
+        # 阈值判断
+        if best_score < self._rerank_threshold:
+            logger.debug(
+                "Rerank 未达标: best_score=%.4f < threshold=%.4f",
+                best_score, self._rerank_threshold,
+            )
+            return None
+
+        return {
+            "response_json": best_candidate["payload"].get("response_json", ""),
+            "score": best_score,
+            "hit_count": best_candidate["payload"].get("hit_count", 0),
+            "reranked": True,
+        }
+```
+
+#### Reranker 实现选择
+
+```python
+class Reranker(Protocol):
+    """Reranker 接口协议。"""
+    async def rerank(self, query: str, documents: List[str]) -> List[float]:
+        """对文档列表相对于 query 进行打分，返回分数列表。"""
+        ...
+
+class CrossEncoderReranker:
+    """基于 sentence-transformers CrossEncoder 的本地 reranker。
+    
+    模型: cross-encoder/ms-marco-MiniLM-L-6-v2（~80MB, 推理 <10ms/对）
+    优点: 本地推理，无 API 成本，延迟可控
+    缺点: 需要额外 ~80MB 内存
+    """
+
+    def __init__(self, model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"):
+        from sentence_transformers import CrossEncoder
+        self._model = CrossEncoder(model_name)
+
+    async def rerank(self, query: str, documents: List[str]) -> List[float]:
+        """Cross-encoder 打分（在线程池中执行避免阻塞）。"""
+        import asyncio
+        loop = asyncio.get_event_loop()
+        pairs = [(query, doc) for doc in documents]
+        scores = await loop.run_in_executor(None, self._model.predict, pairs)
+        return scores.tolist()
+
+class LightweightReranker:
+    """轻量 reranker：基于 BM25 + 关键词重叠度的启发式打分。
+    
+    优点: 零依赖，零延迟，不需要模型
+    缺点: 精度不如 cross-encoder
+    适用: 不想加载额外模型时的降级方案
+    """
+
+    async def rerank(self, query: str, documents: List[str]) -> List[float]:
+        scores = []
+        query_tokens = set(query.lower().split())
+        for doc in documents:
+            doc_tokens = set(doc.lower().split())
+            overlap = len(query_tokens & doc_tokens)
+            score = overlap / max(len(query_tokens), 1)
+            scores.append(score)
+        return scores
+```
+
+#### Token 节省分析
+
+| 场景 | 无 Rerank | 有 Rerank | Token 节省 |
+|------|----------|----------|-----------|
+| 相似但不完全匹配的请求 | 返回不准确缓存 → 用户重新提问 → 多花 1 次 LLM 调用 | 精排拦截 → 直接调 LLM 一次 | 节省 1 次 LLM 调用的输入+输出 token |
+| 多个近似缓存存在 | 随机选 top-1（可能非最优） | 精排选出语义最匹配的 | 减少不准确响应的概率 |
+| 查询与缓存主题差异大 | 阈值 0.95 太严，什么都不命中 | 粗检索 0.90 + 精排 0.85，命中率更高 | 更多有效缓存命中 → 省 LLM 调用 |
+
+#### 配置
+
+```yaml
+# config.yaml
+plugins:
+  - name: semantic_cache
+    enabled: true
+    depends_on: [prompt_cache]
+    config:
+      # 原有配置
+      threshold: 0.95           # 无 rerank 时的阈值（向后兼容）
+      ttl: 86400
+      
+      # Rerank 配置（可选，默认不启用）
+      rerank:
+        enabled: false          # 是否启用 rerank
+        backend: cross_encoder  # cross_encoder | lightweight | none
+        model: cross-encoder/ms-marco-MiniLM-L-6-v2
+        retrieve_top_k: 5       # 粗检索候选数
+        retrieve_threshold: 0.90  # 粗检索阈值
+        rerank_threshold: 0.85   # 精排最终阈值
+```
+
+#### QdrantClientManager 接口扩展
+
+```python
+async def query_vector_multi(
+    self,
+    collection: str,
+    vector: List[float],
+    limit: int = 5,
+    score_threshold: float = 0.90,
+    user_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """向量相似度搜索 — 返回多个候选（供 rerank 使用）。
+    
+    与 query_vector 的区别：返回 List 而非单个 Optional。
+    """
+    # ... 与 query_vector 相同的 Qdrant API 调用
+    # 但 limit > 1，返回所有符合阈值的结果列表
+    ...
+
+async def delete_by_filter(
+    self,
+    collection: str,
+    filter: Dict[str, Any],
+) -> int:
+    """按过滤条件批量删除向量点。
+    
+    用于 L3 定期清理过期条目。
+    Returns: 删除的点数量。
+    """
+    resp = await self._http.post(
+        f"/collections/{collection}/points/delete",
+        json={"filter": filter},
+        headers=self._headers(),
+    )
+    resp.raise_for_status()
+    return resp.json().get("result", {}).get("deleted_count", 0)
 ```
 
 ### 10. Hot-Reload Safety Mechanism (`aigateway-core/config.py` enhancement)
@@ -598,13 +1092,21 @@ Value: full API key string (existing behavior)
 
 ### Property 18: Cache backfill completeness on hit
 
-*For any* cache key and value, when a lower tier (L2 or L3) returns a hit, all higher-priority tiers (L1, and L2 if L3 hit) should contain that value after the backfill operation completes.
+### Property 18: Cache backfill correctness on hit
+
+*For any* cache key and value:
+- When L2 returns a hit, L1 should contain that value after the backfill operation completes.
+- When L3 returns a hit, only L1 should be backfilled (NOT L2), because L3 is a semantic approximate match and its response may not correspond to the exact cache key used by L2.
 
 **Validates: Requirements 10.1, 10.2**
 
-### Property 19: Full-miss backfill populates all tiers
+### Property 19: Full-miss backfill with capacity protection
 
-*For any* new LLM response on a full cache miss, after backfill completes: L1 should contain the value, L2 should contain the value, and L3 backfill should be initiated asynchronously without blocking the response.
+*For any* new LLM response on a full cache miss:
+- If value size ≤ L1_MAX_VALUE_BYTES (100KB): L1 should contain the value after backfill.
+- If value size ≤ L2_MAX_VALUE_BYTES (500KB): L2 should contain the value with TTL after backfill.
+- If token_count ≥ L3_MIN_TOKEN_COUNT (100): L3 backfill should be initiated asynchronously without blocking the response.
+- If value size exceeds the tier's limit, that tier is skipped (no error, debug log only).
 
 **Validates: Requirements 10.3, 10.4**
 
