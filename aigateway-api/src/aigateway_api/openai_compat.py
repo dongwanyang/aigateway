@@ -202,6 +202,8 @@ async def chat_completions_non_stream(
 
     流程: 缓存检查 → 配额检查 → 下游 LLM 调用 → 用量记录 → 缓存回填
     """
+    request_start_time = time.time()
+
     state = _get_app_state()
     cache_manager = state["cache_manager"]
     key_store = state["key_store"]
@@ -254,10 +256,11 @@ async def chat_completions_non_stream(
         }
 
         # 记录缓存命中日志
+        cache_duration_ms = round((time.time() - request_start_time) * 1000, 1)
         await _record_request_log(
             request=request,
             method="POST", endpoint="/v1/chat/completions",
-            status_code=200, duration_ms=0, model=body.model,
+            status_code=200, duration_ms=cache_duration_ms, model=body.model,
             cache_hit=True, cache_tier=hit_tier,
         )
 
@@ -367,7 +370,7 @@ async def chat_completions_non_stream(
             # 优先使用 LiteLLM 返回的真实成本，否则 fallback 到估算
             final_cost = cost if cost > 0 else _estimate_cost(body.model, tt)
             if final_cost > 0:
-                metrics_collector.record_cost(final_cost, model=body.model)
+                metrics_collector.record_cost(final_cost, model=body.model, user_id=user_id or "")
     # tracker.__exit__ 必须在 metrics_collector 块之外，确保无论如何都被调用
     if tracker:
         tracker.__exit__(None, None, None)
@@ -384,10 +387,11 @@ async def chat_completions_non_stream(
         logger.warning("L2 cache backfill failed: %s", exc)
 
     # 记录请求日志到 Redis
+    total_duration_ms = round((time.time() - request_start_time) * 1000, 1)
     await _record_request_log(
         request=request,
         method="POST", endpoint="/v1/chat/completions",
-        status_code=200, duration_ms=0, model=body.model,
+        status_code=200, duration_ms=total_duration_ms, model=body.model,
         cache_hit=cache_hit, cache_tier=cached.get("hit_tier") if cached else None,
     )
 

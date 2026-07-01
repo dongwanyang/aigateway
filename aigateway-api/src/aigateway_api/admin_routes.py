@@ -109,7 +109,15 @@ async def list_api_keys(
     redis_mgr = key_store.redis
 
     if redis_mgr is None or redis_mgr.redis is None:
-        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Redis not connected"}})
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Redis connection required for key management"}})
+
+    # Auto-reseed: 如果 Redis 中没有 API Key，自动从 config.yaml 重新导入
+    from aigateway_api.main import app
+    config_manager = getattr(app.state, "config_manager")
+    if config_manager:
+        auth_config = config_manager.get("auth", {})
+        keys_config = auth_config.get("api_keys", [])
+        await key_store.ensure_seeded(keys_config)
 
     # 扫描所有 API Key
     cursor = 0
@@ -122,8 +130,8 @@ async def list_api_keys(
             key_str = raw_key.decode() if isinstance(raw_key, bytes) else raw_key
             kh = key_str.split(":")[-1]
             data = await redis_mgr.get_api_key(kh)
-            if data:
-                data["_key_hash"] = kh  # 保留 key_hash 以便后续操作
+            if data and data.get("status") == "active":
+                data["_key_hash"] = kh
                 all_keys.append(data)
         if cursor == 0:
             break
@@ -203,13 +211,13 @@ async def delete_api_key(
     _auth: Dict[str, Any] = Depends(authenticate_admin),
 ):
 
-    """撤销指定的 API Key。"""
+    """删除指定的 API Key（从 Redis 中完全移除）。"""
     key_store, _ = _get_keystore_and_metrics(request)
 
     if not key_id.startswith("key_"):
         raise HTTPException(status_code=400, detail={"error": {"code": "validation_error", "message": "Invalid key_id format"}})
 
-    success = await key_store.revoke(key_id)
+    success = await key_store.delete_permanently(key_id)
     if not success:
         raise HTTPException(status_code=404, detail={"error": {"code": "not_found", "message": f"API key '{key_id}' not found"}})
 
@@ -218,8 +226,8 @@ async def delete_api_key(
     return {
         "data": {
             "id": key_id,
-            "status": "revoked",
-            "revoked_at": now_iso,
+            "status": "deleted",
+            "deleted_at": now_iso,
         },
         "message": "success",
     }
@@ -655,7 +663,7 @@ async def get_request_logs(
     cache_only: bool = Query(default=False, description="仅缓存命中"),
     _auth: Dict[str, Any] = Depends(authenticate_admin),
 ):
-    """从 Redis 查询最近的请求日志。"""
+    """从 Redis 查询最近的请求日志（支持服务端分页）。"""
     from aigateway_api.main import app
     s = app.state
     redis_mgr = getattr(s, "redis_manager")
@@ -663,50 +671,93 @@ async def get_request_logs(
     if redis_mgr is None or redis_mgr.redis is None:
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Redis not connected"}})
 
-    # 获取最近 page_size * 2 条（过滤后再分页）
-    all_logs = await redis_mgr.redis.zrevrange("aigateway:logs:requests", 0, page_size * 2 - 1, withscores=True)
+    # 获取总数
+    total_count = await redis_mgr.redis.zcard("aigateway:logs:requests")
 
-    results = []
-    for raw, score in all_logs:
-        entry = json.loads(raw.decode() if isinstance(raw, bytes) else raw)
+    # 如果有过滤条件，获取更多条目进行过滤；否则精确分页
+    has_filters = bool(user_id or model or status or cache_only)
 
-        # 过滤
-        if user_id and entry.get("user_id") != user_id:
-            continue
-        if model and entry.get("model") != model:
-            continue
-        if status and str(entry.get("status")) != status:
-            continue
-        if cache_only and not entry.get("cache_hit"):
-            continue
+    if has_filters:
+        # 有过滤条件时，获取最近 500 条然后过滤
+        all_logs = await redis_mgr.redis.zrevrange("aigateway:logs:requests", 0, 499, withscores=True)
+        filtered = []
+        for raw, score in all_logs:
+            entry = json.loads(raw.decode() if isinstance(raw, bytes) else raw)
+            if user_id and entry.get("user_id") != user_id:
+                continue
+            if model and entry.get("model") != model:
+                continue
+            if status and str(entry.get("status")) != status:
+                continue
+            if cache_only and not entry.get("cache_hit"):
+                continue
+            filtered.append(entry)
 
-        results.append({
-            "request_id": entry["request_id"],
-            "trace_id": entry["trace_id"],
-            "user_id": entry["user_id"],
-            "timestamp": entry["timestamp"],
-            "method": entry["method"],
-            "endpoint": entry["endpoint"],
-            "model": entry["model"],
-            "status": entry["status"],
-            "duration_ms": entry["duration_ms"],
-            "cache_hit": entry["cache_hit"],
+        total_filtered = len(filtered)
+        start = (page - 1) * page_size
+        end = start + page_size
+        results = filtered[start:end]
+    else:
+        # 无过滤条件，直接 Redis 分页
+        start = (page - 1) * page_size
+        end = start + page_size - 1
+        all_logs = await redis_mgr.redis.zrevrange("aigateway:logs:requests", start, end, withscores=True)
+        results = []
+        for raw, score in all_logs:
+            entry = json.loads(raw.decode() if isinstance(raw, bytes) else raw)
+            results.append(entry)
+        total_filtered = total_count
+
+    items = []
+    for entry in results:
+        items.append({
+            "request_id": entry.get("request_id", ""),
+            "trace_id": entry.get("trace_id", ""),
+            "user_id": entry.get("user_id", ""),
+            "timestamp": entry.get("timestamp", 0),
+            "method": entry.get("method", ""),
+            "endpoint": entry.get("endpoint", ""),
+            "model": entry.get("model", ""),
+            "status": entry.get("status", 0),
+            "duration_ms": entry.get("duration_ms", 0),
+            "cache_hit": entry.get("cache_hit", False),
             "tier": entry.get("tier"),
         })
 
-        if len(results) >= page_size:
-            break
-
-    total = len(results)  # 简化：不返回总数，只返回当前页
-
     return {
         "data": {
-            "items": results,
+            "items": items,
             "pagination": {
                 "page": page,
                 "pageSize": page_size,
-                "total": total,
+                "total": total_filtered,
             },
         },
+        "message": "success",
+    }
+
+
+# ------------------------------------------------------------------
+# DELETE /admin/logs — 清空请求日志
+# ------------------------------------------------------------------
+
+
+@router.delete("/logs")
+async def delete_all_logs(
+    request: Request,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+    """清空所有请求日志。"""
+    from aigateway_api.main import app
+    s = app.state
+    redis_mgr = getattr(s, "redis_manager")
+
+    if redis_mgr is None or redis_mgr.redis is None:
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Redis not connected"}})
+
+    deleted_count = await redis_mgr.redis.delete("aigateway:logs:requests")
+
+    return {
+        "data": {"deleted": bool(deleted_count)},
         "message": "success",
     }

@@ -1,0 +1,116 @@
+- generic [ref=e1]:
+  - generic [ref=e3]:
+    - banner [ref=e4]:
+      - heading "AI Gateway Control Panel" [level=1] [ref=e5]
+      - button "亮色" [ref=e6] [cursor=pointer]:
+        - img [ref=e7]
+        - generic [ref=e13]: 亮色
+    - complementary [ref=e14]:
+      - navigation [ref=e15]:
+        - link "概览" [ref=e16] [cursor=pointer]:
+          - /url: /
+          - img [ref=e17]
+          - text: 概览
+        - link "插件管理" [ref=e22] [cursor=pointer]:
+          - /url: /plugins
+          - img [ref=e23]
+          - text: 插件管理
+        - link "成本分析" [ref=e25] [cursor=pointer]:
+          - /url: /costs
+          - img [ref=e26]
+          - text: 成本分析
+        - link "配额管理" [active] [ref=e28] [cursor=pointer]:
+          - /url: /quotas
+          - img [ref=e29]
+          - text: 配额管理
+        - link "缓存监控" [ref=e31] [cursor=pointer]:
+          - /url: /cache
+          - img [ref=e32]
+          - text: 缓存监控
+        - link "请求日志" [ref=e36] [cursor=pointer]:
+          - /url: /logs
+          - img [ref=e37]
+          - text: 请求日志
+    - main [ref=e40]:
+      - generic [ref=e231]:
+        - generic [ref=e232]:
+          - heading "配额管理" [level=2] [ref=e233]
+          - button "创建 API Key" [ref=e234] [cursor=pointer]:
+            - img [ref=e235]
+            - text: 创建 API Key
+        - generic [ref=e236]:
+          - img [ref=e237]
+          - textbox "搜索用户 ID 或 Key 前缀..." [ref=e240]
+        - table [ref=e243]:
+          - rowgroup [ref=e244]:
+            - row "User ID Key 前缀 状态 日 Token 月成本 最后使用 操作" [ref=e245]:
+              - columnheader "User ID" [ref=e246]
+              - columnheader "Key 前缀" [ref=e247]
+              - columnheader "状态" [ref=e248]
+              - columnheader "日 Token" [ref=e249]
+              - columnheader "月成本" [ref=e250]
+              - columnheader "最后使用" [ref=e251]
+              - columnheader "操作" [ref=e252]
+          - rowgroup [ref=e253]:
+            - row "test_dongwy sk-uEvmr... active 0% $0.00 / $50.00 6/29/2026" [ref=e254]:
+              - cell "test_dongwy" [ref=e255]
+              - cell "sk-uEvmr..." [ref=e256]
+              - cell "active" [ref=e257]:
+                - generic [ref=e258]: active
+              - cell "0%" [ref=e259]:
+                - generic [ref=e262]: 0%
+              - cell "$0.00 / $50.00" [ref=e263]:
+                - generic [ref=e264]: $0.00 / $50.00
+              - cell "6/29/2026" [ref=e265]
+              - cell [ref=e266]:
+                - generic [ref=e267]:
+                  - button "查看详情" [ref=e268] [cursor=pointer]:
+                    - img [ref=e269]
+                  - button "撤销" [ref=e272] [cursor=pointer]:
+                    - img [ref=e273]
+            - row "e2e_test_user sk-Gra4g... revoked 0% $0.00 / $25.00 6/30/2026" [ref=e276]:
+              - cell "e2e_test_user" [ref=e277]
+              - cell "sk-Gra4g..." [ref=e278]
+              - cell "revoked" [ref=e279]:
+                - generic [ref=e280]: revoked
+              - cell "0%" [ref=e281]:
+                - generic [ref=e284]: 0%
+              - cell "$0.00 / $25.00" [ref=e285]:
+                - generic [ref=e286]: $0.00 / $25.00
+              - cell "6/30/2026" [ref=e287]
+              - cell [ref=e288]:
+                - button "查看详情" [ref=e290] [cursor=pointer]:
+                  - img [ref=e291]
+            - row "openclaw test-ope... active 0% $0.00 / $50.00 —" [ref=e294]:
+              - cell "openclaw" [ref=e295]
+              - cell "test-ope..." [ref=e296]
+              - cell "active" [ref=e297]:
+                - generic [ref=e298]: active
+              - cell "0%" [ref=e299]:
+                - generic [ref=e302]: 0%
+              - cell "$0.00 / $50.00" [ref=e303]:
+                - generic [ref=e304]: $0.00 / $50.00
+              - cell "—" [ref=e305]
+              - cell [ref=e306]:
+                - generic [ref=e307]:
+                  - button "查看详情" [ref=e308] [cursor=pointer]:
+                    - img [ref=e309]
+                  - button "撤销" [ref=e312] [cursor=pointer]:
+                    - img [ref=e313]
+            - row "admin sk-a1b2c... active 0% $0.00 / $50.00 6/30/2026" [ref=e316]:
+              - cell "admin" [ref=e317]
+              - cell "sk-a1b2c..." [ref=e318]
+              - cell "active" [ref=e319]:
+                - generic [ref=e320]: active
+              - cell "0%" [ref=e321]:
+                - generic [ref=e325]: 0%
+              - cell "$0.00 / $50.00" [ref=e326]:
+                - generic [ref=e327]: $0.00 / $50.00
+              - cell "6/30/2026" [ref=e328]
+              - cell [ref=e329]:
+                - generic [ref=e330]:
+                  - button "查看详情" [ref=e331] [cursor=pointer]:
+                    - img [ref=e332]
+                  - button "撤销" [ref=e335] [cursor=pointer]:
+                    - img [ref=e336]
+  - generic [ref=e136]: 08:00

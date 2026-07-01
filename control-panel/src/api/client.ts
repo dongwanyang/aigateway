@@ -367,3 +367,17 @@ export async function getRequestLogs(params: {
     throw new Error('Logs returned invalid response')
   }
 }
+
+export async function deleteAllLogs(): Promise<ApiResponse<{ deleted: boolean }>> {
+  const headers = await ensureAuthHeaders()
+  const res = await fetch(`${API_BASE}/admin/logs`, {
+    method: 'DELETE',
+    headers,
+  })
+  if (!res.ok) throw new Error(`Failed to delete logs: ${res.status}`)
+  try {
+    return await res.json()
+  } catch {
+    throw new Error('Delete logs returned invalid response')
+  }
+}

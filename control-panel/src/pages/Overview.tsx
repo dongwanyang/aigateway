@@ -16,7 +16,7 @@ export default function Overview() {
   const [health, setHealth] = useState<HealthData | null>(null)
   const [healthLoading, setHealthLoading] = useState(true)
   const [stats, setStats] = useState(statCards)
-  const [costByModel, setCostByModel] = useState<{ model: string; cost: number }[]>([])
+  const [costByUser, setCostByUser] = useState<{ user: string; cost: number }[]>([])
   const [latencyData, setLatencyData] = useState<{ time: string; p50: number; p99: number }[]>([])
 
   useEffect(() => {
@@ -51,12 +51,12 @@ export default function Overview() {
         const totalCache = totalCacheHits + cacheMisses
         const hitRate = totalCache > 0 ? Math.round((totalCacheHits / totalCache) * 100) : 0
 
-        // 按模型的成本分布
-        const modelSamples = samples.filter(s => s.name === 'gateway_cost_by_model_total')
-        const modelCosts = modelSamples.map(s => ({
-          model: s.labels.model || 'unknown',
+        // 按用户的成本分布
+        const userSamples = samples.filter(s => s.name === 'gateway_cost_by_user_total')
+        const userCosts = userSamples.map(s => ({
+          user: s.labels.user_id || 'unknown',
           cost: s.value,
-        }))
+        })).sort((a, b) => b.cost - a.cost).slice(0, 5)
 
         // 延迟数据 — 从 histogram bucket 计算 P50/P90/P99
         const bucketSamples = samples.filter(s => s.name === 'gateway_request_duration_seconds_bucket')
@@ -138,11 +138,11 @@ export default function Overview() {
         if (!cancelled) {
           setStats([
             { ...statCards[0], value: Math.round(totalRequests).toLocaleString(), unit: 'requests' },
-            { ...statCards[1], value: avgLatency.toString(), unit: 'ms' },
+            { ...statCards[1], value: avgLatency > 0 ? avgLatency.toString() : '—', unit: 'ms' },
             { ...statCards[2], value: `$${totalCost.toFixed(2)}`, unit: 'USD' },
             { ...statCards[3], value: hitRate.toString(), unit: '%' },
           ])
-          setCostByModel(modelCosts)
+          setCostByUser(userCosts)
           setLatencyData(displayLatencyData)
         }
       } catch {
@@ -155,7 +155,7 @@ export default function Overview() {
   }, [])
 
   // 成本分布数据（至少显示一个占位）
-  const displayCostData = costByModel.length > 0 ? costByModel : [{ model: '暂无数据', cost: 0 }]
+  const displayCostData = costByUser.length > 0 ? costByUser : [{ user: '暂无数据', cost: 0 }]
 
   return (
     <div className="space-y-6">
@@ -232,17 +232,23 @@ export default function Overview() {
         </Card>
       </div>
 
-      {/* 成本分布 */}
-      <Card title="成本分布 by 模型">
-        <ResponsiveContainer width="100%" height={280}>
-          <LineChart data={displayCostData.map(m => ({ ...m, model: m.model.slice(0, 8) }))}>
-            <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
-            <XAxis dataKey="model" tick={{ fontSize: 11, fill: 'var(--color-text-quaternary)' }} />
-            <YAxis tick={{ fontSize: 11, fill: 'var(--color-text-quaternary)' }} />
-            <Tooltip contentStyle={{ backgroundColor: 'var(--color-bg-elevated)', border: '1px solid var(--color-border)', borderRadius: 8 }} />
-            <Line type="monotone" dataKey="cost" stroke="var(--color-primary)" strokeWidth={2} dot={{ fill: 'var(--color-primary)' }} name="Cost ($)" />
-          </LineChart>
-        </ResponsiveContainer>
+      {/* 成本分布 by 用户 */}
+      <Card title="成本分布 by 用户 (Top 5)">
+        {costByUser.length < 2 ? (
+          <div className="text-center py-12" style={{ color: 'var(--color-text-tertiary)' }}>
+            数据不足，等待更多请求...
+          </div>
+        ) : (
+          <ResponsiveContainer width="100%" height={280}>
+            <LineChart data={displayCostData}>
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
+              <XAxis dataKey="user" tick={{ fontSize: 11, fill: 'var(--color-text-quaternary)' }} />
+              <YAxis tick={{ fontSize: 11, fill: 'var(--color-text-quaternary)' }} />
+              <Tooltip contentStyle={{ backgroundColor: 'var(--color-bg-elevated)', border: '1px solid var(--color-border)', borderRadius: 8 }} />
+              <Line type="monotone" dataKey="cost" stroke="var(--color-primary)" strokeWidth={2} dot={{ fill: 'var(--color-primary)' }} name="Cost ($)" />
+            </LineChart>
+          </ResponsiveContainer>
+        )}
       </Card>
     </div>
   )

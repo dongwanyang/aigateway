@@ -126,6 +126,7 @@ class KeyStore:
         """验证 API Key 有效性。
 
         从 Redis `aigateway:key:{key_hash}` 查找并验证状态和配额。
+        若 Redis 中无任何 API Key（可能被清空），自动从 config 重新 seed。
 
         Args:
             key: 完整 API Key 值。
@@ -138,6 +139,12 @@ class KeyStore:
         """
         key_hash = self._hash_key(key)
         data = await self.redis.get_api_key(key_hash)
+
+        if data is None:
+            # Key not found — check if Redis was cleared and needs reseed
+            if await self._try_auto_reseed():
+                # Retry after reseed
+                data = await self.redis.get_api_key(key_hash)
 
         if data is None:
             logger.warning("API Key hash=%s 未找到", key_hash)
@@ -156,7 +163,6 @@ class KeyStore:
         # 更新 last_used_at
         data["last_used_at"] = self._now_iso()
         # 写回 Redis 前确保所有值是 str 类型（bool 会导致 hset 报错）
-        # 注意: bool 是 int 的子类，所以要单独检查
         serializable_data = {}
         for k, v in data.items():
             if isinstance(v, bool):
@@ -168,6 +174,40 @@ class KeyStore:
         await self.redis.set_api_key(key_hash, serializable_data)
 
         return data
+
+    async def _try_auto_reseed(self) -> bool:
+        """检查 Redis 中是否有任何 API Key，若无则从 config 自动 reseed。
+
+        Returns:
+            True if reseed was performed, False otherwise.
+        """
+        if self.redis is None or self.redis.redis is None:
+            return False
+
+        try:
+            cursor, keys = await self.redis.redis.scan(0, match="aigateway:key:*", count=5)
+            if keys:
+                return False  # Redis has keys, no need to reseed
+
+            # Redis is empty — try to reseed from config
+            # Import config_manager from app state (circular-import-safe)
+            try:
+                from aigateway_api.main import app
+                config_manager = getattr(app.state, "config_manager", None)
+                if config_manager:
+                    auth_config = config_manager.get("auth", {})
+                    keys_config = auth_config.get("api_keys", [])
+                    if keys_config:
+                        seeded = await self.seed_from_config(keys_config)
+                        logger.info("API Keys re-seeded from config.yaml: %d keys imported", seeded)
+                        return seeded > 0
+            except Exception as exc:
+                logger.warning("Auto-reseed failed: %s", exc)
+
+        except Exception as exc:
+            logger.warning("Auto-reseed check failed: %s", exc)
+
+        return False
 
     async def create(self, user_id: str, quotas: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """创建新 API Key 并存入 Redis。
@@ -399,6 +439,63 @@ class KeyStore:
 
         logger.info("API Key 已撤销: key_id=%s", key_id)
         return True
+
+    async def delete_permanently(self, key_id: str) -> bool:
+        """从 Redis 中完全删除指定 API Key 的所有数据。
+
+        与 revoke 不同，此方法彻底删除 key 记录，不留任何痕迹。
+
+        Args:
+            key_id: API Key 内部 ID，如 "key_abc123"。
+
+        Returns:
+            是否删除成功。
+        """
+        if not key_id.startswith("key_"):
+            raise ValueError("Invalid key_id format, should be key_xxx")
+
+        key_hashes = await self._find_key_hashes_by_id(key_id)
+        if not key_hashes:
+            logger.warning("未找到 key_id=%s 对应的 Key 记录", key_id)
+            return False
+
+        for kh in key_hashes:
+            data = await self.redis.get_api_key(kh)
+            if not data:
+                continue
+            key_prefix = data.get("key_prefix", "")
+            # 删除 key 主记录
+            await self.redis.delete_api_key(kh, key_prefix)
+            logger.info("API Key 已永久删除: key_id=%s, key_hash=%s", key_id, kh)
+
+        # 广播删除事件
+        pub_msg = self._build_pubsub_message("key_deleted", key_id, "")
+        await self.redis.publish(self.PUBSUB_CHANNEL, pub_msg)
+
+        return True
+
+    async def ensure_seeded(self, keys_config: List[Dict[str, Any]]) -> int:
+        """检查 Redis 中是否有 API Key，若为空则重新 seed。
+
+        用于 Redis 被清空后的自动恢复。
+
+        Args:
+            keys_config: config.yaml auth.api_keys 配置列表。
+
+        Returns:
+            重新导入的 key 数量（0 表示无需重新 seed）。
+        """
+        if self.redis is None or self.redis.redis is None:
+            return 0
+
+        # 检查是否有任何 key 存在
+        cursor, keys = await self.redis.redis.scan(0, match="aigateway:key:*", count=10)
+        if keys:
+            return 0  # 有 key 存在，无需 reseed
+
+        # Redis 为空，重新 seed
+        logger.info("API Keys re-seeded from config.yaml")
+        return await self.seed_from_config(keys_config)
 
     # ------------------------------------------------------------------
     # 配额检查与累加

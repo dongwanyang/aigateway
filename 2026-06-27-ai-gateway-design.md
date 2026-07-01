@@ -976,3 +976,332 @@ docker compose up -d
 - **Plugin DAG execution**: Upgrade linear pipeline to DAG-based scheduling (networkx) enabling parallel execution of independent plugins.
 - **Async task queue**: Offload RAG document processing and log ingestion to Celery workers for lower P99 latency.
 - **Feature flag platform**: Integrate Unleash or similar for per-key plugin A/B testing and gradual rollout.
+
+---
+
+## Stage-Based Parallelism（阶段内并行调度方案）
+
+> Status: v2+ 预案 — 当插件数量 > 10 或单插件耗时 > 50ms 时考虑实施
+> 前置条件: MVP 线性管道稳定运行，性能瓶颈已通过 profiling 确认在插件调度层
+
+### 设计理念
+
+Stage-based parallelism 是介于纯线性管道和完整 DAG 调度之间的折中方案。核心思路：
+
+1. 将插件按逻辑功能分为多个**阶段（Stage）**
+2. **阶段间**严格串行（前一阶段全部完成后才进入下一阶段）
+3. **阶段内**的插件无依赖关系，可以 `asyncio.gather()` 并行执行
+4. 短路检查在**阶段边界**进行（而非每个插件之后）
+
+这样保留了线性管道的可预测性和短路简洁性，同时在有并行机会的阶段获得延迟收益。
+
+### 阶段划分
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Stage 0: Pre-processing（预处理）                               │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          │
+│  │ PII Detector │  │ Prompt       │  │ Token        │          │
+│  │              │  │ Compress     │  │ Counter      │          │
+│  └──────────────┘  └──────────────┘  └──────────────┘          │
+│  ↑ 这三个插件都只读 request.messages，写各自的 namespace         │
+│  ↑ 可以并行执行                                                  │
+├─────────────────────────────────────────────────────────────────┤
+│  ★ 短路检查点: if ctx.should_stop → return                      │
+├─────────────────────────────────────────────────────────────────┤
+│  Stage 1: Cache Lookup（缓存查找）                               │
+│  ┌──────────────┐  ┌──────────────┐                            │
+│  │ Prompt Cache │  │ Semantic     │                            │
+│  │ (L1 + L2)   │  │ Cache (L3)   │                            │
+│  └──────────────┘  └──────────────┘                            │
+│  ↑ 精确缓存和语义缓存可以并行查找                                 │
+│  ↑ 任一命中即标记 should_stop                                    │
+├─────────────────────────────────────────────────────────────────┤
+│  ★ 短路检查点: if ctx.should_stop → return cached response      │
+├─────────────────────────────────────────────────────────────────┤
+│  Stage 2: Enrichment（增强）                                     │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          │
+│  │ Conv         │  │ RAG          │  │ Context      │          │
+│  │ Compressor   │  │ Retriever    │  │ Injector     │          │
+│  └──────────────┘  └──────────────┘  └──────────────┘          │
+│  ↑ 对话摘要、RAG检索、上下文注入互不依赖，可并行                   │
+├─────────────────────────────────────────────────────────────────┤
+│  ★ 短路检查点                                                    │
+├─────────────────────────────────────────────────────────────────┤
+│  Stage 3: Routing & Execution（路由与执行）                       │
+│  ┌──────────────┐  →  ┌──────────────┐                         │
+│  │ Model Router │     │ LiteLLM Call │                         │
+│  └──────────────┘     └──────────────┘                         │
+│  ↑ 路由决策 → LLM调用，天然串行                                   │
+├─────────────────────────────────────────────────────────────────┤
+│  Stage 4: Post-processing（后处理）                              │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          │
+│  │ Response     │  │ Cache        │  │ Metrics      │          │
+│  │ Formatter    │  │ Backfill     │  │ Collector    │          │
+│  └──────────────┘  └──────────────┘  └──────────────┘          │
+│  ↑ 格式化响应、回填缓存、收集指标可并行                            │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 接口设计
+
+```python
+from __future__ import annotations
+import asyncio
+from dataclasses import dataclass, field
+from typing import List, Optional
+
+@dataclass
+class Stage:
+    """一个执行阶段，包含可并行执行的插件列表。"""
+    name: str
+    plugins: List[Plugin]
+    short_circuit_after: bool = True  # 阶段完成后是否检查短路
+    fail_strategy: str = "continue"   # "continue" | "abort_stage" | "abort_pipeline"
+
+class StagedPipelineEngine:
+    """阶段内并行的管线引擎。
+
+    与 PipelineEngine 接口兼容，可无缝替换。
+    """
+
+    def __init__(self, stages: List[Stage]) -> None:
+        self._stages = stages
+
+    async def execute(self, request: dict) -> dict:
+        ctx = PipelineContext(request=request)
+        ctx.should_stream = bool(request.get("stream", False))
+
+        for stage in self._stages:
+            # 阶段间短路检查
+            if ctx.should_stop:
+                self._mark_remaining_skipped(stage, ctx)
+                continue
+
+            # 阶段内并行执行
+            results = await self._execute_stage(stage, ctx)
+
+            # 阶段完成后短路检查
+            if stage.short_circuit_after and ctx.should_stop:
+                # 跳过后续所有阶段
+                break
+
+        return self._build_response(ctx)
+
+    async def _execute_stage(self, stage: Stage, ctx: PipelineContext) -> None:
+        """并行执行一个阶段内的所有插件。
+
+        关键设计决策：
+        1. 每个插件操作 ctx 的独立 namespace，不会冲突
+        2. 全局字段（should_stop）使用 first-writer-wins 语义
+        3. 单个插件失败不影响同阶段其他插件
+        """
+        if len(stage.plugins) == 1:
+            # 单插件阶段，无需 gather 开销
+            await self._run_plugin(stage.plugins[0], ctx)
+            return
+
+        # 多插件并行
+        tasks = [
+            asyncio.create_task(
+                self._run_plugin(plugin, ctx),
+                name=f"stage:{stage.name}:plugin:{plugin.name}",
+            )
+            for plugin in stage.plugins
+        ]
+
+        # 等待所有任务完成（即使某个失败，其余继续）
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+        # 处理异常
+        for task, plugin in zip(tasks, stage.plugins):
+            if task.exception():
+                exc = task.exception()
+                logger.error(
+                    "Stage %s plugin %s failed: %s",
+                    stage.name, plugin.name, exc,
+                )
+                ctx.add_plugin_trace(plugin.name, 0, "failed")
+
+    async def _run_plugin(self, plugin: Plugin, ctx: PipelineContext) -> None:
+        """执行单个插件，包含计时和异常处理。"""
+        start = time.monotonic()
+        try:
+            await plugin.execute(ctx)
+            elapsed_ms = (time.monotonic() - start) * 1000
+            ctx.add_plugin_trace(plugin.name, elapsed_ms, "success")
+        except Exception as exc:
+            elapsed_ms = (time.monotonic() - start) * 1000
+            ctx.add_plugin_trace(plugin.name, elapsed_ms, "failed")
+            raise
+```
+
+### 配置格式
+
+```yaml
+# config.yaml — 阶段式管线配置
+pipeline:
+  mode: staged  # "linear" (MVP) | "staged" (v2)
+
+  stages:
+    - name: pre_processing
+      parallel: true
+      short_circuit_after: true
+      plugins:
+        - pii_detector
+        - prompt_compress
+        - token_counter
+
+    - name: cache_lookup
+      parallel: true
+      short_circuit_after: true
+      plugins:
+        - prompt_cache
+        - semantic_cache
+
+    - name: enrichment
+      parallel: true
+      short_circuit_after: false
+      plugins:
+        - conv_compressor
+        - rag_retriever
+        - context_injector
+
+    - name: routing_execution
+      parallel: false  # 串行：先路由后调用
+      short_circuit_after: false
+      plugins:
+        - model_router
+        - litellm_completion
+
+    - name: post_processing
+      parallel: true
+      short_circuit_after: false
+      plugins:
+        - response_formatter
+        - cache_backfill
+        - metrics_collector
+```
+
+### PipelineContext 并发安全
+
+阶段内并行要求对 `PipelineContext` 的并发访问做出约束：
+
+```python
+class PipelineContext:
+    # === 只读字段（创建后不变） ===
+    request: dict              # 原始请求，所有插件只读
+    request_id: str
+    trace_id: str
+    user_id: Optional[str]
+
+    # === 插件隔离字段（每个插件写自己的 namespace） ===
+    # 使用 dict 的 key 隔离，不同 key 无竞争
+    pii_detector: dict = {}       # 仅 PII 插件写
+    prompt_cache: dict = {}       # 仅缓存插件写
+    semantic_cache: dict = {}     # 仅语义缓存写
+    model_router: dict = {}       # 仅路由插件写
+    # ...
+
+    # === 全局可变字段（需要原子操作） ===
+    _should_stop: bool = False
+    _stop_reason: str = ""
+    _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    async def mark_stopped(self, reason: str) -> None:
+        """线程安全的短路标记（first-writer-wins）。"""
+        async with self._lock:
+            if not self._should_stop:
+                self._should_stop = True
+                self._stop_reason = reason
+
+    @property
+    def should_stop(self) -> bool:
+        return self._should_stop
+```
+
+**设计原则：**
+- 插件只写自己 namespace 的字段 → 无锁
+- `should_stop` 使用 `asyncio.Lock` + first-writer-wins → 避免后写覆盖
+- `response` 字段由缓存插件通过 `mark_stopped()` 原子设置
+
+### 短路语义
+
+```
+阶段内并行时的短路处理：
+
+1. Stage 1 内 prompt_cache 和 semantic_cache 同时查询
+2. 假设 prompt_cache 先命中 → 调用 ctx.mark_stopped("cache_hit=L2")
+3. semantic_cache 的 embedding 计算可能还在进行中
+4. 由于 gather() 会等所有任务完成，semantic_cache 会自然结束
+   （它的结果会被忽略，因为 should_stop 已经为 True）
+5. Stage 1 结束后检查 should_stop → True → 跳过后续 Stage
+
+注意：不使用 Task.cancel()，避免取消带来的复杂性。
+让已启动的任务自然完成，仅在阶段边界做短路判断。
+代价是浪费少量计算，但换来了确定性和简洁性。
+```
+
+### 与 MVP 线性管道的兼容性
+
+```python
+class PipelineEngineFactory:
+    """根据配置选择管线引擎实现。"""
+
+    @staticmethod
+    def create(config: dict, registry: PluginRegistry) -> PipelineEngine:
+        mode = config.get("pipeline", {}).get("mode", "linear")
+
+        if mode == "linear":
+            # MVP 模式：拓扑排序 + 线性执行
+            engine = LinearPipelineEngine(registry)
+        elif mode == "staged":
+            # v2 模式：阶段内并行
+            stages = StageBuilder.build_from_config(
+                config["pipeline"]["stages"],
+                registry,
+            )
+            engine = StagedPipelineEngine(stages)
+        else:
+            raise ValueError(f"Unknown pipeline mode: {mode}")
+
+        engine.initialize()
+        return engine
+```
+
+升级路径：
+1. 修改 `config.yaml` 中 `pipeline.mode` 从 `linear` → `staged`
+2. 添加 `stages` 配置
+3. 无需修改任何插件代码（接口不变）
+4. 可随时回退到 `linear` 模式
+
+### 性能预估
+
+以当前插件为例，假设未来启用全部插件：
+
+| 模式 | Stage 0 | Stage 1 | Stage 2 | Stage 3 | Stage 4 | 总计 |
+|------|---------|---------|---------|---------|---------|------|
+| 线性 | 5+2+1=8ms | 5+50=55ms | 30+80+5=115ms | 2+LLM | 3+5+1=9ms | ~187ms + LLM |
+| 阶段并行 | max(5,2,1)=5ms | max(5,50)=50ms | max(30,80,5)=80ms | 2+LLM | max(3,5,1)=5ms | ~142ms + LLM |
+| 节省 | — | — | — | — | — | **~45ms (24%)** |
+
+当 RAG 检索（80ms）和对话摘要（30ms）同时启用时，Stage 2 的并行收益最为明显。
+
+### 何时触发升级
+
+建议在满足以下任一条件时从线性管道升级到阶段式并行：
+
+1. **启用插件数 > 8 个**，且存在 2+ 个无依赖的独立插件
+2. **P99 管线延迟 > 100ms**（不含 LLM 调用时间），profiling 确认瓶颈在插件串行等待
+3. **RAG + Conv Compressor 同时启用**，Stage 2 串行延迟超过 100ms
+4. **用户反馈首字节延迟（TTFB）不达标**，需要压缩管线开销
+
+### 实施步骤
+
+1. 将 `PipelineEngine` 重命名为 `LinearPipelineEngine`
+2. 新建 `StagedPipelineEngine`，实现 `execute()` 接口
+3. 添加 `PipelineEngineFactory`，根据 config 选择实现
+4. 给 `PipelineContext` 的 `should_stop` 加 `asyncio.Lock`
+5. 编写阶段配置解析器 `StageBuilder`
+6. 添加 per-stage metrics（每阶段耗时、并行度）
+7. 集成测试：验证阶段并行结果与线性模式一致（属性测试）

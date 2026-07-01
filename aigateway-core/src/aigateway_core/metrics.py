@@ -96,6 +96,7 @@ class MetricsCollector:
         self._tokens_counter: Any = None
         self._cost_total_gauge: Any = None
         self._cost_by_model_counter: Any = None
+        self._cost_by_user_counter: Any = None
         self._circuit_breaker_gauge: Any = None
         self._active_requests_gauge: Any = None
         self._up_gauge: Any = None
@@ -175,6 +176,14 @@ class MetricsCollector:
             "gateway_cost_by_model",
             "Total cost by model",
             labelnames=["model"],
+            registry=registry,
+        )
+
+        # gateway_cost_by_user — counter
+        self._cost_by_user_counter = Counter(
+            "gateway_cost_by_user",
+            "Total cost by user",
+            labelnames=["user_id"],
             registry=registry,
         )
 
@@ -304,12 +313,13 @@ class MetricsCollector:
         if self._tokens_counter and tokens > 0:
             self._tokens_counter.labels(type=token_type).inc(tokens)
 
-    def record_cost(self, cost_usd: float, model: str = "unknown") -> None:
+    def record_cost(self, cost_usd: float, model: str = "unknown", user_id: str = "") -> None:
         """记录请求成本。
 
         Args:
             cost_usd: 成本（美元）。
             model: 模型名称。
+            user_id: 用户 ID。
         """
         if not self.enabled:
             return
@@ -320,6 +330,9 @@ class MetricsCollector:
 
         if self._cost_by_model_counter:
             self._cost_by_model_counter.labels(model=model).inc(cost_usd)
+
+        if self._cost_by_user_counter and user_id:
+            self._cost_by_user_counter.labels(user_id=user_id).inc(cost_usd)
 
     # ------------------------------------------------------------------
     # 熔断器状态指标

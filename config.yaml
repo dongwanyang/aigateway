@@ -100,4 +100,4 @@ observability:
   log_format: json
   log_level: info
 hot_reload: true
-debug_mode: false
+debug_mode: true
