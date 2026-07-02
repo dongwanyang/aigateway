@@ -1,7 +1,162 @@
 import { useEffect, useState } from 'react'
-import { Bot, Plus, Trash2, Save, RefreshCw, ChevronDown, ChevronRight, Wifi, List } from 'lucide-react'
+import { Bot, Plus, Trash2, Save, RefreshCw, ChevronDown, ChevronRight, Wifi, List, Zap, Check } from 'lucide-react'
 import Card from '@/components/Card'
 import { getFullConfig, updateFullConfig, testProviderConnectivity, fetchProviderModels } from '@/api/client'
+
+// --- 预设提供商定义 ---
+
+interface PresetProvider {
+  id: string
+  name: string
+  description: string
+  baseUrl: string
+  defaultModels: string[]
+  keyPlaceholder: string
+  keyPrefix?: string
+  color: string
+}
+
+const PRESET_PROVIDERS: PresetProvider[] = [
+  {
+    id: 'openai',
+    name: 'OpenAI',
+    description: 'GPT-4o, GPT-4o-mini, o1, o3 等',
+    baseUrl: 'https://api.openai.com/v1',
+    defaultModels: ['gpt-4o', 'gpt-4o-mini', 'o1', 'o3-mini', 'gpt-4-turbo'],
+    keyPlaceholder: 'sk-...',
+    keyPrefix: 'sk-',
+    color: '#10a37f',
+  },
+  {
+    id: 'anthropic',
+    name: 'Anthropic (Claude)',
+    description: 'Claude 4 Sonnet, Claude 3.5 Sonnet, Claude 3 Opus 等',
+    baseUrl: 'https://api.anthropic.com/v1',
+    defaultModels: ['claude-sonnet-4-20250514', 'claude-3-5-sonnet-20241022', 'claude-3-opus-20240229', 'claude-3-haiku-20240307'],
+    keyPlaceholder: 'sk-ant-...',
+    keyPrefix: 'sk-ant-',
+    color: '#d97757',
+  },
+  {
+    id: 'google',
+    name: 'Google (Gemini)',
+    description: 'Gemini 2.5 Pro, Gemini 2.0 Flash 等',
+    baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+    defaultModels: ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-pro'],
+    keyPlaceholder: 'AIza...',
+    color: '#4285f4',
+  },
+  {
+    id: 'deepseek',
+    name: 'DeepSeek',
+    description: 'DeepSeek-V3, DeepSeek-R1 等',
+    baseUrl: 'https://api.deepseek.com/v1',
+    defaultModels: ['deepseek-chat', 'deepseek-reasoner'],
+    keyPlaceholder: 'sk-...',
+    color: '#4d6bfe',
+  },
+  {
+    id: 'zhipu',
+    name: '智谱 AI (GLM)',
+    description: 'GLM-4-Plus, GLM-4-Flash 等',
+    baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+    defaultModels: ['glm-4-plus', 'glm-4-flash', 'glm-4-long', 'glm-4v-plus'],
+    keyPlaceholder: '输入你的智谱 API Key',
+    color: '#3451b2',
+  },
+  {
+    id: 'qwen',
+    name: '通义千问 (Qwen)',
+    description: 'Qwen-Max, Qwen-Plus, Qwen-Turbo 等',
+    baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    defaultModels: ['qwen-max', 'qwen-plus', 'qwen-turbo', 'qwen-long'],
+    keyPlaceholder: 'sk-...',
+    color: '#6236ff',
+  },
+  {
+    id: 'moonshot',
+    name: 'Moonshot (Kimi)',
+    description: 'Moonshot-v1-8k, 32k, 128k',
+    baseUrl: 'https://api.moonshot.cn/v1',
+    defaultModels: ['moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k'],
+    keyPlaceholder: 'sk-...',
+    color: '#000000',
+  },
+  {
+    id: 'doubao',
+    name: '豆包 (Doubao)',
+    description: '字节跳动豆包大模型',
+    baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
+    defaultModels: ['doubao-1-5-pro-256k', 'doubao-1-5-pro-32k', 'doubao-1-5-lite-32k'],
+    keyPlaceholder: '输入你的火山引擎 API Key',
+    color: '#ff6900',
+  },
+  {
+    id: 'yi',
+    name: '零一万物 (Yi)',
+    description: 'Yi-Lightning, Yi-Large, Yi-Medium 等',
+    baseUrl: 'https://api.lingyiwanwu.com/v1',
+    defaultModels: ['yi-lightning', 'yi-large', 'yi-medium', 'yi-spark'],
+    keyPlaceholder: '输入你的零一万物 API Key',
+    color: '#1a1a2e',
+  },
+  {
+    id: 'minimax',
+    name: 'MiniMax',
+    description: 'abab6.5s, abab6.5t 等',
+    baseUrl: 'https://api.minimax.chat/v1',
+    defaultModels: ['abab6.5s-chat', 'abab6.5t-chat', 'abab5.5-chat'],
+    keyPlaceholder: '输入你的 MiniMax API Key',
+    color: '#e83e8c',
+  },
+  {
+    id: 'groq',
+    name: 'Groq',
+    description: 'Llama 3.3, Mixtral 等（极速推理）',
+    baseUrl: 'https://api.groq.com/openai/v1',
+    defaultModels: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768'],
+    keyPlaceholder: 'gsk_...',
+    keyPrefix: 'gsk_',
+    color: '#f55036',
+  },
+  {
+    id: 'mistral',
+    name: 'Mistral AI',
+    description: 'Mistral Large, Medium, Small 等',
+    baseUrl: 'https://api.mistral.ai/v1',
+    defaultModels: ['mistral-large-latest', 'mistral-medium-latest', 'mistral-small-latest', 'open-mixtral-8x22b'],
+    keyPlaceholder: '输入你的 Mistral API Key',
+    color: '#ff7000',
+  },
+  {
+    id: 'openrouter',
+    name: 'OpenRouter',
+    description: '聚合多个模型提供商的统一接口',
+    baseUrl: 'https://openrouter.ai/api/v1',
+    defaultModels: ['openai/gpt-4o', 'anthropic/claude-3.5-sonnet', 'google/gemini-pro-1.5', 'meta-llama/llama-3.1-405b-instruct'],
+    keyPlaceholder: 'sk-or-...',
+    keyPrefix: 'sk-or-',
+    color: '#6366f1',
+  },
+  {
+    id: 'siliconflow',
+    name: 'SiliconFlow (硅基流动)',
+    description: 'DeepSeek, Qwen, GLM 等开源模型托管',
+    baseUrl: 'https://api.siliconflow.cn/v1',
+    defaultModels: ['deepseek-ai/DeepSeek-V3', 'Qwen/Qwen2.5-72B-Instruct', 'THUDM/glm-4-9b-chat'],
+    keyPlaceholder: 'sk-...',
+    color: '#7c3aed',
+  },
+  {
+    id: 'custom',
+    name: '自定义 (OpenAI 兼容)',
+    description: '其他兼容 OpenAI API 格式的服务',
+    baseUrl: '',
+    defaultModels: [],
+    keyPlaceholder: '输入 API Key',
+    color: '#6b7280',
+  },
+]
 
 // --- 类型定义 ---
 
@@ -46,8 +201,12 @@ export default function Models() {
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
   const [expandedProviders, setExpandedProviders] = useState<Set<string>>(new Set())
-  const [newProviderName, setNewProviderName] = useState('')
-  const [showAddProvider, setShowAddProvider] = useState(false)
+  const [showQuickAdd, setShowQuickAdd] = useState(false)
+  const [quickAddStep, setQuickAddStep] = useState<'select' | 'config'>('select')
+  const [selectedPreset, setSelectedPreset] = useState<PresetProvider | null>(null)
+  const [quickAddKey, setQuickAddKey] = useState('')
+  const [quickAddBaseUrl, setQuickAddBaseUrl] = useState('')
+  const [quickAddName, setQuickAddName] = useState('')
   const [fullConfig, setFullConfig] = useState<Record<string, unknown>>({})
   const [testResults, setTestResults] = useState<Record<string, { success: boolean; latency_ms: number; error?: string; loading: boolean }>>({})
   const [fetchedModels, setFetchedModels] = useState<Record<string, { models: string[]; loading: boolean; error?: string }>>({})
@@ -101,7 +260,6 @@ export default function Models() {
     setError(null)
     setSuccess(null)
     try {
-      // 构建更新的配置
       const updatedConfig = {
         ...fullConfig,
         providers,
@@ -118,6 +276,59 @@ export default function Models() {
     }
   }
 
+  // --- 快速添加提供商 ---
+  function handleSelectPreset(preset: PresetProvider) {
+    setSelectedPreset(preset)
+    setQuickAddKey('')
+    setQuickAddBaseUrl(preset.baseUrl)
+    setQuickAddName(preset.id === 'custom' ? '' : preset.id)
+    setQuickAddStep('config')
+  }
+
+  function handleQuickAddConfirm() {
+    if (!selectedPreset) return
+    const name = (quickAddName || selectedPreset.id).trim().toLowerCase()
+    if (!name || providers[name]) {
+      setError(`提供商 "${name}" 已存在`)
+      return
+    }
+    if (!quickAddKey.trim()) {
+      setError('请输入 API Key')
+      return
+    }
+
+    const newProvider: ProviderConfig = {
+      api_key: quickAddKey.trim(),
+      base_url: quickAddBaseUrl || selectedPreset.baseUrl || '',
+      model_grouper: [{
+        models: [...selectedPreset.defaultModels],
+        fallback_models: [],
+        pricing: {},
+      }],
+      num_retries: 3,
+      retry_after: 1000,
+    }
+
+    setProviders(prev => ({ ...prev, [name]: newProvider }))
+    setExpandedProviders(prev => new Set([...prev, name]))
+    setShowQuickAdd(false)
+    setQuickAddStep('select')
+    setSelectedPreset(null)
+    setQuickAddKey('')
+    setSuccess(`已添加提供商 "${name}"，记得点击"保存配置"使其生效`)
+    setTimeout(() => setSuccess(null), 4000)
+  }
+
+  function resetQuickAdd() {
+    setShowQuickAdd(false)
+    setQuickAddStep('select')
+    setSelectedPreset(null)
+    setQuickAddKey('')
+    setQuickAddBaseUrl('')
+    setQuickAddName('')
+  }
+
+  // --- 通用操作 ---
   function toggleProviderExpand(name: string) {
     setExpandedProviders(prev => {
       const next = new Set(prev)
@@ -167,7 +378,6 @@ export default function Models() {
       const group = { ...groups[groupIdx] }
       const modelName = group.models[modelIdx]
       group.models = group.models.filter((_, i) => i !== modelIdx)
-      // 同时删除对应的 pricing
       const pricing = { ...group.pricing }
       delete pricing[modelName]
       group.pricing = pricing
@@ -233,31 +443,46 @@ export default function Models() {
     })
   }
 
-  /** 将价格数字格式化为易读的小数形式，避免科学计数法 */
+  // 价格输入临时状态（允许中间输入如 "0.", "0.0"）
+  const [pricingInputs, setPricingInputs] = useState<Record<string, string>>({})
+
   function formatPrice(value: number | undefined): string {
     if (value === undefined || value === 0) return ''
-    // 使用 toFixed 确保不显示科学计数法
-    // 找到有效精度
     const str = value.toFixed(10).replace(/0+$/, '').replace(/\.$/, '')
     return str
   }
 
-  function addProvider() {
-    const name = newProviderName.trim().toLowerCase()
-    if (!name || providers[name]) return
-    setProviders(prev => ({
-      ...prev,
-      [name]: {
-        api_key: '',
-        base_url: '',
-        model_grouper: [{ models: [], fallback_models: [], pricing: {} }],
-        num_retries: 3,
-        retry_after: 1000,
-      },
-    }))
-    setExpandedProviders(prev => new Set([...prev, name]))
-    setNewProviderName('')
-    setShowAddProvider(false)
+  function getPricingInputKey(providerName: string, groupIdx: number, modelName: string, field: string) {
+    return `${providerName}:${groupIdx}:${modelName}:${field}`
+  }
+
+  function getPricingDisplayValue(providerName: string, groupIdx: number, modelName: string, field: 'prompt' | 'completion') {
+    const key = getPricingInputKey(providerName, groupIdx, modelName, field)
+    if (key in pricingInputs) return pricingInputs[key]
+    const group = providers[providerName]?.model_grouper[groupIdx]
+    const value = group?.pricing[modelName]?.[field]
+    return formatPrice(value)
+  }
+
+  function handlePricingChange(providerName: string, groupIdx: number, modelName: string, field: 'prompt' | 'completion', value: string) {
+    const key = getPricingInputKey(providerName, groupIdx, modelName, field)
+    // 只允许数字和小数点
+    if (value !== '' && !/^[0-9]*\.?[0-9]*$/.test(value)) return
+    setPricingInputs(prev => ({ ...prev, [key]: value }))
+  }
+
+  function handlePricingBlur(providerName: string, groupIdx: number, modelName: string, field: 'prompt' | 'completion') {
+    const key = getPricingInputKey(providerName, groupIdx, modelName, field)
+    const rawValue = pricingInputs[key]
+    if (rawValue === undefined) return
+    // 失焦时提交实际数值
+    updatePricing(providerName, groupIdx, modelName, field, rawValue)
+    // 清除临时状态
+    setPricingInputs(prev => {
+      const next = { ...prev }
+      delete next[key]
+      return next
+    })
   }
 
   async function handleTestConnectivity(providerName: string) {
@@ -349,40 +574,212 @@ export default function Models() {
         </div>
       )}
 
-      {/* --- Providers 区域 --- */}
+      {/* === 快速添加提供商面板 === */}
       <div className="space-y-4">
         <div className="flex items-center justify-between">
           <h3 className="text-lg font-semibold">模型提供商</h3>
           <button
-            className="btn btn-secondary"
-            style={{ padding: '6px 12px', fontSize: '12px' }}
-            onClick={() => setShowAddProvider(true)}
+            className="btn btn-primary"
+            style={{ padding: '8px 16px', fontSize: '12px' }}
+            onClick={() => { setShowQuickAdd(true); setQuickAddStep('select') }}
           >
-            <Plus size={14} /> 添加提供商
+            <Zap size={14} /> 快速添加
           </button>
         </div>
 
-        {showAddProvider && (
+        {/* 快速添加 - 选择提供商 */}
+        {showQuickAdd && quickAddStep === 'select' && (
           <Card>
-            <div className="flex items-center gap-3">
-              <input
-                className="input flex-1"
-                placeholder="提供商名称 (如: openai, anthropic, deepseek...)"
-                value={newProviderName}
-                onChange={e => setNewProviderName(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter') addProvider() }}
-                autoFocus
-              />
-              <button className="btn btn-primary" style={{ padding: '8px 16px', fontSize: '12px' }} onClick={addProvider} disabled={!newProviderName.trim()}>
-                确认添加
-              </button>
-              <button className="btn btn-secondary" style={{ padding: '8px 16px', fontSize: '12px' }} onClick={() => setShowAddProvider(false)}>
-                取消
-              </button>
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <h4 className="font-semibold text-base">选择模型提供商</h4>
+                <button
+                  className="text-xs cursor-pointer px-3 py-1 rounded"
+                  style={{ color: 'var(--color-text-secondary)', border: '1px solid var(--color-border)' }}
+                  onClick={resetQuickAdd}
+                >
+                  取消
+                </button>
+              </div>
+              <p className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>
+                选择一个提供商，只需输入 API Key 即可完成配置，无需手动填写 Base URL
+              </p>
+              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+                {PRESET_PROVIDERS.map(preset => {
+                  const alreadyAdded = Object.keys(providers).includes(preset.id)
+                  return (
+                    <div
+                      key={preset.id}
+                      className="relative p-4 rounded-lg cursor-pointer transition-all"
+                      style={{
+                        border: `1.5px solid ${alreadyAdded ? 'var(--color-border)' : 'var(--color-border)'}`,
+                        backgroundColor: 'var(--color-bg-overlay)',
+                        opacity: alreadyAdded ? 0.5 : 1,
+                      }}
+                      onClick={() => !alreadyAdded && handleSelectPreset(preset)}
+                      onMouseEnter={e => {
+                        if (!alreadyAdded) {
+                          (e.currentTarget as HTMLElement).style.borderColor = preset.color
+                          ;(e.currentTarget as HTMLElement).style.boxShadow = `0 0 0 1px ${preset.color}20`
+                        }
+                      }}
+                      onMouseLeave={e => {
+                        (e.currentTarget as HTMLElement).style.borderColor = 'var(--color-border)'
+                        ;(e.currentTarget as HTMLElement).style.boxShadow = 'none'
+                      }}
+                    >
+                      {alreadyAdded && (
+                        <div className="absolute top-2 right-2">
+                          <Check size={14} style={{ color: 'var(--color-success)' }} />
+                        </div>
+                      )}
+                      <div
+                        className="w-8 h-8 rounded-lg flex items-center justify-center mb-2 text-white font-bold text-sm"
+                        style={{ backgroundColor: preset.color }}
+                      >
+                        {preset.name.charAt(0)}
+                      </div>
+                      <div className="font-medium text-sm">{preset.name}</div>
+                      <div className="text-xs mt-1" style={{ color: 'var(--color-text-quaternary)' }}>
+                        {preset.description}
+                      </div>
+                      {alreadyAdded && (
+                        <div className="text-xs mt-1" style={{ color: 'var(--color-success)' }}>已配置</div>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
             </div>
           </Card>
         )}
 
+        {/* 快速添加 - 输入 API Key */}
+        {showQuickAdd && quickAddStep === 'config' && selectedPreset && (
+          <Card>
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div
+                    className="w-8 h-8 rounded-lg flex items-center justify-center text-white font-bold text-sm"
+                    style={{ backgroundColor: selectedPreset.color }}
+                  >
+                    {selectedPreset.name.charAt(0)}
+                  </div>
+                  <div>
+                    <h4 className="font-semibold text-base">{selectedPreset.name}</h4>
+                    <p className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>
+                      {selectedPreset.description}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    className="text-xs cursor-pointer px-3 py-1 rounded"
+                    style={{ color: 'var(--color-text-secondary)', border: '1px solid var(--color-border)' }}
+                    onClick={() => setQuickAddStep('select')}
+                  >
+                    返回
+                  </button>
+                  <button
+                    className="text-xs cursor-pointer px-3 py-1 rounded"
+                    style={{ color: 'var(--color-text-secondary)', border: '1px solid var(--color-border)' }}
+                    onClick={resetQuickAdd}
+                  >
+                    取消
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs mb-1 font-medium" style={{ color: 'var(--color-text-tertiary)' }}>
+                    API Key <span style={{ color: 'var(--color-danger)' }}>*</span>
+                  </label>
+                  <input
+                    className="input w-full"
+                    type="password"
+                    placeholder={selectedPreset.keyPlaceholder}
+                    value={quickAddKey}
+                    onChange={e => setQuickAddKey(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') handleQuickAddConfirm() }}
+                    autoFocus
+                  />
+                </div>
+                {selectedPreset.id === 'custom' && (
+                  <div>
+                    <label className="block text-xs mb-1 font-medium" style={{ color: 'var(--color-text-tertiary)' }}>
+                      提供商名称 <span style={{ color: 'var(--color-danger)' }}>*</span>
+                    </label>
+                    <input
+                      className="input w-full"
+                      placeholder="如: my-provider"
+                      value={quickAddName}
+                      onChange={e => setQuickAddName(e.target.value)}
+                    />
+                  </div>
+                )}
+                {selectedPreset.id === 'custom' && (
+                  <div>
+                    <label className="block text-xs mb-1 font-medium" style={{ color: 'var(--color-text-tertiary)' }}>
+                      Base URL <span style={{ color: 'var(--color-danger)' }}>*</span>
+                    </label>
+                    <input
+                      className="input w-full"
+                      placeholder="https://your-api.com/v1"
+                      value={quickAddBaseUrl}
+                      onChange={e => setQuickAddBaseUrl(e.target.value)}
+                    />
+                  </div>
+                )}
+              </div>
+
+              {/* 预设模型列表预览 */}
+              {selectedPreset.defaultModels.length > 0 && (
+                <div>
+                  <label className="block text-xs mb-2 font-medium" style={{ color: 'var(--color-text-tertiary)' }}>
+                    将自动添加以下模型:
+                  </label>
+                  <div className="flex flex-wrap gap-2">
+                    {selectedPreset.defaultModels.map(m => (
+                      <span
+                        key={m}
+                        className="text-xs px-2.5 py-1 rounded-md"
+                        style={{
+                          backgroundColor: `${selectedPreset.color}15`,
+                          border: `1px solid ${selectedPreset.color}30`,
+                          color: 'var(--color-text-primary)',
+                        }}
+                      >
+                        {m}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Base URL 显示（非自定义时只读展示） */}
+              {selectedPreset.id !== 'custom' && selectedPreset.baseUrl && (
+                <div className="text-xs p-2 rounded" style={{ backgroundColor: 'var(--color-bg-elevated)', color: 'var(--color-text-quaternary)' }}>
+                  🔗 Base URL: <code>{selectedPreset.baseUrl}</code> (已自动配置，无需修改)
+                </div>
+              )}
+
+              <div className="flex justify-end">
+                <button
+                  className="btn btn-primary"
+                  style={{ padding: '10px 24px', fontSize: '13px' }}
+                  onClick={handleQuickAddConfirm}
+                  disabled={!quickAddKey.trim() || (selectedPreset.id === 'custom' && !quickAddBaseUrl.trim())}
+                >
+                  <Plus size={14} /> 确认添加
+                </button>
+              </div>
+            </div>
+          </Card>
+        )}
+
+        {/* === 已配置的提供商列表 === */}
         {Object.entries(providers).map(([providerName, config]) => (
           <Card key={providerName}>
             {/* Provider 头部 */}
@@ -392,12 +789,11 @@ export default function Models() {
             >
               <div className="flex items-center gap-3">
                 {expandedProviders.has(providerName) ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
-                <Bot size={20} style={{ color: 'var(--color-primary)' }} />
+                <Bot size={20} style={{ color: PRESET_PROVIDERS.find(p => p.id === providerName)?.color ?? 'var(--color-primary)' }} />
                 <span className="font-semibold text-base">{providerName}</span>
                 <span className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>
                   {config.model_grouper.flatMap(g => g.models).length} 个模型
                 </span>
-                {/* 连通性测试结果指示 */}
                 {testResults[providerName] && !testResults[providerName].loading && (
                   <span className="text-xs px-2 py-0.5 rounded" style={{
                     backgroundColor: testResults[providerName].success ? 'rgba(16, 185, 129, 0.1)' : 'rgba(239, 68, 68, 0.1)',
@@ -588,8 +984,9 @@ export default function Models() {
                                   type="text"
                                   inputMode="decimal"
                                   placeholder="Prompt $/tok"
-                                  value={formatPrice(group.pricing[model]?.prompt)}
-                                  onChange={e => updatePricing(providerName, gIdx, model, 'prompt', e.target.value)}
+                                  value={getPricingDisplayValue(providerName, gIdx, model, 'prompt')}
+                                  onChange={e => handlePricingChange(providerName, gIdx, model, 'prompt', e.target.value)}
+                                  onBlur={() => handlePricingBlur(providerName, gIdx, model, 'prompt')}
                                   title="Prompt 价格 ($/token)，如 0.000005"
                                 />
                                 <input
@@ -598,8 +995,9 @@ export default function Models() {
                                   type="text"
                                   inputMode="decimal"
                                   placeholder="Compl $/tok"
-                                  value={formatPrice(group.pricing[model]?.completion)}
-                                  onChange={e => updatePricing(providerName, gIdx, model, 'completion', e.target.value)}
+                                  value={getPricingDisplayValue(providerName, gIdx, model, 'completion')}
+                                  onChange={e => handlePricingChange(providerName, gIdx, model, 'completion', e.target.value)}
+                                  onBlur={() => handlePricingBlur(providerName, gIdx, model, 'completion')}
                                   title="Completion 价格 ($/token)，如 0.000015"
                                 />
                               </div>

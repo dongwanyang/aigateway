@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area } from 'recharts'
-import { Activity, Clock, DollarSign, Zap } from 'lucide-react'
+import { Activity, Clock, DollarSign, Zap, TrendingDown } from 'lucide-react'
 import Card from '@/components/Card'
 import { getHealth, parseMetrics, getMetricsText } from '@/api/client'
 import type { HealthData } from '@/types'
@@ -10,6 +10,7 @@ const statCards = [
   { icon: Clock, label: '平均延迟', value: '0', unit: 'ms', color: '--color-success' },
   { icon: DollarSign, label: '总成本', value: '$0', unit: 'USD', color: '--color-warning' },
   { icon: Zap, label: '缓存命中率', value: '0', unit: '%', color: '--color-info' },
+  { icon: TrendingDown, label: 'Token 节省', value: '0', unit: 'tokens', color: '--color-success' },
 ]
 
 export default function Overview() {
@@ -40,7 +41,7 @@ export default function Overview() {
           return samples.filter(s => s.name === name).reduce((sum: number, s: {value: number}) => sum + s.value, 0)
         }
 
-        const totalRequests = samples.find(s => s.name === 'gateway_http_requests_total')?.value ?? 0
+        const totalRequests = samples.filter(s => s.name === 'gateway_http_requests_total').reduce((sum, s) => sum + s.value, 0)
         // 使用 Counter 类型的 gateway_cost_by_model_total 而非 Gauge 类型的 gateway_cost_total
         // Gauge 在 multiprocess 场景下每个 worker 独立 set()，会被覆盖；Counter 是 inc()，正确累加
         const totalCost = sumByMetric(samples, 'gateway_cost_by_model_total')
@@ -51,6 +52,9 @@ export default function Overview() {
         const totalCache = totalCacheHits + cacheMisses
         const hitRate = totalCache > 0 ? Math.round((totalCacheHits / totalCache) * 100) : 0
 
+        // Token 节省
+        const tokensSaved = samples.find(s => s.name === 'gateway_tokens_saved_total')?.value ?? 0
+
         // 按用户的成本分布
         const userSamples = samples.filter(s => s.name === 'gateway_cost_by_user_total')
         const userCosts = userSamples.map(s => ({
@@ -60,9 +64,12 @@ export default function Overview() {
 
         // 延迟数据 — 从 histogram bucket 计算 P50/P90/P99
         const bucketSamples = samples.filter(s => s.name === 'gateway_request_duration_seconds_bucket')
+        // 按 endpoint 分组（去掉 le 标签后作为 key）
         const leMap = new Map<string, Record<string, number>>()
         for (const s of bucketSamples) {
-          const key = JSON.stringify(s.labels)
+          const groupLabels = { ...s.labels }
+          delete groupLabels.le
+          const key = JSON.stringify(groupLabels)
           if (!leMap.has(key)) leMap.set(key, {})
           const entry = leMap.get(key)!
           entry[s.labels.le ?? ''] = s.value
@@ -95,21 +102,22 @@ export default function Overview() {
           return { p50: findPct(50), p90: findPct(90), p99: findPct(99) }
         }
 
-        // 平均延迟
-        let avgLatency = 0
-        for (let i = 0; i < sumSamples.length; i++) {
-          const dur = sumSamples[i]
-          const cnt = countSamples.find(c => c.name === dur.name && JSON.stringify(c.labels) === JSON.stringify(dur.labels))
-          if (cnt && cnt.value > 0) {
-            avgLatency = Math.round((dur.value / cnt.value) * 1000)
-            break
-          }
+        // 平均延迟（聚合所有 endpoint）
+        let totalDuration = 0
+        let totalCount = 0
+        for (const dur of sumSamples) {
+          totalDuration += dur.value
         }
+        for (const cnt of countSamples) {
+          totalCount += cnt.value
+        }
+        const avgLatency = totalCount > 0 ? Math.round((totalDuration / totalCount) * 1000) : 0
 
-        // 生成分位数时间序列（基于 histogram 的分桶区间，模拟时间轴上的分位趋势）
+        // 生成分位数时间序列（基于 histogram 的分桶区间）
         const latencyBuckets = []
         for (const [key, leMapEntry] of leMap.entries()) {
           if (!leMapEntry) continue
+          // key 现在是 endpoint 标签 JSON（不含 le），与 count labels 一致
           const countVal = countSamples.find(c => JSON.stringify(c.labels) === key)?.value ?? 0
           if (countVal > 0) {
             const pcts = computePercentiles(leMapEntry, countVal)
@@ -139,8 +147,9 @@ export default function Overview() {
           setStats([
             { ...statCards[0], value: Math.round(totalRequests).toLocaleString(), unit: 'requests' },
             { ...statCards[1], value: avgLatency > 0 ? avgLatency.toString() : '—', unit: 'ms' },
-            { ...statCards[2], value: `$${totalCost.toFixed(2)}`, unit: 'USD' },
+            { ...statCards[2], value: `$${totalCost < 0.01 ? totalCost.toFixed(4) : totalCost.toFixed(2)}`, unit: 'USD' },
             { ...statCards[3], value: hitRate.toString(), unit: '%' },
+            { ...statCards[4], value: tokensSaved > 0 ? Math.round(tokensSaved).toLocaleString() : '0', unit: 'tokens' },
           ])
           setCostByUser(userCosts)
           setLatencyData(displayLatencyData)
@@ -151,7 +160,8 @@ export default function Overview() {
     }
 
     load()
-    return () => { cancelled = true }
+    const interval = setInterval(load, 10000)
+    return () => { cancelled = true; clearInterval(interval) }
   }, [])
 
   // 成本分布数据（至少显示一个占位）
@@ -162,7 +172,7 @@ export default function Overview() {
       <h2 className="text-2xl font-bold">概览</h2>
 
       {/* 统计卡片 */}
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
         {stats.map(({ icon: Icon, label, value, unit, color }) => (
           <Card key={label}>
             <div className="flex items-center justify-between mb-3">
@@ -234,9 +244,9 @@ export default function Overview() {
 
       {/* 成本分布 by 用户 */}
       <Card title="成本分布 by 用户 (Top 5)">
-        {costByUser.length < 2 ? (
+        {costByUser.length === 0 ? (
           <div className="text-center py-12" style={{ color: 'var(--color-text-tertiary)' }}>
-            数据不足，等待更多请求...
+            暂无用户成本数据，等待更多请求...
           </div>
         ) : (
           <ResponsiveContainer width="100%" height={280}>

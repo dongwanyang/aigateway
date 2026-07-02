@@ -1,8 +1,8 @@
 import { useEffect, useState, useCallback } from 'react'
-import { Search, Filter, Trash2, ChevronLeft, ChevronRight, ChevronDown, ChevronUp } from 'lucide-react'
+import { Search, Filter, Trash2, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, X } from 'lucide-react'
 import Card from '@/components/Card'
-import { getRequestLogs, deleteAllLogs } from '@/api/client'
-import type { LogEntry } from '@/api/client'
+import { getRequestLogs, deleteAllLogs, getTraceDetail } from '@/api/client'
+import type { LogEntry, TraceDetail } from '@/api/client'
 
 const statusColor = (status: number) => {
   if (status >= 200 && status < 300) return 'badge-success'
@@ -21,6 +21,8 @@ export default function Logs() {
   const [total, setTotal] = useState(0)
   const [expandedRow, setExpandedRow] = useState<string | null>(null)
   const [copyFeedback, setCopyFeedback] = useState<string | null>(null)
+  const [traceDetail, setTraceDetail] = useState<TraceDetail | null>(null)
+  const [traceLoading, setTraceLoading] = useState(false)
   const pageSize = 50
 
   const loadLogs = useCallback(async () => {
@@ -76,6 +78,36 @@ export default function Logs() {
       setPage(1)
     } catch {
       alert('清空日志失败')
+    }
+  }
+
+  const handleTraceClick = async (traceId: string) => {
+    setTraceLoading(true)
+    try {
+      const r = await getTraceDetail(traceId)
+      setTraceDetail(r.data)
+    } catch {
+      // 如果后端没有 trace 数据，用当前日志中匹配的条目构建基本视图
+      const matched = logs.filter(l => l.trace_id === traceId)
+      if (matched.length > 0) {
+        const primary = matched[0]
+        setTraceDetail({
+          trace_id: traceId,
+          request_id: primary.request_id,
+          user_id: primary.user_id,
+          model: primary.model,
+          endpoint: primary.endpoint,
+          status: primary.status,
+          duration_ms: primary.duration_ms,
+          cache_hit: primary.cache_hit,
+          cache_tier: primary.tier,
+          timestamp: primary.timestamp,
+          plugin_trace: primary.plugin_trace || [],
+          related_requests: matched.slice(1),
+        })
+      }
+    } finally {
+      setTraceLoading(false)
     }
   }
 
@@ -172,10 +204,10 @@ export default function Logs() {
                       </td>
                       <td style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--font-size-xs)', wordBreak: 'break-all' }}>
                         <span
-                          onClick={e => { e.stopPropagation(); handleCopy(log.trace_id, `trace-${idx}`) }}
+                          onClick={e => { e.stopPropagation(); handleTraceClick(log.trace_id) }}
                           className="cursor-pointer hover:underline"
                           style={{ color: 'var(--color-primary)' }}
-                          title="点击复制"
+                          title="点击查看全链路追踪"
                         >
                           {log.trace_id}
                         </span>
@@ -284,6 +316,158 @@ export default function Logs() {
           </div>
         )}
       </Card>
+
+      {/* 全链路追踪详情面板 */}
+      {traceDetail && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 1000,
+          backgroundColor: 'rgba(0,0,0,0.5)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }} onClick={() => setTraceDetail(null)}>
+          <div
+            style={{
+              backgroundColor: 'var(--color-bg-elevated)',
+              borderRadius: 12,
+              padding: 24,
+              maxWidth: 720,
+              width: '90%',
+              maxHeight: '80vh',
+              overflow: 'auto',
+              border: '1px solid var(--color-border)',
+            }}
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold">全链路追踪</h3>
+              <button onClick={() => setTraceDetail(null)} style={{ color: 'var(--color-text-tertiary)', cursor: 'pointer' }}>
+                <X size={20} />
+              </button>
+            </div>
+
+            {traceLoading ? (
+              <div className="text-center py-8" style={{ color: 'var(--color-text-tertiary)' }}>加载中...</div>
+            ) : (
+            <>
+            {/* 基本信息 */}
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-6" style={{ fontSize: 'var(--font-size-sm)' }}>
+              <div>
+                <div style={{ color: 'var(--color-text-tertiary)', marginBottom: 2 }}>Trace ID</div>
+                <div style={{ fontFamily: 'var(--font-mono)', wordBreak: 'break-all' }}>{traceDetail.trace_id}</div>
+              </div>
+              <div>
+                <div style={{ color: 'var(--color-text-tertiary)', marginBottom: 2 }}>Request ID</div>
+                <div style={{ fontFamily: 'var(--font-mono)', wordBreak: 'break-all' }}>{traceDetail.request_id}</div>
+              </div>
+              <div>
+                <div style={{ color: 'var(--color-text-tertiary)', marginBottom: 2 }}>User</div>
+                <div>{traceDetail.user_id || '—'}</div>
+              </div>
+              <div>
+                <div style={{ color: 'var(--color-text-tertiary)', marginBottom: 2 }}>模型</div>
+                <div>{traceDetail.model}</div>
+              </div>
+              <div>
+                <div style={{ color: 'var(--color-text-tertiary)', marginBottom: 2 }}>状态</div>
+                <span className={`badge ${statusColor(traceDetail.status)}`}>{traceDetail.status}</span>
+              </div>
+              <div>
+                <div style={{ color: 'var(--color-text-tertiary)', marginBottom: 2 }}>总延迟</div>
+                <div style={{ fontFamily: 'var(--font-mono)' }}>{traceDetail.duration_ms}ms</div>
+              </div>
+              <div>
+                <div style={{ color: 'var(--color-text-tertiary)', marginBottom: 2 }}>缓存</div>
+                <div>{traceDetail.cache_hit ? `命中 (${traceDetail.cache_tier || 'L1'})` : '未命中'}</div>
+              </div>
+              <div>
+                <div style={{ color: 'var(--color-text-tertiary)', marginBottom: 2 }}>时间</div>
+                <div>{formatTime(traceDetail.timestamp)}</div>
+              </div>
+            </div>
+
+            {/* 插件执行链路 */}
+            <div style={{ marginBottom: 16 }}>
+              <h4 className="font-semibold mb-3" style={{ fontSize: 'var(--font-size-sm)' }}>插件执行链路</h4>
+              {traceDetail.plugin_trace.length === 0 ? (
+                <div style={{ color: 'var(--color-text-tertiary)', fontSize: 'var(--font-size-sm)', padding: '12px 0' }}>
+                  暂无插件追踪数据（旧日志可能未包含此信息）
+                </div>
+              ) : (
+                <div style={{ position: 'relative', paddingLeft: 20 }}>
+                  {/* 竖线 */}
+                  <div style={{
+                    position: 'absolute', left: 7, top: 8, bottom: 8,
+                    width: 2, backgroundColor: 'var(--color-border)',
+                  }} />
+                  {traceDetail.plugin_trace.map((step, i) => (
+                    <div key={i} style={{ position: 'relative', padding: '8px 0', display: 'flex', alignItems: 'center', gap: 12 }}>
+                      {/* 节点圆点 */}
+                      <div style={{
+                        position: 'absolute', left: -16, top: '50%', transform: 'translateY(-50%)',
+                        width: 12, height: 12, borderRadius: '50%',
+                        backgroundColor: step.status === 'success' ? 'var(--color-success)'
+                          : step.status === 'failed' ? 'var(--color-danger)'
+                          : 'var(--color-text-quaternary)',
+                        border: '2px solid var(--color-bg-elevated)',
+                      }} />
+                      <div style={{ flex: 1 }}>
+                        <span className="font-medium" style={{ fontSize: 'var(--font-size-sm)' }}>{step.plugin_name}</span>
+                        <span className={`badge ml-2 ${step.status === 'success' ? 'badge-success' : step.status === 'failed' ? 'badge-danger' : 'badge-neutral'}`}>
+                          {step.status}
+                        </span>
+                      </div>
+                      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--font-size-xs)', color: 'var(--color-text-tertiary)' }}>
+                        {step.duration_ms.toFixed(1)}ms
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* 耗时分布条 */}
+            {traceDetail.plugin_trace.length > 0 && (
+              <div style={{ marginBottom: 16 }}>
+                <h4 className="font-semibold mb-2" style={{ fontSize: 'var(--font-size-sm)' }}>耗时分布</h4>
+                <div style={{ display: 'flex', height: 24, borderRadius: 6, overflow: 'hidden', border: '1px solid var(--color-border)' }}>
+                  {traceDetail.plugin_trace.filter(s => s.status !== 'skipped').map((step, i) => {
+                    const totalPluginMs = traceDetail.plugin_trace.filter(s => s.status !== 'skipped').reduce((s, p) => s + p.duration_ms, 0)
+                    const pct = totalPluginMs > 0 ? (step.duration_ms / totalPluginMs) * 100 : 0
+                    const colors = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899']
+                    return (
+                      <div
+                        key={i}
+                        title={`${step.plugin_name}: ${step.duration_ms.toFixed(1)}ms`}
+                        style={{
+                          width: `${Math.max(pct, 2)}%`,
+                          backgroundColor: step.status === 'failed' ? '#EF4444' : colors[i % colors.length],
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          fontSize: 'var(--font-size-xs)', color: '#fff', fontWeight: 500,
+                          overflow: 'hidden', whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {pct > 15 ? step.plugin_name : ''}
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
+
+            <div className="flex justify-end">
+              <button
+                className="btn"
+                onClick={() => { handleCopy(traceDetail.trace_id, 'trace-modal'); }}
+                style={{ padding: '6px 16px', fontSize: 'var(--font-size-sm)' }}
+              >
+                复制 Trace ID
+                {copyFeedback === 'trace-modal' && <span className="ml-2" style={{ color: 'var(--color-success)' }}>✓</span>}
+              </button>
+            </div>
+            </>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   )
 }

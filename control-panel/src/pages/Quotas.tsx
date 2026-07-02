@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
-import { Plus, Trash2, Eye, Search, Copy, AlertTriangle } from 'lucide-react'
+import { Plus, Trash2, Eye, Search, Copy, AlertTriangle, Edit3 } from 'lucide-react'
 import Card from '@/components/Card'
-import { listApiKeys, deleteApiKey, createApiKey } from '@/api/client'
+import { listApiKeys, deleteApiKey, createApiKey, updateApiKeyQuota } from '@/api/client'
 import type { ApiKeyItem, CreateApiKeyRequest, CreateApiKeyData } from '@/types'
 
 export default function Quotas() {
@@ -18,6 +18,15 @@ export default function Quotas() {
     rate_limit_rpm: 60,
     rate_limit_tpm: 100_000,
   })
+
+  // 编辑配额状态
+  const [editingKey, setEditingKey] = useState<ApiKeyItem | null>(null)
+  const [editForm, setEditForm] = useState<{
+    daily_tokens: number
+    monthly_cost: number
+    rate_limit_rpm: number
+    rate_limit_tpm: number
+  }>({ daily_tokens: 0, monthly_cost: 0, rate_limit_rpm: 0, rate_limit_tpm: 0 })
 
   useEffect(() => {
     listApiKeys()
@@ -80,6 +89,34 @@ export default function Quotas() {
       setKeys(prev => prev.filter(k => k.id !== keyId))
     } catch {
       alert('撤销失败')
+    }
+  }
+
+  const handleStartEdit = (key: ApiKeyItem) => {
+    setEditingKey(key)
+    setEditForm({
+      daily_tokens: key.quotas.daily_tokens_limit,
+      monthly_cost: key.quotas.monthly_cost_limit,
+      rate_limit_rpm: key.quotas.rpm_limit,
+      rate_limit_tpm: key.quotas.tpm_limit,
+    })
+  }
+
+  const handleSaveEdit = async () => {
+    if (!editingKey) return
+    try {
+      await updateApiKeyQuota(editingKey.id, {
+        daily_tokens: editForm.daily_tokens,
+        monthly_cost: editForm.monthly_cost,
+        rate_limit_rpm: editForm.rate_limit_rpm,
+        rate_limit_tpm: editForm.rate_limit_tpm,
+      })
+      // 刷新列表
+      const r = await listApiKeys()
+      setKeys(r.data.items)
+      setEditingKey(null)
+    } catch {
+      alert('修改配额失败')
     }
   }
 
@@ -190,6 +227,35 @@ export default function Quotas() {
         />
       </div>
 
+      {/* 编辑配额面板 */}
+      {editingKey && (
+        <Card>
+          <h3 className="text-md font-semibold mb-4">修改配额 — {editingKey.user_id} ({editingKey.key_prefix}...)</h3>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm mb-1" style={{ color: 'var(--color-text-secondary)' }}>日 token 上限</label>
+              <input className="input w-full" type="number" value={editForm.daily_tokens} onChange={(e) => setEditForm(f => ({ ...f, daily_tokens: Number(e.target.value) }))} />
+            </div>
+            <div>
+              <label className="block text-sm mb-1" style={{ color: 'var(--color-text-secondary)' }}>月成本上限 ($)</label>
+              <input className="input w-full" type="number" value={editForm.monthly_cost} step={0.01} onChange={(e) => setEditForm(f => ({ ...f, monthly_cost: Number(e.target.value) }))} />
+            </div>
+            <div>
+              <label className="block text-sm mb-1" style={{ color: 'var(--color-text-secondary)' }}>RPM 限制</label>
+              <input className="input w-full" type="number" value={editForm.rate_limit_rpm} onChange={(e) => setEditForm(f => ({ ...f, rate_limit_rpm: Number(e.target.value) }))} />
+            </div>
+            <div>
+              <label className="block text-sm mb-1" style={{ color: 'var(--color-text-secondary)' }}>TPM 限制</label>
+              <input className="input w-full" type="number" value={editForm.rate_limit_tpm} onChange={(e) => setEditForm(f => ({ ...f, rate_limit_tpm: Number(e.target.value) }))} />
+            </div>
+          </div>
+          <div className="flex gap-2 mt-4">
+            <button className="btn btn-primary" onClick={handleSaveEdit}>保存</button>
+            <button className="btn btn-secondary" onClick={() => setEditingKey(null)}>取消</button>
+          </div>
+        </Card>
+      )}
+
       {/* 列表 */}
       <Card>
         <div className="table-container">
@@ -242,6 +308,9 @@ export default function Quotas() {
                     </td>
                     <td>
                       <div className="flex gap-1">
+                        <button className="p-1.5 rounded cursor-pointer transition-colors" style={{ color: 'var(--color-text-tertiary)' }} title="修改配额" onClick={() => handleStartEdit(key)}>
+                          <Edit3 size={16} />
+                        </button>
                         <button className="p-1.5 rounded cursor-pointer transition-colors" style={{ color: 'var(--color-text-tertiary)' }} title="查看详情">
                           <Eye size={16} />
                         </button>

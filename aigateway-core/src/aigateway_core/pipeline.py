@@ -655,6 +655,19 @@ def _register_builtin_plugins(registry: PluginRegistry, config_manager: Any = No
         "prompt_compress": (PromptCompressPlugin, {}),
     }
 
+    # 注册 Media Optimization Plugin（V2）
+    try:
+        from aigateway_core.media.plugin import MediaOptimizationPlugin
+
+        mol_config = {}
+        if config_manager is not None:
+            mol_config = config_manager.get("media_optimization", {}) or {}
+
+        if mol_config.get("enabled", False):
+            plugin_map["media_optimizer"] = (MediaOptimizationPlugin, {"config": mol_config})
+    except ImportError:
+        logger.debug("Media Optimization Plugin 不可用（导入失败）")
+
     for name, (plugin_cls, default_config) in plugin_map.items():
         # 查找配置
         cfg = None

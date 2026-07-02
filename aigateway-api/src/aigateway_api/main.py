@@ -258,6 +258,27 @@ async def lifespan(app: "FastAPI"):
     cb_factory = CircuitBreakerFactory()
     logger.info("CircuitBreakerFactory 初始化完成")
 
+    # 初始化 Media Optimization Layer (V2)
+    media_optimization_layer = None
+    media_cache = None
+    try:
+        mol_cfg = config_manager.get("media_optimization", {}) or {}
+        if mol_cfg.get("enabled", False):
+            from aigateway_core.media import MediaCacheManager
+            from aigateway_core.media.plugin import MediaOptimizationPlugin
+
+            if redis_mgr is not None:
+                media_cache = MediaCacheManager(redis_client=redis_mgr)
+
+            mol_plugin = MediaOptimizationPlugin(config=mol_cfg, media_cache=media_cache)
+            media_optimization_layer = mol_plugin
+            logger.info(
+                "Media Optimization Layer 初始化完成: media_cache=%s",
+                "enabled" if media_cache else "disabled (no redis)",
+            )
+    except Exception as exc:
+        logger.warning("Media Optimization Layer 初始化失败: %s", exc)
+
     # 持久化到 app.state（唯一数据源）
     import time
     app.state._start_time = int(time.time())
@@ -287,6 +308,8 @@ async def lifespan(app: "FastAPI"):
     app.state.litellm_bridge = litellm_bridge
     app.state.redis_manager = redis_mgr
     app.state.qdrant_manager = qdrant_mgr
+    app.state.media_optimization_layer = media_optimization_layer
+    app.state.media_cache = media_cache
 
     # 注册异常处理器
     _register_exception_handlers(app)

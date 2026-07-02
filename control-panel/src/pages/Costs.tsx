@@ -33,7 +33,7 @@ export default function Costs() {
           setTotalRequests(Math.round(totalRequestsCount))
           setAvgCost(totalRequestsCount > 0 ? costTotal / totalRequestsCount : 0)
 
-          // 生成近 7 天模拟趋势（基于当前总成本分摊）
+          // 生成近 7 天趋势（基于当前总成本均匀分摊，固定值不再随机）
           const dailyCost = costTotal / 7
           const today = new Date()
           const history = Array.from({ length: 7 }, (_, i) => {
@@ -41,7 +41,7 @@ export default function Costs() {
             d.setDate(d.getDate() - (6 - i))
             return {
               date: `${d.getMonth() + 1}/${d.getDate()}`,
-              cost: Math.round((dailyCost * (0.7 + Math.random() * 0.6)) * 100) / 100,
+              cost: Math.round(dailyCost * 100) / 100,
             }
           })
           setCostHistory(history)

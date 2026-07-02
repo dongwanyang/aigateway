@@ -157,6 +157,15 @@ class CreateApiKeyRequest(BaseModel):
     rate_limit_tpm: Optional[int] = Field(default=100_000, description="每分钟 token 数上限")
 
 
+class UpdateQuotaRequest(BaseModel):
+    """PUT /admin/api-keys/{key_id} 请求体 — 修改用户配额。"""
+
+    daily_tokens: Optional[int] = Field(default=None, ge=1, description="每日 token 上限")
+    monthly_cost: Optional[float] = Field(default=None, gt=0, description="每月成本上限（美元）")
+    rate_limit_rpm: Optional[int] = Field(default=None, ge=1, description="每分钟请求数上限")
+    rate_limit_tpm: Optional[int] = Field(default=None, ge=1, description="每分钟 token 数上限")
+
+
 # ------------------------------------------------------------------
 # 辅助函数
 # ------------------------------------------------------------------
@@ -341,6 +350,86 @@ async def delete_api_key(
             "id": key_id,
             "status": "deleted",
             "deleted_at": now_iso,
+        },
+        "message": "success",
+    }
+
+
+# ------------------------------------------------------------------
+# PUT /admin/api-keys/{key_id} — 修改用户配额
+# ------------------------------------------------------------------
+
+
+@router.put("/api-keys/{key_id}")
+async def update_api_key_quota(
+    request: Request,
+    key_id: str,
+    body: UpdateQuotaRequest,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+    """修改指定 API Key 的配额限制。
+
+    仅更新请求中包含的字段（非 None 字段），其余保持不变。
+    """
+    key_store, _ = _get_keystore_and_metrics(request)
+    redis_mgr = key_store.redis
+
+    if redis_mgr is None or redis_mgr.redis is None:
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Redis not connected"}})
+
+    if not key_id.startswith("key_"):
+        raise HTTPException(status_code=400, detail={"error": {"code": "validation_error", "message": "Invalid key_id format"}})
+
+    # 通过 key_id 查找 key_hash
+    key_hashes = await key_store._find_key_hashes_by_id(key_id)
+    if not key_hashes:
+        raise HTTPException(status_code=404, detail={"error": {"code": "not_found", "message": f"API key '{key_id}' not found"}})
+
+    kh = key_hashes[0]
+    data = await redis_mgr.get_api_key(kh)
+    if not data:
+        raise HTTPException(status_code=404, detail={"error": {"code": "not_found", "message": f"API key '{key_id}' not found"}})
+
+    # 仅更新非 None 字段
+    updated_fields: Dict[str, str] = {}
+    if body.daily_tokens is not None:
+        updated_fields["daily_tokens_limit"] = str(body.daily_tokens)
+    if body.monthly_cost is not None:
+        updated_fields["monthly_cost_limit"] = str(body.monthly_cost)
+    if body.rate_limit_rpm is not None:
+        updated_fields["rate_limit_rpm"] = str(body.rate_limit_rpm)
+    if body.rate_limit_tpm is not None:
+        updated_fields["rate_limit_tpm"] = str(body.rate_limit_tpm)
+
+    if not updated_fields:
+        raise HTTPException(status_code=400, detail={"error": {"code": "validation_error", "message": "No fields to update"}})
+
+    # 合并到现有数据并写回 Redis
+    data.update(updated_fields)
+    await redis_mgr.set_api_key(kh, data)
+
+    # 通过 Pub/Sub 广播配额变更事件（多实例同步）
+    try:
+        pub_msg = key_store._build_pubsub_message(
+            "quota_updated", key_id, data.get("user_id", ""),
+            updated_fields=updated_fields,
+        )
+        await redis_mgr.publish(key_store.PUBSUB_CHANNEL, pub_msg)
+    except Exception as exc:
+        logger.warning("Failed to publish quota update event: %s", exc)
+
+    logger.info("API Key 配额已更新: key_id=%s, fields=%s", key_id, list(updated_fields.keys()))
+
+    return {
+        "data": {
+            "id": key_id,
+            "user_id": data.get("user_id", ""),
+            "quotas": {
+                "daily_tokens_limit": int(data.get("daily_tokens_limit", 1_000_000)),
+                "monthly_cost_limit": float(data.get("monthly_cost_limit", 50.00)),
+                "rate_limit_rpm": int(data.get("rate_limit_rpm", 60)),
+                "rate_limit_tpm": int(data.get("rate_limit_tpm", 100_000)),
+            },
         },
         "message": "success",
     }
@@ -835,6 +924,7 @@ async def get_request_logs(
             "duration_ms": entry.get("duration_ms", 0),
             "cache_hit": entry.get("cache_hit", False),
             "tier": entry.get("tier"),
+            "plugin_trace": entry.get("plugin_trace", []),
         })
 
     return {
@@ -846,6 +936,61 @@ async def get_request_logs(
                 "total": total_filtered,
             },
         },
+        "message": "success",
+    }
+
+
+# ------------------------------------------------------------------
+# GET /admin/trace/:trace_id — 全链路追踪详情
+# ------------------------------------------------------------------
+
+
+@router.get("/trace/{trace_id}")
+async def get_trace_detail(
+    request: Request,
+    trace_id: str,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+    """根据 trace_id 查询该请求的全链路信息（包括插件执行步骤）。"""
+    from aigateway_api.main import app
+    s = app.state
+    redis_mgr = getattr(s, "redis_manager")
+
+    if redis_mgr is None or redis_mgr.redis is None:
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Redis not connected"}})
+
+    # 从 Redis 日志中按 trace_id 搜索（扫描最近 1000 条）
+    all_logs = await redis_mgr.redis.zrevrange("aigateway:logs:requests", 0, 999, withscores=True)
+    matched = []
+    for raw, score in all_logs:
+        entry = json.loads(raw.decode() if isinstance(raw, bytes) else raw)
+        if entry.get("trace_id") == trace_id:
+            matched.append(entry)
+
+    if not matched:
+        raise HTTPException(status_code=404, detail={"error": {"code": "not_found", "message": f"Trace {trace_id} not found"}})
+
+    # 以第一条匹配为主记录（通常一个 trace_id 对应一个请求）
+    primary = matched[0]
+
+    # 构建全链路视图
+    trace_detail = {
+        "trace_id": trace_id,
+        "request_id": primary.get("request_id", ""),
+        "user_id": primary.get("user_id", ""),
+        "model": primary.get("model", ""),
+        "endpoint": primary.get("endpoint", ""),
+        "status": primary.get("status", 0),
+        "duration_ms": primary.get("duration_ms", 0),
+        "cache_hit": primary.get("cache_hit", False),
+        "cache_tier": primary.get("tier"),
+        "timestamp": primary.get("timestamp", 0),
+        "plugin_trace": primary.get("plugin_trace", []),
+        "related_requests": matched[1:] if len(matched) > 1 else [],
+    }
+
+    return {
+        "data": trace_detail,
         "message": "success",
     }
 
@@ -1632,6 +1777,18 @@ async def test_provider_connectivity(
         default_urls = {
             "openai": "https://api.openai.com/v1",
             "anthropic": "https://api.anthropic.com/v1",
+            "google": "https://generativelanguage.googleapis.com/v1beta/openai",
+            "deepseek": "https://api.deepseek.com/v1",
+            "zhipu": "https://open.bigmodel.cn/api/paas/v4",
+            "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "moonshot": "https://api.moonshot.cn/v1",
+            "doubao": "https://ark.cn-beijing.volces.com/api/v3",
+            "yi": "https://api.lingyiwanwu.com/v1",
+            "minimax": "https://api.minimax.chat/v1",
+            "groq": "https://api.groq.com/openai/v1",
+            "mistral": "https://api.mistral.ai/v1",
+            "openrouter": "https://openrouter.ai/api/v1",
+            "siliconflow": "https://api.siliconflow.cn/v1",
         }
         base_url = default_urls.get(provider, "")
 
@@ -1731,6 +1888,18 @@ async def get_provider_models(
         default_urls = {
             "openai": "https://api.openai.com/v1",
             "anthropic": "https://api.anthropic.com/v1",
+            "google": "https://generativelanguage.googleapis.com/v1beta/openai",
+            "deepseek": "https://api.deepseek.com/v1",
+            "zhipu": "https://open.bigmodel.cn/api/paas/v4",
+            "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "moonshot": "https://api.moonshot.cn/v1",
+            "doubao": "https://ark.cn-beijing.volces.com/api/v3",
+            "yi": "https://api.lingyiwanwu.com/v1",
+            "minimax": "https://api.minimax.chat/v1",
+            "groq": "https://api.groq.com/openai/v1",
+            "mistral": "https://api.mistral.ai/v1",
+            "openrouter": "https://openrouter.ai/api/v1",
+            "siliconflow": "https://api.siliconflow.cn/v1",
         }
         base_url = default_urls.get(provider, "")
 

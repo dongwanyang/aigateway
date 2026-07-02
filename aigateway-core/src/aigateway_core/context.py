@@ -27,6 +27,8 @@ NS_PROMPT_CACHE = "prompt_cache"
 NS_SEMANTIC_CACHE = "semantic_cache"
 NS_PII_DETECTOR = "pii_detector"
 NS_MODEL_ROUTER = "model_router"
+NS_MEDIA_OPTIMIZATION = "media_optimization"
+NS_GENERATION_PIPELINE = "generation_pipeline"
 
 
 @dataclass
@@ -58,6 +60,10 @@ class PipelineContext:
     request_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     user_id: Optional[str] = None
     extra: Dict[str, Any] = field(default_factory=dict)
+
+    # === V2 多模态字段 ===
+    is_multimodal: bool = False
+    total_token_savings: int = 0
 
     # ------------------------------------------------------------------
     # extra 命名空间的便捷访问器
@@ -253,6 +259,43 @@ class PipelineContext:
     @circuit_breaker_state.setter
     def circuit_breaker_state(self, value: str) -> None:
         self.model_router["circuit_breaker_state"] = value
+
+    # -- media_optimization (V2) --
+
+    @property
+    def media_optimization(self) -> Dict[str, Any]:
+        """获取 media_optimization 命名空间。"""
+        if NS_MEDIA_OPTIMIZATION not in self.extra:
+            self.extra[NS_MEDIA_OPTIMIZATION] = {
+                "detected_types": [],
+                "processors_executed": [],
+                "total_savings": 0,
+                "per_media_results": [],
+            }
+        return self.extra[NS_MEDIA_OPTIMIZATION]
+
+    @media_optimization.setter
+    def media_optimization(self, value: Dict[str, Any]) -> None:
+        self.extra[NS_MEDIA_OPTIMIZATION] = value
+
+    # -- generation_pipeline (V2) --
+
+    @property
+    def generation_pipeline(self) -> Dict[str, Any]:
+        """获取 generation_pipeline 命名空间。"""
+        if NS_GENERATION_PIPELINE not in self.extra:
+            self.extra[NS_GENERATION_PIPELINE] = {
+                "prompt_enhanced": False,
+                "enhancement_level": "off",
+                "selected_model": "",
+                "completion_tokens": 0,
+                "prompt_tokens": 0,
+            }
+        return self.extra[NS_GENERATION_PIPELINE]
+
+    @generation_pipeline.setter
+    def generation_pipeline(self, value: Dict[str, Any]) -> None:
+        self.extra[NS_GENERATION_PIPELINE] = value
 
     # ------------------------------------------------------------------
     # 通用辅助方法

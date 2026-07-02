@@ -50,53 +50,32 @@ plugins:
   config:
     compression_ratio: 0.5
 providers:
-  openai:
-    api_key: sk-proj-xxx
-    model_grouper:
-    - models:
-      - gpt-4o
-      - gpt-4o-mini
-      fallback_models:
-      - gpt-3.5-turbo
-      pricing:
-        gpt-4o:
-          prompt: 5.0e-06
-          completion: 1.5e-05
-        gpt-4o-mini:
-          prompt: 1.5e-07
-          completion: 6.0e-07
-        gpt-3.5-turbo:
-          prompt: 1.5e-06
-          completion: 2.0e-06
-    num_retries: 3
-    retry_after: 1000
-  anthropic:
-    api_key: sk-ant-xxx
-    model_grouper:
-    - models:
-      - claude-3-5-sonnet
-      fallback_models:
-      - claude-3-sonnet
-      pricing:
-        claude-3-5-sonnet:
-          prompt: 3.0e-06
-          completion: 1.5e-05
-        claude-3-sonnet:
-          prompt: 1.5e-06
-          completion: 7.5e-06
-    num_retries: 3
-    retry_after: 1000
   agnes:
     api_key: sk-Idz9oi7Cvx946OY6ipSp5FjU0T1S8IHQXRnVAnu2j1Q2zPBK
     base_url: https://apihub.agnes-ai.com/v1
     model_grouper:
     - models:
       - agnes-2.0-flash
+      - agnes-image-2.1-flash
+      - agnes-video-v2.0
       fallback_models: []
       pricing:
         agnes-2.0-flash:
-          prompt: 3.0e-06
-          completion: 1.5e-05
+          prompt: 0.02
+          completion: 1
+    num_retries: 3
+    retry_after: 1000
+  deepseek:
+    api_key: sk-d10ef482afad4b86a37f680ddb336d37
+    base_url: https://api.deepseek.com/v1
+    model_grouper:
+    - models:
+      - deepseek-v4-flash
+      fallback_models: []
+      pricing:
+        deepseek-v4-flash:
+          prompt: 0.02
+          completion: 1
     num_retries: 3
     retry_after: 1000
 embedding:
@@ -113,3 +92,57 @@ observability:
   log_level: info
 hot_reload: true
 debug_mode: false
+media_optimization:
+  enabled: true
+  image:
+    max_width: 1920
+    max_height: 1080
+    quality: 85
+    output_format: webp
+    ocr_backend: tesseract
+    ocr_languages:
+    - eng
+    - chi_sim
+    caption_model: gpt-4o
+    max_file_size_mb: 20.0
+  video:
+    max_frames: 10
+    frame_interval_sec: 5.0
+    scene_detection: true
+    target_resolution: 720p
+    max_duration_sec: 300
+    whisper_model: faster-whisper
+    language: auto
+    max_file_size_mb: 100.0
+  audio:
+    target_format: opus
+    sample_rate: 16000
+    bitrate: 64k
+    whisper_model: faster-whisper
+    language: auto
+    max_duration_sec: 600
+    diarization_enabled: false
+    max_file_size_mb: 50.0
+  document:
+    supported_formats:
+    - pdf
+    - docx
+    - xlsx
+    - pptx
+    - md
+    - csv
+    - html
+    ocr_fallback: true
+    chunk_size: 512
+    chunk_overlap: 64
+    chunking_strategy: semantic
+    embedding_model: Qwen/Qwen3-Embedding-0.6B
+    vector_dim: 1024
+    summary_max_length: 500
+    max_file_size_mb: 50.0
+  generation:
+    enhancement_level: 'off'
+    vision_model: gpt-4o
+    default_model: gpt-4o
+  media_cache_ttl: 604800
+  max_concurrent_processors: 4

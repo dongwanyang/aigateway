@@ -82,6 +82,7 @@ async def _wrap_stream_for_metrics(
     completion_gen: Any,
     metrics_collector: Any,
     model: str,
+    user_id: str = "",
 ) -> Any:
     """包装流式生成器，从最后一个 chunk 提取 usage 并记录指标。"""
     last_chunk: Dict[str, Any] = {}
@@ -105,7 +106,7 @@ async def _wrap_stream_for_metrics(
     if total_tokens > 0:
         cost = _estimate_cost(model, total_tokens)
         if cost > 0:
-            metrics_collector.record_cost(cost, model=model)
+            metrics_collector.record_cost(cost, model=model, user_id=user_id)
 
 
 def _get_app_state() -> Dict[str, Any]:
@@ -144,6 +145,76 @@ def _get_redis_client() -> Any:
         return None
 
 
+# ------------------------------------------------------------------
+# L3 向量计算 — Qwen/Qwen3-Embedding-0.6B (1024 维)
+# ------------------------------------------------------------------
+
+# 模块级模型缓存（避免每次请求加载 ~600MB 模型）
+_l3_model_cache: Dict[str, Any] = {}
+
+
+async def _compute_l3_vector(text: str) -> Optional[list]:
+    """使用 Qwen/Qwen3-Embedding-0.6B 计算 1024 维 embedding 向量。
+
+    使用 transformers + torch 直接加载（无需 sentence_transformers）。
+    模型在首次调用时加载并缓存到模块级变量。
+
+    Args:
+        text: 待嵌入的文本（通常是 normalized_messages）。
+
+    Returns:
+        1024 维归一化向量列表，失败返回 None。
+    """
+    try:
+        import torch
+        from transformers import AutoModel, AutoTokenizer
+
+        model_name = "Qwen/Qwen3-Embedding-0.6B"
+
+        # 从模块级缓存获取或加载模型
+        if "tokenizer" not in _l3_model_cache:
+            logger.info("Loading L3 embedding model: %s", model_name)
+            _l3_model_cache["tokenizer"] = AutoTokenizer.from_pretrained(
+                model_name, trust_remote_code=True
+            )
+            _l3_model_cache["model"] = AutoModel.from_pretrained(
+                model_name, trust_remote_code=True
+            ).eval()
+            logger.info("L3 embedding model loaded successfully")
+
+        tokenizer = _l3_model_cache["tokenizer"]
+        model = _l3_model_cache["model"]
+
+        # Tokenize（截断过长文本）
+        inputs = tokenizer(
+            text, return_tensors="pt", truncation=True, max_length=512, padding=True
+        )
+
+        # 推理
+        with torch.no_grad():
+            outputs = model(**inputs)
+
+        # 使用 last_hidden_state 的 mean pooling 作为 sentence embedding
+        attention_mask = inputs["attention_mask"]
+        token_embeddings = outputs.last_hidden_state  # (1, seq_len, 1024)
+        input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+        embedding = torch.sum(token_embeddings * input_mask_expanded, 1) / torch.clamp(
+            input_mask_expanded.sum(1), min=1e-9
+        )
+
+        # L2 归一化
+        embedding = torch.nn.functional.normalize(embedding, p=2, dim=1)
+
+        return embedding[0].tolist()
+
+    except ImportError as exc:
+        logger.warning("L3 vector: transformers/torch not available: %s", exc)
+        return None
+    except Exception as exc:
+        logger.warning("L3 vector computation failed: %s", exc)
+        return None
+
+
 async def _safe_l3_backfill(
     cache_manager: Any,
     cache_key: str,
@@ -155,7 +226,7 @@ async def _safe_l3_backfill(
 ) -> None:
     """异步回填 L3 语义缓存（fire-and-forget）。
 
-    使用 sentence-transformers 计算 embedding 向量后存入 Qdrant。
+    使用 Qwen/Qwen3-Embedding-0.6B (transformers) 计算 1024 维向量后存入 Qdrant。
     失败时仅记录 WARNING，不影响主请求。
     """
     try:
@@ -163,20 +234,8 @@ async def _safe_l3_backfill(
             return
 
         # 计算 embedding 向量
-        try:
-            from sentence_transformers import SentenceTransformer
-            from aigateway_core.pipeline import SemanticCachePlugin
-            if not hasattr(SemanticCachePlugin, "_model_cache"):
-                SemanticCachePlugin._model_cache = {}
-            st_model = SemanticCachePlugin._model_cache.get("all-MiniLM-L6-v2")
-            if st_model is None:
-                st_model = SentenceTransformer("all-MiniLM-L6-v2")
-                SemanticCachePlugin._model_cache["all-MiniLM-L6-v2"] = st_model
-            vector = st_model.encode(normalized_messages, normalize_embeddings=True).tolist()
-        except ImportError:
-            return  # sentence-transformers not installed
-        except Exception as exc:
-            logger.warning("L3 backfill: embedding computation failed: %s", exc)
+        vector = await _compute_l3_vector(normalized_messages)
+        if vector is None:
             return
 
         # 存入 Qdrant
@@ -217,6 +276,9 @@ async def _record_request_log(
         if api_key_data:
             user_id = api_key_data.get("user_id", "")
 
+    # 获取 plugin_trace（管线插件执行步骤）
+    plugin_trace = getattr(request.state, "plugin_trace", None) or []
+
     redis_client = _get_redis_client()
     if redis_client is None:
         return
@@ -233,6 +295,7 @@ async def _record_request_log(
         "cache_hit": cache_hit,
         "tier": cache_tier,
         "timestamp": now,
+        "plugin_trace": plugin_trace,
     }, ensure_ascii=False)
     try:
         await redis_client.zadd("aigateway:logs:requests", {log_entry: now})
@@ -316,6 +379,7 @@ async def chat_completions_non_stream(
     流程: 缓存检查 → 配额检查 → 下游 LLM 调用 → 用量记录 → 缓存回填
     """
     request_start_time = time.time()
+    plugin_trace: list = []  # 手动记录各步骤耗时
 
     state = _get_app_state()
     cache_manager = state["cache_manager"]
@@ -326,19 +390,24 @@ async def chat_completions_non_stream(
     # 解析 user_id / key_hash（从鉴权中间件注入）
     user_id: Optional[str] = None
     key_hash: Optional[str] = None
-    if hasattr(request.state, "user_id"):
-        user_id = request.state.user_id
     if hasattr(request.state, "api_key_data"):
         key_data = request.state.api_key_data
         if key_data:
+            user_id = key_data.get("user_id") or None
             raw_key = getattr(request.state, "api_key_value", "")
             if raw_key:
                 key_hash = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()[:16]
+    if not user_id and hasattr(request.state, "user_id"):
+        user_id = request.state.user_id
 
     # ===== Media Optimization (V2) — 处理多模态内容 =====
+    mol_start = time.time()
     mol_result = await _apply_media_optimization(body, request, state)
     body.messages = mol_result["messages"]
     mol_meta = mol_result["meta"]
+    mol_ms = round((time.time() - mol_start) * 1000, 2)
+    if mol_meta:
+        plugin_trace.append({"plugin_name": "media_optimization", "duration_ms": mol_ms, "status": "success"})
 
     # 生成缓存键
     normalized_messages = json.dumps(body.messages, sort_keys=True, ensure_ascii=False)
@@ -352,8 +421,21 @@ async def chat_completions_non_stream(
     )
 
     # 检查缓存（L1 -> L2 -> L3）
-    cached = await cache_manager.get(cache_key, value_fn=None, user_id=user_id)
+    cache_start = time.time()
+    # 计算 embedding 向量用于 L3 语义缓存查询
+    l3_vector = None
+    if cache_manager._qdrant_client is not None:
+        l3_vector = await _compute_l3_vector(normalized_messages)
+
+    cache_kwargs: Dict[str, Any] = {"user_id": user_id}
+    if l3_vector is not None:
+        cache_kwargs["vector"] = l3_vector
+    cached = await cache_manager.get(cache_key, value_fn=None, **cache_kwargs)
     cache_hit = cached is not None and cached.get("hit_tier") in ("L1", "L2", "L3")
+    cache_ms = round((time.time() - cache_start) * 1000, 2)
+    hit_tier_name = cached.get("hit_tier", "") if cached else ""
+    cache_plugin_name = "semantic_cache" if hit_tier_name == "L3" else "prompt_cache"
+    plugin_trace.append({"plugin_name": cache_plugin_name, "duration_ms": cache_ms, "status": "success"})
 
     if cache_hit and cached:
         # 缓存命中 -- 返回缓存的完整响应
@@ -361,6 +443,11 @@ async def chat_completions_non_stream(
         hit_tier = cached.get("hit_tier", "L1")
         if metrics_collector:
             metrics_collector.inc_cache_hits(tier=hit_tier)
+            # 记录缓存命中节省的 token
+            cached_usage = response_data.get("usage", {})
+            saved_tokens = cached_usage.get("total_tokens", 0)
+            if saved_tokens > 0:
+                metrics_collector.record_tokens_saved(saved_tokens)
 
         # 构建 _meta 元数据（API_CONTRACT.md 要求放在顶层）
         meta = {
@@ -375,6 +462,11 @@ async def chat_completions_non_stream(
 
         # 记录缓存命中日志
         cache_duration_ms = round((time.time() - request_start_time) * 1000, 1)
+        # 记录 Prometheus 请求计数和延迟
+        if metrics_collector:
+            metrics_collector.record_request("POST", "/v1/chat/completions", "200")
+            metrics_collector.record_duration("/v1/chat/completions", (time.time() - request_start_time))
+        request.state.plugin_trace = plugin_trace
         await _record_request_log(
             request=request,
             method="POST", endpoint="/v1/chat/completions",
@@ -391,6 +483,7 @@ async def chat_completions_non_stream(
     # ===== 配额检查（缓存未命中时才检查，避免浪费） =====
     if metrics_collector:
         metrics_collector.inc_cache_misses()
+    quota_start = time.time()
     if key_hash and key_store:
         # 预估 token 消耗（基于输入消息大小）
         estimated_tokens = sum(len(json.dumps(m)) for m in body.messages) // 4
@@ -398,6 +491,8 @@ async def chat_completions_non_stream(
             key_hash=key_hash, tokens=estimated_tokens, cost=0.0
         )
         if not allowed:
+            quota_ms = round((time.time() - quota_start) * 1000, 2)
+            plugin_trace.append({"plugin_name": "quota_check", "duration_ms": quota_ms, "status": "failed"})
             headers = {}
             if retry_after > 0:
                 headers["Retry-After"] = str(retry_after)
@@ -411,6 +506,7 @@ async def chat_completions_non_stream(
                 code = "quota_exceeded_daily_tokens"
             elif "Monthly" in fail_msg:
                 code = "quota_exceeded_monthly_cost"
+            request.state.plugin_trace = plugin_trace
             await _record_request_log(
                 request=request,
                 method="POST", endpoint="/v1/chat/completions",
@@ -422,6 +518,8 @@ async def chat_completions_non_stream(
                 status_code=429,
                 headers=headers,
             )
+    quota_ms = round((time.time() - quota_start) * 1000, 2)
+    plugin_trace.append({"plugin_name": "quota_check", "duration_ms": quota_ms, "status": "success"})
 
     # 缓存未命中 -- 调用下游 LLM
     if litellm_bridge is None:
@@ -435,6 +533,7 @@ async def chat_completions_non_stream(
     if tracker:
         tracker.__enter__()
 
+    llm_start = time.time()
     try:
         result = await litellm_bridge.completion(
             messages=body.messages,
@@ -451,6 +550,8 @@ async def chat_completions_non_stream(
             stop=body.stop,
         )
     except Exception as exc:
+        llm_ms = round((time.time() - llm_start) * 1000, 2)
+        plugin_trace.append({"plugin_name": "llm_completion", "duration_ms": llm_ms, "status": "failed"})
         logger.error("LLM completion failed: %s", exc, exc_info=True)
         if tracker:
             tracker.__exit__(type(exc), exc, exc.__traceback__)
@@ -459,6 +560,9 @@ async def chat_completions_non_stream(
             status_code=500,
         )
 
+    llm_ms = round((time.time() - llm_start) * 1000, 2)
+    plugin_trace.append({"plugin_name": "llm_completion", "duration_ms": llm_ms, "status": "success"})
+
     # 检查 bridge 返回的错误（如模型未注册）
     if "error" in result and "data" not in result:
         if tracker:
@@ -466,6 +570,7 @@ async def chat_completions_non_stream(
         error_info = result["error"]
         error_code = error_info.get("code", "internal_error")
         status_code = 404 if error_code == "model_not_found" else 502
+        request.state.plugin_trace = plugin_trace
         await _record_request_log(
             request=request,
             method="POST", endpoint="/v1/chat/completions",
@@ -534,6 +639,8 @@ async def chat_completions_non_stream(
 
     # 记录请求日志到 Redis
     total_duration_ms = round((time.time() - request_start_time) * 1000, 1)
+    # 将 plugin_trace 存储到 request.state 供 _record_request_log 使用
+    request.state.plugin_trace = plugin_trace
     await _record_request_log(
         request=request,
         method="POST", endpoint="/v1/chat/completions",
@@ -565,6 +672,8 @@ async def chat_completions_stream(
     API_CONTRACT.md F15: 缓存命中时，将缓存的完整响应按 chunk 分块，
     以 20ms/chunk 延迟模拟真实 LLM 生成。
     """
+    request_start_time = time.time()
+    plugin_trace: list = []  # 手动记录各步骤耗时
     from .streaming import SSEGenerator, create_sse_response, simulate_stream_from_cache
     state = _get_app_state()
     cache_manager = state["cache_manager"]
@@ -575,20 +684,22 @@ async def chat_completions_stream(
     # 解析 user_id / key_hash
     user_id: Optional[str] = None
     key_hash: Optional[str] = None
-    if hasattr(request.state, "user_id"):
-        user_id = request.state.user_id
     if hasattr(request.state, "api_key_data"):
         key_data = request.state.api_key_data
         if key_data:
+            user_id = key_data.get("user_id") or None
             raw_key = getattr(request.state, "api_key_value", "")
             if raw_key:
                 key_hash = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()[:16]
+    if not user_id and hasattr(request.state, "user_id"):
+        user_id = request.state.user_id
 
     # ===== Media Optimization (V2) — 处理多模态内容 =====
     mol_result = await _apply_media_optimization(body, request, state)
     body.messages = mol_result["messages"]
 
     # 生成缓存键并检查缓存
+    cache_start = time.time()
     normalized_messages = json.dumps(body.messages, sort_keys=True, ensure_ascii=False)
     cache_key = cache_manager.generate_cache_key(
         normalized_prompt=normalized_messages,
@@ -599,18 +710,41 @@ async def chat_completions_stream(
         user_id=user_id or "",
     )
 
-    cached = await cache_manager.get(cache_key, value_fn=None, user_id=user_id)
+    # 计算 embedding 向量用于 L3 语义缓存查询
+    l3_vector = None
+    if cache_manager._qdrant_client is not None:
+        l3_vector = await _compute_l3_vector(normalized_messages)
+
+    cache_kwargs: Dict[str, Any] = {"user_id": user_id}
+    if l3_vector is not None:
+        cache_kwargs["vector"] = l3_vector
+    cached = await cache_manager.get(cache_key, value_fn=None, **cache_kwargs)
     if cached is not None and cached.get("hit_tier") in ("L1", "L2", "L3"):
         # 缓存命中 — 模拟流式响应（F15）
+        cache_ms = round((time.time() - cache_start) * 1000, 2)
         hit_tier = cached.get("hit_tier", "L1")
+        cache_plugin_name = "semantic_cache" if hit_tier == "L3" else "prompt_cache"
+        plugin_trace.append({"plugin_name": cache_plugin_name, "duration_ms": cache_ms, "status": "success"})
         if metrics_collector:
             metrics_collector.inc_cache_hits(tier=hit_tier)
+            # 记录缓存命中节省的 token
+            try:
+                cached_data = json.loads(cached["value"])
+                saved_tokens = cached_data.get("usage", {}).get("total_tokens", 0)
+                if saved_tokens > 0:
+                    metrics_collector.record_tokens_saved(saved_tokens)
+            except (json.JSONDecodeError, AttributeError):
+                pass
         response_json = cached["value"]
 
         chat_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
         stream_gen = simulate_stream_from_cache(response_json, hit_tier=hit_tier)
 
         # 记录缓存命中日志（流式）
+        if metrics_collector:
+            metrics_collector.record_request("POST", "/v1/chat/completions", "200")
+            metrics_collector.record_duration("/v1/chat/completions", 0.001)  # 缓存命中极低延迟
+        request.state.plugin_trace = plugin_trace
         await _record_request_log(
             request=request,
             method="POST", endpoint="/v1/chat/completions",
@@ -619,15 +753,21 @@ async def chat_completions_stream(
         )
         return create_sse_response(stream_gen, chat_id=chat_id)
 
+    cache_ms = round((time.time() - cache_start) * 1000, 2)
+    plugin_trace.append({"plugin_name": "prompt_cache", "duration_ms": cache_ms, "status": "success"})
+
     # ===== 配额检查 =====
     if metrics_collector:
         metrics_collector.inc_cache_misses()
+    quota_start = time.time()
     if key_hash and key_store:
         estimated_tokens = sum(len(json.dumps(m)) for m in body.messages) // 4
         allowed, fail_msg, retry_after = await key_store.check_quota(
             key_hash=key_hash, tokens=estimated_tokens, cost=0.0
         )
         if not allowed:
+            quota_ms = round((time.time() - quota_start) * 1000, 2)
+            plugin_trace.append({"plugin_name": "quota_check", "duration_ms": quota_ms, "status": "failed"})
             headers = {}
             if retry_after > 0:
                 headers["Retry-After"] = str(retry_after)
@@ -640,6 +780,7 @@ async def chat_completions_stream(
                 code = "quota_exceeded_daily_tokens"
             elif "Monthly" in fail_msg:
                 code = "quota_exceeded_monthly_cost"
+            request.state.plugin_trace = plugin_trace
             await _record_request_log(
                 request=request,
                 method="POST", endpoint="/v1/chat/completions",
@@ -651,6 +792,8 @@ async def chat_completions_stream(
                 status_code=429,
                 headers=headers,
             )
+    quota_ms = round((time.time() - quota_start) * 1000, 2)
+    plugin_trace.append({"plugin_name": "quota_check", "duration_ms": quota_ms, "status": "success"})
 
     if litellm_bridge is None:
         return JSONResponse(
@@ -659,6 +802,8 @@ async def chat_completions_stream(
         )
 
     # 调用下游 LLM 流式
+    plugin_trace.append({"plugin_name": "llm_completion", "duration_ms": 0, "status": "success"})
+    request.state.plugin_trace = plugin_trace
     completion_gen = litellm_bridge.completion_stream(
         messages=body.messages,
         model=body.model,
@@ -675,7 +820,11 @@ async def chat_completions_stream(
 
     # 包装生成器：消费完所有 chunk 后从最后一个提取 usage 并记录指标
     if metrics_collector:
-        completion_gen = _wrap_stream_for_metrics(completion_gen, metrics_collector, body.model)
+        # 记录请求计数和延迟（流式请求在开始时就计数，延迟为到首字节时间）
+        stream_start_duration = time.time() - request_start_time
+        metrics_collector.record_request("POST", "/v1/chat/completions", "200")
+        metrics_collector.record_duration("/v1/chat/completions", stream_start_duration)
+        completion_gen = _wrap_stream_for_metrics(completion_gen, metrics_collector, body.model, user_id=user_id or "")
 
     return create_sse_response(completion_gen, chat_id=f"chatcmpl-{uuid.uuid4().hex[:12]}")
 

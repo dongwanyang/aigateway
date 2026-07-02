@@ -160,6 +160,34 @@ export async function deleteApiKey(keyId: string): Promise<ApiResponse<RevokedKe
   })
 }
 
+export interface UpdateQuotaRequest {
+  daily_tokens?: number
+  monthly_cost?: number
+  rate_limit_rpm?: number
+  rate_limit_tpm?: number
+}
+
+export interface UpdateQuotaData {
+  id: string
+  user_id: string
+  quotas: {
+    daily_tokens_limit: number
+    monthly_cost_limit: number
+    rate_limit_rpm: number
+    rate_limit_tpm: number
+  }
+}
+
+export async function updateApiKeyQuota(
+  keyId: string,
+  body: UpdateQuotaRequest,
+): Promise<ApiResponse<UpdateQuotaData>> {
+  return fetchJson<UpdateQuotaData>(`/admin/api-keys/${encodeURIComponent(keyId)}`, {
+    method: 'PUT',
+    body: JSON.stringify(body),
+  })
+}
+
 // ------------------------------------------------------------------
 // Admin: Quotas
 // ------------------------------------------------------------------
@@ -324,6 +352,12 @@ export async function updateGlobalConfig(config: { hot_reload: boolean; debug_mo
 // Admin: Request Logs
 // ------------------------------------------------------------------
 
+export interface PluginTraceStep {
+  plugin_name: string
+  duration_ms: number
+  status: 'success' | 'skipped' | 'failed'
+}
+
 export interface LogEntry {
   request_id: string
   trace_id: string
@@ -336,6 +370,22 @@ export interface LogEntry {
   duration_ms: number
   cache_hit: boolean
   tier: string | null
+  plugin_trace?: PluginTraceStep[]
+}
+
+export interface TraceDetail {
+  trace_id: string
+  request_id: string
+  user_id: string
+  model: string
+  endpoint: string
+  status: number
+  duration_ms: number
+  cache_hit: boolean
+  cache_tier: string | null
+  timestamp: number
+  plugin_trace: PluginTraceStep[]
+  related_requests: LogEntry[]
 }
 
 export interface LogsData {
@@ -379,6 +429,17 @@ export async function deleteAllLogs(): Promise<ApiResponse<{ deleted: boolean }>
     return await res.json()
   } catch {
     throw new Error('Delete logs returned invalid response')
+  }
+}
+
+export async function getTraceDetail(traceId: string): Promise<ApiResponse<TraceDetail>> {
+  const headers = await ensureAuthHeaders()
+  const res = await fetch(`${API_BASE}/admin/trace/${encodeURIComponent(traceId)}`, { headers })
+  if (!res.ok) throw new Error(`Failed to fetch trace: ${res.status}`)
+  try {
+    return await res.json()
+  } catch {
+    throw new Error('Trace detail returned invalid response')
   }
 }
 

@@ -94,6 +94,7 @@ class MetricsCollector:
         self._cache_hits_counter: Any = None
         self._cache_misses_counter: Any = None
         self._tokens_counter: Any = None
+        self._tokens_saved_counter: Any = None
         self._cost_total_gauge: Any = None
         self._cost_by_model_counter: Any = None
         self._cost_by_user_counter: Any = None
@@ -161,6 +162,13 @@ class MetricsCollector:
             "gateway_tokens_total",
             "Total tokens processed",
             labelnames=["type"],
+            registry=registry,
+        )
+
+        # gateway_tokens_saved_total — counter
+        self._tokens_saved_counter = Counter(
+            "gateway_tokens_saved",
+            "Total tokens saved by cache hits",
             registry=registry,
         )
 
@@ -308,6 +316,22 @@ class MetricsCollector:
             token_type: token 类型 "prompt" | "completion"。
         """
         if not self.enabled:
+            return
+
+        if self._tokens_counter and tokens > 0:
+            self._tokens_counter.labels(type=token_type).inc(tokens)
+
+    def record_tokens_saved(self, tokens: int) -> None:
+        """记录缓存命中节省的 token 数。
+
+        Args:
+            tokens: 节省的 token 数量。
+        """
+        if not self.enabled:
+            return
+
+        if self._tokens_saved_counter and tokens > 0:
+            self._tokens_saved_counter.inc(tokens)
             return
 
         if self._tokens_counter and tokens > 0:
