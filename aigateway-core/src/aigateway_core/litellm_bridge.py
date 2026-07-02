@@ -125,8 +125,8 @@ class LiteLLMBridge:
             if model_grouper:
                 # 多模型分组模式
                 for group in model_grouper:
+                    fallback_models = group.get("fallback_models", [])
                     for model_name in group.get("models", []):
-                        fallback_models = group.get("fallback_models", [])
                         if base_url:
                             # OpenAI 兼容提供商：用 openai/{model_name}，Router 通过 openai 前缀
                             # 选择 OpenAI client，再通过 litellm_params 中的 base_url 路由到具体地址
@@ -154,6 +154,30 @@ class LiteLLMBridge:
                         self._register_model_pricing(group, litellm_model, base_url, provider_name)
 
                         model_list.append(entry)
+
+                    # 同时注册 fallback 模型到 alias map 和 model_list
+                    for fb_model_name in fallback_models:
+                        if fb_model_name in self._model_alias_map:
+                            continue  # 已注册，跳过
+                        if base_url:
+                            fb_litellm_model = f"openai/{fb_model_name}"
+                        else:
+                            fb_litellm_model = f"{provider_name}/{fb_model_name}"
+                        self._model_alias_map[fb_model_name] = fb_litellm_model
+
+                        fb_entry = {
+                            "model_name": fb_litellm_model,
+                            "litellm_params": {
+                                "model": fb_litellm_model,
+                                "api_key": api_key,
+                                "base_url": base_url,
+                                "num_retries": num_retries,
+                                "retry_after": retry_after,
+                            },
+                            "fallbacks": [],
+                        }
+                        self._register_model_pricing(group, fb_litellm_model, base_url, provider_name)
+                        model_list.append(fb_entry)
             else:
                 # 单模型模式
                 model_name = f"{provider_name}/{provider_name}"
@@ -235,6 +259,37 @@ class LiteLLMBridge:
         # 已经带前缀或 Router 能识别的名称，原样返回
         return model
 
+    def is_model_registered(self, model: str) -> bool:
+        """检查模型是否已在 Router 中注册。
+
+        支持裸模型名和带前缀的完整名。
+
+        Args:
+            model: 模型名称（裸名或完整名）。
+
+        Returns:
+            模型是否已注册。
+        """
+        # 裸模型名在 alias map 中
+        if model in self._model_alias_map:
+            return True
+        # 完整名在 alias map 的 values 中
+        if model in self._model_alias_map.values():
+            return True
+        # 检查 Router model_list（兜底）
+        if self.router is not None:
+            try:
+                model_list = self.router.get_model_list()
+                registered_names = {m.get("model_name", "") for m in model_list}
+                return model in registered_names
+            except Exception:
+                pass
+        return False
+
+    def get_registered_models(self) -> List[str]:
+        """返回所有已注册的裸模型名列表。"""
+        return list(self._model_alias_map.keys())
+
     def _build_routing_strategy(self, providers_config: Dict[str, Any]) -> str:
         """构建路由策略配置。
 
@@ -305,6 +360,20 @@ class LiteLLMBridge:
         attempts = 0
         last_error: Optional[Exception] = None
         fallback_used: List[str] = []
+
+        # 前置校验：检查模型是否已注册
+        if not self.is_model_registered(model):
+            registered = self.get_registered_models()
+            return {
+                "error": {
+                    "code": "model_not_found",
+                    "message": (
+                        f"Model '{model}' is not registered. "
+                        f"Available models: {registered}. "
+                        f"Please add it to config.yaml providers section."
+                    ),
+                }
+            }
 
         # 构建尝试模型列表：先尝试指定 model，再走 fallback
         candidates = [model]
@@ -677,8 +746,24 @@ class LiteLLMBridge:
         Yields:
             每个 chunk 的字典（OpenAI 流式格式）。
         """
+        # 前置校验：检查模型是否已注册
+        if not self.is_model_registered(model):
+            registered = self.get_registered_models()
+            yield {
+                "error": {
+                    "code": "model_not_found",
+                    "message": (
+                        f"Model '{model}' is not registered. "
+                        f"Available models: {registered}. "
+                        f"Please add it to config.yaml providers section."
+                    ),
+                }
+            }
+            return
+
         max_retries = max_retries or 3
         attempts = 0
+        last_error: Optional[Exception] = None
 
         candidates = [model]
         if fallback_chain:
@@ -711,6 +796,7 @@ class LiteLLMBridge:
 
                 return  # 成功完成
             except Exception as exc:
+                last_error = exc
                 attempts += 1
                 retry_delay = self.config.get("retry_delay_ms", 1000) / 1000.0
                 logger.warning("模型 %s 流式调用失败 (尝试 %d/%d): %s", current_model, attempts, max_retries + 1, exc)
@@ -718,7 +804,7 @@ class LiteLLMBridge:
                     await asyncio_sleep(retry_delay * attempts)
 
         # 全部失败
-        yield {"error": {"code": "upstream_timeout", "message": f"All stream models failed: {exc}"}}
+        yield {"error": {"code": "upstream_timeout", "message": f"All stream models failed: {last_error}"}}
 
     # ------------------------------------------------------------------
     # 工具方法

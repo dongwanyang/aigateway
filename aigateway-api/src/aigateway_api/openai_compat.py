@@ -122,6 +122,8 @@ def _get_app_state() -> Dict[str, Any]:
         "circuit_breaker_factory": getattr(s, "circuit_breaker_factory"),
         "redis_manager": getattr(s, "redis_manager"),
         "qdrant_manager": getattr(s, "qdrant_manager"),
+        "media_optimization_layer": getattr(s, "media_optimization_layer", None),
+        "media_cache": getattr(s, "media_cache", None),
     }
 
 
@@ -240,6 +242,67 @@ async def _record_request_log(
 
 
 # ------------------------------------------------------------------
+# Media Optimization (V2) — 在 LLM 调用前处理多模态内容
+# ------------------------------------------------------------------
+
+
+async def _apply_media_optimization(
+    body: "ChatCompletionRequest",
+    request: Request,
+    state: Dict[str, Any],
+) -> Dict[str, Any]:
+    """对请求消息应用 Media Optimization Layer。
+
+    检测并处理多模态内容（图片 OCR、音频转录等），
+    将媒体转为文本以节约 token。
+
+    Returns:
+        {"messages": optimized_messages, "meta": {...}}
+        失败或无多模态内容时原样返回。
+    """
+    mol_plugin = state.get("media_optimization_layer")
+    result: Dict[str, Any] = {"messages": body.messages, "meta": {}}
+
+    if mol_plugin is None:
+        return result
+
+    # 仅当消息包含 list 类型 content（多模态）时才处理
+    has_multimodal = any(
+        isinstance(m.get("content"), list) for m in body.messages
+    )
+    if not has_multimodal:
+        return result
+
+    try:
+        from aigateway_core.context import PipelineContext
+
+        ctx = PipelineContext(request={"messages": body.messages, "model": body.model})
+        if hasattr(request.state, "user_id"):
+            ctx.user_id = request.state.user_id
+
+        ctx = await mol_plugin.execute(ctx)
+
+        optimized_messages = ctx.request.get("messages", body.messages)
+        mol_ns = ctx.extra.get("media_optimization", {})
+        result["messages"] = optimized_messages
+        result["meta"] = {
+            "is_multimodal": ctx.is_multimodal,
+            "detected_types": mol_ns.get("detected_types", []),
+            "token_savings": ctx.total_token_savings,
+            "processors_executed": mol_ns.get("processors_executed", []),
+        }
+        logger.info(
+            "Media optimization applied: types=%s, savings=%d",
+            mol_ns.get("detected_types", []),
+            ctx.total_token_savings,
+        )
+    except Exception as exc:
+        logger.warning("Media optimization 失败（原样透传）: %s", exc)
+
+    return result
+
+
+# ------------------------------------------------------------------
 # POST /v1/chat/completions -- 非流式
 # ------------------------------------------------------------------
 
@@ -271,6 +334,11 @@ async def chat_completions_non_stream(
             raw_key = getattr(request.state, "api_key_value", "")
             if raw_key:
                 key_hash = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()[:16]
+
+    # ===== Media Optimization (V2) — 处理多模态内容 =====
+    mol_result = await _apply_media_optimization(body, request, state)
+    body.messages = mol_result["messages"]
+    mol_meta = mol_result["meta"]
 
     # 生成缓存键
     normalized_messages = json.dumps(body.messages, sort_keys=True, ensure_ascii=False)
@@ -391,6 +459,24 @@ async def chat_completions_non_stream(
             status_code=500,
         )
 
+    # 检查 bridge 返回的错误（如模型未注册）
+    if "error" in result and "data" not in result:
+        if tracker:
+            tracker.__exit__(None, None, None)
+        error_info = result["error"]
+        error_code = error_info.get("code", "internal_error")
+        status_code = 404 if error_code == "model_not_found" else 502
+        await _record_request_log(
+            request=request,
+            method="POST", endpoint="/v1/chat/completions",
+            status_code=status_code, duration_ms=round((time.time() - request_start_time) * 1000, 1),
+            model=body.model, cache_hit=False, cache_tier=None,
+        )
+        return JSONResponse(
+            content={"error": error_info},
+            status_code=status_code,
+        )
+
     # 记录用量（Redis + Prometheus 指标）
     data_part = result.get("data", {})
     usage = data_part.get("usage", {})
@@ -458,7 +544,10 @@ async def chat_completions_non_stream(
     return JSONResponse(content={
         "data": result.get("data", {}),
         "message": "success",
-        "_meta": result.get("_meta", {"cache_hit": False, "cache_tier": None}),
+        "_meta": {
+            **result.get("_meta", {"cache_hit": False, "cache_tier": None}),
+            "media_optimization": mol_meta,
+        },
     })
 
 
@@ -494,6 +583,10 @@ async def chat_completions_stream(
             raw_key = getattr(request.state, "api_key_value", "")
             if raw_key:
                 key_hash = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()[:16]
+
+    # ===== Media Optimization (V2) — 处理多模态内容 =====
+    mol_result = await _apply_media_optimization(body, request, state)
+    body.messages = mol_result["messages"]
 
     # 生成缓存键并检查缓存
     normalized_messages = json.dumps(body.messages, sort_keys=True, ensure_ascii=False)

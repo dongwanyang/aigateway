@@ -1,0 +1,343 @@
+"""
+LiteLLM Bridge 单元测试
+========================
+
+测试覆盖:
+- 模型注册验证（model_not_found 错误）
+- 异常变量作用域修复（Python 3.12 兼容）
+- resolve_model 映射
+- completion / completion_stream 对未注册模型的处理
+"""
+
+import asyncio
+import sys
+import os
+import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
+
+# 确保导入路径正确
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-api", "src"))
+
+from aigateway_core.litellm_bridge import LiteLLMBridge
+
+
+# ==================================================================
+# Helper: 创建已初始化的 Bridge（不依赖真实 litellm）
+# ==================================================================
+
+
+def _create_bridge_with_models(models_config: dict) -> LiteLLMBridge:
+    """创建一个带有模型注册的 bridge（mock Router）。"""
+    bridge = LiteLLMBridge(config={"providers": models_config})
+
+    # 手动构建 model_list 来填充 _model_alias_map（模拟 initialize）
+    model_list = bridge._build_model_list(models_config)
+
+    # Mock router
+    bridge.router = MagicMock()
+    bridge.router.get_model_list.return_value = model_list
+
+    return bridge
+
+
+# ==================================================================
+# resolve_model Tests
+# ==================================================================
+
+
+class TestResolveModel:
+    """resolve_model 映射测试。"""
+
+    def setup_method(self):
+        self.bridge = _create_bridge_with_models({
+            "openai": {
+                "api_key": "sk-test",
+                "model_grouper": [{
+                    "models": ["gpt-4o", "gpt-4o-mini"],
+                    "fallback_models": [],
+                }],
+            },
+            "agnes": {
+                "api_key": "sk-agnes-test",
+                "base_url": "https://apihub.agnes-ai.com/v1",
+                "model_grouper": [{
+                    "models": ["agnes-2.0-flash"],
+                    "fallback_models": [],
+                }],
+            },
+        })
+
+    def test_bare_model_resolves_to_prefixed(self):
+        """裸模型名应解析为带前缀的完整名。"""
+        assert self.bridge.resolve_model("gpt-4o") == "openai/gpt-4o"
+        assert self.bridge.resolve_model("gpt-4o-mini") == "openai/gpt-4o-mini"
+
+    def test_agnes_resolves_with_openai_prefix(self):
+        """base_url 提供商的模型应解析为 openai/ 前缀。"""
+        assert self.bridge.resolve_model("agnes-2.0-flash") == "openai/agnes-2.0-flash"
+
+    def test_unknown_model_returns_as_is(self):
+        """未注册模型原样返回。"""
+        assert self.bridge.resolve_model("deepseek-chat") == "deepseek-chat"
+
+    def test_already_prefixed_returns_as_is(self):
+        """已经带前缀的模型原样返回。"""
+        assert self.bridge.resolve_model("openai/gpt-4o") == "openai/gpt-4o"
+
+
+# ==================================================================
+# is_model_registered Tests
+# ==================================================================
+
+
+class TestIsModelRegistered:
+    """模型注册检查测试。"""
+
+    def setup_method(self):
+        self.bridge = _create_bridge_with_models({
+            "openai": {
+                "api_key": "sk-test",
+                "model_grouper": [{
+                    "models": ["gpt-4o", "gpt-4o-mini"],
+                    "fallback_models": ["gpt-3.5-turbo"],
+                }],
+            },
+            "anthropic": {
+                "api_key": "sk-ant-test",
+                "model_grouper": [{
+                    "models": ["claude-3-5-sonnet"],
+                    "fallback_models": [],
+                }],
+            },
+            "agnes": {
+                "api_key": "sk-agnes-test",
+                "base_url": "https://apihub.agnes-ai.com/v1",
+                "model_grouper": [{
+                    "models": ["agnes-2.0-flash"],
+                    "fallback_models": [],
+                }],
+            },
+        })
+
+    def test_registered_bare_name(self):
+        """已注册的裸模型名应返回 True。"""
+        assert self.bridge.is_model_registered("gpt-4o") is True
+        assert self.bridge.is_model_registered("gpt-4o-mini") is True
+        assert self.bridge.is_model_registered("claude-3-5-sonnet") is True
+        assert self.bridge.is_model_registered("agnes-2.0-flash") is True
+
+    def test_registered_full_name(self):
+        """已注册的完整模型名应返回 True。"""
+        assert self.bridge.is_model_registered("openai/gpt-4o") is True
+        assert self.bridge.is_model_registered("anthropic/claude-3-5-sonnet") is True
+        assert self.bridge.is_model_registered("openai/agnes-2.0-flash") is True
+
+    def test_unregistered_model(self):
+        """未注册模型应返回 False。"""
+        assert self.bridge.is_model_registered("deepseek-chat") is False
+        assert self.bridge.is_model_registered("qwen-turbo") is False
+        assert self.bridge.is_model_registered("llama-3-70b") is False
+
+    def test_fallback_model_registered(self):
+        """fallback 模型也应被注册。"""
+        assert self.bridge.is_model_registered("gpt-3.5-turbo") is True
+
+
+# ==================================================================
+# completion: model_not_found Tests
+# ==================================================================
+
+
+class TestCompletionModelNotFound:
+    """completion 对未注册模型的处理测试。"""
+
+    def setup_method(self):
+        self.bridge = _create_bridge_with_models({
+            "openai": {
+                "api_key": "sk-test",
+                "model_grouper": [{
+                    "models": ["gpt-4o"],
+                    "fallback_models": [],
+                }],
+            },
+        })
+
+    @pytest.mark.asyncio
+    async def test_unregistered_model_returns_error(self):
+        """请求未注册模型应返回 model_not_found 错误。"""
+        result = await self.bridge.completion(
+            messages=[{"role": "user", "content": "hello"}],
+            model="deepseek-chat",
+        )
+
+        assert "error" in result
+        assert result["error"]["code"] == "model_not_found"
+        assert "deepseek-chat" in result["error"]["message"]
+        assert "gpt-4o" in result["error"]["message"]
+
+    @pytest.mark.asyncio
+    async def test_unregistered_qwen_returns_error(self):
+        """请求千问模型未注册时应返回清晰错误。"""
+        result = await self.bridge.completion(
+            messages=[{"role": "user", "content": "你好"}],
+            model="qwen-turbo",
+        )
+
+        assert "error" in result
+        assert result["error"]["code"] == "model_not_found"
+        assert "qwen-turbo" in result["error"]["message"]
+
+    @pytest.mark.asyncio
+    async def test_registered_model_does_not_return_model_not_found(self):
+        """请求已注册模型不应返回 model_not_found 错误。"""
+        # Mock the router's acompletion
+        mock_response = MagicMock()
+        mock_response.dict.return_value = {
+            "id": "chatcmpl-test",
+            "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
+        }
+        self.bridge.router.acompletion = AsyncMock(return_value=mock_response)
+
+        result = await self.bridge.completion(
+            messages=[{"role": "user", "content": "hello"}],
+            model="gpt-4o",
+        )
+
+        assert "error" not in result or "data" in result
+        assert "data" in result
+
+
+# ==================================================================
+# completion_stream: model_not_found Tests
+# ==================================================================
+
+
+class TestCompletionStreamModelNotFound:
+    """completion_stream 对未注册模型的处理测试。"""
+
+    def setup_method(self):
+        self.bridge = _create_bridge_with_models({
+            "openai": {
+                "api_key": "sk-test",
+                "model_grouper": [{
+                    "models": ["gpt-4o"],
+                    "fallback_models": [],
+                }],
+            },
+        })
+
+    @pytest.mark.asyncio
+    async def test_stream_unregistered_model_yields_error(self):
+        """流式请求未注册模型应 yield model_not_found 错误。"""
+        chunks = []
+        async for chunk in self.bridge.completion_stream(
+            messages=[{"role": "user", "content": "hello"}],
+            model="deepseek-chat",
+        ):
+            chunks.append(chunk)
+
+        assert len(chunks) == 1
+        assert "error" in chunks[0]
+        assert chunks[0]["error"]["code"] == "model_not_found"
+        assert "deepseek-chat" in chunks[0]["error"]["message"]
+
+
+# ==================================================================
+# Python 3.12 Exception Scope Fix Tests
+# ==================================================================
+
+
+class TestExceptionScopeFix:
+    """验证 Python 3.12 异常变量作用域修复。"""
+
+    def setup_method(self):
+        self.bridge = _create_bridge_with_models({
+            "openai": {
+                "api_key": "sk-test",
+                "model_grouper": [{
+                    "models": ["gpt-4o"],
+                    "fallback_models": [],
+                }],
+            },
+        })
+
+    @pytest.mark.asyncio
+    async def test_stream_all_retries_fail_no_name_error(self):
+        """所有重试失败时应返回 upstream_timeout 错误而非 NameError。"""
+
+        # Mock router 的 acompletion 返回一个会抛异常的 async generator
+        async def _failing_acompletion(**kwargs):
+            """模拟 async generator 在首次 yield 前抛异常。"""
+            raise RuntimeError("Connection refused")
+            # 使其成为 async generator
+            yield  # noqa: unreachable - needed to make this an async generator
+
+        self.bridge.router.acompletion = _failing_acompletion
+
+        chunks = []
+        async for chunk in self.bridge.completion_stream(
+            messages=[{"role": "user", "content": "hello"}],
+            model="gpt-4o",
+            max_retries=1,
+        ):
+            chunks.append(chunk)
+
+        # 应该拿到错误 chunk 而不是 NameError
+        assert len(chunks) >= 1
+        last_chunk = chunks[-1]
+        assert "error" in last_chunk
+        assert last_chunk["error"]["code"] == "upstream_timeout"
+        assert "Connection refused" in last_chunk["error"]["message"]
+
+    @pytest.mark.asyncio
+    async def test_non_stream_all_retries_fail(self):
+        """非流式所有重试失败时应正确返回错误。"""
+        self.bridge.router.acompletion = AsyncMock(
+            side_effect=RuntimeError("Timeout")
+        )
+
+        result = await self.bridge.completion(
+            messages=[{"role": "user", "content": "hello"}],
+            model="gpt-4o",
+            max_retries=1,
+        )
+
+        assert "error" in result
+        assert result["error"]["code"] == "upstream_timeout"
+        assert "Timeout" in result["error"]["message"]
+
+
+# ==================================================================
+# get_registered_models Tests
+# ==================================================================
+
+
+class TestGetRegisteredModels:
+    """get_registered_models 测试。"""
+
+    def test_returns_all_bare_names(self):
+        bridge = _create_bridge_with_models({
+            "openai": {
+                "api_key": "sk-test",
+                "model_grouper": [{
+                    "models": ["gpt-4o", "gpt-4o-mini"],
+                    "fallback_models": ["gpt-3.5-turbo"],
+                }],
+            },
+            "agnes": {
+                "api_key": "sk-agnes",
+                "base_url": "https://apihub.agnes-ai.com/v1",
+                "model_grouper": [{
+                    "models": ["agnes-2.0-flash"],
+                    "fallback_models": [],
+                }],
+            },
+        })
+
+        models = bridge.get_registered_models()
+        assert "gpt-4o" in models
+        assert "gpt-4o-mini" in models
+        assert "gpt-3.5-turbo" in models
+        assert "agnes-2.0-flash" in models
