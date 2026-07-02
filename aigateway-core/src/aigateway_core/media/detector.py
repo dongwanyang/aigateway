@@ -97,14 +97,20 @@ class ContentTypeDetector:
             # 处理 base64 data URI
             if url.startswith("data:"):
                 raw, mime = self._decode_data_uri(url)
+                # 根据实际 MIME type 分类（data URI 可能是视频/音频/文档）
+                media_type = MediaType.IMAGE
+                if mime and mime in self.MIME_MAP:
+                    media_type = self.MIME_MAP[mime]
                 return MediaContent(
-                    media_type=MediaType.IMAGE,
+                    media_type=media_type,
                     raw_data=raw,
                     mime_type=mime,
                     size_bytes=len(raw) if raw else 0,
                 )
+            # URL 类型：根据扩展名判断
+            media_type = self._detect_from_url(url) if url else MediaType.IMAGE
             return MediaContent(
-                media_type=MediaType.IMAGE,
+                media_type=media_type,
                 source_url=url,
                 mime_type=self._guess_mime(url),
             )
