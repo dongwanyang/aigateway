@@ -303,15 +303,15 @@ class OCRExtractor(MediaProcessor):
 class VisionCaptionProcessor(MediaProcessor):
     """Vision Caption 处理器 — 生成图片描述。
 
-    当前实现为占位符（需要外部 LLM API 支持）。
-    实际环境中通过 LiteLLM Bridge 调用 Vision Model。
+    通过 LiteLLM Bridge 调用配置的 Vision Model 生成图片文字描述。
+    如果 LiteLLM 不可用或调用失败，则优雅降级（跳过 caption 步骤）。
     """
 
     name = "vision_caption"
     phase = ProcessorPhase.PRE_LLM
     supported_types = [MediaType.IMAGE]
 
-    def __init__(self, model: str = "gpt-4o") -> None:
+    def __init__(self, model: str = "agnes-2.0-flash") -> None:
         self.model = model
 
     def supports(self, content: MediaContent) -> bool:
@@ -332,7 +332,12 @@ class VisionCaptionProcessor(MediaProcessor):
             )
 
         # 尝试通过 LiteLLM Bridge 调用 Vision Model
-        litellm_bridge = ctx.extra.get("_litellm_bridge")
+        try:
+            from aigateway_api.main import app
+            litellm_bridge = getattr(app.state, "litellm_bridge", None)
+        except Exception:
+            litellm_bridge = None
+
         if litellm_bridge is None:
             elapsed = (time.monotonic() - start) * 1000
             return ProcessorResult(
@@ -342,15 +347,64 @@ class VisionCaptionProcessor(MediaProcessor):
                 error="LiteLLM Bridge not available for captioning",
             )
 
-        # 实际 caption 生成逻辑（当 LiteLLM 可用时）
+        # 构建 vision 请求
         try:
-            # 简化实现：生成一个描述性占位
+            import base64
+            image_data = content.optimized_data or content.raw_data
+            if image_data is None:
+                elapsed = (time.monotonic() - start) * 1000
+                return ProcessorResult(
+                    success=False,
+                    processor_name=self.name,
+                    duration_ms=elapsed,
+                    error="No image data for captioning",
+                )
+
+            b64 = base64.b64encode(image_data).decode()
+            mime = content.mime_type or "image/png"
+            data_url = f"data:{mime};base64,{b64}"
+
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "用一段简洁的中文描述这张图片的主要内容，不超过100字。"},
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ],
+                }
+            ]
+
+            result = await litellm_bridge.completion(
+                messages=messages,
+                model=self.model,
+                max_tokens=150,
+                temperature=0.3,
+                stream=False,
+            )
+
+            data = result.get("data", {})
+            choices = data.get("choices", [])
+            if choices:
+                caption = choices[0].get("message", {}).get("content", "")
+                if caption:
+                    elapsed = (time.monotonic() - start) * 1000
+                    original_tokens = len(image_data) // 4
+                    caption_tokens = len(caption) // 4
+                    savings = max(0, original_tokens - caption_tokens)
+                    return ProcessorResult(
+                        success=True,
+                        processor_name=self.name,
+                        duration_ms=elapsed,
+                        output=f"[图片描述]: {caption}",
+                        token_savings=savings,
+                    )
+
             elapsed = (time.monotonic() - start) * 1000
             return ProcessorResult(
                 success=False,
                 processor_name=self.name,
                 duration_ms=elapsed,
-                error="Caption generation requires Vision Model API",
+                error="Vision model returned empty caption",
             )
         except Exception as exc:
             elapsed = (time.monotonic() - start) * 1000

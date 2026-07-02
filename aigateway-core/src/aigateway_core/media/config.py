@@ -21,7 +21,7 @@ class ImagePipelineConfig:
     output_format: str = "webp"  # "webp" | "jpeg" | "png"
     ocr_backend: str = "tesseract"  # "tesseract" | "paddleocr"
     ocr_languages: List[str] = field(default_factory=lambda: ["chi_sim", "eng"])
-    caption_model: str = "gpt-4o"  # Vision model for captioning
+    caption_model: str = "agnes-2.0-flash"  # Vision model for captioning
     max_file_size_mb: float = 20.0
 
 
@@ -35,7 +35,7 @@ class VideoPipelineConfig:
     target_resolution: str = "720p"
     max_duration_sec: int = 300
     whisper_model: str = "faster-whisper"
-    caption_model: str = "gpt-4o"
+    caption_model: str = "agnes-2.0-flash"
     language: str = "auto"
     max_file_size_mb: float = 100.0
 

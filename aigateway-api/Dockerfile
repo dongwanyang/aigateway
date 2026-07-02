@@ -1,7 +1,15 @@
 FROM python:3.12-slim
 
-# 安装 curl 用于 healthcheck
-RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
+# 安装系统依赖（OCR tesseract + 视频 ffmpeg/opencv + curl healthcheck）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    tesseract-ocr \
+    tesseract-ocr-chi-sim \
+    tesseract-ocr-eng \
+    libgl1 \
+    libglib2.0-0 \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -17,6 +25,15 @@ RUN pip install --no-cache-dir \
     pydantic \
     litellm \
     Pillow
+
+# 安装多模态处理依赖
+RUN pip install --no-cache-dir \
+    pytesseract \
+    opencv-python-headless \
+    faster-whisper \
+    pymupdf \
+    python-docx \
+    beautifulsoup4
 
 # 安装 Embedding 模型依赖（CPU-only PyTorch + transformers）
 # 用于 L3 语义缓存的 Qwen/Qwen3-Embedding-0.6B 向量计算
