@@ -15,7 +15,8 @@ RUN pip install --no-cache-dir \
     httpx \
     redis hiredis \
     pydantic \
-    litellm
+    litellm \
+    Pillow
 
 # 安装 Embedding 模型依赖（CPU-only PyTorch + transformers）
 # 用于 L3 语义缓存的 Qwen/Qwen3-Embedding-0.6B 向量计算

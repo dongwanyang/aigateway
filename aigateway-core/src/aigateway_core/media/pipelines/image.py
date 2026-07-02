@@ -461,8 +461,12 @@ class ImagePipeline(MediaPipeline):
         try:
             import httpx
 
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.get(url)
+            headers = {
+                "User-Agent": "AIGateway/1.0 (Media Optimization Layer)",
+                "Accept": "image/*,*/*",
+            }
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+                resp = await client.get(url, headers=headers)
                 if resp.status_code == 200:
                     return resp.content
                 logger.warning("图片下载失败: HTTP %d from %s", resp.status_code, url)
