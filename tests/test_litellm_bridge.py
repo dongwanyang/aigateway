@@ -267,12 +267,13 @@ class TestExceptionScopeFix:
     async def test_stream_all_retries_fail_no_name_error(self):
         """所有重试失败时应返回 upstream_timeout 错误而非 NameError。"""
 
-        # Mock router 的 acompletion 返回一个会抛异常的 async generator
-        async def _failing_acompletion(**kwargs):
-            """模拟 async generator 在首次 yield 前抛异常。"""
+        # Mock router 的 acompletion: await 后返回 async generator 再抛异常
+        async def _failing_stream():
             raise RuntimeError("Connection refused")
-            # 使其成为 async generator
-            yield  # noqa: unreachable - needed to make this an async generator
+            yield  # noqa: unreachable - makes this an async generator
+
+        async def _failing_acompletion(**kwargs):
+            return _failing_stream()
 
         self.bridge.router.acompletion = _failing_acompletion
 

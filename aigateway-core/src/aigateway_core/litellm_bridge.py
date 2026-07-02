@@ -498,7 +498,8 @@ class LiteLLMBridge:
         if kwargs.get("stream", False):
             # 流式：逐 chunk 聚合
             chunks: List[str] = []
-            async for chunk in self.router.acompletion(**params):
+            response = await self.router.acompletion(**params)
+            async for chunk in response:
                 chunk_data = chunk.dict() if hasattr(chunk, "dict") else dict(chunk)
                 chunks.append(chunk_data)
 
@@ -790,7 +791,8 @@ class LiteLLMBridge:
                 if self.router is None:
                     raise RuntimeError("LiteLLM Router not initialized")
 
-                async for chunk in self.router.acompletion(**params):
+                response = await self.router.acompletion(**params)
+                async for chunk in response:
                     chunk_data = chunk.dict() if hasattr(chunk, "dict") else dict(chunk)
                     yield chunk_data
 
