@@ -351,14 +351,19 @@ class KeyStore:
             # 检查是否已存在
             existing = await self.redis.get_api_key(key_hash)
             if existing:
-                # 更新配额和 is_admin
+                # 仅更新结构性字段（is_admin/status/user_id），保留运行时修改的配额
                 existing["user_id"] = user_id
                 existing["status"] = "active"
-                existing["daily_tokens_limit"] = str(quotas.get("daily_tokens", self.DEFAULT_DAILY_TOKENS))
-                existing["monthly_cost_limit"] = str(quotas.get("monthly_cost", self.DEFAULT_MONTHLY_COST))
-                existing["rate_limit_rpm"] = str(quotas.get("rate_limit_rpm", self.DEFAULT_RATE_LIMIT_RPM))
-                existing["rate_limit_tpm"] = str(quotas.get("rate_limit_tpm", self.DEFAULT_RATE_LIMIT_TPM))
                 existing["is_admin"] = str(is_admin)
+                # 配额限制：仅当 Redis 中无该字段时才从 config 写入（不覆盖 API 修改的值）
+                if "daily_tokens_limit" not in existing:
+                    existing["daily_tokens_limit"] = str(quotas.get("daily_tokens", self.DEFAULT_DAILY_TOKENS))
+                if "monthly_cost_limit" not in existing:
+                    existing["monthly_cost_limit"] = str(quotas.get("monthly_cost", self.DEFAULT_MONTHLY_COST))
+                if "rate_limit_rpm" not in existing:
+                    existing["rate_limit_rpm"] = str(quotas.get("rate_limit_rpm", self.DEFAULT_RATE_LIMIT_RPM))
+                if "rate_limit_tpm" not in existing:
+                    existing["rate_limit_tpm"] = str(quotas.get("rate_limit_tpm", self.DEFAULT_RATE_LIMIT_TPM))
                 await self.redis.set_api_key(key_hash, existing)
                 logger.info("API Key 已更新: user_id=%s, key_hash=%s, is_admin=%s", user_id, key_hash, is_admin)
             else:
