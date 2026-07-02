@@ -776,9 +776,11 @@ class LiteLLMBridge:
 
         while attempts <= max_retries:
             current_model = candidates[attempts % len(candidates)] if candidates else model
+            # 解析裸模型名为 Router 注册的全名
+            resolved_model = self.resolve_model(current_model)
             try:
                 params: Dict[str, Any] = {
-                    "model": current_model,
+                    "model": resolved_model,
                     "messages": messages,
                     "stream": True,
                 }
