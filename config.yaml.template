@@ -300,3 +300,19 @@ media_optimization:
 
   media_cache_ttl: 604800    # 媒体处理结果缓存 TTL（秒），默认 7 天
   max_concurrent_processors: 4  # 最大并发媒体处理器数（限制 CPU/内存占用）
+
+# ==========================
+# 生成优化层配置 (Generation Optimization)
+# ==========================
+# 6 大策略降低图片/视频生成成本
+generation_optimization:
+  token_compressor:          # 视觉 Token 压缩（CLIP 特征提取）
+    clip:
+      model_name: "openai/clip-vit-large-patch14"  # CLIP 模型
+      device: cpu            # 运行设备：cpu | cuda
+      batch_size: 1          # 批量处理大小
+  draft_workflow:             # Draft-to-HiRes 草图工作流
+    comfyui:
+      server_url: "http://localhost:8188"  # ComfyUI API 地址
+      connect_timeout: 10    # 连接超时（秒）
+      execution_timeout: 300 # 工作流执行超时（秒）
