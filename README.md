@@ -131,9 +131,9 @@ pip install -e "aigateway-core[all-integrations]" # 全部安装
 # 4. 启动 Redis
 docker run -d --name redis -p 6379:6379 redis:7-alpine
 
-# 5. 启动 API 服务
-cd aigateway-api
-uvicorn src.aigateway_api.main:create_app --factory --host 0.0.0.0 --port 8000 --reload
+# 5. 启动 API 服务（从项目根目录启动，确保 config.yaml 可被找到）
+uvicorn aigateway_api.main:app --host 0.0.0.0 --port 8000 --reload \
+  --app-dir aigateway-api/src
 
 # 6. 启动前端（另一个终端）
 cd control-panel && npm install && npm run dev

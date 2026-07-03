@@ -87,12 +87,18 @@ class ConfigManager:
         """
         Args:
             config_path: 配置文件路径，默认从 AI_GATEWAY_CONFIG_PATH 读取，
-                        再缺省用 "./config.yaml"。
+                        再缺省用 "./config.yaml"。若当前目录下不存在，
+                        会向上搜索最多 3 层父目录。
         """
         # 确定配置文件路径
-        self.config_path = config_path or os.environ.get(
-            "AI_GATEWAY_CONFIG_PATH", "./config.yaml"
+        resolved_path = config_path or os.environ.get(
+            "AI_GATEWAY_CONFIG_PATH", ""
         )
+
+        if not resolved_path:
+            resolved_path = self._find_config_file()
+
+        self.config_path = resolved_path
 
         self._config: Dict[str, Any] = {}
         self._lock = threading.RLock()
@@ -104,6 +110,31 @@ class ConfigManager:
 
         # 加载配置
         self.load()
+
+    @staticmethod
+    def _find_config_file() -> str:
+        """从当前目录向上搜索 config.yaml（最多 3 层）。
+
+        搜索顺序：
+        1. ./config.yaml
+        2. ../config.yaml
+        3. ../../config.yaml
+        4. ../../../config.yaml
+
+        Returns:
+            找到的 config.yaml 绝对路径，或默认 "./config.yaml"。
+        """
+        current = Path.cwd()
+        for _ in range(4):
+            candidate = current / "config.yaml"
+            if candidate.exists():
+                return str(candidate)
+            parent = current.parent
+            if parent == current:
+                break
+            current = parent
+        # 回退到默认值（_load_yaml 会 warning）
+        return "./config.yaml"
 
     # ------------------------------------------------------------------
     # 配置加载
