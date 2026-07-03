@@ -117,10 +117,33 @@ def register_generation_optimization_plugins(
     # --- 创建策略实例 ---
     ai_director_strategy = AIDirectorStrategy(config=config.ai_director)
     intent_evaluator_strategy = IntentEvaluatorStrategy(config=config.model_router)
-    token_compressor_strategy = TokenCompressorStrategy(config=config.token_compressor)
+
+    # 加载 CLIP 配置（从 generation_optimization.token_compressor.clip）
+    from aigateway_core.integration_configs import CLIPConfig, ComfyUIConfig
+    clip_dict = gen_opt_dict.get("token_compressor", {}).get("clip", {})
+    clip_config = CLIPConfig(
+        model_name=clip_dict.get("model_name", CLIPConfig.model_name),
+        device=clip_dict.get("device", CLIPConfig.device),
+        batch_size=clip_dict.get("batch_size", CLIPConfig.batch_size),
+    ) if clip_dict else CLIPConfig()
+
+    token_compressor_strategy = TokenCompressorStrategy(
+        config=config.token_compressor,
+        clip_config=clip_config,
+    )
+
+    # 加载 ComfyUI 配置（从 generation_optimization.draft_workflow.comfyui）
+    comfyui_dict = gen_opt_dict.get("draft_workflow", {}).get("comfyui", {})
+    comfyui_config = ComfyUIConfig(
+        server_url=comfyui_dict.get("server_url", ComfyUIConfig.server_url),
+        connect_timeout=comfyui_dict.get("connect_timeout", ComfyUIConfig.connect_timeout),
+        execution_timeout=comfyui_dict.get("execution_timeout", ComfyUIConfig.execution_timeout),
+    ) if comfyui_dict else ComfyUIConfig()
+
     draft_generator_strategy = DraftGeneratorStrategy(
         config=config.draft_workflow,
         redis_client=redis_client,
+        comfyui_config=comfyui_config,
     )
     model_router_strategy = ModelRouterStrategy(
         config=config.model_router,

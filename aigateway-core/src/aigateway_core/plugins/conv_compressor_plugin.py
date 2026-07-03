@@ -193,9 +193,9 @@ class ConvCompressorPlugin:
 
         for msg in messages:
             if msg.get("role") == "system" and system_msg is None:
-                system_msg = msg
+                system_msg = msg.copy()
             else:
-                non_system_messages.append(msg)
+                non_system_messages.append(msg.copy())
 
         # 确定需要压缩的旧消息和保留的近期消息
         recent_messages = non_system_messages[-max_history:]

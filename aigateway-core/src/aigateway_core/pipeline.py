@@ -568,7 +568,7 @@ class ModelRouterPlugin:
 
     name: str = "model_router"
     enabled: bool = True
-    depends_on: list = ["prompt_compress"]
+    depends_on: list = ["semantic_cache"]
 
     def __init__(self, litellm_bridge: Any = None) -> None:
         self.litellm_bridge = litellm_bridge
@@ -607,7 +607,7 @@ class PromptCompressPlugin:
 
     name: str = "prompt_compress"
     enabled: bool = True
-    depends_on: list = ["rag_retriever", "conv_compressor"]
+    depends_on: list = ["model_router", "rag_retriever", "conv_compressor"]
 
     def __init__(
         self,
@@ -624,6 +624,13 @@ class PromptCompressPlugin:
 
         self._compressor: Any = None
         self._is_available: bool = False
+        self._initialized: bool = False
+
+    def _ensure_compressor_loaded(self) -> None:
+        """延迟初始化 LLMLingua-2 压缩器（首次请求时加载，避免阻塞启动）."""
+        if self._initialized:
+            return
+        self._initialized = True
         self._init_compressor()
 
     def _init_compressor(self) -> None:
@@ -716,6 +723,9 @@ class PromptCompressPlugin:
         messages = ctx.request.get("messages", [])
         if not messages:
             return ctx
+
+        # Lazy load LLMLingua-2 on first request (avoids blocking startup)
+        self._ensure_compressor_loaded()
 
         # 若 LLMLingua 不可用，passthrough
         if not self._is_available:

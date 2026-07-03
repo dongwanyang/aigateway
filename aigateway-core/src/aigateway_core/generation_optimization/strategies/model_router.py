@@ -462,7 +462,9 @@ class ModelRouterStrategy:
                     seen_models.add(model_name)
 
                     # 获取能力评分
-                    capability = self.config.model_capabilities.get(model_name, 50)
+                    capability = self.config.model_capabilities.get(
+                        model_name, self.config.default_capability_score
+                    )
 
                     # 获取模态
                     modality = self.config.model_modalities.get(

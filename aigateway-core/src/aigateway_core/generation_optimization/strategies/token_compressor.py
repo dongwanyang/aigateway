@@ -73,7 +73,14 @@ class TokenCompressorStrategy:
         self._clip_model: Optional[Any] = None
         self._clip_processor: Optional[Any] = None
         self._clip_available: bool = False
+        self._clip_loaded: bool = False
         self._device: str = self._clip_config.device
+
+    def _ensure_clip_loaded(self) -> None:
+        """延迟加载 CLIP 模型（首次调用时加载，避免阻塞启动）."""
+        if self._clip_loaded:
+            return
+        self._clip_loaded = True
         self._load_clip_model()
 
     def _load_clip_model(self) -> None:
@@ -130,6 +137,9 @@ class TokenCompressorStrategy:
             CompressionResult 包含 feature_vector 和 token 节省信息
         """
         start_time = time.monotonic()
+
+        # Lazy load CLIP model on first use (avoids blocking startup)
+        self._ensure_clip_loaded()
 
         # Check format support
         if not self._is_format_supported(image, config):

@@ -453,12 +453,12 @@ class DraftGeneratorStrategy:
     # ComfyUI 工作流 JSON 构建器
     # ===================================================================
 
-    def _build_image_draft_workflow(self, request: GenerationRequest) -> dict:
-        """构建 512x512 低分辨率图片生成工作流 JSON.
+    def _build_image_draft_workflow(self, request: GenerationRequest, config: Optional[DraftWorkflowConfig] = None) -> dict:
+        """构建低分辨率图片生成工作流 JSON.
 
         工作流包含:
         - CheckpointLoaderSimple: 加载 SDXL base 模型
-        - EmptyLatentImage: 512x512 潜空间
+        - EmptyLatentImage: 使用 config.draft_resolution 潜空间
         - CLIPTextEncode (positive): 用户 prompt
         - CLIPTextEncode (negative): 默认负面 prompt
         - KSampler: 采样器节点
@@ -467,13 +467,16 @@ class DraftGeneratorStrategy:
 
         Args:
             request: 生成请求
+            config: Draft 工作流配置（可选，默认使用 self._config）
 
         Returns:
             ComfyUI 标准格式工作流 JSON dict
 
         需求: 4.2
         """
+        cfg = config or self._config
         prompt_text = request.prompt or "a beautiful image"
+        draft_w, draft_h = cfg.draft_resolution
 
         workflow: dict = {
             "3": {
@@ -500,8 +503,8 @@ class DraftGeneratorStrategy:
             "5": {
                 "class_type": "EmptyLatentImage",
                 "inputs": {
-                    "width": 512,
-                    "height": 512,
+                    "width": draft_w,
+                    "height": draft_h,
                     "batch_size": 1,
                 },
             },
@@ -725,7 +728,7 @@ class DraftGeneratorStrategy:
         """
         if self._comfyui_available:
             try:
-                workflow = self._build_image_draft_workflow(request)
+                workflow = self._build_image_draft_workflow(request, config)
                 prompt_id = await self._submit_workflow(workflow)
                 image_data = await self._poll_result(prompt_id)
                 logger.info(
@@ -831,8 +834,7 @@ class DraftGeneratorStrategy:
     def _is_video_request(self, request: GenerationRequest) -> bool:
         """判断请求是否为视频生成请求.
 
-        基于 generation_params 中的 media_type 或 duration 字段判断。
-        如果 target_fps > 1 且存在其他视频相关信号，视为视频请求。
+        基于 request.media_type 字段判断，默认 "image"。
 
         Args:
             request: 生成请求
@@ -840,24 +842,7 @@ class DraftGeneratorStrategy:
         Returns:
             True 如果是视频请求
         """
-        # Check if media_type is explicitly set in template_variables or similar
-        # For now, determine based on required_modality containing 'video'
-        # or prompt containing video-related keywords, or target_fps > 1
-        # In practice, the plugin layer would set a field or use generation_params.
-        # Heuristic: if the prompt mentions video-specific keywords or
-        # required_modality indicates generative video
-        prompt_lower = request.prompt.lower()
-        video_indicators = ["video", "animate", "animation", "motion", "clip"]
-        if any(indicator in prompt_lower for indicator in video_indicators):
-            return True
-
-        # If target_fps is explicitly set to something video-like
-        # and resolution suggests video
-        if request.target_fps > 1 and request.target_resolution[0] > 512:
-            # This alone isn't enough - we need more explicit signal
-            pass
-
-        return False
+        return request.media_type == "video"
 
     def _calculate_keyframe_count(
         self,

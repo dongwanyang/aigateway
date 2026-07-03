@@ -54,6 +54,7 @@ class GenerationRequest:
     character_id: Optional[str] = None
     target_resolution: Tuple[int, int] = (1920, 1080)
     target_fps: int = 60
+    media_type: str = "image"  # "image" | "video"
     injection_method: str = "ip-adapter"
     api_key_id: str = ""
     request_id: str = field(default_factory=lambda: uuid.uuid4().hex)

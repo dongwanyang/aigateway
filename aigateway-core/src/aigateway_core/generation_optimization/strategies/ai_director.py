@@ -76,12 +76,20 @@ class AIDirectorStrategy:
     Attributes:
         _config: AI Director 配置
         _litellm_bridge: LiteLLM 桥接层实例，用于调用文本模型
+        _rewrite_prompt: 改写系统提示词（可自定义覆盖）
+        _expand_prompt: 扩展系统提示词（可自定义覆盖）
     """
+
+    # 类级别默认 prompt，子类或实例化时可覆盖
+    DEFAULT_REWRITE_PROMPT = _REWRITE_SYSTEM_PROMPT
+    DEFAULT_EXPAND_PROMPT = _EXPAND_SYSTEM_PROMPT
 
     def __init__(
         self,
         config: AIDirectorConfig,
         litellm_bridge: Any = None,
+        rewrite_prompt: Optional[str] = None,
+        expand_prompt: Optional[str] = None,
     ) -> None:
         """初始化 AI Director 策略.
 
@@ -89,9 +97,13 @@ class AIDirectorStrategy:
             config: AI Director 配置实例
             litellm_bridge: LiteLLM 桥接层实例。如果为 None，
                 optimize_prompt 将直接返回原始 prompt。
+            rewrite_prompt: 自定义改写系统提示词（可选，默认使用内置模板）
+            expand_prompt: 自定义扩展系统提示词（可选，默认使用内置模板）
         """
         self._config = config
         self._litellm_bridge = litellm_bridge
+        self._rewrite_prompt = rewrite_prompt or self.DEFAULT_REWRITE_PROMPT
+        self._expand_prompt = expand_prompt or self.DEFAULT_EXPAND_PROMPT
 
     async def optimize_prompt(
         self,
@@ -214,7 +226,7 @@ class AIDirectorStrategy:
         )
 
         # Select system prompt
-        system_prompt = _EXPAND_SYSTEM_PROMPT if is_short else _REWRITE_SYSTEM_PROMPT
+        system_prompt = self._expand_prompt if is_short else self._rewrite_prompt
 
         messages = [
             {"role": "system", "content": system_prompt},

@@ -73,11 +73,12 @@ def image_request():
 
 @pytest.fixture
 def video_request():
-    """Create a video generation request (prompt contains video keyword)."""
+    """Create a video generation request."""
     return GenerationRequest(
         prompt="A video of a cat playing with a ball",
         target_resolution=(1920, 1080),
         target_fps=60,
+        media_type="video",
     )
 
 
