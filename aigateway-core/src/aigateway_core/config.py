@@ -162,8 +162,17 @@ class ConfigManager:
             "streaming",
         }
 
-        # 检查未识别的顶层字段
-        unknown_fields = set(config.keys()) - allowed_top_level
+        # 环境变量覆盖产生的扁平键（AI_GATEWAY_* 去前缀后的小写形式）
+        # 这些不算 "未识别" — 它们来自合法的环境变量配置
+        env_prefix = "AI_GATEWAY_"
+        env_generated_keys = {
+            k[len(env_prefix):].lower()
+            for k in os.environ
+            if k.startswith(env_prefix)
+        }
+
+        # 检查未识别的顶层字段（排除环境变量覆盖产生的键）
+        unknown_fields = set(config.keys()) - allowed_top_level - env_generated_keys
         if unknown_fields:
             logger.warning("config.yaml 包含未识别的顶层字段: %s", list(unknown_fields))
 
