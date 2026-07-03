@@ -16,6 +16,12 @@ auth:
       rate_limit_rpm: 60
       rate_limit_tpm: 100000
   distributed_mode: false
+  defaults:
+    daily_tokens: 1000000
+    monthly_cost: 50.0
+    rate_limit_rpm: 60
+    rate_limit_tpm: 100000
+  budget_alert_threshold: 0.8
 plugins:
 - name: pii_detector
   enabled: true
@@ -65,6 +71,7 @@ providers:
           completion: 1
     num_retries: 3
     retry_after: 1000
+    timeout: 120
   deepseek:
     api_key: sk-d10ef482afad4b86a37f680ddb336d37
     base_url: https://api.deepseek.com/v1
@@ -78,6 +85,7 @@ providers:
           completion: 1
     num_retries: 3
     retry_after: 1000
+    timeout: 120
 embedding:
   backend: sentence_transformers
   model: Qwen/Qwen3-Embedding-0.6B
@@ -90,10 +98,59 @@ observability:
   otel_sample_rate: 0.1
   log_format: json
   log_level: info
+infrastructure:
+  redis:
+    url: ${AI_GATEWAY_REDIS_URL:-redis://localhost:6379/0}
+    connect_timeout: 5
+    socket_timeout: 10
+    health_check_interval: 30
+    rpm_key_ttl: 120
+    tpm_window_ttl: 60
+  qdrant:
+    url: ${AI_GATEWAY_QDRANT_URL:-http://localhost:6333}
+    connect_timeout: 5.0
+    read_timeout: 10.0
+    write_timeout: 10.0
+    hnsw_m: 16
+    hnsw_ef_construct: 128
+cache:
+  l1:
+    max_entries: 1000
+    max_value_bytes: 102400
+  l2:
+    max_value_bytes: 512000
+    default_ttl: 3600
+    compression_level: 9
+  l3:
+    min_token_count: 100
+    default_ttl: 86400
+    cleanup_interval: 3600
+    similarity_threshold: 0.95
+    rerank:
+      enabled: false
+      model: cross-encoder/ms-marco-MiniLM-L-6-v2
+      retrieve_top_k: 5
+      retrieve_threshold: 0.90
+      rerank_threshold: 0.85
+circuit_breaker:
+  failure_threshold: 5
+  recovery_timeout: 60
+  long_open_alert_seconds: 300
+rate_limiter:
+  max_requests: 30
+  window_seconds: 60
+streaming:
+  cache_chunk_delay_ms: 20
+  cache_chunk_count: 20
 hot_reload: true
 debug_mode: false
 media_optimization:
   enabled: true
+  download_timeouts:
+    image: 30
+    video: 120
+    audio: 60
+    document: 60
   image:
     max_width: 1920
     max_height: 1080
@@ -105,6 +162,8 @@ media_optimization:
     - chi_sim
     caption_model: gpt-4o
     max_file_size_mb: 20.0
+    caption_max_tokens: 150
+    caption_temperature: 0.3
   video:
     max_frames: 10
     frame_interval_sec: 5.0
@@ -123,6 +182,7 @@ media_optimization:
     max_duration_sec: 600
     diarization_enabled: false
     max_file_size_mb: 50.0
+    whisper_model_size: base
   document:
     supported_formats:
     - pdf
@@ -140,6 +200,8 @@ media_optimization:
     vector_dim: 1024
     summary_max_length: 500
     max_file_size_mb: 50.0
+    long_doc_threshold_chars: 5000
+    summary_preview_chars: 2000
   generation:
     enhancement_level: 'off'
     vision_model: gpt-4o

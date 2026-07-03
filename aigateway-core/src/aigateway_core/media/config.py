@@ -23,6 +23,9 @@ class ImagePipelineConfig:
     ocr_languages: List[str] = field(default_factory=lambda: ["chi_sim", "eng"])
     caption_model: str = "agnes-2.0-flash"  # Vision model for captioning
     max_file_size_mb: float = 20.0
+    download_timeout: float = 30.0
+    caption_max_tokens: int = 150
+    caption_temperature: float = 0.3
 
 
 @dataclass
@@ -38,6 +41,7 @@ class VideoPipelineConfig:
     caption_model: str = "agnes-2.0-flash"
     language: str = "auto"
     max_file_size_mb: float = 100.0
+    download_timeout: float = 120.0
 
 
 @dataclass
@@ -52,6 +56,8 @@ class AudioPipelineConfig:
     max_duration_sec: int = 600
     diarization_enabled: bool = False
     max_file_size_mb: float = 50.0
+    download_timeout: float = 60.0
+    whisper_model_size: str = "base"
 
 
 @dataclass
@@ -69,6 +75,9 @@ class DocumentPipelineConfig:
     vector_dim: int = 1024
     summary_max_length: int = 500
     max_file_size_mb: float = 50.0
+    download_timeout: float = 60.0
+    long_doc_threshold_chars: int = 5000
+    summary_preview_chars: int = 2000
 
 
 @dataclass

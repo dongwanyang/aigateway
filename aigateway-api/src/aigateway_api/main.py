@@ -145,10 +145,27 @@ def _create_app() -> "FastAPI":
 
     # 速率限制中间件 (Req 9)
     from .rate_limiter import RateLimiterMiddleware
+
+    # Read rate_limiter config from YAML if available
+    _rl_max_requests = 30
+    _rl_window_seconds = 60
+    try:
+        import yaml
+        _rl_config_path = os.environ.get("AI_GATEWAY_CONFIG_PATH", "./config.yaml")
+        if os.path.isfile(_rl_config_path):
+            with open(_rl_config_path, "r", encoding="utf-8") as _f:
+                _rl_raw = yaml.safe_load(_f) or {}
+            _rl_cfg = _rl_raw.get("rate_limiter", {})
+            if isinstance(_rl_cfg, dict):
+                _rl_max_requests = int(_rl_cfg.get("max_requests", 30))
+                _rl_window_seconds = int(_rl_cfg.get("window_seconds", 60))
+    except Exception:
+        pass
+
     app_instance.add_middleware(
         RateLimiterMiddleware,
-        max_requests=30,
-        window_seconds=60,
+        max_requests=_rl_max_requests,
+        window_seconds=_rl_window_seconds,
         protected_prefixes=("/admin",),
         exempt_paths={"/health", "/metrics"},
     )
@@ -188,20 +205,32 @@ async def lifespan(app: "FastAPI"):
 
     # 初始化 Redis 连接
     infra_cfg = config_manager.get("infrastructure", {})
-    redis_url = os.environ.get("AI_GATEWAY_REDIS_URL") or infra_cfg.get("redis_url", "redis://localhost:6379/0")
+    redis_cfg = infra_cfg.get("redis", {}) if isinstance(infra_cfg, dict) else {}
+    redis_url = os.environ.get("AI_GATEWAY_REDIS_URL") or redis_cfg.get("url", "redis://localhost:6379/0")
     redis_mgr = RedisClientManager()
     try:
-        await redis_mgr.connect(url=redis_url)
+        await redis_mgr.connect(
+            url=redis_url,
+            connect_timeout=int(redis_cfg.get("connect_timeout", 5)),
+            socket_timeout=int(redis_cfg.get("socket_timeout", 10)),
+            health_check_interval=int(redis_cfg.get("health_check_interval", 30)),
+        )
         logger.info("Redis 连接成功: %s", redis_url)
     except Exception as exc:
         logger.warning("Redis 连接失败，部分功能不可用: %s", exc)
         redis_mgr = None  # type: ignore[assignment]
 
     # 初始化 Qdrant 连接
-    qdrant_url = os.environ.get("AI_GATEWAY_QDRANT_URL") or infra_cfg.get("qdrant_url", "http://localhost:6333")
+    qdrant_cfg = infra_cfg.get("qdrant", {}) if isinstance(infra_cfg, dict) else {}
+    qdrant_url = os.environ.get("AI_GATEWAY_QDRANT_URL") or qdrant_cfg.get("url", "http://localhost:6333")
     qdrant_mgr = QdrantClientManager()
     try:
-        await qdrant_mgr.connect(url=qdrant_url)
+        await qdrant_mgr.connect(
+            url=qdrant_url,
+            connect_timeout=float(qdrant_cfg.get("connect_timeout", 5.0)),
+            read_timeout=float(qdrant_cfg.get("read_timeout", 10.0)),
+            write_timeout=float(qdrant_cfg.get("write_timeout", 10.0)),
+        )
         logger.info("Qdrant 连接成功: %s", qdrant_url)
     except Exception as exc:
         logger.warning("Qdrant 连接失败，语义缓存功能不可用: %s", exc)
@@ -228,14 +257,19 @@ async def lifespan(app: "FastAPI"):
             prompt_cache_cfg = plugin.get("config", {})
             break
 
-    # 读取 L3 缓存容量配置
-    l3_cache_cfg = config_manager.get("cache", {})
-    l3_cfg = l3_cache_cfg.get("l3", {}) if isinstance(l3_cache_cfg, dict) else {}
+    # 读取 cache 配置节
+    cache_section = config_manager.get("cache", {})
+    l1_cfg = cache_section.get("l1", {}) if isinstance(cache_section, dict) else {}
+    l2_cfg = cache_section.get("l2", {}) if isinstance(cache_section, dict) else {}
+    l3_cfg = cache_section.get("l3", {}) if isinstance(cache_section, dict) else {}
 
     cache_manager = CacheManager(
-        l1_maxsize=prompt_cache_cfg.get("l1_maxsize", 1000),
-        l2_default_ttl=prompt_cache_cfg.get("ttl", 3600),
-        l3_default_ttl=int(l3_cfg.get("default_ttl_hours", 24)) * 3600 if l3_cfg else 86400,
+        l1_maxsize=int(l1_cfg.get("max_entries", prompt_cache_cfg.get("l1_maxsize", 1000))),
+        l2_default_ttl=int(l2_cfg.get("default_ttl", prompt_cache_cfg.get("ttl", 3600))),
+        l3_default_ttl=int(l3_cfg.get("default_ttl", 86400)),
+        l1_max_value_bytes=int(l1_cfg.get("max_value_bytes", 102400)),
+        l2_max_value_bytes=int(l2_cfg.get("max_value_bytes", 512000)),
+        l3_min_token_count=int(l3_cfg.get("min_token_count", 100)),
     )
     if redis_mgr is not None:
         cache_manager.set_redis_client(redis_mgr)
@@ -245,7 +279,7 @@ async def lifespan(app: "FastAPI"):
 
     # 启动 L3 清理调度器
     from aigateway_core.caching import L3CleanupScheduler
-    cleanup_interval = int(l3_cfg.get("auto_cleanup_interval_minutes", 60)) if l3_cfg else 60
+    cleanup_interval = int(l3_cfg.get("cleanup_interval", 3600)) // 60 if l3_cfg else 60
     l3_scheduler = L3CleanupScheduler(cache_manager, interval_minutes=cleanup_interval)
     await l3_scheduler.start()
 
@@ -255,7 +289,12 @@ async def lifespan(app: "FastAPI"):
     logger.info("PluginRegistry 初始化完成: %d 个插件已注册", len(plugin_registry.get_all()))
 
     # 初始化 CircuitBreakerFactory
-    cb_factory = CircuitBreakerFactory()
+    cb_cfg = config_manager.get("circuit_breaker", {})
+    cb_factory = CircuitBreakerFactory(
+        failure_threshold=int(cb_cfg.get("failure_threshold", 5)) if cb_cfg else 5,
+        recovery_timeout=int(cb_cfg.get("recovery_timeout", 60)) if cb_cfg else 60,
+        long_open_alert_seconds=int(cb_cfg.get("long_open_alert_seconds", 300)) if cb_cfg else 300,
+    )
     logger.info("CircuitBreakerFactory 初始化完成")
 
     # 初始化 Media Optimization Layer (V2)

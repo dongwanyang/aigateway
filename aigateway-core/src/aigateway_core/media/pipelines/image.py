@@ -311,8 +311,10 @@ class VisionCaptionProcessor(MediaProcessor):
     phase = ProcessorPhase.PRE_LLM
     supported_types = [MediaType.IMAGE]
 
-    def __init__(self, model: str = "agnes-2.0-flash") -> None:
+    def __init__(self, model: str = "agnes-2.0-flash", max_tokens: int = 150, temperature: float = 0.3) -> None:
         self.model = model
+        self.max_tokens = max_tokens
+        self.temperature = temperature
 
     def supports(self, content: MediaContent) -> bool:
         return content.media_type == MediaType.IMAGE
@@ -377,8 +379,8 @@ class VisionCaptionProcessor(MediaProcessor):
             result = await litellm_bridge.completion(
                 messages=messages,
                 model=self.model,
-                max_tokens=150,
-                temperature=0.3,
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
                 stream=False,
             )
 
@@ -455,6 +457,8 @@ class ImagePipeline(MediaPipeline):
         )
         self.caption_processor = VisionCaptionProcessor(
             model=cfg.caption_model,
+            max_tokens=cfg.caption_max_tokens,
+            temperature=cfg.caption_temperature,
         )
         self.processors = [
             self.resize_processor,
@@ -519,7 +523,7 @@ class ImagePipeline(MediaPipeline):
                 "User-Agent": "AIGateway/1.0 (Media Optimization Layer)",
                 "Accept": "image/*,*/*",
             }
-            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            async with httpx.AsyncClient(timeout=self.config.download_timeout, follow_redirects=True) as client:
                 resp = await client.get(url, headers=headers)
                 if resp.status_code == 200:
                     return resp.content

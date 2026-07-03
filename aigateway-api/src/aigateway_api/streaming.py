@@ -79,6 +79,7 @@ def create_sse_response(
 async def simulate_stream_from_cache(
     response_json: str,
     chunk_delay_ms: int = 20,
+    chunk_count: int = 20,
     hit_tier: str = "L1",
 ) -> AsyncIterator[Dict[str, Any]]:
     """将缓存的完整响应按 chunk 分块，模拟流式生成。
@@ -91,6 +92,7 @@ async def simulate_stream_from_cache(
     Args:
         response_json: 完整的 OpenAI 格式响应 JSON 字符串。
         chunk_delay_ms: 每个 chunk 之间的延迟（毫秒），默认 20。
+        chunk_count: 将内容分成多少个 chunk，默认 20。
 
     Yields:
         模拟的流式 chunk。
@@ -114,7 +116,7 @@ async def simulate_stream_from_cache(
     usage = data.get("usage", {})
 
     # 将内容分成小块
-    chunk_size = max(1, len(content) // 20)
+    chunk_size = max(1, len(content) // chunk_count)
     chunks = [content[i:i + chunk_size] for i in range(0, len(content), chunk_size)]
 
     for i, chunk_text in enumerate(chunks):

@@ -261,11 +261,11 @@ class DocumentPipeline(MediaPipeline):
         full_text: str = parsed.output
 
         # Step 2: 如果文档很长，生成摘要
-        if len(full_text) > 5000:
-            # 截取前 2000 字符作为摘要
+        if len(full_text) > self.config.long_doc_threshold_chars:
+            # 截取前 N 字符作为摘要
             content.extracted_text = (
                 f"[文档内容摘要 (共 {len(full_text)} 字符)]:\n"
-                f"{full_text[:2000]}..."
+                f"{full_text[:self.config.summary_preview_chars]}..."
             )
         else:
             content.extracted_text = f"[文档内容]:\n{full_text}"
@@ -280,7 +280,7 @@ class DocumentPipeline(MediaPipeline):
         try:
             import httpx
 
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            async with httpx.AsyncClient(timeout=self.config.download_timeout) as client:
                 resp = await client.get(url)
                 if resp.status_code == 200:
                     return resp.content

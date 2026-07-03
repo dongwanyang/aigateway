@@ -372,8 +372,16 @@ class CircuitBreakerFactory:
     DEFAULT_FAILURE_THRESHOLD = 5
     DEFAULT_RECOVERY_TIMEOUT = 60
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        failure_threshold: int = 5,
+        recovery_timeout: int = 60,
+        long_open_alert_seconds: int = 300,
+    ) -> None:
         self._breakers: Dict[str, CircuitBreaker] = {}
+        self.DEFAULT_FAILURE_THRESHOLD = failure_threshold
+        self.DEFAULT_RECOVERY_TIMEOUT = recovery_timeout
+        self.long_open_alert_seconds = long_open_alert_seconds
 
     def get_or_create(
         self,

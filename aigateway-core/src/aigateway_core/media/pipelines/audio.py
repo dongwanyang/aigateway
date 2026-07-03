@@ -35,10 +35,12 @@ class AudioTranscriber(MediaProcessor):
         model: str = "faster-whisper",
         language: str = "auto",
         max_duration_sec: int = 600,
+        whisper_model_size: str = "base",
     ) -> None:
         self.model = model
         self.language = language
         self.max_duration_sec = max_duration_sec
+        self.whisper_model_size = whisper_model_size
 
     def supports(self, content: MediaContent) -> bool:
         return content.media_type == MediaType.AUDIO
@@ -120,7 +122,7 @@ class AudioTranscriber(MediaProcessor):
         """使用 faster-whisper 转录。"""
         from faster_whisper import WhisperModel
 
-        model = WhisperModel("base", device="cpu", compute_type="int8")
+        model = WhisperModel(self.whisper_model_size, device="cpu", compute_type="int8")
         lang = None if self.language == "auto" else self.language
         segments, _ = model.transcribe(path, language=lang)
         return " ".join(seg.text for seg in segments)
@@ -129,7 +131,7 @@ class AudioTranscriber(MediaProcessor):
         """使用 openai-whisper 转录。"""
         import whisper
 
-        model = whisper.load_model("base")
+        model = whisper.load_model(self.whisper_model_size)
         result = model.transcribe(path)
         return result.get("text", "")
 
@@ -157,6 +159,7 @@ class AudioPipeline(MediaPipeline):
             model=cfg.whisper_model,
             language=cfg.language,
             max_duration_sec=cfg.max_duration_sec,
+            whisper_model_size=cfg.whisper_model_size,
         )
         self.processors = [self.transcriber]
 
@@ -191,7 +194,7 @@ class AudioPipeline(MediaPipeline):
         try:
             import httpx
 
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            async with httpx.AsyncClient(timeout=self.config.download_timeout) as client:
                 resp = await client.get(url)
                 if resp.status_code == 200:
                     return resp.content

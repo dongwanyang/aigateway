@@ -151,10 +151,10 @@ class CreateApiKeyRequest(BaseModel):
     """POST /admin/api-keys 请求体。"""
 
     user_id: str = Field(..., min_length=1, description="关联的用户 ID")
-    daily_tokens: Optional[int] = Field(default=1_000_000, description="每日 token 上限")
-    monthly_cost: Optional[float] = Field(default=50.00, description="每月成本上限（美元）")
-    rate_limit_rpm: Optional[int] = Field(default=60, description="每分钟请求数上限")
-    rate_limit_tpm: Optional[int] = Field(default=100_000, description="每分钟 token 数上限")
+    daily_tokens: Optional[int] = Field(default=None, description="每日 token 上限")
+    monthly_cost: Optional[float] = Field(default=None, description="每月成本上限（美元）")
+    rate_limit_rpm: Optional[int] = Field(default=None, description="每分钟请求数上限")
+    rate_limit_tpm: Optional[int] = Field(default=None, description="每分钟 token 数上限")
 
 
 class UpdateQuotaRequest(BaseModel):
@@ -177,14 +177,46 @@ def _get_keystore_and_metrics(request: Request) -> tuple[Any, Any]:
     return getattr(app.state, "key_store"), getattr(app.state, "metrics_collector")
 
 
+def _get_auth_defaults() -> Dict[str, Any]:
+    """从 config 获取 auth.defaults 配额默认值。"""
+    from aigateway_api.main import app
+    config_manager = getattr(app.state, "config_manager", None)
+    if config_manager:
+        auth_cfg = config_manager.get("auth", {})
+        defaults = auth_cfg.get("defaults", {}) if isinstance(auth_cfg, dict) else {}
+        return {
+            "daily_tokens": int(defaults.get("daily_tokens", 1_000_000)),
+            "monthly_cost": float(defaults.get("monthly_cost", 50.0)),
+            "rate_limit_rpm": int(defaults.get("rate_limit_rpm", 60)),
+            "rate_limit_tpm": int(defaults.get("rate_limit_tpm", 100_000)),
+        }
+    return {
+        "daily_tokens": 1_000_000,
+        "monthly_cost": 50.0,
+        "rate_limit_rpm": 60,
+        "rate_limit_tpm": 100_000,
+    }
+
+
+def _get_budget_alert_threshold() -> float:
+    """从 config 获取 auth.budget_alert_threshold。"""
+    from aigateway_api.main import app
+    config_manager = getattr(app.state, "config_manager", None)
+    if config_manager:
+        auth_cfg = config_manager.get("auth", {})
+        return float(auth_cfg.get("budget_alert_threshold", 0.8)) if isinstance(auth_cfg, dict) else 0.8
+    return 0.8
+
+
 def _format_quota_item(key_data: Dict[str, Any], key_hash: str) -> Dict[str, Any]:
     """格式化单个 API Key 的配额信息。"""
-    daily_limit = int(key_data.get("daily_tokens_limit", 1_000_000))
+    defaults = _get_auth_defaults()
+    daily_limit = int(key_data.get("daily_tokens_limit", defaults["daily_tokens"]))
     daily_used = int(key_data.get("daily_tokens_used", 0))
-    monthly_limit = float(key_data.get("monthly_cost_limit", 50.00))
+    monthly_limit = float(key_data.get("monthly_cost_limit", defaults["monthly_cost"]))
     monthly_used = float(key_data.get("monthly_cost_used", 0.00))
-    rpm_limit = int(key_data.get("rate_limit_rpm", 60))
-    tpm_limit = int(key_data.get("rate_limit_tpm", 100_000))
+    rpm_limit = int(key_data.get("rate_limit_rpm", defaults["rate_limit_rpm"]))
+    tpm_limit = int(key_data.get("rate_limit_tpm", defaults["rate_limit_tpm"]))
 
     # 获取当前 RPM/TPM 窗口计数
     rpm_current = int(key_data.get("rpm_window_count", 0))
@@ -293,6 +325,7 @@ async def create_api_key(
 
     """创建新的 API Key。"""
     key_store, _ = _get_keystore_and_metrics(request)
+    defaults = _get_auth_defaults()
 
     # 验证配额参数
     if body.daily_tokens is not None and body.daily_tokens <= 0:
@@ -301,10 +334,10 @@ async def create_api_key(
         raise HTTPException(status_code=400, detail={"error": {"code": "validation_error", "message": "monthly_cost must be a positive number"}})
 
     quotas = {
-        "daily_tokens": body.daily_tokens,
-        "monthly_cost": body.monthly_cost,
-        "rate_limit_rpm": body.rate_limit_rpm,
-        "rate_limit_tpm": body.rate_limit_tpm,
+        "daily_tokens": body.daily_tokens if body.daily_tokens is not None else defaults["daily_tokens"],
+        "monthly_cost": body.monthly_cost if body.monthly_cost is not None else defaults["monthly_cost"],
+        "rate_limit_rpm": body.rate_limit_rpm if body.rate_limit_rpm is not None else defaults["rate_limit_rpm"],
+        "rate_limit_tpm": body.rate_limit_tpm if body.rate_limit_tpm is not None else defaults["rate_limit_tpm"],
     }
 
     try:
@@ -425,10 +458,10 @@ async def update_api_key_quota(
             "id": key_id,
             "user_id": data.get("user_id", ""),
             "quotas": {
-                "daily_tokens_limit": int(data.get("daily_tokens_limit", 1_000_000)),
-                "monthly_cost_limit": float(data.get("monthly_cost_limit", 50.00)),
-                "rate_limit_rpm": int(data.get("rate_limit_rpm", 60)),
-                "rate_limit_tpm": int(data.get("rate_limit_tpm", 100_000)),
+                "daily_tokens_limit": int(data.get("daily_tokens_limit", _get_auth_defaults()["daily_tokens"])),
+                "monthly_cost_limit": float(data.get("monthly_cost_limit", _get_auth_defaults()["monthly_cost"])),
+                "rate_limit_rpm": int(data.get("rate_limit_rpm", _get_auth_defaults()["rate_limit_rpm"])),
+                "rate_limit_tpm": int(data.get("rate_limit_tpm", _get_auth_defaults()["rate_limit_tpm"])),
             },
         },
         "message": "success",
@@ -677,12 +710,15 @@ async def get_quota(
     if not data:
         raise HTTPException(status_code=404, detail={"error": {"code": "not_found", "message": f"API key '{key_id}' not found"}})
 
-    daily_limit = int(data.get("daily_tokens_limit", 1_000_000))
+    defaults = _get_auth_defaults()
+    budget_alert_threshold = _get_budget_alert_threshold()
+
+    daily_limit = int(data.get("daily_tokens_limit", defaults["daily_tokens"]))
     daily_used = int(data.get("daily_tokens_used", 0))
-    monthly_limit = float(data.get("monthly_cost_limit", 50.00))
+    monthly_limit = float(data.get("monthly_cost_limit", defaults["monthly_cost"]))
     monthly_used = float(data.get("monthly_cost_used", 0.00))
-    rpm_limit = int(data.get("rate_limit_rpm", 60))
-    tpm_limit = int(data.get("rate_limit_tpm", 100_000))
+    rpm_limit = int(data.get("rate_limit_rpm", defaults["rate_limit_rpm"]))
+    tpm_limit = int(data.get("rate_limit_tpm", defaults["rate_limit_tpm"]))
 
     # 计算重置时间
     now_utc = datetime.now(timezone.utc)
@@ -701,16 +737,17 @@ async def get_quota(
     daily_pct = daily_used / daily_limit if daily_limit > 0 else 0
     monthly_pct = monthly_used / monthly_limit if monthly_limit > 0 else 0
 
-    if daily_pct >= 0.8:
+    threshold_percent = int(budget_alert_threshold * 100)
+    if daily_pct >= budget_alert_threshold:
         alerts.append({
             "type": "budget_warning",
-            "threshold_percent": 80,
+            "threshold_percent": threshold_percent,
             "message": f"Daily token usage has reached {daily_pct:.0%}",
         })
-    if monthly_pct >= 0.8:
+    if monthly_pct >= budget_alert_threshold:
         alerts.append({
             "type": "budget_warning",
-            "threshold_percent": 80,
+            "threshold_percent": threshold_percent,
             "message": f"Monthly cost usage has reached {monthly_pct:.0%}",
         })
 

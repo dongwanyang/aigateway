@@ -36,11 +36,20 @@ class QdrantClientManager:
     # 连接管理
     # ------------------------------------------------------------------
 
-    async def connect(self, url: str = "http://localhost:6333") -> None:
+    async def connect(
+        self,
+        url: str = "http://localhost:6333",
+        connect_timeout: float = 5.0,
+        read_timeout: float = 10.0,
+        write_timeout: float = 10.0,
+    ) -> None:
         """连接到 Qdrant REST API。
 
         Args:
             url: Qdrant 服务器地址。
+            connect_timeout: 连接超时（秒），默认 5.0。
+            read_timeout: 读取超时（秒），默认 10.0。
+            write_timeout: 写入超时（秒），默认 10.0。
 
         Raises:
             ConnectionError: 连接或健康检查失败时抛出。
@@ -48,7 +57,7 @@ class QdrantClientManager:
         self.url = url.rstrip("/")
         self._http = AsyncClient(
             base_url=self.url,
-            timeout=Timeout(connect=5.0, read=10.0, write=10.0, pool=5.0),
+            timeout=Timeout(connect=connect_timeout, read=read_timeout, write=write_timeout, pool=5.0),
         )
         # 执行健康检查
         try:

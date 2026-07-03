@@ -34,11 +34,20 @@ class RedisClientManager:
     # 连接管理
     # ------------------------------------------------------------------
 
-    async def connect(self, url: str = "redis://localhost:6379/0") -> redis.Redis:
+    async def connect(
+        self,
+        url: str = "redis://localhost:6379/0",
+        connect_timeout: int = 5,
+        socket_timeout: int = 10,
+        health_check_interval: int = 30,
+    ) -> redis.Redis:
         """建立 Redis 连接池，启用 hiredis 驱动解析。
 
         Args:
             url: Redis 连接 URL。
+            connect_timeout: 连接超时（秒），默认 5。
+            socket_timeout: 套接字超时（秒），默认 10。
+            health_check_interval: 健康检查间隔（秒），默认 30。
 
         Returns:
             redis.asyncio.Redis 客户端实例。
@@ -53,10 +62,10 @@ class RedisClientManager:
         self.redis = redis.from_url(
             url,
             decode_responses=False,  # 使用 bytes 以减少中间转换，部分场景下性能更好
-            socket_connect_timeout=5,
-            socket_timeout=10,
+            socket_connect_timeout=connect_timeout,
+            socket_timeout=socket_timeout,
             retry_on_timeout=True,
-            health_check_interval=30,
+            health_check_interval=health_check_interval,
             # hiredis 解析器：如果已安装则自动启用
         )
         # 验证连通性

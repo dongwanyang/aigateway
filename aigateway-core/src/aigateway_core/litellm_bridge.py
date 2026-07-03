@@ -121,6 +121,7 @@ class LiteLLMBridge:
             model_grouper = provider_cfg.get("model_grouper", [])
             num_retries = provider_cfg.get("num_retries", 3)
             retry_after = provider_cfg.get("retry_after", 1000)
+            timeout = provider_cfg.get("timeout", 120)
 
             if model_grouper:
                 # 多模型分组模式
@@ -145,6 +146,7 @@ class LiteLLMBridge:
                                 "base_url": base_url,
                                 "num_retries": num_retries,
                                 "retry_after": retry_after,
+                                "timeout": timeout,
                             },
                             "fallbacks": fallback_models,
                         }

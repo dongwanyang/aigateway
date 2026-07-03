@@ -158,7 +158,8 @@ class ConfigManager:
         allowed_top_level = {
             "server", "auth", "plugins", "providers", "embedding",
             "observability", "hot_reload", "debug_mode", "infrastructure",
-            "cache", "media_optimization",
+            "cache", "media_optimization", "circuit_breaker", "rate_limiter",
+            "streaming",
         }
 
         # 检查未识别的顶层字段
@@ -662,7 +663,8 @@ class ConfigManager:
         allowed_top_level = {
             "server", "auth", "plugins", "providers", "embedding",
             "observability", "hot_reload", "debug_mode", "infrastructure",
-            "cache", "media_optimization",
+            "cache", "media_optimization", "circuit_breaker", "rate_limiter",
+            "streaming",
         }
 
         # 检查未识别的顶层字段

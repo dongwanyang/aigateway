@@ -178,7 +178,7 @@ class VideoPipeline(MediaPipeline):
         try:
             import httpx
 
-            async with httpx.AsyncClient(timeout=120.0) as client:
+            async with httpx.AsyncClient(timeout=self.config.download_timeout) as client:
                 resp = await client.get(url)
                 if resp.status_code == 200:
                     return resp.content
