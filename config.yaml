@@ -6,9 +6,12 @@ server:
   - http://localhost:5173
 auth:
   api_keys:
-  - key: sk-a1b2c3d4e5f6XDFDDSF12nco
+  # Bootstrap key (No delete) — Gateway 自身的访问密钥，非 LLM 提供商 API Key
+  # 客户端请求 Gateway 时通过 Authorization: Bearer <此 key> 认证
+  - key: gw-rRIop4dpcyJJNUTJbHmHpr9Bj3M11s5o
     user_id: admin
     is_admin: true
+    group: admin-team
     quotas:
       daily_tokens: 1000000
       monthly_cost: 50.0
@@ -51,9 +54,30 @@ plugins:
   config: {}
 - name: prompt_compress
   enabled: true
-  depends_on: []
+  depends_on: ["semantic_cache"]
   config:
     compression_ratio: 0.5
+    model_name: "microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbank"
+    target_token: -1
+    device: cpu
+- name: rag_retriever
+  enabled: false
+  depends_on: ["semantic_cache"]
+  config:
+    top_k: 5
+    similarity_threshold: 0.7
+    rerank_enabled: false
+    chunk_size: 512
+    chunk_overlap: 64
+    collection_name: rag_documents
+- name: conv_compressor
+  enabled: false
+  depends_on: ["semantic_cache"]
+  config:
+    max_history: 20
+    summary_model: gpt-4o-mini
+    max_token_limit: 4000
+    summary_interval: 5
 providers:
   agnes:
     api_key: sk-Idz9oi7Cvx946OY6ipSp5FjU0T1S8IHQXRnVAnu2j1Q2zPBK
@@ -163,6 +187,9 @@ media_optimization:
     max_file_size_mb: 20.0
     caption_max_tokens: 150
     caption_temperature: 0.3
+    paddleocr:
+      lang: ch
+      use_angle_cls: true
   video:
     max_frames: 10
     frame_interval_sec: 5.0
@@ -201,9 +228,24 @@ media_optimization:
     max_file_size_mb: 50.0
     long_doc_threshold_chars: 5000
     summary_preview_chars: 2000
+    unstructured:
+      strategy: auto
+      languages: ["chi_sim", "eng"]
+      extract_images: false
   generation:
     enhancement_level: 'off'
     vision_model: gpt-4o
     default_model: gpt-4o
   media_cache_ttl: 604800
   max_concurrent_processors: 4
+generation_optimization:
+  token_compressor:
+    clip:
+      model_name: "openai/clip-vit-large-patch14"
+      device: cpu
+      batch_size: 1
+  draft_workflow:
+    comfyui:
+      server_url: "http://localhost:8188"
+      connect_timeout: 10
+      execution_timeout: 300

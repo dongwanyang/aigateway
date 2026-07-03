@@ -53,7 +53,7 @@ async def init_default_api_keys(redis_mgr: RedisClientManager, api_keys: list[di
         keys_list = [k.strip() for k in raw_keys.split(",") if k.strip()]
     else:
         # 如果未配置环境变量，创建开发用默认 Key
-        keys_list = [f"sk-dev-{uuid.uuid4().hex[:16]}"]
+        keys_list = [f"gw-dev-{uuid.uuid4().hex[:16]}"]
 
     for raw_key in keys_list:
         key_hash = _hash_key(raw_key)

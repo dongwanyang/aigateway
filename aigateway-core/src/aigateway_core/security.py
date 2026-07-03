@@ -224,9 +224,9 @@ class KeyStore:
         if not user_id:
             raise ValueError("user_id is required")
 
-        # 生成唯一 Key 值 (sk- + 24 位大小写字母+数字)
+        # 生成唯一 Key 值 (gw- + 32 位大小写字母+数字)
         _ALPHABET = string.ascii_letters + string.digits  # a-zA-Z0-9
-        raw_key = f"sk-{''.join(secrets.choice(_ALPHABET) for _ in range(24))}"
+        raw_key = f"gw-{''.join(secrets.choice(_ALPHABET) for _ in range(32))}"
 
         key_hash = self._hash_key(raw_key)
         key_prefix = self._prefix_key(raw_key)
