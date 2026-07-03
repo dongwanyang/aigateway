@@ -84,9 +84,12 @@ providers:
     base_url: https://apihub.agnes-ai.com/v1
     model_grouper:
     - models:
-      - agnes-2.0-flash
-      - agnes-image-2.1-flash
-      - agnes-video-v2.0
+      - name: agnes-2.0-flash
+        modality: mllm          # 多模态理解（文本+图片输入）
+      - name: agnes-image-2.1-flash
+        modality: generative    # 图片生成
+      - name: agnes-video-v2.0
+        modality: generative    # 视频生成
       fallback_models: []
       pricing:
         agnes-2.0-flash:
@@ -100,7 +103,8 @@ providers:
     base_url: https://api.deepseek.com/v1
     model_grouper:
     - models:
-      - deepseek-v4-flash
+      - name: deepseek-v4-flash
+        modality: llm           # 纯文本理解
       fallback_models: []
       pricing:
         deepseek-v4-flash:

@@ -454,22 +454,48 @@ class ModelRouterStrategy:
                 if not isinstance(group_pricing, dict):
                     group_pricing = {}
 
-                for model_name in group_models:
-                    if not isinstance(model_name, str) or not model_name:
+                for model_entry in group_models:
+                    # 支持两种格式：
+                    # 1. 字符串: "model-name"（向后兼容）
+                    # 2. 字典: {"name": "model-name", "modality": "llm", "capability": 80}
+                    if isinstance(model_entry, dict):
+                        model_name = model_entry.get("name", "")
+                        if not model_name:
+                            continue
+                        # 从 model_entry 读取 modality/capability 覆盖
+                        entry_modality = model_entry.get("modality")
+                        entry_capability = model_entry.get("capability")
+                    elif isinstance(model_entry, str) and model_entry:
+                        model_name = model_entry
+                        entry_modality = None
+                        entry_capability = None
+                    else:
                         continue
+
                     if model_name in seen_models:
                         continue
                     seen_models.add(model_name)
 
-                    # 获取能力评分
-                    capability = self.config.model_capabilities.get(
-                        model_name, self.config.default_capability_score
-                    )
+                    # 获取能力评分（优先级：model_entry > config.model_capabilities > default）
+                    if entry_capability is not None:
+                        try:
+                            capability = int(entry_capability)
+                        except (TypeError, ValueError):
+                            capability = self.config.model_capabilities.get(
+                                model_name, self.config.default_capability_score
+                            )
+                    else:
+                        capability = self.config.model_capabilities.get(
+                            model_name, self.config.default_capability_score
+                        )
 
-                    # 获取模态
-                    modality = self.config.model_modalities.get(
-                        model_name, "generative"
-                    )
+                    # 获取模态（优先级：model_entry > config.model_modalities > default "generative"）
+                    if entry_modality is not None:
+                        modality = entry_modality
+                    else:
+                        modality = self.config.model_modalities.get(
+                            model_name, "generative"
+                        )
 
                     # 获取价格: 使用 pricing 中的 prompt 价格作为 price_per_request
                     price = 0.0

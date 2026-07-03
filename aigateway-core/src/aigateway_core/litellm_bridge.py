@@ -46,6 +46,7 @@ class LiteLLMBridge:
         self.cost_tracker: Any = None
         self._fallback_chain: List[str] = []
         self._model_alias_map: Dict[str, str] = {}  # 裸模型名 -> Router 注册名
+        self._model_modalities: Dict[str, str] = {}  # 裸模型名 -> modality (llm/mllm/generative)
         self._model_pricing: Dict[str, Dict[str, float]] = {}  # litellm_model -> {prompt, completion}
 
     # ------------------------------------------------------------------
@@ -127,7 +128,22 @@ class LiteLLMBridge:
                 # 多模型分组模式
                 for group in model_grouper:
                     fallback_models = group.get("fallback_models", [])
-                    for model_name in group.get("models", []):
+                    for model_entry in group.get("models", []):
+                        # 支持字符串或字典格式
+                        if isinstance(model_entry, dict):
+                            model_name = model_entry.get("name", "")
+                            if not model_name:
+                                continue
+                            model_modality = model_entry.get("modality", "generative")
+                        elif isinstance(model_entry, str):
+                            model_name = model_entry
+                            model_modality = "generative"
+                        else:
+                            continue
+
+                        # 记录 modality
+                        self._model_modalities[model_name] = model_modality
+
                         if base_url:
                             # OpenAI 兼容提供商：用 openai/{model_name}，Router 通过 openai 前缀
                             # 选择 OpenAI client，再通过 litellm_params 中的 base_url 路由到具体地址
@@ -724,12 +740,15 @@ class LiteLLMBridge:
                 model_info = m.get("model_info", {})
                 # 去掉 provider 前缀，只保留实际模型名
                 bare_model = model_name.split("/")[-1] if "/" in model_name else model_name
+                # 从 _model_modalities 获取模态分类
+                modality = self._model_modalities.get(bare_model, "generative")
                 result.append({
                     "id": bare_model,
                     "object": "model",
                     "created": int(time.time()),
                     "owned_by": self._extract_provider(model_name),
-                    **{k: v for k, v in model_info.items() if k not in ("id", "object", "created", "owned_by")},
+                    "modality": modality,
+                    **{k: v for k, v in model_info.items() if k not in ("id", "object", "created", "owned_by", "modality")},
                 })
             return result
         except Exception as exc:

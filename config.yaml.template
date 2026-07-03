@@ -128,10 +128,16 @@ providers:
     num_retries: 3           # 最大重试次数（0=不重试）
     retry_after: 1000        # 重试间隔（毫秒），实际使用递增退避
     model_grouper:           # 模型分组（一个提供商可有多组模型）
-      - models:              # 该组包含的模型名称列表
-          - agnes-2.0-flash
-          - agnes-image-2.1-flash
-          - agnes-video-v2.0
+      - models:              # 模型列表（字符串或字典格式）
+          # 字典格式支持 modality/capability 标注:
+          #   modality: llm(纯文本) | mllm(多模态理解) | generative(生成)
+          #   capability: 0-100 能力评分（可选）
+          - name: agnes-2.0-flash
+            modality: mllm         # 多模态理解（文本+图片输入）
+          - name: agnes-image-2.1-flash
+            modality: generative   # 图片生成
+          - name: agnes-video-v2.0
+            modality: generative   # 视频生成
         fallback_models: []  # 降级模型列表（主模型全部失败后尝试）
         pricing:             # 每个模型的定价（$/token）
           agnes-2.0-flash:
@@ -146,7 +152,8 @@ providers:
     retry_after: 1000
     model_grouper:
       - models:
-          - deepseek-v4-flash
+          - name: deepseek-v4-flash
+            modality: llm          # 纯文本理解
         fallback_models: []
         pricing:
           deepseek-v4-flash:
