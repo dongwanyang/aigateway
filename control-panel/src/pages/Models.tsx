@@ -177,6 +177,7 @@ interface ProviderConfig {
   model_grouper: ModelGroup[]
   num_retries: number
   retry_after: number
+  timeout: number
 }
 
 interface EmbeddingConfig {
@@ -234,6 +235,7 @@ export default function Models() {
             model_grouper: Array.isArray(cfg.model_grouper) ? cfg.model_grouper : [],
             num_retries: cfg.num_retries ?? 3,
             retry_after: cfg.retry_after ?? 1000,
+            timeout: cfg.timeout ?? 120,
           }
         }
       }
@@ -307,6 +309,7 @@ export default function Models() {
       }],
       num_retries: 3,
       retry_after: 1000,
+      timeout: 120,
     }
 
     setProviders(prev => ({ ...prev, [name]: newProvider }))
@@ -949,6 +952,21 @@ export default function Models() {
                       value={config.retry_after}
                       onChange={e => updateProvider(providerName, 'retry_after', parseInt(e.target.value) || 0)}
                     />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs mb-1 font-medium" style={{ color: 'var(--color-text-tertiary)' }}>请求超时 (秒)</label>
+                    <input
+                      className="input w-full"
+                      type="number"
+                      min={5}
+                      max={600}
+                      value={config.timeout}
+                      onChange={e => updateProvider(providerName, 'timeout', parseInt(e.target.value) || 120)}
+                    />
+                    <span className="text-xs" style={{ color: 'var(--color-text-quaternary)' }}>单次 LLM 请求最大等待时间</span>
                   </div>
                 </div>
 
