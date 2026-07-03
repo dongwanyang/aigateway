@@ -21,7 +21,6 @@
 server:
   host: 0.0.0.0              # 监听地址（0.0.0.0 表示所有网卡）
   port: 8000                 # 监听端口（1024-65535）
-  workers: 1                 # Uvicorn worker 进程数（生产环境建议 2-4）
   cors_origins:              # CORS 允许的来源列表
     - http://localhost:3000
     - http://localhost:5173

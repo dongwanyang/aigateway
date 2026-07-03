@@ -1,7 +1,6 @@
 server:
   host: 0.0.0.0
   port: 8000
-  workers: 1
   cors_origins:
   - http://localhost:3000
   - http://localhost:5173
@@ -71,7 +70,7 @@ providers:
           completion: 1
     num_retries: 3
     retry_after: 1000
-    timeout: 120
+    timeout: 3600
   deepseek:
     api_key: sk-d10ef482afad4b86a37f680ddb336d37
     base_url: https://api.deepseek.com/v1
@@ -108,9 +107,9 @@ infrastructure:
     tpm_window_ttl: 60
   qdrant:
     url: ${AI_GATEWAY_QDRANT_URL:-http://localhost:6333}
-    connect_timeout: 5.0
-    read_timeout: 10.0
-    write_timeout: 10.0
+    connect_timeout: 5
+    read_timeout: 10
+    write_timeout: 10
     hnsw_m: 16
     hnsw_ef_construct: 128
 cache:
@@ -130,7 +129,7 @@ cache:
       enabled: false
       model: cross-encoder/ms-marco-MiniLM-L-6-v2
       retrieve_top_k: 5
-      retrieve_threshold: 0.90
+      retrieve_threshold: 0.9
       rerank_threshold: 0.85
 circuit_breaker:
   failure_threshold: 5
