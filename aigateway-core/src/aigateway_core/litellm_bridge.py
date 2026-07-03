@@ -333,6 +333,7 @@ class LiteLLMBridge:
         stop: Optional[Any] = None,
         fallback_chain: Optional[List[str]] = None,
         max_retries: Optional[int] = None,
+        extra_headers: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """发送聊天补全请求到下游 LLM。
 
@@ -354,6 +355,7 @@ class LiteLLMBridge:
             stop: 停止序列。
             fallback_chain: 降级模型列表 [{model, provider}]。
             max_retries: 最大重试次数。
+            extra_headers: 额外 HTTP 请求头（用于 trace context 传播等）。
 
         Returns:
             完整的响应字典（OpenAI 格式）。
@@ -407,6 +409,7 @@ class LiteLLMBridge:
                     tools=tools,
                     tool_choice=tool_choice,
                     stop=stop,
+                    extra_headers=extra_headers,
                 )
 
                 # 成功：记录用量，获取本次请求成本
@@ -495,6 +498,11 @@ class LiteLLMBridge:
             val = kwargs.get(key)
             if val is not None:
                 params[key] = val
+
+        # 透传 extra_headers（用于 trace context 传播）
+        extra_headers = kwargs.get("extra_headers")
+        if extra_headers:
+            params["extra_headers"] = extra_headers
 
         # 执行请求
         if kwargs.get("stream", False):

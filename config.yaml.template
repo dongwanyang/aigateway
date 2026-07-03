@@ -33,6 +33,7 @@ auth:
     - key: ${ADMIN_API_KEY:-sk-your-admin-key-here}  # API Key 值（建议用环境变量）
       user_id: admin         # 关联的用户 ID
       is_admin: true         # 是否为管理员（可访问 /admin/* 接口）
+      group: admin-team      # 可选: API Key 分组标签（用于成本追踪指标聚合，不影响资源隔离）
       quotas:                # 该 Key 的配额限制
         daily_tokens: 1000000      # 每日 token 上限
         monthly_cost: 50.0         # 每月成本上限（美元）

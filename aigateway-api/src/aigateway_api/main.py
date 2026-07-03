@@ -335,6 +335,27 @@ async def lifespan(app: "FastAPI"):
     except Exception as exc:
         logger.warning("LiteLLM Bridge 初始化失败（部分功能不可用）: %s", exc)
 
+    # 初始化 PromptTemplateManager
+    prompt_template_manager = None
+    try:
+        from aigateway_core.generation_optimization.config import PromptTemplateConfig
+        from aigateway_core.generation_optimization.strategies.prompt_template_manager import PromptTemplateManager
+
+        pt_cfg_raw = config_manager.get("generation_optimization", {})
+        pt_cfg_section = pt_cfg_raw.get("prompt_templates", {}) if isinstance(pt_cfg_raw, dict) else {}
+        pt_config = PromptTemplateConfig(
+            enabled=pt_cfg_section.get("enabled", True),
+            default_page_size=int(pt_cfg_section.get("default_page_size", 20)),
+            max_page_size=int(pt_cfg_section.get("max_page_size", 100)),
+            max_name_length=int(pt_cfg_section.get("max_name_length", 64)),
+            max_content_length=int(pt_cfg_section.get("max_content_length", 10000)),
+            max_description_length=int(pt_cfg_section.get("max_description_length", 500)),
+        )
+        prompt_template_manager = PromptTemplateManager(redis_client=redis_mgr, config=pt_config)
+        logger.info("PromptTemplateManager 初始化完成")
+    except Exception as exc:
+        logger.warning("PromptTemplateManager 初始化失败: %s", exc)
+
     # 挂载到 app.state，供 FastAPI 中间件/依赖注入使用
     app.state.key_store = key_store
     app.state.config_manager = config_manager
@@ -349,6 +370,7 @@ async def lifespan(app: "FastAPI"):
     app.state.qdrant_manager = qdrant_mgr
     app.state.media_optimization_layer = media_optimization_layer
     app.state.media_cache = media_cache
+    app.state.prompt_template_manager = prompt_template_manager
 
     # 注册异常处理器
     _register_exception_handlers(app)
@@ -423,13 +445,16 @@ def _configure_cors(app: "FastAPI", config_manager: "ConfigManager") -> None:
 
 def _mount_routes(app: "FastAPI") -> None:
     """挂载所有路由到 FastAPI 应用。"""
-    from . import admin_routes, openai_compat, routes
+    from . import admin_routes, openai_compat, routes, template_routes
 
     # /v1/* — OpenAI 兼容接口（需要鉴权）
     app.include_router(openai_compat.router, prefix="/v1", tags=["OpenAI 兼容接口"])
 
     # /admin/* — 管理接口（需要管理员鉴权）
     app.include_router(admin_routes.router, prefix="/admin", tags=["管理接口"])
+
+    # Generation Optimization — 模板管理等端点
+    app.include_router(template_routes.router, tags=["generation-optimization"])
 
     # /metrics 和 /health — 基础设施路由（无需鉴权）
     app.include_router(routes.router, tags=["基础设施"])

@@ -21,12 +21,21 @@ from ..types import MediaContent, MediaType, ProcessorPhase, ProcessorResult
 
 if TYPE_CHECKING:
     from ...context import PipelineContext
+    from ...integration_configs import UnstructuredConfig
 
 logger = logging.getLogger(__name__)
 
 
 class DocumentParser(MediaProcessor):
-    """文档解析处理器 — 将各种格式解析为纯文本。"""
+    """文档解析处理器 — 优先使用 Unstructured，回退到多库组合。
+
+    当 ``unstructured`` 包可用时，通过其统一 ``partition`` 接口处理所有
+    支持的文档格式（PDF、DOCX、PPTX、HTML、CSV、Markdown），并保留
+    表格 HTML 和布局元素等结构信息。
+
+    当 ``unstructured`` 不可用时，回退到已有的 PyMuPDF + python-docx +
+    BeautifulSoup 多库实现。
+    """
 
     name = "document_parser"
     phase = ProcessorPhase.PRE_LLM
@@ -35,10 +44,27 @@ class DocumentParser(MediaProcessor):
     def __init__(
         self,
         supported_formats: Optional[List[str]] = None,
+        config: Optional["UnstructuredConfig"] = None,
     ) -> None:
         self.supported_formats = supported_formats or [
             "pdf", "docx", "xlsx", "pptx", "md", "csv", "html"
         ]
+        # 延迟导入以避免循环依赖
+        if config is None:
+            from ...integration_configs import UnstructuredConfig
+            config = UnstructuredConfig()
+        self._config = config
+        self._unstructured_available = self._check_unstructured()
+
+    @staticmethod
+    def _check_unstructured() -> bool:
+        """检测 unstructured 包是否可用。"""
+        try:
+            from unstructured.partition.auto import partition  # noqa: F401
+            return True
+        except ImportError:
+            logger.warning("Unstructured 未安装，回退到多库实现")
+            return False
 
     def supports(self, content: MediaContent) -> bool:
         return content.media_type == MediaType.DOCUMENT
@@ -88,7 +114,58 @@ class DocumentParser(MediaProcessor):
             )
 
     def _parse(self, data: bytes, mime_type: str) -> str:
-        """同步解析文档。"""
+        """同步解析文档 — Unstructured 优先，失败回退到 legacy 实现。"""
+        if self._unstructured_available:
+            try:
+                return self._parse_with_unstructured(data, mime_type)
+            except Exception as exc:
+                logger.warning(
+                    "Unstructured 解析异常，回退到多库实现: %s", exc
+                )
+                return self._parse_legacy(data, mime_type)
+        return self._parse_legacy(data, mime_type)
+
+    def _parse_with_unstructured(self, data: bytes, mime_type: str) -> str:
+        """使用 Unstructured partition 统一解析。
+
+        保留结构信息：
+        - 表格元素使用 ``text_as_html`` 元数据（如果可用）
+        - 其他布局元素转为纯文本表示
+        - 所有部分以双换行连接，确保与 TextChunker 兼容
+        """
+        from io import BytesIO
+
+        from unstructured.partition.auto import partition
+
+        kwargs: dict = {
+            "file": BytesIO(data),
+            "content_type": mime_type,
+            "strategy": self._config.strategy,
+            "languages": self._config.languages,
+        }
+
+        elements = partition(**kwargs)
+
+        # 构建输出 — 保留结构信息
+        text_parts: List[str] = []
+        for element in elements:
+            # 表格元素：优先使用 HTML 表示以保留结构
+            if hasattr(element, "metadata"):
+                metadata = element.metadata
+                # unstructured 使用 text_as_html 保存表格的 HTML 表示
+                html_text = getattr(metadata, "text_as_html", None)
+                if html_text:
+                    text_parts.append(html_text)
+                    continue
+            # 其他元素：使用纯文本表示
+            text_repr = str(element)
+            if text_repr.strip():
+                text_parts.append(text_repr)
+
+        return "\n\n".join(text_parts)
+
+    def _parse_legacy(self, data: bytes, mime_type: str) -> str:
+        """Legacy 解析 — 基于 MIME 类型分发到各专用库。"""
         if "pdf" in mime_type:
             return self._parse_pdf(data)
         elif "word" in mime_type or "docx" in mime_type:

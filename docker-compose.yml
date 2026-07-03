@@ -8,8 +8,6 @@ services:
       dockerfile: aigateway-api/Dockerfile
     ports:
       - "8000:8000"
-    env_file:
-      - .env
     environment:
       - AI_GATEWAY_REDIS_URL=redis://redis:6379/0
       - AI_GATEWAY_QDRANT_URL=http://qdrant:6333

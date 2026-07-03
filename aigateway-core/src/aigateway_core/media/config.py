@@ -8,7 +8,7 @@ Media Configuration — 多模态管线配置模型
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List
+from typing import Any, Dict, List, Optional
 
 
 @dataclass
@@ -26,6 +26,7 @@ class ImagePipelineConfig:
     download_timeout: float = 30.0
     caption_max_tokens: int = 150
     caption_temperature: float = 0.3
+    paddleocr: Optional[Dict[str, Any]] = None  # PaddleOCR 嵌套配置
 
 
 @dataclass
@@ -78,6 +79,7 @@ class DocumentPipelineConfig:
     download_timeout: float = 60.0
     long_doc_threshold_chars: int = 5000
     summary_preview_chars: int = 2000
+    unstructured: Optional[Dict[str, Any]] = None  # Unstructured 嵌套配置
 
 
 @dataclass

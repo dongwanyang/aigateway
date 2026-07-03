@@ -477,6 +477,7 @@ class SemanticCachePlugin:
         self,
         cache_manager: Optional[CacheManager] = None,
         embedding_model: str = "Qwen/Qwen3-Embedding-0.6B",
+        **kwargs: Any,
     ) -> None:
         self.cache_manager = cache_manager
         self.embedding_model = embedding_model
@@ -567,7 +568,7 @@ class ModelRouterPlugin:
 
     name: str = "model_router"
     enabled: bool = True
-    depends_on: list = []
+    depends_on: list = ["prompt_compress"]
 
     def __init__(self, litellm_bridge: Any = None) -> None:
         self.litellm_bridge = litellm_bridge
@@ -596,35 +597,180 @@ class ModelRouterPlugin:
 
 
 class PromptCompressPlugin:
-    """Prompt 压缩插件 — 在请求到达 LLM 前压缩冗长 prompt。
+    """Prompt 压缩插件 — LLMLingua-2 Token 级压缩。
 
-    配置参数:
-        compression_ratio: 目标压缩比例，默认 0.5
+    使用 LLMLingua-2 对完整 prompt（含 system/history/user/RAG 上下文）
+    进行 token 级压缩，降低发送到 LLM 的 token 数量。
+
+    当 llmlingua 包未安装或运行时异常时，自动降级为 passthrough 模式。
     """
 
     name: str = "prompt_compress"
     enabled: bool = True
-    depends_on: list = []
+    depends_on: list = ["rag_retriever", "conv_compressor"]
 
-    def __init__(self, compression_ratio: float = 0.5) -> None:
-        self.compression_ratio = compression_ratio
+    def __init__(
+        self,
+        config: Optional["PromptCompressConfig"] = None,
+        *,
+        compression_ratio: float = 0.5,
+    ) -> None:
+        from .integration_configs import PromptCompressConfig
+
+        if config is not None:
+            self._config = config
+        else:
+            self._config = PromptCompressConfig(compression_ratio=compression_ratio)
+
+        self._compressor: Any = None
+        self._is_available: bool = False
+        self._init_compressor()
+
+    def _init_compressor(self) -> None:
+        """延迟初始化 LLMLingua-2 压缩器。ImportError 时标记 passthrough。"""
+        try:
+            from llmlingua import PromptCompressor
+
+            self._compressor = PromptCompressor(
+                model_name=self._config.model_name,
+                use_llmlingua2=True,
+                device=self._config.device,
+            )
+            self._is_available = True
+            logger.info(
+                "LLMLingua-2 压缩器已初始化: model=%s, device=%s",
+                self._config.model_name,
+                self._config.device,
+            )
+        except ImportError:
+            self._is_available = False
+            logger.warning(
+                "llmlingua 包未安装，PromptCompressPlugin 将以 passthrough 模式运行。"
+                "安装方式: pip install llmlingua"
+            )
+        except Exception as exc:
+            self._is_available = False
+            logger.warning(
+                "LLMLingua-2 初始化失败，降级为 passthrough: %s", exc
+            )
+
+    def _build_prompt_text(self, messages: list) -> str:
+        """将 messages 列表拼接为单一文本块用于压缩。
+
+        包含所有消息类型：system、assistant（历史）、user、RAG 注入的内容。
+        每条消息以 "[role]: content" 格式拼接，用换行分隔。
+
+        Args:
+            messages: OpenAI 格式的消息列表。
+
+        Returns:
+            拼接后的完整文本。
+        """
+        parts: list = []
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if content:
+                parts.append(f"[{role}]: {content}")
+        return "\n".join(parts)
+
+    def _rebuild_messages(
+        self, compressed: str, original_messages: list
+    ) -> list:
+        """将压缩后的文本重建为 messages 格式。
+
+        策略：保留原始消息结构，将压缩后的文本作为单个 user 消息内容，
+        保留第一条 system 消息（如有），其余替换为压缩后的内容。
+
+        Args:
+            compressed: 压缩后的文本。
+            original_messages: 原始消息列表。
+
+        Returns:
+            重建后的 messages 列表。
+        """
+        if not original_messages:
+            return []
+
+        rebuilt: list = []
+
+        # 保留 system 消息（如有）
+        for msg in original_messages:
+            if msg.get("role") == "system":
+                rebuilt.append(msg)
+                break
+
+        # 压缩后的内容作为 user 消息
+        rebuilt.append({"role": "user", "content": compressed})
+        return rebuilt
 
     async def execute(self, ctx: PipelineContext) -> PipelineContext:
-        """执行 prompt 压缩。"""
+        """执行 prompt 压缩。
+
+        1. 从 ctx.request["messages"] 提取完整 prompt
+        2. 拼接为单一文本块
+        3. 调用 LLMLingua-2 压缩（若可用）
+        4. 将压缩后文本写回 ctx.request["messages"]
+        5. 记录 original_tokens / compressed_tokens / ratio 到 ctx.prompt_compress
+        """
         messages = ctx.request.get("messages", [])
         if not messages:
             return ctx
 
-        # 提取总 token 数作为原始长度估算
-        total_chars = sum(
-            len(json.dumps(msg.get("content", ""))) for msg in messages
-        )
-        ctx.original_length = total_chars
+        # 若 LLMLingua 不可用，passthrough
+        if not self._is_available:
+            return ctx
 
-        # TODO: 集成实际的 prompt 压缩逻辑（如 LangChain compression）
-        # 目前仅记录原始长度，不做实际压缩
-        ctx.compressed_prompt = ctx.request.get("messages", [])
-        ctx.compression_ratio = 1.0
+        # 构建完整 prompt 文本
+        prompt_text = self._build_prompt_text(messages)
+        if not prompt_text.strip():
+            return ctx
+
+        # 估算原始 token 数（简化：按空格+标点分词近似）
+        original_tokens = len(prompt_text.split())
+
+        try:
+            result = self._compressor.compress_prompt(
+                prompt_text,
+                rate=self._config.compression_ratio,
+                target_token=self._config.target_token if self._config.target_token > 0 else -1,
+                force_tokens=self._config.force_tokens,
+            )
+            compressed_text = result["compressed_prompt"]
+            compressed_tokens = len(compressed_text.split())
+
+            # 如果压缩结果为空或比原文长，透传原文
+            if not compressed_text.strip() or compressed_tokens >= original_tokens:
+                ctx.prompt_compress["original_tokens"] = original_tokens
+                ctx.prompt_compress["compressed_tokens"] = original_tokens
+                ctx.prompt_compress["compression_ratio"] = 1.0
+                return ctx
+
+            # 重建 messages
+            compressed_messages = self._rebuild_messages(compressed_text, messages)
+            ctx.request["messages"] = compressed_messages
+
+            # 记录指标
+            ratio = compressed_tokens / original_tokens if original_tokens > 0 else 1.0
+            ctx.prompt_compress["original_tokens"] = original_tokens
+            ctx.prompt_compress["compressed_tokens"] = compressed_tokens
+            ctx.prompt_compress["compression_ratio"] = ratio
+
+            logger.debug(
+                "Prompt 压缩完成: original_tokens=%d, compressed_tokens=%d, ratio=%.3f",
+                original_tokens,
+                compressed_tokens,
+                ratio,
+            )
+
+        except Exception as exc:
+            # 运行时异常：透传原始 prompt
+            logger.warning(
+                "LLMLingua-2 压缩运行时异常，透传原始 prompt: %s", exc
+            )
+            ctx.prompt_compress["original_tokens"] = original_tokens
+            ctx.prompt_compress["compressed_tokens"] = original_tokens
+            ctx.prompt_compress["compression_ratio"] = 1.0
 
         return ctx
 
@@ -647,13 +793,78 @@ def _register_builtin_plugins(registry: PluginRegistry, config_manager: Any = No
     if config_manager is not None:
         plugins_config = config_manager.get("plugins", []) or []
 
+    # 获取集成配置（用于 PromptCompressPlugin 等）
+    prompt_compress_kwargs: Dict[str, Any] = {}
+    if config_manager is not None:
+        try:
+            integration_cfgs = config_manager.integration_configs
+            prompt_compress_kwargs = {"config": integration_cfgs.prompt_compress}
+        except Exception:
+            pass  # 回退到默认配置
+
     plugin_map = {
         "pii_detector": (PIIDetectorPlugin, {"strategy": "sanitize"}),
         "prompt_cache": (PromptCachePlugin, {}),
         "semantic_cache": (SemanticCachePlugin, {}),
         "model_router": (ModelRouterPlugin, {}),
-        "prompt_compress": (PromptCompressPlugin, {}),
+        "prompt_compress": (PromptCompressPlugin, prompt_compress_kwargs),
     }
+
+    # 注册 RAGRetrieverPlugin（可选依赖）
+    try:
+        from aigateway_core.plugins.rag_retriever_plugin import RAGRetrieverPlugin
+
+        rag_config = None
+        if config_manager is not None:
+            try:
+                integration_cfgs = config_manager.integration_configs
+                rag_config = integration_cfgs.rag_retriever
+            except Exception:
+                pass
+
+        rag_kwargs: Dict[str, Any] = {}
+        if rag_config is not None:
+            rag_kwargs["config"] = rag_config
+
+        # Check if enabled via plugins config
+        rag_enabled = True
+        for pcfg in plugins_config:
+            if isinstance(pcfg, dict) and pcfg.get("name") == "rag_retriever":
+                rag_enabled = pcfg.get("enabled", True)
+                break
+
+        if rag_enabled:
+            plugin_map["rag_retriever"] = (RAGRetrieverPlugin, rag_kwargs)
+    except ImportError:
+        logger.debug("RAGRetrieverPlugin 不可用（导入失败）")
+
+    # 注册 ConvCompressorPlugin（可选依赖）
+    try:
+        from aigateway_core.plugins.conv_compressor_plugin import ConvCompressorPlugin
+
+        conv_config = None
+        if config_manager is not None:
+            try:
+                integration_cfgs = config_manager.integration_configs
+                conv_config = integration_cfgs.conv_compressor
+            except Exception:
+                pass
+
+        conv_kwargs: Dict[str, Any] = {}
+        if conv_config is not None:
+            conv_kwargs["config"] = conv_config
+
+        # Check if enabled via plugins config
+        conv_enabled = True
+        for pcfg in plugins_config:
+            if isinstance(pcfg, dict) and pcfg.get("name") == "conv_compressor":
+                conv_enabled = pcfg.get("enabled", True)
+                break
+
+        if conv_enabled:
+            plugin_map["conv_compressor"] = (ConvCompressorPlugin, conv_kwargs)
+    except ImportError:
+        logger.debug("ConvCompressorPlugin 不可用（导入失败）")
 
     # 注册 Media Optimization Plugin（V2）
     try:
@@ -678,17 +889,22 @@ def _register_builtin_plugins(registry: PluginRegistry, config_manager: Any = No
 
         enabled = True
         priority = 0
-        depends_on: list[str] = []
+        # 使用类级别 depends_on 作为默认值
+        depends_on: list[str] = getattr(plugin_cls, "depends_on", [])
         plugin_config: dict = {}
 
         if cfg:
             enabled = cfg.get("enabled", True)
             priority = cfg.get("priority", 0)
-            depends_on = cfg.get("depends_on", [])
+            depends_on = cfg.get("depends_on", depends_on)
             plugin_config = cfg.get("config", {})
 
-        # 合并默认配置
-        merged_config = {**default_config, **plugin_config}
+        # 如果 default_config 中已有 "config" 键（使用专用配置对象），
+        # 不再用 YAML plugin_config 合并覆盖，仅用 default_config
+        if "config" in default_config:
+            merged_config = default_config
+        else:
+            merged_config = {**default_config, **plugin_config}
 
         registry.register(
             name=name,
@@ -698,3 +914,33 @@ def _register_builtin_plugins(registry: PluginRegistry, config_manager: Any = No
             priority=priority,
             config=merged_config,
         )
+
+    # 注册 Generation Optimization Plugins（6 个优化插件）
+    try:
+        from aigateway_core.generation_optimization.plugins import (
+            register_generation_optimization_plugins,
+        )
+
+        gen_opt_config = {}
+        if config_manager is not None:
+            gen_opt_config = config_manager.get("generation_optimization", {}) or {}
+
+        if gen_opt_config.get("enabled", True):
+            # 获取 Redis 客户端（若可用）
+            redis_client = None
+            try:
+                from aigateway_core.redis_client import RedisClientManager
+
+                redis_client = RedisClientManager.get_client()
+            except Exception:
+                logger.debug("Redis client 不可用，Generation Optimization 插件将使用内存后备")
+
+            register_generation_optimization_plugins(
+                registry=registry,
+                config_manager=config_manager,
+                redis_client=redis_client,
+            )
+        else:
+            logger.info("Generation Optimization Layer 已禁用 (generation_optimization.enabled=false)")
+    except ImportError as exc:
+        logger.debug("Generation Optimization Plugins 不可用（导入失败）: %s", exc)

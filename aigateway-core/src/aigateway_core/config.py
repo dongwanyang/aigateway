@@ -14,14 +14,25 @@ ConfigManager — YAML 配置加载器
 from __future__ import annotations
 
 import copy
+import dataclasses
 import json
 import logging
 import os
 import threading
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import yaml
+
+from .integration_configs import (
+    CLIPConfig,
+    ComfyUIConfig,
+    ConvCompressorConfig,
+    PaddleOCRConfig,
+    PromptCompressConfig,
+    RAGRetrieverConfig,
+    UnstructuredConfig,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +100,7 @@ class ConfigManager:
         self._watchdog: Any = None
         self._watch_handle: Any = None
         self._watchdog_active = False
+        self._integration_configs: Optional["IntegrationConfigs"] = None
 
         # 加载配置
         self.load()
@@ -112,13 +124,24 @@ class ConfigManager:
         self._validate_config(config)
 
         with self._lock:
+            old_config = copy.deepcopy(self._config)
             self._config = copy.deepcopy(config)
+
+        # 解析集成配置（新增配置时自动包含在热重载路径中）
+        self._integration_configs = parse_integration_configs(
+            config, self._integration_configs
+        )
 
         logger.info(
             "配置已加载: path=%s, keys=%s",
             self.config_path,
             list(config.keys()),
         )
+
+        # 如果已有旧配置（非首次加载），通知热重载回调
+        if old_config:
+            self._notify_reload(old_config, config)
+
         return self._config
 
     def _apply_environment_mode(self, config: Dict[str, Any]) -> Dict[str, Any]:
@@ -159,7 +182,7 @@ class ConfigManager:
             "server", "auth", "plugins", "providers", "embedding",
             "observability", "hot_reload", "debug_mode", "infrastructure",
             "cache", "media_optimization", "circuit_breaker", "rate_limiter",
-            "streaming",
+            "streaming", "generation_optimization",
         }
 
         # 环境变量覆盖产生的扁平键（AI_GATEWAY_* 去前缀后的小写形式）
@@ -435,6 +458,17 @@ class ConfigManager:
         with self._lock:
             return copy.deepcopy(self._config)
 
+    @property
+    def integration_configs(self) -> "IntegrationConfigs":
+        """获取当前集成配置实例。
+
+        Returns:
+            IntegrationConfigs 实例，包含所有 7 个集成配置 dataclass。
+        """
+        if self._integration_configs is None:
+            self._integration_configs = parse_integration_configs(self._config)
+        return self._integration_configs
+
     # ------------------------------------------------------------------
     # 原子交换
     # ------------------------------------------------------------------
@@ -673,7 +707,7 @@ class ConfigManager:
             "server", "auth", "plugins", "providers", "embedding",
             "observability", "hot_reload", "debug_mode", "infrastructure",
             "cache", "media_optimization", "circuit_breaker", "rate_limiter",
-            "streaming",
+            "streaming", "generation_optimization",
         }
 
         # 检查未识别的顶层字段
@@ -725,3 +759,339 @@ class ConfigManager:
             metrics.record_request("INTERNAL", "/config-reload", "500")
         except Exception:
             pass
+
+
+# ------------------------------------------------------------------
+# 集成配置解析
+# ------------------------------------------------------------------
+
+# 环境变量前缀到 dataclass 字段名的映射
+# 格式: AI_GATEWAY_<CONFIG_NAME>_<FIELD_NAME>
+_INTEGRATION_ENV_PREFIXES = {
+    "PROMPT_COMPRESS": PromptCompressConfig,
+    "CLIP": CLIPConfig,
+    "COMFYUI": ComfyUIConfig,
+    "RAG_RETRIEVER": RAGRetrieverConfig,
+    "CONV_COMPRESSOR": ConvCompressorConfig,
+    "PADDLEOCR": PaddleOCRConfig,
+    "UNSTRUCTURED": UnstructuredConfig,
+}
+
+# 字段值范围约束 — {(ConfigClass, field_name): (min, max)} 或 callable validator
+_FIELD_VALIDATORS: Dict[Tuple[type, str], Any] = {
+    (PromptCompressConfig, "compression_ratio"): {"min": 0.0, "max": 1.0},
+    (CLIPConfig, "batch_size"): {"min": 1},
+    (ComfyUIConfig, "connect_timeout"): {"min": 1},
+    (ComfyUIConfig, "execution_timeout"): {"min": 1},
+    (ComfyUIConfig, "ws_reconnect_attempts"): {"min": 0},
+    (RAGRetrieverConfig, "top_k"): {"min": 1},
+    (RAGRetrieverConfig, "similarity_threshold"): {"min": 0.0, "max": 1.0},
+    (RAGRetrieverConfig, "chunk_size"): {"min": 1},
+    (RAGRetrieverConfig, "chunk_overlap"): {"min": 0},
+    (ConvCompressorConfig, "max_history"): {"min": 1},
+    (ConvCompressorConfig, "max_token_limit"): {"min": 1},
+    (ConvCompressorConfig, "summary_interval"): {"min": 1},
+    (UnstructuredConfig, "strategy"): {"choices": ["auto", "fast", "hi_res"]},
+}
+
+
+def _extract_plugin_config(config_dict: Dict[str, Any], plugin_name: str) -> Dict[str, Any]:
+    """从 plugins 列表中提取指定插件的 config 字典。
+
+    Args:
+        config_dict: 完整配置字典。
+        plugin_name: 插件名称。
+
+    Returns:
+        插件的 config 字典，若不存在则返回空字典。
+    """
+    plugins = config_dict.get("plugins", [])
+    if not isinstance(plugins, list):
+        return {}
+    for plugin in plugins:
+        if isinstance(plugin, dict) and plugin.get("name") == plugin_name:
+            cfg = plugin.get("config", {})
+            return cfg if isinstance(cfg, dict) else {}
+    return {}
+
+
+def _get_nested(config_dict: Dict[str, Any], dotted_path: str) -> Dict[str, Any]:
+    """按点分隔路径获取嵌套字典。
+
+    Args:
+        config_dict: 完整配置字典。
+        dotted_path: 点分隔路径，如 "generation_optimization.token_compressor.clip"
+
+    Returns:
+        找到的字典，若不存在则返回空字典。
+    """
+    keys = dotted_path.split(".")
+    current: Any = config_dict
+    for key in keys:
+        if isinstance(current, dict):
+            current = current.get(key)
+        else:
+            return {}
+        if current is None:
+            return {}
+    return current if isinstance(current, dict) else {}
+
+
+def _apply_env_overrides_for_config(
+    config_name: str, raw_values: Dict[str, Any]
+) -> Dict[str, Any]:
+    """为特定集成配置应用环境变量覆盖。
+
+    查找形如 AI_GATEWAY_<CONFIG_NAME>_<FIELD_NAME> 的环境变量。
+
+    Args:
+        config_name: 配置名称（大写），如 "PROMPT_COMPRESS"。
+        raw_values: 已从 YAML 提取的配置值字典。
+
+    Returns:
+        应用环境变量覆盖后的值字典。
+    """
+    prefix = f"AI_GATEWAY_{config_name}_"
+    result = dict(raw_values)
+
+    for env_key, env_value in os.environ.items():
+        if env_key.startswith(prefix):
+            field_name = env_key[len(prefix):].lower()
+            parsed = ConfigManager._parse_env_value(env_value)
+            result[field_name] = parsed
+
+    return result
+
+
+def _validate_and_build(
+    config_class: type,
+    values: Dict[str, Any],
+    previous: Optional[Any] = None,
+) -> Any:
+    """验证配置值并构建 dataclass 实例。
+
+    对每个字段进行类型验证和范围检查。
+    如果某个字段无效，则使用 previous 实例中的对应值（若有），
+    否则使用 dataclass 默认值。
+
+    Args:
+        config_class: dataclass 类型。
+        values: 配置值字典。
+        previous: 之前有效的配置实例（用于回退）。
+
+    Returns:
+        已验证的 dataclass 实例。
+    """
+    fields = dataclasses.fields(config_class)
+    valid_kwargs: Dict[str, Any] = {}
+
+    for f in fields:
+        if f.name not in values:
+            # 没有提供值，使用 previous 或 default
+            if previous is not None and hasattr(previous, f.name):
+                valid_kwargs[f.name] = getattr(previous, f.name)
+            # 否则让 dataclass 使用自己的默认值（不传此字段）
+            continue
+
+        raw_value = values[f.name]
+
+        # 类型验证
+        expected_type = f.type
+        if not _check_type(raw_value, expected_type):
+            logger.warning(
+                "集成配置 %s.%s 类型无效: 期望 %s，实际 %r，保留旧值",
+                config_class.__name__, f.name, expected_type, raw_value,
+            )
+            if previous is not None and hasattr(previous, f.name):
+                valid_kwargs[f.name] = getattr(previous, f.name)
+            continue
+
+        # 范围/约束验证
+        constraint = _FIELD_VALIDATORS.get((config_class, f.name))
+        if constraint and not _check_constraint(raw_value, constraint):
+            logger.warning(
+                "集成配置 %s.%s 值越界: %r，约束 %s，保留旧值",
+                config_class.__name__, f.name, raw_value, constraint,
+            )
+            if previous is not None and hasattr(previous, f.name):
+                valid_kwargs[f.name] = getattr(previous, f.name)
+            continue
+
+        valid_kwargs[f.name] = raw_value
+
+    return config_class(**valid_kwargs)
+
+
+def _check_type(value: Any, type_hint: str) -> bool:
+    """简单类型检查，基于 dataclass field type 注解字符串。
+
+    Args:
+        value: 待检查值。
+        type_hint: 类型注解字符串（如 "bool", "float", "str", "int"）。
+
+    Returns:
+        是否类型匹配。
+    """
+    # 处理 Optional 类型
+    if "Optional" in str(type_hint):
+        if value is None:
+            return True
+        # 提取内部类型
+        inner = str(type_hint).replace("Optional[", "").rstrip("]")
+        return _check_type(value, inner)
+
+    # 处理 List 类型
+    if "List" in str(type_hint) or "list" in str(type_hint):
+        return isinstance(value, list)
+
+    # 基础类型检查
+    type_str = str(type_hint).lower()
+    if "bool" in type_str:
+        return isinstance(value, bool)
+    if "int" in type_str:
+        # int 类型不应接受 bool（Python 中 bool 是 int 子类）
+        return isinstance(value, int) and not isinstance(value, bool)
+    if "float" in type_str:
+        # float 也接受 int（自动转换）
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if "str" in type_str:
+        return isinstance(value, str)
+
+    return True  # 未知类型，通过
+
+
+def _check_constraint(value: Any, constraint: Dict[str, Any]) -> bool:
+    """检查值是否满足约束条件。
+
+    Args:
+        value: 待检查值。
+        constraint: 约束字典，可包含 "min", "max", "choices"。
+
+    Returns:
+        是否满足约束。
+    """
+    if "choices" in constraint:
+        return value in constraint["choices"]
+
+    if "min" in constraint and value < constraint["min"]:
+        return False
+    if "max" in constraint and value > constraint["max"]:
+        return False
+
+    return True
+
+
+class IntegrationConfigs:
+    """持有所有 7 个集成配置 dataclass 实例的容器。"""
+
+    def __init__(
+        self,
+        prompt_compress: PromptCompressConfig,
+        clip: CLIPConfig,
+        comfyui: ComfyUIConfig,
+        rag_retriever: RAGRetrieverConfig,
+        conv_compressor: ConvCompressorConfig,
+        paddleocr: PaddleOCRConfig,
+        unstructured: UnstructuredConfig,
+    ) -> None:
+        self.prompt_compress = prompt_compress
+        self.clip = clip
+        self.comfyui = comfyui
+        self.rag_retriever = rag_retriever
+        self.conv_compressor = conv_compressor
+        self.paddleocr = paddleocr
+        self.unstructured = unstructured
+
+
+def parse_integration_configs(
+    config_dict: Dict[str, Any],
+    previous: Optional[IntegrationConfigs] = None,
+) -> IntegrationConfigs:
+    """从完整配置字典解析所有 7 个集成配置。
+
+    解析流程：
+    1. 从 config_dict 中提取各配置节的原始值
+    2. 应用环境变量覆盖（AI_GATEWAY_<NAME>_<FIELD>）
+    3. 验证类型和范围
+    4. 构建 dataclass 实例（无效值回退到 previous 或默认值）
+
+    YAML 配置路径映射:
+    - plugins.[name="prompt_compress"].config → PromptCompressConfig
+    - generation_optimization.token_compressor.clip → CLIPConfig
+    - generation_optimization.draft_workflow.comfyui → ComfyUIConfig
+    - plugins.[name="rag_retriever"].config → RAGRetrieverConfig
+    - plugins.[name="conv_compressor"].config → ConvCompressorConfig
+    - media_optimization.image.paddleocr → PaddleOCRConfig
+    - media_optimization.document.unstructured → UnstructuredConfig
+
+    Args:
+        config_dict: 完整 YAML 配置字典。
+        previous: 之前有效的配置实例（用于无效值回退）。
+
+    Returns:
+        IntegrationConfigs 实例，包含所有 7 个配置。
+    """
+    # 1. 提取各配置节的原始值
+    prompt_compress_raw = _extract_plugin_config(config_dict, "prompt_compress")
+    clip_raw = _get_nested(config_dict, "generation_optimization.token_compressor.clip")
+    comfyui_raw = _get_nested(config_dict, "generation_optimization.draft_workflow.comfyui")
+    rag_retriever_raw = _extract_plugin_config(config_dict, "rag_retriever")
+    conv_compressor_raw = _extract_plugin_config(config_dict, "conv_compressor")
+    paddleocr_raw = _get_nested(config_dict, "media_optimization.image.paddleocr")
+    unstructured_raw = _get_nested(config_dict, "media_optimization.document.unstructured")
+
+    # 2. 应用环境变量覆盖
+    prompt_compress_raw = _apply_env_overrides_for_config("PROMPT_COMPRESS", prompt_compress_raw)
+    clip_raw = _apply_env_overrides_for_config("CLIP", clip_raw)
+    comfyui_raw = _apply_env_overrides_for_config("COMFYUI", comfyui_raw)
+    rag_retriever_raw = _apply_env_overrides_for_config("RAG_RETRIEVER", rag_retriever_raw)
+    conv_compressor_raw = _apply_env_overrides_for_config("CONV_COMPRESSOR", conv_compressor_raw)
+    paddleocr_raw = _apply_env_overrides_for_config("PADDLEOCR", paddleocr_raw)
+    unstructured_raw = _apply_env_overrides_for_config("UNSTRUCTURED", unstructured_raw)
+
+    # 3 & 4. 验证并构建 dataclass 实例
+    prompt_compress = _validate_and_build(
+        PromptCompressConfig,
+        prompt_compress_raw,
+        previous.prompt_compress if previous else None,
+    )
+    clip = _validate_and_build(
+        CLIPConfig,
+        clip_raw,
+        previous.clip if previous else None,
+    )
+    comfyui = _validate_and_build(
+        ComfyUIConfig,
+        comfyui_raw,
+        previous.comfyui if previous else None,
+    )
+    rag_retriever = _validate_and_build(
+        RAGRetrieverConfig,
+        rag_retriever_raw,
+        previous.rag_retriever if previous else None,
+    )
+    conv_compressor = _validate_and_build(
+        ConvCompressorConfig,
+        conv_compressor_raw,
+        previous.conv_compressor if previous else None,
+    )
+    paddleocr = _validate_and_build(
+        PaddleOCRConfig,
+        paddleocr_raw,
+        previous.paddleocr if previous else None,
+    )
+    unstructured = _validate_and_build(
+        UnstructuredConfig,
+        unstructured_raw,
+        previous.unstructured if previous else None,
+    )
+
+    return IntegrationConfigs(
+        prompt_compress=prompt_compress,
+        clip=clip,
+        comfyui=comfyui,
+        rag_retriever=rag_retriever,
+        conv_compressor=conv_compressor,
+        paddleocr=paddleocr,
+        unstructured=unstructured,
+    )

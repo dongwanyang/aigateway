@@ -208,21 +208,77 @@ class ImageCompressProcessor(MediaProcessor):
 
 
 class OCRExtractor(MediaProcessor):
-    """OCR 文字提取处理器。
+    """OCR 文字提取处理器 — 支持 PaddleOCR 和 Tesseract 双后端。
 
-    使用 pytesseract 作为默认后端。
-    失败时优雅降级（返回空结果）。
+    当 `ocr_backend` 配置为 "paddleocr" 时优先使用 PaddleOCR 引擎，
+    PaddleOCR 未安装或初始化失败时自动回退到 Tesseract。
     """
 
     name = "ocr_extractor"
     phase = ProcessorPhase.PRE_LLM
     supported_types = [MediaType.IMAGE]
 
+    # PaddleOCR 语言代码映射（常用语言 → PaddleOCR lang 参数）
+    _PADDLE_LANG_MAP: dict = {
+        "chi_sim": "ch",
+        "chi_tra": "chinese_cht",
+        "eng": "en",
+        "jpn": "japan",
+        "kor": "korean",
+        "fra": "fr",
+        "deu": "german",
+        "rus": "ru",
+        "spa": "es",
+        "por": "pt",
+        "ara": "ar",
+        "hin": "hi",
+        "ita": "it",
+        "ch": "ch",
+        "en": "en",
+    }
+
     def __init__(
         self, backend: str = "tesseract", languages: Optional[List[str]] = None
     ) -> None:
         self.backend = backend
         self.languages = languages or ["eng"]
+        self._paddleocr_engine: Optional[object] = None
+
+        if backend == "paddleocr":
+            self._init_paddleocr()
+
+    def _init_paddleocr(self) -> None:
+        """初始化 PaddleOCR 引擎。失败则回退到 Tesseract。"""
+        try:
+            from paddleocr import PaddleOCR
+
+            lang = self._map_language_code(self.languages)
+            self._paddleocr_engine = PaddleOCR(
+                use_angle_cls=True,
+                lang=lang,
+                show_log=False,
+            )
+            logger.info("PaddleOCR 引擎初始化成功 (lang=%s)", lang)
+        except ImportError:
+            logger.warning("PaddleOCR 未安装，回退到 Tesseract")
+            self.backend = "tesseract"
+            self._paddleocr_engine = None
+        except Exception as exc:
+            logger.warning("PaddleOCR 初始化失败，回退到 Tesseract: %s", exc)
+            self.backend = "tesseract"
+            self._paddleocr_engine = None
+
+    def _map_language_code(self, languages: List[str]) -> str:
+        """将语言列表映射为 PaddleOCR 支持的 lang 参数。
+
+        PaddleOCR 一次只支持单一语言参数，优先使用列表中第一个可映射的语言。
+        """
+        for lang in languages:
+            mapped = self._PADDLE_LANG_MAP.get(lang.lower())
+            if mapped:
+                return mapped
+        # 默认中文
+        return "ch"
 
     def supports(self, content: MediaContent) -> bool:
         return content.media_type == MediaType.IMAGE
@@ -283,21 +339,70 @@ class OCRExtractor(MediaProcessor):
             )
 
     def _extract(self, image_data: bytes) -> str:
-        """同步 OCR 提取。"""
+        """根据 backend 选择 OCR 引擎执行提取。"""
+        if self.backend == "paddleocr" and self._paddleocr_engine:
+            return self._extract_paddleocr(image_data)
+        return self._extract_tesseract(image_data)
+
+    def _extract_paddleocr(self, image_data: bytes) -> str:
+        """PaddleOCR 提取，按位置排序保留表格布局信息。"""
+        import numpy as np
         from PIL import Image
 
         img = Image.open(io.BytesIO(image_data))
+        img_array = np.array(img)
 
-        if self.backend == "tesseract":
-            import pytesseract
+        results = self._paddleocr_engine.ocr(img_array, cls=True)
 
-            lang = "+".join(self.languages)
-            return pytesseract.image_to_string(img, lang=lang)
-        else:
-            # Fallback: 尝试 pytesseract
-            import pytesseract
+        # 按 y 坐标排序，保留文档布局
+        lines: List[tuple] = []
+        if results:
+            for line_result in results:
+                if line_result:
+                    for box, (text, confidence) in line_result:
+                        # box[0][1] 是左上角 y 坐标，box[0][0] 是左上角 x 坐标
+                        y_coord = box[0][1]
+                        x_coord = box[0][0]
+                        lines.append((y_coord, x_coord, text))
 
-            return pytesseract.image_to_string(img)
+        # 按 y 坐标排序（行），同行内按 x 坐标排序（列）
+        # 使用 y 坐标分组（容差范围内视为同一行）
+        if not lines:
+            return ""
+
+        lines.sort(key=lambda x: (x[0], x[1]))
+
+        # 简单行分组：y 坐标差值小于阈值的归为同一行
+        grouped_lines: List[List[tuple]] = []
+        current_group: List[tuple] = [lines[0]]
+        y_tolerance = 15  # 像素容差
+
+        for i in range(1, len(lines)):
+            if abs(lines[i][0] - current_group[-1][0]) <= y_tolerance:
+                current_group.append(lines[i])
+            else:
+                grouped_lines.append(current_group)
+                current_group = [lines[i]]
+        grouped_lines.append(current_group)
+
+        # 同一行内按 x 坐标排序，用空格连接
+        output_lines: List[str] = []
+        for group in grouped_lines:
+            group.sort(key=lambda x: x[1])
+            line_text = "  ".join(text for _, _, text in group)
+            output_lines.append(line_text)
+
+        return "\n".join(output_lines)
+
+    def _extract_tesseract(self, image_data: bytes) -> str:
+        """Tesseract OCR 提取。"""
+        from PIL import Image
+
+        img = Image.open(io.BytesIO(image_data))
+        import pytesseract
+
+        lang = "+".join(self.languages)
+        return pytesseract.image_to_string(img, lang=lang)
 
 
 class VisionCaptionProcessor(MediaProcessor):

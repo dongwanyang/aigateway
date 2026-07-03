@@ -29,6 +29,8 @@ NS_PII_DETECTOR = "pii_detector"
 NS_MODEL_ROUTER = "model_router"
 NS_MEDIA_OPTIMIZATION = "media_optimization"
 NS_GENERATION_PIPELINE = "generation_pipeline"
+NS_RAG_RETRIEVER = "rag_retriever"
+NS_CONV_COMPRESSOR = "conv_compressor"
 
 
 @dataclass
@@ -296,6 +298,20 @@ class PipelineContext:
     @generation_pipeline.setter
     def generation_pipeline(self, value: Dict[str, Any]) -> None:
         self.extra[NS_GENERATION_PIPELINE] = value
+
+    # -- rag_retriever --
+
+    @property
+    def rag_context(self) -> list:
+        """RAG 检索到的文档块列表。"""
+        return self.extra.get(NS_RAG_RETRIEVER, {}).get("retrieved_chunks", [])
+
+    # -- conv_compressor --
+
+    @property
+    def conv_summary(self) -> str:
+        """对话历史压缩摘要。"""
+        return self.extra.get(NS_CONV_COMPRESSOR, {}).get("summary", "")
 
     # ------------------------------------------------------------------
     # 通用辅助方法
