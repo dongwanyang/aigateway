@@ -1,0 +1,302 @@
+# ============================================================================
+# AI Gateway 配置文件模板
+# ============================================================================
+#
+# 使用方式：
+#   1. 复制本文件为 config.yaml
+#   2. 按需修改各参数
+#   3. 支持 ${ENV_VAR} 语法引用环境变量，如 ${AGNES_API_KEY}
+#   4. 支持默认值语法 ${ENV_VAR:-default_value}
+#   5. 所有参数都有合理的默认值，未配置的项将使用默认值
+#
+# 环境变量覆盖：
+#   任何配置项都可通过 AI_GATEWAY_<PATH> 环境变量覆盖
+#   例如：AI_GATEWAY_SERVER_PORT=9000 → server.port = 9000
+#
+# ============================================================================
+
+# ==========================
+# 服务器配置
+# ==========================
+server:
+  host: 0.0.0.0              # 监听地址（0.0.0.0 表示所有网卡）
+  port: 8000                 # 监听端口（1024-65535）
+  workers: 1                 # Uvicorn worker 进程数（生产环境建议 2-4）
+  cors_origins:              # CORS 允许的来源列表
+    - http://localhost:3000
+    - http://localhost:5173
+
+# ==========================
+# 认证与配额
+# ==========================
+auth:
+  api_keys:                  # API Key 列表（启动时导入 Redis）
+    - key: ${ADMIN_API_KEY:-sk-your-admin-key-here}  # API Key 值（建议用环境变量）
+      user_id: admin         # 关联的用户 ID
+      is_admin: true         # 是否为管理员（可访问 /admin/* 接口）
+      quotas:                # 该 Key 的配额限制
+        daily_tokens: 1000000      # 每日 token 上限
+        monthly_cost: 50.0         # 每月成本上限（美元）
+        rate_limit_rpm: 60         # 每分钟请求数上限 (RPM)
+        rate_limit_tpm: 100000     # 每分钟 token 数上限 (TPM)
+
+  distributed_mode: false    # 分布式模式（多实例时通过 Pub/Sub 同步 Key 变更）
+
+  defaults:                  # 新建 API Key 时的默认配额
+    daily_tokens: 1000000    # 默认日 token 上限
+    monthly_cost: 50.0       # 默认月成本上限（美元）
+    rate_limit_rpm: 60       # 默认 RPM
+    rate_limit_tpm: 100000   # 默认 TPM
+
+  budget_alert_threshold: 0.8  # 配额预警阈值（0.8 = 使用达 80% 时触发告警）
+
+# ==========================
+# 插件配置
+# ==========================
+# 插件按定义顺序执行，可通过 depends_on 声明依赖关系
+plugins:
+  - name: pii_detector       # PII 检测器（个人信息脱敏）
+    enabled: true
+    depends_on: []
+    config:
+      strategy: sanitize     # 策略：sanitize(脱敏) | reject(拒绝) | warn(仅告警)
+
+  - name: prompt_cache       # 提示词精确缓存（L1/L2 查询入口）
+    enabled: true
+    depends_on: []
+    config: {}
+
+  - name: semantic_cache     # 语义缓存（L3 向量相似度匹配）
+    enabled: true
+    depends_on:
+      - prompt_cache         # 在 prompt_cache miss 后才执行语义匹配
+    config:
+      embedding_model: Qwen/Qwen3-Embedding-0.6B  # 嵌入模型名
+      threshold: 0.95        # 语义相似度阈值（0-1，越高越严格）
+      ttl: 86400             # 语义缓存条目 TTL（秒），默认 24h
+      rerank:                # Rerank 二次精排配置
+        enabled: false       # 是否启用 rerank
+        backend: lightweight # 后端：lightweight | cross-encoder
+        retrieve_top_k: 5    # 初筛返回 top-K 候选
+        retrieve_threshold: 0.9   # 初筛最低相似度
+        rerank_threshold: 0.85    # 精排接受阈值
+
+  - name: model_router       # 模型路由器（选择最优 provider）
+    enabled: true
+    depends_on: []
+    config:
+      strategy: quality      # 路由策略：quality | cost | speed
+
+  - name: prompt_compress    # 提示词压缩（减少 token 消耗）
+    enabled: true
+    depends_on: []
+    config:
+      compression_ratio: 0.5 # 目标压缩比（0.5 = 压缩到 50%）
+
+# ==========================
+# 模型提供商配置
+# ==========================
+# 每个提供商可配置多个模型，支持 fallback 降级链
+providers:
+  agnes:                     # 提供商标识符（自定义命名）
+    api_key: ${AGNES_API_KEY}  # API Key（强烈建议使用环境变量）
+    base_url: https://apihub.agnes-ai.com/v1  # API 基地址（OpenAI 兼容格式）
+    timeout: 120             # 单次请求超时（秒），超时后触发重试或 fallback
+    num_retries: 3           # 最大重试次数（0=不重试）
+    retry_after: 1000        # 重试间隔（毫秒），实际使用递增退避
+    model_grouper:           # 模型分组（一个提供商可有多组模型）
+      - models:              # 该组包含的模型名称列表
+          - agnes-2.0-flash
+          - agnes-image-2.1-flash
+          - agnes-video-v2.0
+        fallback_models: []  # 降级模型列表（主模型全部失败后尝试）
+        pricing:             # 每个模型的定价（$/token）
+          agnes-2.0-flash:
+            prompt: 0.02     # 输入 token 单价
+            completion: 1    # 输出 token 单价
+
+  deepseek:
+    api_key: ${DEEPSEEK_API_KEY}
+    base_url: https://api.deepseek.com/v1
+    timeout: 120
+    num_retries: 3
+    retry_after: 1000
+    model_grouper:
+      - models:
+          - deepseek-v4-flash
+        fallback_models: []
+        pricing:
+          deepseek-v4-flash:
+            prompt: 0.02
+            completion: 1
+
+# ==========================
+# 向量嵌入配置
+# ==========================
+embedding:
+  backend: sentence_transformers  # 后端引擎：sentence_transformers | openai | litellm
+  model: Qwen/Qwen3-Embedding-0.6B  # 嵌入模型名称
+  vector_dim: 1024           # 向量维度（必须与模型输出维度一致）
+  openai_model: text-embedding-3-small  # OpenAI 后端回退时使用的模型
+
+# ==========================
+# 可观测性配置
+# ==========================
+observability:
+  prometheus_enabled: true   # 是否启用 Prometheus /metrics 端点
+  opentelemetry_enabled: true  # 是否启用 OpenTelemetry 链路追踪
+  otel_service_name: ai-gateway  # OTEL 服务名称
+  otel_sample_rate: 0.1      # OTEL 采样率（0.1 = 10% 请求生成 trace）
+  log_format: json           # 日志格式：json | text
+  log_level: info            # 日志级别：debug | info | warning | error
+
+# ==========================
+# 基础设施连接
+# ==========================
+infrastructure:
+  redis:
+    url: ${AI_GATEWAY_REDIS_URL:-redis://localhost:6379/0}  # Redis 连接 URL
+    connect_timeout: 5       # 连接超时（秒）
+    socket_timeout: 10       # 读写超时（秒）
+    health_check_interval: 30  # 健康检查间隔（秒）
+    rpm_key_ttl: 120         # RPM 滑动窗口 sorted set TTL（秒）
+    tpm_window_ttl: 60       # TPM 计数器窗口 TTL（秒）
+
+  qdrant:
+    url: ${AI_GATEWAY_QDRANT_URL:-http://localhost:6333}  # Qdrant REST API 地址
+    connect_timeout: 5.0     # HTTP 连接超时（秒）
+    read_timeout: 10.0       # HTTP 读取超时（秒）
+    write_timeout: 10.0      # HTTP 写入超时（秒）
+    hnsw_m: 16               # HNSW 索引参数 M（影响召回率和内存）
+    hnsw_ef_construct: 128   # HNSW 构建时 ef 值（越大索引越准但越慢）
+
+# ==========================
+# 缓存配置
+# ==========================
+cache:
+  l1:                        # L1 进程内 LRU 缓存
+    max_entries: 1000        # 最大条目数（LRU 淘汰）
+    max_value_bytes: 102400  # 单条最大字节数（100KB），超过不进 L1
+
+  l2:                        # L2 Redis 分布式缓存
+    max_value_bytes: 512000  # 单条最大字节数（500KB），超过不进 L2
+    default_ttl: 3600        # 默认 TTL（秒），默认 1 小时
+    compression_level: 9     # LZ4 压缩级别（1-12，越高压缩比越大但越慢）
+
+  l3:                        # L3 Qdrant 向量语义缓存
+    min_token_count: 100     # 最低 token 数阈值（低于此值不写入 L3）
+    default_ttl: 86400       # 默认 TTL（秒），默认 24 小时
+    cleanup_interval: 3600   # 过期条目清理间隔（秒），默认 1 小时
+    similarity_threshold: 0.95  # 相似度匹配阈值（0-1，越高越严格）
+    rerank:                  # L3 查询后的 Rerank 精排
+      enabled: false         # 是否启用 rerank
+      model: cross-encoder/ms-marco-MiniLM-L-6-v2  # CrossEncoder 模型
+      retrieve_top_k: 5      # 初筛 top-K
+      retrieve_threshold: 0.90  # 初筛最低分
+      rerank_threshold: 0.85    # 精排接受阈值
+
+# ==========================
+# 熔断器配置
+# ==========================
+circuit_breaker:
+  failure_threshold: 5       # 连续失败 N 次后触发熔断（CLOSED → OPEN）
+  recovery_timeout: 60       # 熔断恢复等待时间（秒，OPEN → HALF_OPEN）
+  long_open_alert_seconds: 300  # 持续 OPEN 超过此时间触发告警（秒）
+
+# ==========================
+# IP 限流配置
+# ==========================
+rate_limiter:
+  max_requests: 30           # 每个 IP 在窗口期内的最大请求数
+  window_seconds: 60         # 滑动窗口大小（秒）
+  # 注：/admin/* 路径受保护，/health 和 /metrics 豁免限流
+
+# ==========================
+# 流式响应配置
+# ==========================
+streaming:
+  cache_chunk_delay_ms: 20   # 缓存命中时模拟流式的 chunk 间延迟（毫秒）
+  cache_chunk_count: 20      # 将缓存内容分成多少个 chunk 发送
+
+# ==========================
+# 热重载与调试
+# ==========================
+hot_reload: true             # 是否启用配置文件热重载（Watchdog 监听变更）
+debug_mode: false            # 调试模式（启用后日志级别强制 DEBUG）
+
+# ==========================
+# 多模态优化配置 (Media Optimization Layer)
+# ==========================
+media_optimization:
+  enabled: true              # 是否启用多模态内容优化
+
+  download_timeouts:         # 各类型媒体下载超时（秒）
+    image: 30
+    video: 120
+    audio: 60
+    document: 60
+
+  image:                     # 图像处理管线
+    max_width: 1920          # 最大宽度（超过自动缩放）
+    max_height: 1080         # 最大高度
+    quality: 85              # JPEG/WebP 压缩质量（1-100）
+    output_format: webp      # 输出格式：webp | jpeg | png
+    ocr_backend: tesseract   # OCR 后端：tesseract | paddleocr
+    ocr_languages:           # OCR 语言列表
+      - eng                  # 英文
+      - chi_sim              # 简体中文
+    caption_model: agnes-2.0-flash  # Vision Caption 使用的模型
+    max_file_size_mb: 20.0   # 图片最大文件大小（MB）
+    caption_max_tokens: 150  # Caption 生成最大 token 数
+    caption_temperature: 0.3 # Caption 生成温度（越低越确定性）
+
+  video:                     # 视频处理管线
+    max_frames: 10           # 最大提取关键帧数
+    frame_interval_sec: 5.0  # 帧提取间隔（秒）
+    scene_detection: true    # 是否启用场景检测
+    target_resolution: 720p  # 目标分辨率
+    max_duration_sec: 300    # 最大处理时长（秒，超过截断）
+    whisper_model: faster-whisper  # 音频转录引擎
+    language: auto           # 语言检测：auto | zh | en | ...
+    max_file_size_mb: 100.0  # 视频最大文件大小（MB）
+
+  audio:                     # 音频处理管线
+    target_format: opus      # 目标编码格式
+    sample_rate: 16000       # 采样率（Hz）
+    bitrate: 64k             # 比特率
+    whisper_model: faster-whisper  # 转录引擎：faster-whisper | openai-whisper
+    language: auto           # 语言：auto | zh | en | ...
+    max_duration_sec: 600    # 最大转录时长（秒）
+    diarization_enabled: false  # 是否启用说话人分离
+    max_file_size_mb: 50.0   # 音频最大文件大小（MB）
+    whisper_model_size: base # Whisper 模型大小：tiny | base | small | medium | large
+
+  document:                  # 文档处理管线
+    supported_formats:       # 支持的文档格式
+      - pdf
+      - docx
+      - xlsx
+      - pptx
+      - md
+      - csv
+      - html
+    ocr_fallback: true       # PDF 无法提取文字时是否回退 OCR
+    chunk_size: 512          # 文本分块大小（token）
+    chunk_overlap: 64        # 分块重叠（token）
+    chunking_strategy: semantic  # 分块策略：semantic | token | sentence
+    embedding_model: Qwen/Qwen3-Embedding-0.6B  # 文档向量化使用的模型
+    vector_dim: 1024         # 向量维度
+    summary_max_length: 500  # 摘要最大长度（字符）
+    max_file_size_mb: 50.0   # 文档最大文件大小（MB）
+    long_doc_threshold_chars: 5000   # 长文档判定阈值（字符数，超过则生成摘要）
+    summary_preview_chars: 2000      # 摘要预览截取字符数
+
+  generation:                # 媒体生成配置（预留）
+    enhancement_level: 'off' # 增强级别：off | light | aggressive
+    vision_model: agnes-2.0-flash  # Vision 模型
+    default_model: agnes-2.0-flash # 默认生成模型
+    max_retries: 3           # 生成失败重试次数
+    retry_delay_ms: 1000     # 重试间隔（毫秒）
+
+  media_cache_ttl: 604800    # 媒体处理结果缓存 TTL（秒），默认 7 天
+  max_concurrent_processors: 4  # 最大并发媒体处理器数（限制 CPU/内存占用）
