@@ -236,6 +236,8 @@ media_optimization:
     enhancement_level: 'off'
     vision_model: gpt-4o
     default_model: gpt-4o
+    max_retries: 3
+    retry_delay_ms: 1000
   media_cache_ttl: 604800
   max_concurrent_processors: 4
 generation_optimization:

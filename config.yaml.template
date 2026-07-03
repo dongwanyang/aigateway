@@ -89,9 +89,32 @@ plugins:
 
   - name: prompt_compress    # 提示词压缩（减少 token 消耗）
     enabled: true
-    depends_on: []
+    depends_on: ["semantic_cache"]
     config:
       compression_ratio: 0.5 # 目标压缩比（0.5 = 压缩到 50%）
+      model_name: "microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbank"
+      target_token: -1       # 目标 token 数，-1 表示按 compression_ratio 自动
+      device: cpu            # 运行设备：cpu | cuda
+
+  - name: rag_retriever      # RAG 检索增强（知识库检索）
+    enabled: false           # 默认关闭，需配合 Qdrant 知识库
+    depends_on: ["semantic_cache"]
+    config:
+      top_k: 5              # 检索返回 top-K 文档块
+      similarity_threshold: 0.7  # 相似度阈值
+      rerank_enabled: false  # 是否启用重排序
+      chunk_size: 512        # 文档分块大小（token）
+      chunk_overlap: 64      # 分块重叠
+      collection_name: rag_documents  # Qdrant 集合名称
+
+  - name: conv_compressor    # 对话历史压缩（长会话摘要）
+    enabled: false           # 默认关闭，需安装 langchain
+    depends_on: ["semantic_cache"]
+    config:
+      max_history: 20        # 保留最近 N 条消息，超出部分压缩为摘要
+      summary_model: gpt-4o-mini  # 摘要生成使用的模型
+      max_token_limit: 4000  # 摘要最大 token 数
+      summary_interval: 5    # 每 N 条消息触发一次摘要
 
 # ==========================
 # 模型提供商配置
@@ -249,6 +272,9 @@ media_optimization:
     max_file_size_mb: 20.0   # 图片最大文件大小（MB）
     caption_max_tokens: 150  # Caption 生成最大 token 数
     caption_temperature: 0.3 # Caption 生成温度（越低越确定性）
+    paddleocr:               # PaddleOCR 专项配置
+      lang: ch               # 识别语言
+      use_angle_cls: true    # 是否启用角度分类器
 
   video:                     # 视频处理管线
     max_frames: 10           # 最大提取关键帧数
@@ -290,6 +316,10 @@ media_optimization:
     max_file_size_mb: 50.0   # 文档最大文件大小（MB）
     long_doc_threshold_chars: 5000   # 长文档判定阈值（字符数，超过则生成摘要）
     summary_preview_chars: 2000      # 摘要预览截取字符数
+    unstructured:            # Unstructured 文档解析配置
+      strategy: auto         # 解析策略：auto | fast | hi_res
+      languages: ["chi_sim", "eng"]  # 识别语言
+      extract_images: false  # 是否提取文档中的图片
 
   generation:                # 媒体生成配置（预留）
     enhancement_level: 'off' # 增强级别：off | light | aggressive
