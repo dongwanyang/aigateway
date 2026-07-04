@@ -45,7 +45,7 @@ class PipelineContext:
         response: 缓存命中时设置的完整响应内容（JSON 字符串）。
         should_stop: 短路标记，True 时跳过后续插件。
         should_stream: 是否流式响应。
-        trace_id: OpenTelemetry 追踪 ID（UUID4）。
+        trace_id: 全请求唯一追踪 ID（由 TraceMiddleware 生成,必须显式传入）。
         request_id: 唯一请求 ID（UUID4）。
         user_id: 从 API Key 解析出的用户 ID。
         extra: 插件间传递的命名空间数据字典。
@@ -53,12 +53,12 @@ class PipelineContext:
 
     # 必填字段
     request: Dict[str, Any]
+    trace_id: str  # 必传 —— 由 TraceMiddleware 生成,经 dispatcher/openai_compat 透传,保证全请求唯一
 
     # 可选字段，带默认值
     response: Optional[str] = None
     should_stop: bool = False
     should_stream: bool = False
-    trace_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     request_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     user_id: Optional[str] = None
     extra: Dict[str, Any] = field(default_factory=dict)

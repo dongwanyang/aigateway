@@ -35,3 +35,17 @@ def test_collector_emit_accumulates():
 def test_collector_current_none_when_not_started():
     TraceCollector._current.set(None)
     assert TraceCollector.current() is None
+
+
+def test_pipeline_context_trace_id_required():
+    """trace_id 不再有默认值,必须显式传入."""
+    from aigateway_core.context import PipelineContext
+    import pytest
+    with pytest.raises(TypeError):
+        PipelineContext(request={"messages": [], "model": "gpt"})  # 缺 trace_id
+
+
+def test_pipeline_context_with_trace_id():
+    from aigateway_core.context import PipelineContext
+    ctx = PipelineContext(request={"messages": [], "model": "gpt"}, trace_id="t-fixed")
+    assert ctx.trace_id == "t-fixed"
