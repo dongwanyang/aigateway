@@ -36,7 +36,7 @@ cd control-panel && npm run dev
 ```bash
 export GW="http://localhost:8000"                              # Gateway 地址
 export KEY="gw-rRIop4dpcyJJNUTJbHmHpr9Bj3M11s5o"               # 引导 API Key
-export MODEL="deepseek-v4-flash"                               # 低成本测试模型
+export MODEL="agnes-2.0-flash"                                 # 低成本测试模型
 export AUTH="Authorization: Bearer $KEY"
 export CTYPE="Content-Type: application/json"
 ```

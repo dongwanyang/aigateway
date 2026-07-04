@@ -78,6 +78,12 @@ class RAGRetrieverConfig:
         chunk_size: 文档分块大小 (默认: 512)
         chunk_overlap: 分块重叠字符数 (默认: 64)
         collection_name: Qdrant 集合名称 (默认: "rag_documents")
+        embedding_backend: Embedding 后端 (默认: "local")
+            - "local": 使用本地 HuggingFace 模型（无需 API Key，与 L3 语义缓存一致）
+            - "openai": 使用 OpenAI 兼容端点（需配 embedding_api_base + embedding_api_key）
+        embedding_model: Embedding 模型名，local 时是 HF 模型 ID，openai 时是模型名 (默认: "Qwen/Qwen3-Embedding-0.6B")
+        embedding_api_base: OpenAI 兼容端点 base_url，仅 embedding_backend=openai 时用
+        embedding_api_key: 端点 API Key，支持 ${ENV_VAR} 语法
     """
 
     enabled: bool = True
@@ -88,6 +94,10 @@ class RAGRetrieverConfig:
     chunk_size: int = 512
     chunk_overlap: int = 64
     collection_name: str = "rag_documents"
+    embedding_backend: str = "local"
+    embedding_model: str = "Qwen/Qwen3-Embedding-0.6B"
+    embedding_api_base: Optional[str] = None
+    embedding_api_key: Optional[str] = None
 
 
 @dataclass
@@ -97,16 +107,20 @@ class ConvCompressorConfig:
     Attributes:
         enabled: 是否启用对话压缩 (默认: True)
         max_history: 消息数阈值，超过则触发压缩 (默认: 20)
-        summary_model: 摘要生成使用的模型 (默认: "gpt-4o-mini")
+        summary_model: 摘要生成使用的模型 (默认: "agnes-2.0-flash")
         max_token_limit: 摘要最大 token 数 (默认: 4000)
         summary_interval: 每隔 N 条消息触发一次摘要 (默认: 5)
+        api_base: OpenAI 兼容端点 base_url，默认走 gateway 自身 (默认: "http://localhost:8000/v1")
+        api_key: 端点 API Key，支持 ${ENV_VAR} 语法。默认使用 gateway 内置管理员 key
     """
 
     enabled: bool = True
     max_history: int = 20
-    summary_model: str = "gpt-4o-mini"
+    summary_model: str = "agnes-2.0-flash"
     max_token_limit: int = 4000
     summary_interval: int = 5
+    api_base: str = "http://localhost:8000/v1"
+    api_key: Optional[str] = None
 
 
 @dataclass

@@ -318,6 +318,65 @@ async def lifespan(app: "FastAPI"):
     except Exception as exc:
         logger.warning("Media Optimization Layer 初始化失败: %s", exc)
 
+    # ---- PII Detector Plugin (always enabled) ----
+    pii_detector_plugin = None
+    try:
+        from aigateway_core.pipeline import PIIDetectorPlugin
+
+        pii_cfg = {"strategy": "sanitize"}
+        for pcfg in config_manager.get("plugins", []) or []:
+            if isinstance(pcfg, dict) and pcfg.get("name") == "pii_detector":
+                pii_cfg = pcfg.get("config", pii_cfg)
+                break
+
+        pii_detector_plugin = PIIDetectorPlugin(strategy=pii_cfg.get("strategy", "sanitize"))
+        logger.info("PIIDetectorPlugin 初始化完成: strategy=%s", pii_cfg.get("strategy", "sanitize"))
+    except Exception as exc:
+        logger.warning("PIIDetectorPlugin 初始化失败（PII 检测将不可用）: %s", exc)
+
+    # ---- Model Router Resolver (for "auto" model resolution) ----
+    model_router_resolver = None
+    try:
+        from aigateway_core.generation_optimization.config import ModelRouterConfig
+        from aigateway_core.generation_optimization.strategies.model_router import ModelRouterStrategy
+
+        gen_opt_cfg = config_manager.get("generation_optimization", {}) or {}
+        mr_cfg_data = gen_opt_cfg.get("model_router", {}) or {}
+        mr_config = ModelRouterConfig(
+            enabled=mr_cfg_data.get("enabled", True),
+            default_model=mr_cfg_data.get("default_model", "deepseek-v4-flash"),
+            default_capability_score=mr_cfg_data.get("default_capability_score", 50),
+            model_capabilities=mr_cfg_data.get("model_capabilities", {}),
+            model_modalities=mr_cfg_data.get("model_modalities", {}),
+        )
+        providers_cfg = config_manager.get("providers", {})
+        model_router_resolver = ModelRouterStrategy(
+            config=mr_config,
+            providers_config=providers_cfg,
+        )
+        model_list = model_router_resolver.get_model_list()
+        logger.info("ModelRouterStrategy 初始化完成: %d models in routing table", len(model_list) if model_list else 0)
+    except Exception as exc:
+        logger.warning("ModelRouterStrategy 初始化失败（auto 路由将不可用）: %s", exc)
+
+    # ---- Prompt Compress Plugin ----
+    prompt_compress_plugin = None
+    try:
+        from aigateway_core.pipeline import PromptCompressPlugin
+
+        pc_cfg = {}
+        for pcfg in config_manager.get("plugins", []) or []:
+            if isinstance(pcfg, dict) and pcfg.get("name") == "prompt_compress":
+                pc_cfg = pcfg.get("config", {})
+                break
+
+        prompt_compress_plugin = PromptCompressPlugin(
+            compression_ratio=pc_cfg.get("compression_ratio", 0.5),
+        )
+        logger.info("PromptCompressPlugin 初始化完成: compression_ratio=%.2f", pc_cfg.get("compression_ratio", 0.5))
+    except Exception as exc:
+        logger.warning("PromptCompressPlugin 初始化失败（prompt 压缩将不可用）: %s", exc)
+
     # 持久化到 app.state（唯一数据源）
     import time
     app.state._start_time = int(time.time())
@@ -371,6 +430,11 @@ async def lifespan(app: "FastAPI"):
     app.state.media_optimization_layer = media_optimization_layer
     app.state.media_cache = media_cache
     app.state.prompt_template_manager = prompt_template_manager
+
+    # New plugin instances (inline integration)
+    app.state.pii_detector_plugin = pii_detector_plugin
+    app.state.model_router_resolver = model_router_resolver
+    app.state.prompt_compress_plugin = prompt_compress_plugin
 
     # 注册异常处理器
     _register_exception_handlers(app)

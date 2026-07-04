@@ -18,8 +18,9 @@ from typing import Any, List, Optional
 logger = logging.getLogger(__name__)
 
 # 尝试导入 LangChain 依赖
+# langchain 1.x 已将 Conversation*Memory 等 Legacy Memory 类移到 langchain-classic
 try:
-    from langchain.memory import ConversationSummaryBufferMemory
+    from langchain_classic.memory import ConversationSummaryBufferMemory
     from langchain_openai import ChatOpenAI
 
     _LANGCHAIN_AVAILABLE = True
@@ -71,16 +72,21 @@ class ConvCompressorPlugin:
             logger.warning(
                 "langchain 或 langchain-openai 包未安装，"
                 "ConvCompressorPlugin 将以 passthrough 模式运行。"
-                "安装方式: pip install langchain langchain-openai"
+                "安装方式: pip install langchain-classic langchain-openai"
             )
             return
 
         try:
-            self._llm = ChatOpenAI(
-                model=self._config.summary_model,
-                temperature=0,
-                max_tokens=self._config.max_token_limit,
-            )
+            llm_kwargs: dict = {
+                "model": self._config.summary_model,
+                "temperature": 0,
+                "max_tokens": self._config.max_token_limit,
+            }
+            if getattr(self._config, "api_base", None):
+                llm_kwargs["base_url"] = self._config.api_base
+            if getattr(self._config, "api_key", None):
+                llm_kwargs["api_key"] = self._config.api_key
+            self._llm = ChatOpenAI(**llm_kwargs)
             self._memory = ConversationSummaryBufferMemory(
                 llm=self._llm,
                 max_token_limit=self._config.max_token_limit,

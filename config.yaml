@@ -61,7 +61,7 @@ plugins:
     target_token: -1
     device: cpu
 - name: rag_retriever
-  enabled: false
+  enabled: true
   depends_on: ["semantic_cache"]
   config:
     top_k: 5
@@ -70,14 +70,23 @@ plugins:
     chunk_size: 512
     chunk_overlap: 64
     collection_name: rag_documents
+    # 默认用本地 HuggingFace 模型（与 L3 语义缓存一致），无需外部 API Key
+    embedding_backend: local
+    embedding_model: Qwen/Qwen3-Embedding-0.6B
+    # 切换到 OpenAI 兼容端点时，把 embedding_backend 改为 openai，并填下面两项：
+    # embedding_api_base: https://apihub.agnes-ai.com/v1
+    # embedding_api_key: ${AGNES_API_KEY}
 - name: conv_compressor
-  enabled: false
+  enabled: true
   depends_on: ["semantic_cache"]
   config:
     max_history: 20
-    summary_model: gpt-4o-mini
+    summary_model: agnes-2.0-flash
     max_token_limit: 4000
     summary_interval: 5
+    # 默认让摘要 LLM 走 gateway 自己（agnes-2.0-flash），避免依赖外部 OPENAI_API_KEY
+    api_base: http://localhost:8000/v1
+    api_key: gw-rRIop4dpcyJJNUTJbHmHpr9Bj3M11s5o
 providers:
   agnes:
     api_key: sk-Idz9oi7Cvx946OY6ipSp5FjU0T1S8IHQXRnVAnu2j1Q2zPBK
@@ -245,6 +254,7 @@ media_optimization:
   media_cache_ttl: 604800
   max_concurrent_processors: 4
 generation_optimization:
+  enabled: true
   ai_director: {}
   model_router: {}
   feature_cache: {}

@@ -125,6 +125,9 @@ def _get_app_state() -> Dict[str, Any]:
         "qdrant_manager": getattr(s, "qdrant_manager"),
         "media_optimization_layer": getattr(s, "media_optimization_layer", None),
         "media_cache": getattr(s, "media_cache", None),
+        "pii_detector_plugin": getattr(s, "pii_detector_plugin", None),
+        "model_router_resolver": getattr(s, "model_router_resolver", None),
+        "prompt_compress_plugin": getattr(s, "prompt_compress_plugin", None),
     }
 
 
@@ -366,6 +369,192 @@ async def _apply_media_optimization(
 
 
 # ------------------------------------------------------------------
+# PII Detection
+# ------------------------------------------------------------------
+
+
+async def _apply_pii_detection(
+    body: "ChatCompletionRequest",
+    request: Request,
+    state: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Apply PII detection and sanitization to the request.
+
+    Returns:
+        {"messages": sanitized_messages, "meta": {...}}
+        If reject strategy triggers, returns {"error": {...}, "status_code": 403}.
+    """
+    pii_plugin = state.get("pii_detector_plugin")
+    result: Dict[str, Any] = {"messages": body.messages, "meta": {}}
+
+    if pii_plugin is None:
+        return result
+
+    try:
+        from aigateway_core.context import PipelineContext
+
+        ctx = PipelineContext(request={"messages": body.messages, "model": body.model})
+        if hasattr(request.state, "user_id"):
+            ctx.user_id = request.state.user_id
+
+        ctx = await pii_plugin.execute(ctx)
+
+        pii_ns = ctx.pii_detector
+        result["meta"] = {
+            "has_pii": pii_ns.get("has_pii", False),
+            "detected_categories": pii_ns.get("detected_categories", []),
+            "strategy": pii_ns.get("strategy", "sanitize"),
+        }
+
+        # If reject strategy triggered, return 403
+        if pii_ns.get("error"):
+            return {"error": {"code": "pii_rejected", "message": pii_ns["error"]}, "status_code": 403}
+
+        # Use sanitized messages from context (updated by PIIDetectorPlugin.execute)
+        sanitized_messages = ctx.request.get("messages", body.messages)
+        if sanitized_messages:
+            result["messages"] = sanitized_messages
+
+        logger.info(
+            "PII detection applied: has_pii=%s, categories=%s",
+            pii_ns.get("has_pii", False),
+            pii_ns.get("detected_categories", []),
+        )
+    except Exception as exc:
+        logger.warning("PII detection failed (pass-through): %s", exc)
+
+    return result
+
+
+# ------------------------------------------------------------------
+# Model Router (auto resolution)
+# ------------------------------------------------------------------
+
+
+async def _resolve_auto_model(
+    body: "ChatCompletionRequest",
+    state: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Resolve model='auto' to the best available provider/model.
+
+    Returns:
+        {"model": resolved_model_name, "meta": {...}}
+        If model is not "auto", returns {"model": body.model, "meta": {}}.
+    """
+    if body.model != "auto":
+        return {"model": body.model, "meta": {}}
+
+    resolver = state.get("model_router_resolver")
+    litellm_bridge = state.get("litellm_bridge")
+
+    # Try full ModelRouterStrategy
+    if resolver is not None:
+        try:
+            # Estimate complexity from prompt length
+            full_text_parts: list[str] = []
+            for m in body.messages:
+                content = m.get("content", "")
+                if isinstance(content, str):
+                    full_text_parts.append(content)
+                elif isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            full_text_parts.append(block.get("text", ""))
+            full_text = " ".join(full_text_parts)
+            complexity_score = min(100, max(0, len(full_text) // 50))
+
+            decision = await resolver.route(
+                complexity_score=complexity_score,
+                required_modality="llm",
+            )
+            resolved_model = decision.selected_model
+            meta = {
+                "selected_model": resolved_model,
+                "selected_provider": decision.selected_provider,
+                "reason": decision.reason,
+                "estimated_cost": decision.estimated_cost,
+            }
+            logger.info("Auto model routed: %s -> %s (reason=%s)", body.model, resolved_model, decision.reason)
+            return {"model": resolved_model, "meta": meta}
+        except Exception as exc:
+            logger.warning("ModelRouterStrategy failed, falling back to cheapest: %s", exc)
+
+    # Fallback: pick first available model from litellm_bridge
+    if litellm_bridge is not None:
+        try:
+            registered = litellm_bridge.get_registered_models()
+            if registered:
+                resolved_model = registered[0]
+                logger.info("Auto model resolved (fallback): %s -> %s", body.model, resolved_model)
+                return {"model": resolved_model, "meta": {
+                    "selected_model": resolved_model,
+                    "selected_provider": "fallback",
+                    "reason": "auto_fallback",
+                }}
+        except Exception as exc:
+            logger.warning("Auto model fallback failed: %s", exc)
+
+    # Final fallback: error
+    return {
+        "error": {
+            "code": "model_not_found",
+            "message": "'auto' model resolution failed: no providers configured",
+        },
+        "status_code": 400,
+    }
+
+
+# ------------------------------------------------------------------
+# Prompt Compression
+# ------------------------------------------------------------------
+
+
+async def _apply_prompt_compression(
+    body: "ChatCompletionRequest",
+    state: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Apply prompt compression before LLM call.
+
+    Returns:
+        {"messages": updated_messages, "meta": {...}}
+        If plugin unavailable or passthrough, returns original messages.
+    """
+    compress_plugin = state.get("prompt_compress_plugin")
+    result: Dict[str, Any] = {"messages": body.messages, "meta": {}}
+
+    if compress_plugin is None:
+        return result
+
+    try:
+        from aigateway_core.context import PipelineContext
+
+        ctx = PipelineContext(request={"messages": body.messages, "model": body.model})
+        ctx = await compress_plugin.execute(ctx)
+
+        pc_ns = ctx.prompt_compress
+        result["meta"] = {
+            "original_tokens": pc_ns.get("original_tokens", 0),
+            "compressed_tokens": pc_ns.get("compressed_tokens", 0),
+            "compression_ratio": pc_ns.get("compression_ratio", 1.0),
+        }
+
+        # Update messages if compression produced a result
+        new_messages = ctx.request.get("messages")
+        if new_messages:
+            result["messages"] = new_messages
+
+        if result["meta"]["compression_ratio"] < 1.0:
+            logger.info(
+                "Prompt compression applied: %.1f%% reduction",
+                (1 - result["meta"]["compression_ratio"]) * 100,
+            )
+    except Exception as exc:
+        logger.warning("Prompt compression failed (pass-through): %s", exc)
+
+    return result
+
+
+# ------------------------------------------------------------------
 # POST /v1/chat/completions -- 非流式
 # ------------------------------------------------------------------
 
@@ -409,7 +598,51 @@ async def chat_completions_non_stream(
     if mol_meta:
         plugin_trace.append({"plugin_name": "media_optimization", "duration_ms": mol_ms, "status": "success"})
 
-    # 生成缓存键
+    # ===== PII Detection =====
+    pii_start = time.time()
+    pii_result = await _apply_pii_detection(body, request, state)
+    if "error" in pii_result:
+        pii_ms = round((time.time() - pii_start) * 1000, 2)
+        plugin_trace.append({"plugin_name": "pii_detector", "duration_ms": pii_ms, "status": "rejected"})
+        request.state.plugin_trace = plugin_trace
+        await _record_request_log(
+            request=request, method="POST", endpoint="/v1/chat/completions",
+            status_code=403, duration_ms=0, model=body.model,
+            cache_hit=False, cache_tier=None,
+        )
+        return JSONResponse(
+            content=pii_result["error"],
+            status_code=403,
+        )
+    body.messages = pii_result["messages"]
+    pii_meta = pii_result["meta"]
+    pii_ms = round((time.time() - pii_start) * 1000, 2)
+    if pii_meta:
+        plugin_trace.append({"plugin_name": "pii_detector", "duration_ms": pii_ms, "status": "success", **pii_meta})
+
+    # ===== Model Router (auto) =====
+    router_start = time.time()
+    router_result = await _resolve_auto_model(body, state)
+    if "error" in router_result:
+        router_ms = round((time.time() - router_start) * 1000, 2)
+        plugin_trace.append({"plugin_name": "model_router", "duration_ms": router_ms, "status": "failed"})
+        request.state.plugin_trace = plugin_trace
+        await _record_request_log(
+            request=request, method="POST", endpoint="/v1/chat/completions",
+            status_code=400, duration_ms=0, model=body.model,
+            cache_hit=False, cache_tier=None,
+        )
+        return JSONResponse(
+            content=router_result["error"],
+            status_code=400,
+        )
+    body.model = router_result["model"]
+    router_meta = router_result["meta"]
+    router_ms = round((time.time() - router_start) * 1000, 2)
+    if router_meta:
+        plugin_trace.append({"plugin_name": "model_router", "duration_ms": router_ms, "status": "success", **router_meta})
+
+    # 生成缓存键 (body.model is now resolved, body.messages are now sanitized)
     normalized_messages = json.dumps(body.messages, sort_keys=True, ensure_ascii=False)
     cache_key = cache_manager.generate_cache_key(
         normalized_prompt=normalized_messages,
@@ -459,6 +692,10 @@ async def chat_completions_non_stream(
                 "tier": hit_tier,
             },
         }
+        if pii_meta:
+            meta["pii_detector"] = pii_meta
+        if router_meta:
+            meta["model_router"] = router_meta
 
         # 记录缓存命中日志
         cache_duration_ms = round((time.time() - request_start_time) * 1000, 1)
@@ -520,6 +757,17 @@ async def chat_completions_non_stream(
             )
     quota_ms = round((time.time() - quota_start) * 1000, 2)
     plugin_trace.append({"plugin_name": "quota_check", "duration_ms": quota_ms, "status": "success"})
+
+    # ===== Prompt Compression =====
+    compress_start = time.time()
+    compress_result = await _apply_prompt_compression(body, state)
+    body.messages = compress_result["messages"]
+    compress_meta = compress_result["meta"]
+    compress_ms = round((time.time() - compress_start) * 1000, 2)
+    if compress_meta and compress_meta.get("compression_ratio", 1.0) < 1.0:
+        plugin_trace.append({"plugin_name": "prompt_compress", "duration_ms": compress_ms, "status": "success", **compress_meta})
+    else:
+        plugin_trace.append({"plugin_name": "prompt_compress", "duration_ms": compress_ms, "status": "skipped"})
 
     # 缓存未命中 -- 调用下游 LLM
     if litellm_bridge is None:
@@ -648,13 +896,22 @@ async def chat_completions_non_stream(
         cache_hit=cache_hit, cache_tier=cached.get("hit_tier") if cached else None,
     )
 
+    # Build enriched _meta
+    enriched_meta = {
+        **result.get("_meta", {"cache_hit": False, "cache_tier": None}),
+        "media_optimization": mol_meta,
+    }
+    if pii_meta:
+        enriched_meta["pii_detector"] = pii_meta
+    if router_meta:
+        enriched_meta["model_router"] = router_meta
+    if compress_meta:
+        enriched_meta["prompt_compress"] = compress_meta
+
     return JSONResponse(content={
         "data": result.get("data", {}),
         "message": "success",
-        "_meta": {
-            **result.get("_meta", {"cache_hit": False, "cache_tier": None}),
-            "media_optimization": mol_meta,
-        },
+        "_meta": enriched_meta,
     })
 
 
@@ -695,8 +952,57 @@ async def chat_completions_stream(
         user_id = request.state.user_id
 
     # ===== Media Optimization (V2) — 处理多模态内容 =====
+    mol_start = time.time()
     mol_result = await _apply_media_optimization(body, request, state)
     body.messages = mol_result["messages"]
+    mol_meta = mol_result["meta"]
+    mol_ms = round((time.time() - mol_start) * 1000, 2)
+    if mol_meta:
+        plugin_trace.append({"plugin_name": "media_optimization", "duration_ms": mol_ms, "status": "success"})
+
+    # ===== PII Detection =====
+    pii_start = time.time()
+    pii_result = await _apply_pii_detection(body, request, state)
+    if "error" in pii_result:
+        pii_ms = round((time.time() - pii_start) * 1000, 2)
+        plugin_trace.append({"plugin_name": "pii_detector", "duration_ms": pii_ms, "status": "rejected"})
+        request.state.plugin_trace = plugin_trace
+        await _record_request_log(
+            request=request, method="POST", endpoint="/v1/chat/completions",
+            status_code=403, duration_ms=0, model=body.model,
+            cache_hit=False, cache_tier=None,
+        )
+        return JSONResponse(
+            content=pii_result["error"],
+            status_code=403,
+        )
+    body.messages = pii_result["messages"]
+    pii_meta = pii_result["meta"]
+    pii_ms = round((time.time() - pii_start) * 1000, 2)
+    if pii_meta:
+        plugin_trace.append({"plugin_name": "pii_detector", "duration_ms": pii_ms, "status": "success", **pii_meta})
+
+    # ===== Model Router (auto) =====
+    router_start = time.time()
+    router_result = await _resolve_auto_model(body, state)
+    if "error" in router_result:
+        router_ms = round((time.time() - router_start) * 1000, 2)
+        plugin_trace.append({"plugin_name": "model_router", "duration_ms": router_ms, "status": "failed"})
+        request.state.plugin_trace = plugin_trace
+        await _record_request_log(
+            request=request, method="POST", endpoint="/v1/chat/completions",
+            status_code=400, duration_ms=0, model=body.model,
+            cache_hit=False, cache_tier=None,
+        )
+        return JSONResponse(
+            content=router_result["error"],
+            status_code=400,
+        )
+    body.model = router_result["model"]
+    router_meta = router_result["meta"]
+    router_ms = round((time.time() - router_start) * 1000, 2)
+    if router_meta:
+        plugin_trace.append({"plugin_name": "model_router", "duration_ms": router_ms, "status": "success", **router_meta})
 
     # 生成缓存键并检查缓存
     cache_start = time.time()
@@ -794,6 +1100,17 @@ async def chat_completions_stream(
             )
     quota_ms = round((time.time() - quota_start) * 1000, 2)
     plugin_trace.append({"plugin_name": "quota_check", "duration_ms": quota_ms, "status": "success"})
+
+    # ===== Prompt Compression =====
+    compress_start = time.time()
+    compress_result = await _apply_prompt_compression(body, state)
+    body.messages = compress_result["messages"]
+    compress_meta = compress_result["meta"]
+    compress_ms = round((time.time() - compress_start) * 1000, 2)
+    if compress_meta and compress_meta.get("compression_ratio", 1.0) < 1.0:
+        plugin_trace.append({"plugin_name": "prompt_compress", "duration_ms": compress_ms, "status": "success", **compress_meta})
+    else:
+        plugin_trace.append({"plugin_name": "prompt_compress", "duration_ms": compress_ms, "status": "skipped"})
 
     if litellm_bridge is None:
         return JSONResponse(

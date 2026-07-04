@@ -380,6 +380,29 @@ class PIIDetectorPlugin:
         ctx.detected_categories = list(self.detector.detected_categories)
         ctx.sanitized_prompt = sanitized
 
+        # Update ctx.request["messages"] with sanitized text so callers
+        # reading back from context get the modified messages
+        if sanitized != full_text:
+            messages = ctx.request.get("messages", [])
+            if messages:
+                updated = list(messages)
+                for i in reversed(range(len(updated))):
+                    msg = updated[i]
+                    content = msg.get("content", "")
+                    if isinstance(content, str) and content.strip():
+                        updated[i] = {**msg, "content": sanitized}
+                        break
+                    elif isinstance(content, list):
+                        new_content = []
+                        for block in content:
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                new_content.append({**block, "text": sanitized})
+                            else:
+                                new_content.append(block)
+                        updated[i] = {**msg, "content": new_content}
+                        break
+                ctx.request["messages"] = updated
+
         if self.detector.detected_categories:
             logger.info(
                 "PII 检测完成: categories=%s, strategy=%s, request_id=%s",
@@ -641,7 +664,6 @@ class PromptCompressPlugin:
             self._compressor = PromptCompressor(
                 model_name=self._config.model_name,
                 use_llmlingua2=True,
-                device=self._config.device,
             )
             self._is_available = True
             logger.info(

@@ -61,7 +61,12 @@ class RAGRetrieverPlugin:
 
             import os
 
-            qdrant_url = os.environ.get("QDRANT_URL", "http://localhost:6333")
+            # 项目主流使用 AI_GATEWAY_QDRANT_URL 变量，向后兼容裸 QDRANT_URL
+            qdrant_url = (
+                os.environ.get("AI_GATEWAY_QDRANT_URL")
+                or os.environ.get("QDRANT_URL")
+                or "http://localhost:6333"
+            )
 
             # 使用 qdrant_client 库创建客户端连接
             from qdrant_client import QdrantClient
@@ -74,16 +79,21 @@ class RAGRetrieverPlugin:
                 collection_name=self._config.collection_name,
             )
 
+            # 选择 embedding 后端：默认本地 HuggingFace 模型，避免依赖 OPENAI_API_KEY
+            embed_model = self._resolve_embed_model()
+
             # 从已有向量存储创建索引（不重新索引）
-            self._index = VectorStoreIndex.from_vector_store(
-                vector_store=vector_store,
-            )
+            index_kwargs: dict = {"vector_store": vector_store}
+            if embed_model is not None:
+                index_kwargs["embed_model"] = embed_model
+            self._index = VectorStoreIndex.from_vector_store(**index_kwargs)
             self._is_available = True
             logger.info(
-                "RAGRetrieverPlugin 已初始化: collection=%s, qdrant_url=%s, top_k=%d",
+                "RAGRetrieverPlugin 已初始化: collection=%s, qdrant_url=%s, top_k=%d, embedding_backend=%s",
                 self._config.collection_name,
                 qdrant_url,
                 self._config.top_k,
+                getattr(self._config, "embedding_backend", "local"),
             )
 
         except ImportError:
@@ -97,6 +107,65 @@ class RAGRetrieverPlugin:
             logger.warning(
                 "RAGRetrieverPlugin 初始化失败，降级为 passthrough: %s", exc
             )
+
+    def _resolve_embed_model(self) -> Any:
+        """按配置返回 LlamaIndex embedding 实例。
+
+        embedding_backend == "local": 用 HuggingFace 本地模型（默认 Qwen3-Embedding-0.6B，
+        与 L3 语义缓存一致），无需外部 API Key。
+        embedding_backend == "openai": 用 OpenAI 兼容端点，读取 embedding_api_base / embedding_api_key。
+        其他值：返回 None，走 LlamaIndex 默认（会强依赖 OPENAI_API_KEY）。
+
+        任一后端初始化失败时返回 None 并记录 warning。
+        """
+        backend = getattr(self._config, "embedding_backend", "local")
+        model_name = getattr(self._config, "embedding_model", "Qwen/Qwen3-Embedding-0.6B")
+
+        if backend == "local":
+            try:
+                from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+                return HuggingFaceEmbedding(
+                    model_name=model_name,
+                    trust_remote_code=True,
+                )
+            except ImportError:
+                logger.warning(
+                    "llama-index-embeddings-huggingface 未安装，"
+                    "RAG 将回退到 LlamaIndex 默认 embedding（需 OPENAI_API_KEY）。"
+                    "安装: pip install llama-index-embeddings-huggingface"
+                )
+                return None
+            except Exception as exc:
+                logger.warning("本地 HuggingFace embedding 加载失败: %s", exc)
+                return None
+
+        if backend == "openai":
+            api_base = getattr(self._config, "embedding_api_base", None)
+            api_key = getattr(self._config, "embedding_api_key", None)
+            try:
+                from llama_index.embeddings.openai import OpenAIEmbedding
+                kwargs: dict = {"model_name": model_name}
+                if api_base:
+                    kwargs["api_base"] = api_base
+                if api_key:
+                    kwargs["api_key"] = api_key
+                return OpenAIEmbedding(**kwargs)
+            except ImportError:
+                logger.warning(
+                    "llama-index-embeddings-openai 未安装，"
+                    "RAG 将回退到 LlamaIndex 默认 embedding。"
+                    "安装: pip install llama-index-embeddings-openai"
+                )
+                return None
+            except Exception as exc:
+                logger.warning("OpenAI 兼容 embedding 初始化失败: %s", exc)
+                return None
+
+        logger.warning(
+            "RAGRetrieverConfig.embedding_backend=%r 未识别，回退到 LlamaIndex 默认",
+            backend,
+        )
+        return None
 
     async def execute(self, ctx: PipelineContext) -> PipelineContext:
         """执行 RAG 检索。
