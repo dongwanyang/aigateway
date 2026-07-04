@@ -192,6 +192,19 @@ def setup_structlog(
         cache_logger_on_first_use=True,
     )
 
+    # 把根 stdlib logger 的级别也拉到相同高度，否则 aigateway_core.pipeline 等
+    # 使用 logging.getLogger(__name__) 的模块拿不到 DEBUG 日志。
+    # 如果根 logger 还没有 handler，就给它挂一个 StreamHandler（uvicorn 已挂过则复用）。
+    root_logger = logging.getLogger()
+    root_logger.setLevel(stdlib_level)
+    if not root_logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setLevel(stdlib_level)
+        root_logger.addHandler(handler)
+    else:
+        for h in root_logger.handlers:
+            h.setLevel(stdlib_level)
+
 
 def get_logger() -> Any:
     """获取 structlog BoundLogger 实例。

@@ -193,14 +193,33 @@ async def lifespan(app: "FastAPI"):
     关闭时:
     1. 关闭 Redis 和 Qdrant 连接
     """
-    # 初始化日志
-    log_level = os.environ.get("AI_GATEWAY_LOG_LEVEL", "info").upper()
-    setup_logging(log_level=log_level)
-    logger.info("AI Gateway API 启动中...")
-
     # 初始化 ConfigManager
     config_path = os.environ.get("AI_GATEWAY_CONFIG_PATH", "./config.yaml")
     config_manager = ConfigManager(config_path=config_path)
+
+    # 日志级别决策优先级：环境变量 > config.yaml observability.log_level > "info"
+    # 若 config.yaml 里 debug_mode=true 且用户没显式指定级别，则自动升到 DEBUG
+    obs_cfg = config_manager.get("observability", {}) or {}
+    env_level = os.environ.get("AI_GATEWAY_LOG_LEVEL")
+    cfg_level = obs_cfg.get("log_level")
+    debug_mode = bool(config_manager.get("debug_mode", False))
+    if env_level:
+        log_level = env_level.upper()
+    elif cfg_level:
+        log_level = str(cfg_level).upper()
+    elif debug_mode:
+        log_level = "DEBUG"
+    else:
+        log_level = "INFO"
+    # 若 debug_mode=true 但用户设了更高的级别，仍强制拉到 DEBUG（除非环境变量显式指定）
+    if debug_mode and not env_level and log_level not in ("DEBUG",):
+        log_level = "DEBUG"
+
+    setup_logging(log_level=log_level)
+    logger.info(
+        "AI Gateway API 启动中... (log_level=%s, debug_mode=%s)", log_level, debug_mode
+    )
+
     logger.info("ConfigManager 初始化完成: %s", config_manager.config_path)
 
     # 初始化 Redis 连接

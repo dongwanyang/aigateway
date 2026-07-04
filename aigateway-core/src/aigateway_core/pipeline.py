@@ -657,19 +657,34 @@ class PromptCompressPlugin:
         self._init_compressor()
 
     def _init_compressor(self) -> None:
-        """延迟初始化 LLMLingua-2 压缩器。ImportError 时标记 passthrough。"""
+        """延迟初始化 LLMLingua-2 压缩器。ImportError 时标记 passthrough。
+
+        运行设备由 PromptCompressConfig.device 控制（默认 "cpu"，可在 config.yaml
+        的 plugins[prompt_compress].config.device 中改为 "cuda" 或 "auto"），
+        非法值会回落到 "cpu"。
+        """
         try:
             from llmlingua import PromptCompressor
 
+            # LLMLingua PromptCompressor 参数名是 device_map；默认值 "cuda" 在 CPU-only
+            # 环境下会抛 "Torch not compiled with CUDA enabled"，因此显式透传配置。
+            device_map = (self._config.device or "cpu").strip().lower()
+            if device_map not in ("cpu", "cuda", "auto"):
+                logger.warning(
+                    "PromptCompressConfig.device=%r 不识别，回落到 cpu",
+                    self._config.device,
+                )
+                device_map = "cpu"
             self._compressor = PromptCompressor(
                 model_name=self._config.model_name,
                 use_llmlingua2=True,
+                device_map=device_map,
             )
             self._is_available = True
             logger.info(
                 "LLMLingua-2 压缩器已初始化: model=%s, device=%s",
                 self._config.model_name,
-                self._config.device,
+                device_map,
             )
         except ImportError:
             self._is_available = False
@@ -761,6 +776,13 @@ class PromptCompressPlugin:
         # 估算原始 token 数（简化：按空格+标点分词近似）
         original_tokens = len(prompt_text.split())
 
+        logger.debug(
+            "Prompt 压缩开始: original_tokens=%d, target_ratio=%.2f, prompt_preview=%r",
+            original_tokens,
+            self._config.compression_ratio,
+            prompt_text[:120],
+        )
+
         try:
             result = self._compressor.compress_prompt(
                 prompt_text,
@@ -776,6 +798,14 @@ class PromptCompressPlugin:
                 ctx.prompt_compress["original_tokens"] = original_tokens
                 ctx.prompt_compress["compressed_tokens"] = original_tokens
                 ctx.prompt_compress["compression_ratio"] = 1.0
+                logger.debug(
+                    "Prompt 压缩跳过（无收益）: original_tokens=%d, compressed_tokens=%d, "
+                    "compressed_empty=%s。常见原因：中文按空格切分粒度过粗、prompt 过短、"
+                    "或 LLMLingua-2 判定为不可压缩",
+                    original_tokens,
+                    compressed_tokens,
+                    not bool(compressed_text.strip()),
+                )
                 return ctx
 
             # 重建 messages

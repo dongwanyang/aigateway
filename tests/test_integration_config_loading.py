@@ -84,9 +84,12 @@ class TestParseIntegrationConfigsDefaults:
         c = result.conv_compressor
         assert c.enabled is True
         assert c.max_history == 20
-        assert c.summary_model == "gpt-4o-mini"
+        # 默认走 gateway 自身而非 OpenAI，避免容器强依赖 OPENAI_API_KEY
+        assert c.summary_model == "agnes-2.0-flash"
         assert c.max_token_limit == 4000
         assert c.summary_interval == 5
+        assert c.api_base == "http://localhost:8000/v1"
+        assert c.api_key is None
 
     def test_default_paddleocr_values(self):
         result = parse_integration_configs({})
