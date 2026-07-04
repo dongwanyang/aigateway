@@ -64,7 +64,8 @@ class ModelRouterConfig:
         evaluation_timeout_seconds: 意图评估超时/秒 (默认: 2.0, 范围: 0.5-30.0)
         default_capability_score: 未注册模型的默认能力评分 (默认: 50, 范围: 0-100)
         model_capabilities: 模型能力评分映射 model_name -> score(0-100)
-        model_modalities: 模型模态分类 model_name -> "llm"|"mllm"|"generative"
+        model_modalities: 模型模态分类映射 model_name -> ["llm"|"mllm"|"generative", ...]
+            一个模型可属于多个模态（列表元素）
     """
 
     enabled: bool = True
@@ -72,7 +73,7 @@ class ModelRouterConfig:
     evaluation_timeout_seconds: float = 2.0
     default_capability_score: int = 50
     model_capabilities: Dict[str, int] = field(default_factory=dict)
-    model_modalities: Dict[str, str] = field(default_factory=dict)
+    model_modalities: Dict[str, List[str]] = field(default_factory=dict)
 
 
 @dataclass

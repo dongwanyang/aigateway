@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Bot, Plus, Trash2, Save, RefreshCw, ChevronDown, ChevronRight, Wifi, List, Zap, Check } from 'lucide-react'
+import { Bot, Plus, Trash2, Save, RefreshCw, ChevronDown, ChevronRight, Wifi, List, Zap, Check, Pencil, X } from 'lucide-react'
 import Card from '@/components/Card'
 import { getFullConfig, updateFullConfig, testProviderConnectivity, fetchProviderModels } from '@/api/client'
 
@@ -160,13 +160,28 @@ const PRESET_PROVIDERS: PresetProvider[] = [
 
 // --- 类型定义 ---
 
+// 支持的 modality 分类
+const MODALITY_OPTIONS = ['llm', 'mllm', 'generative'] as const
+type Modality = typeof MODALITY_OPTIONS[number]
+
+const MODALITY_LABEL: Record<Modality, string> = {
+  llm: '纯文本 (llm)',
+  mllm: '多模态理解 (mllm)',
+  generative: '生成 (generative)',
+}
+
+interface ModelEntry {
+  name: string
+  modality: string[]
+}
+
 interface PricingConfig {
   prompt: number
   completion: number
 }
 
 interface ModelGroup {
-  models: string[]
+  models: ModelEntry[]
   fallback_models: string[]
   pricing: Record<string, PricingConfig>
 }
@@ -185,6 +200,27 @@ interface EmbeddingConfig {
   model: string
   vector_dim: number
   openai_model: string
+}
+
+// 归一化任意 config 中的 model_entry -> ModelEntry
+function normalizeModelEntry(raw: any): ModelEntry | null {
+  if (!raw) return null
+  if (typeof raw === 'string') {
+    return { name: raw, modality: [] }
+  }
+  if (typeof raw === 'object') {
+    const name = String(raw.name ?? '').trim()
+    if (!name) return null
+    let modality: string[] = []
+    if (Array.isArray(raw.modality)) {
+      modality = raw.modality.map((x: any) => String(x)).filter(Boolean)
+    } else if (typeof raw.modality === 'string' && raw.modality) {
+      // 旧字符串写法：加载时容错为单元素列表，保存时以列表形式回写
+      modality = [raw.modality]
+    }
+    return { name, modality }
+  }
+  return null
 }
 
 // --- 组件 ---
@@ -212,6 +248,19 @@ export default function Models() {
   const [testResults, setTestResults] = useState<Record<string, { success: boolean; latency_ms: number; error?: string; loading: boolean }>>({})
   const [fetchedModels, setFetchedModels] = useState<Record<string, { models: string[]; loading: boolean; error?: string }>>({})
 
+  // --- 新增/编辑模型弹窗 ---
+  // mode='add' 时 modelIdx=-1；mode='edit' 时 modelIdx 指向原索引
+  const [modelDialog, setModelDialog] = useState<{
+    providerName: string
+    groupIdx: number
+    modelIdx: number
+    mode: 'add' | 'edit'
+    name: string
+    modality: string[]
+    promptPrice: string
+    completionPrice: string
+  } | null>(null)
+
   useEffect(() => {
     loadConfig()
   }, [])
@@ -229,10 +278,24 @@ export default function Models() {
       const parsed: Record<string, ProviderConfig> = {}
       for (const [name, cfg] of Object.entries(rawProviders)) {
         if (typeof cfg === 'object' && cfg !== null) {
+          const rawGroups = Array.isArray(cfg.model_grouper) ? cfg.model_grouper : []
+          const groups: ModelGroup[] = rawGroups.map((g: any) => {
+            const rawModels = Array.isArray(g?.models) ? g.models : []
+            const models: ModelEntry[] = rawModels
+              .map(normalizeModelEntry)
+              .filter((m: ModelEntry | null): m is ModelEntry => m !== null)
+            const fallbackModels = Array.isArray(g?.fallback_models)
+              ? g.fallback_models.map((f: any) => String(f))
+              : []
+            const pricing = typeof g?.pricing === 'object' && g?.pricing !== null
+              ? { ...g.pricing }
+              : {}
+            return { models, fallback_models: fallbackModels, pricing }
+          })
           parsed[name] = {
             api_key: cfg.api_key ?? '',
             base_url: cfg.base_url ?? '',
-            model_grouper: Array.isArray(cfg.model_grouper) ? cfg.model_grouper : [],
+            model_grouper: groups,
             num_retries: cfg.num_retries ?? 3,
             retry_after: cfg.retry_after ?? 1000,
             timeout: cfg.timeout ?? 120,
@@ -303,7 +366,10 @@ export default function Models() {
       api_key: quickAddKey.trim(),
       base_url: quickAddBaseUrl || selectedPreset.baseUrl || '',
       model_grouper: [{
-        models: [...selectedPreset.defaultModels],
+        models: selectedPreset.defaultModels.map(name => ({
+          name,
+          modality: ['llm'],   // 默认给 llm，用户可在编辑弹窗中调整
+        })),
         fallback_models: [],
         pricing: {},
       }],
@@ -348,13 +414,33 @@ export default function Models() {
     }))
   }
 
-  function updateModelInGroup(providerName: string, groupIdx: number, modelIdx: number, value: string) {
+  function updateModelInGroup(
+    providerName: string,
+    groupIdx: number,
+    modelIdx: number,
+    patch: Partial<ModelEntry>,
+  ) {
     setProviders(prev => {
       const p = { ...prev[providerName] }
       const groups = [...p.model_grouper]
       const group = { ...groups[groupIdx] }
       const models = [...group.models]
-      models[modelIdx] = value
+      const prevEntry = models[modelIdx]
+      if (!prevEntry) return prev
+      const nextEntry: ModelEntry = {
+        name: patch.name !== undefined ? patch.name : prevEntry.name,
+        modality: patch.modality !== undefined ? patch.modality : prevEntry.modality,
+      }
+      // 如果 name 发生变化，同步迁移 pricing key
+      if (patch.name !== undefined && patch.name !== prevEntry.name) {
+        const pricing = { ...group.pricing }
+        if (prevEntry.name in pricing) {
+          pricing[nextEntry.name] = pricing[prevEntry.name]
+          delete pricing[prevEntry.name]
+        }
+        group.pricing = pricing
+      }
+      models[modelIdx] = nextEntry
       group.models = models
       groups[groupIdx] = group
       p.model_grouper = groups
@@ -362,12 +448,16 @@ export default function Models() {
     })
   }
 
-  function addModelToGroup(providerName: string, groupIdx: number) {
+  function addModelToGroup(
+    providerName: string,
+    groupIdx: number,
+    entry: ModelEntry = { name: '', modality: [] },
+  ) {
     setProviders(prev => {
       const p = { ...prev[providerName] }
       const groups = [...p.model_grouper]
       const group = { ...groups[groupIdx] }
-      group.models = [...group.models, '']
+      group.models = [...group.models, entry]
       groups[groupIdx] = group
       p.model_grouper = groups
       return { ...prev, [providerName]: p }
@@ -379,15 +469,118 @@ export default function Models() {
       const p = { ...prev[providerName] }
       const groups = [...p.model_grouper]
       const group = { ...groups[groupIdx] }
-      const modelName = group.models[modelIdx]
+      const modelName = group.models[modelIdx]?.name
       group.models = group.models.filter((_, i) => i !== modelIdx)
-      const pricing = { ...group.pricing }
-      delete pricing[modelName]
-      group.pricing = pricing
+      if (modelName) {
+        const pricing = { ...group.pricing }
+        delete pricing[modelName]
+        group.pricing = pricing
+      }
       groups[groupIdx] = group
       p.model_grouper = groups
       return { ...prev, [providerName]: p }
     })
+  }
+
+  // --- 新增/编辑模型弹窗控制 ---
+  function openAddModelDialog(providerName: string, groupIdx: number, initialName = '') {
+    setModelDialog({
+      providerName,
+      groupIdx,
+      modelIdx: -1,
+      mode: 'add',
+      name: initialName,
+      modality: initialName ? ['llm'] : [],
+      promptPrice: '',
+      completionPrice: '',
+    })
+  }
+
+  function openEditModelDialog(providerName: string, groupIdx: number, modelIdx: number) {
+    const group = providers[providerName]?.model_grouper[groupIdx]
+    const entry = group?.models[modelIdx]
+    if (!entry) return
+    const pricing = group?.pricing?.[entry.name]
+    setModelDialog({
+      providerName,
+      groupIdx,
+      modelIdx,
+      mode: 'edit',
+      name: entry.name,
+      modality: [...entry.modality],
+      promptPrice: pricing ? formatPrice(pricing.prompt) : '',
+      completionPrice: pricing ? formatPrice(pricing.completion) : '',
+    })
+  }
+
+  function closeModelDialog() {
+    setModelDialog(null)
+  }
+
+  function toggleDialogModality(m: string) {
+    setModelDialog(prev => {
+      if (!prev) return prev
+      const has = prev.modality.includes(m)
+      return {
+        ...prev,
+        modality: has ? prev.modality.filter(x => x !== m) : [...prev.modality, m],
+      }
+    })
+  }
+
+  function commitModelDialog() {
+    if (!modelDialog) return
+    const trimmedName = modelDialog.name.trim()
+    if (!trimmedName) {
+      setError('请填写模型名称')
+      return
+    }
+    if (modelDialog.modality.length === 0) {
+      setError('请至少选择一个 modality')
+      return
+    }
+
+    const { providerName, groupIdx, modelIdx, mode } = modelDialog
+    const group = providers[providerName]?.model_grouper[groupIdx]
+    if (!group) return
+
+    // 检查重名（编辑时允许保持原名）
+    const duplicate = group.models.some(
+      (m, i) => m.name === trimmedName && !(mode === 'edit' && i === modelIdx),
+    )
+    if (duplicate) {
+      setError(`模型 "${trimmedName}" 已存在`)
+      return
+    }
+
+    const promptNum = modelDialog.promptPrice === '' ? 0 : parseFloat(modelDialog.promptPrice)
+    const completionNum = modelDialog.completionPrice === '' ? 0 : parseFloat(modelDialog.completionPrice)
+    const priceValid =
+      (modelDialog.promptPrice === '' || !isNaN(promptNum)) &&
+      (modelDialog.completionPrice === '' || !isNaN(completionNum))
+    if (!priceValid) {
+      setError('价格格式不合法')
+      return
+    }
+
+    if (mode === 'add') {
+      addModelToGroup(providerName, groupIdx, {
+        name: trimmedName,
+        modality: [...modelDialog.modality],
+      })
+    } else {
+      updateModelInGroup(providerName, groupIdx, modelIdx, {
+        name: trimmedName,
+        modality: [...modelDialog.modality],
+      })
+    }
+
+    // 同步 pricing（走已有的 updatePricing）
+    updatePricing(providerName, groupIdx, trimmedName, 'prompt', String(promptNum || 0))
+    updatePricing(providerName, groupIdx, trimmedName, 'completion', String(completionNum || 0))
+
+    setError(null)
+    setModelDialog(null)
   }
 
   function updateFallbackInGroup(providerName: string, groupIdx: number, fbIdx: number, value: string) {
@@ -446,46 +639,10 @@ export default function Models() {
     })
   }
 
-  // 价格输入临时状态（允许中间输入如 "0.", "0.0"）
-  const [pricingInputs, setPricingInputs] = useState<Record<string, string>>({})
-
   function formatPrice(value: number | undefined): string {
     if (value === undefined || value === 0) return ''
     const str = value.toFixed(10).replace(/0+$/, '').replace(/\.$/, '')
     return str
-  }
-
-  function getPricingInputKey(providerName: string, groupIdx: number, modelName: string, field: string) {
-    return `${providerName}:${groupIdx}:${modelName}:${field}`
-  }
-
-  function getPricingDisplayValue(providerName: string, groupIdx: number, modelName: string, field: 'prompt' | 'completion') {
-    const key = getPricingInputKey(providerName, groupIdx, modelName, field)
-    if (key in pricingInputs) return pricingInputs[key]
-    const group = providers[providerName]?.model_grouper[groupIdx]
-    const value = group?.pricing[modelName]?.[field]
-    return formatPrice(value)
-  }
-
-  function handlePricingChange(providerName: string, groupIdx: number, modelName: string, field: 'prompt' | 'completion', value: string) {
-    const key = getPricingInputKey(providerName, groupIdx, modelName, field)
-    // 只允许数字和小数点
-    if (value !== '' && !/^[0-9]*\.?[0-9]*$/.test(value)) return
-    setPricingInputs(prev => ({ ...prev, [key]: value }))
-  }
-
-  function handlePricingBlur(providerName: string, groupIdx: number, modelName: string, field: 'prompt' | 'completion') {
-    const key = getPricingInputKey(providerName, groupIdx, modelName, field)
-    const rawValue = pricingInputs[key]
-    if (rawValue === undefined) return
-    // 失焦时提交实际数值
-    updatePricing(providerName, groupIdx, modelName, field, rawValue)
-    // 清除临时状态
-    setPricingInputs(prev => {
-      const next = { ...prev }
-      delete next[key]
-      return next
-    })
   }
 
   async function handleTestConnectivity(providerName: string) {
@@ -877,13 +1034,12 @@ export default function Models() {
                                 border: '1px solid var(--color-border)',
                                 color: 'var(--color-text-primary)',
                               }}
-                              title="点击添加到模型列表"
+                              title="点击后打开新增弹窗"
                               onClick={() => {
                                 const group = config.model_grouper[0]
-                                if (group && !group.models.includes(m)) {
-                                  addModelToGroup(providerName, 0)
-                                  updateModelInGroup(providerName, 0, group.models.length, m)
-                                }
+                                if (!group) return
+                                if (group.models.some(existing => existing.name === m)) return
+                                openAddModelDialog(providerName, 0, m)
                               }}
                               onMouseEnter={e => {
                                 (e.target as HTMLElement).style.backgroundColor = 'var(--color-primary)'
@@ -981,54 +1137,69 @@ export default function Models() {
                           <button
                             className="text-xs cursor-pointer"
                             style={{ color: 'var(--color-primary)' }}
-                            onClick={() => addModelToGroup(providerName, gIdx)}
+                            onClick={() => openAddModelDialog(providerName, gIdx)}
                           >
                             + 添加模型
                           </button>
                         </div>
                         <div className="space-y-2">
-                          {group.models.map((model, mIdx) => (
-                            <div key={mIdx} className="flex items-center gap-2">
-                              <input
-                                className="input flex-1"
-                                placeholder="模型名称 (如: gpt-4o)"
-                                value={model}
-                                onChange={e => updateModelInGroup(providerName, gIdx, mIdx, e.target.value)}
-                              />
-                              <div className="flex items-center gap-1">
-                                <input
-                                  className="input"
-                                  style={{ width: '120px', fontSize: '12px' }}
-                                  type="text"
-                                  inputMode="decimal"
-                                  placeholder="Prompt $/tok"
-                                  value={getPricingDisplayValue(providerName, gIdx, model, 'prompt')}
-                                  onChange={e => handlePricingChange(providerName, gIdx, model, 'prompt', e.target.value)}
-                                  onBlur={() => handlePricingBlur(providerName, gIdx, model, 'prompt')}
-                                  title="Prompt 价格 ($/token)，如 0.000005"
-                                />
-                                <input
-                                  className="input"
-                                  style={{ width: '120px', fontSize: '12px' }}
-                                  type="text"
-                                  inputMode="decimal"
-                                  placeholder="Compl $/tok"
-                                  value={getPricingDisplayValue(providerName, gIdx, model, 'completion')}
-                                  onChange={e => handlePricingChange(providerName, gIdx, model, 'completion', e.target.value)}
-                                  onBlur={() => handlePricingBlur(providerName, gIdx, model, 'completion')}
-                                  title="Completion 价格 ($/token)，如 0.000015"
-                                />
-                              </div>
-                              <button
-                                className="p-1 rounded cursor-pointer"
-                                style={{ color: 'var(--color-danger)' }}
-                                onClick={() => removeModelFromGroup(providerName, gIdx, mIdx)}
-                                title="移除模型"
+                          {group.models.map((model, mIdx) => {
+                            const pricing = group.pricing[model.name]
+                            return (
+                              <div
+                                key={mIdx}
+                                className="flex items-center gap-2 p-2 rounded"
+                                style={{ border: '1px solid var(--color-border)', backgroundColor: 'var(--color-bg-elevated)' }}
                               >
-                                <Trash2 size={14} />
-                              </button>
-                            </div>
-                          ))}
+                                <div className="flex-1 min-w-0">
+                                  <div className="text-sm font-medium truncate">
+                                    {model.name || <span style={{ color: 'var(--color-text-quaternary)' }}>（未命名模型）</span>}
+                                  </div>
+                                  <div className="flex flex-wrap items-center gap-1 mt-1">
+                                    {model.modality.length === 0 ? (
+                                      <span className="text-xs" style={{ color: 'var(--color-text-quaternary)' }}>无 modality</span>
+                                    ) : model.modality.map(m => (
+                                      <span
+                                        key={m}
+                                        className="text-xs px-1.5 py-0.5 rounded"
+                                        style={{
+                                          backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                                          color: 'var(--color-primary)',
+                                          border: '1px solid rgba(59, 130, 246, 0.3)',
+                                        }}
+                                      >
+                                        {m}
+                                      </span>
+                                    ))}
+                                    {pricing && (pricing.prompt || pricing.completion) ? (
+                                      <span className="text-xs ml-2" style={{ color: 'var(--color-text-quaternary)' }}>
+                                        ${formatPrice(pricing.prompt) || 0} / ${formatPrice(pricing.completion) || 0} 每 token
+                                      </span>
+                                    ) : null}
+                                  </div>
+                                </div>
+                                <button
+                                  className="p-1 rounded cursor-pointer"
+                                  style={{ color: 'var(--color-primary)' }}
+                                  onClick={() => openEditModelDialog(providerName, gIdx, mIdx)}
+                                  title="编辑模型"
+                                >
+                                  <Pencil size={14} />
+                                </button>
+                                <button
+                                  className="p-1 rounded cursor-pointer"
+                                  style={{ color: 'var(--color-danger)' }}
+                                  onClick={() => removeModelFromGroup(providerName, gIdx, mIdx)}
+                                  title="移除模型"
+                                >
+                                  <Trash2 size={14} />
+                                </button>
+                              </div>
+                            )
+                          })}
+                          {group.models.length === 0 && (
+                            <span className="text-xs" style={{ color: 'var(--color-text-quaternary)' }}>暂无模型，点击右上角"+ 添加模型"</span>
+                          )}
                         </div>
                       </div>
 
@@ -1123,6 +1294,135 @@ export default function Models() {
           </div>
         </div>
       </Card>
+
+      {/* === 新增/编辑模型弹窗 === */}
+      {modelDialog && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center"
+          style={{ backgroundColor: 'rgba(0, 0, 0, 0.5)' }}
+          onClick={closeModelDialog}
+        >
+          <div
+            className="rounded-lg p-5 w-full max-w-md space-y-4"
+            style={{ backgroundColor: 'var(--color-bg-elevated)', border: '1px solid var(--color-border)' }}
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-semibold">
+                {modelDialog.mode === 'add' ? '新增模型' : '编辑模型'}
+                <span className="text-xs ml-2" style={{ color: 'var(--color-text-quaternary)' }}>
+                  {modelDialog.providerName}
+                </span>
+              </h3>
+              <button
+                className="p-1 rounded cursor-pointer"
+                style={{ color: 'var(--color-text-secondary)' }}
+                onClick={closeModelDialog}
+                title="关闭"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            <div>
+              <label className="block text-xs mb-1 font-medium" style={{ color: 'var(--color-text-tertiary)' }}>
+                模型名称 <span style={{ color: 'var(--color-danger)' }}>*</span>
+              </label>
+              <input
+                className="input w-full"
+                placeholder="如: gpt-4o"
+                value={modelDialog.name}
+                autoFocus
+                onChange={e => setModelDialog(prev => prev ? { ...prev, name: e.target.value } : prev)}
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs mb-1 font-medium" style={{ color: 'var(--color-text-tertiary)' }}>
+                Modality <span style={{ color: 'var(--color-danger)' }}>*</span>
+                <span className="ml-2" style={{ color: 'var(--color-text-quaternary)' }}>
+                  可多选，代表该模型支持的能力
+                </span>
+              </label>
+              <div className="flex flex-col gap-1 rounded p-2" style={{ border: '1px solid var(--color-border)', backgroundColor: 'var(--color-bg-overlay)' }}>
+                {MODALITY_OPTIONS.map(m => {
+                  const checked = modelDialog.modality.includes(m)
+                  return (
+                    <label
+                      key={m}
+                      className="flex items-center gap-2 cursor-pointer text-sm px-2 py-1 rounded"
+                      style={{
+                        backgroundColor: checked ? 'rgba(59, 130, 246, 0.08)' : 'transparent',
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleDialogModality(m)}
+                      />
+                      <span>{MODALITY_LABEL[m]}</span>
+                    </label>
+                  )
+                })}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs mb-1 font-medium" style={{ color: 'var(--color-text-tertiary)' }}>
+                  Prompt 单价 ($/token)
+                </label>
+                <input
+                  className="input w-full"
+                  type="text"
+                  inputMode="decimal"
+                  placeholder="0.000005"
+                  value={modelDialog.promptPrice}
+                  onChange={e => {
+                    const v = e.target.value
+                    if (v !== '' && !/^[0-9]*\.?[0-9]*$/.test(v)) return
+                    setModelDialog(prev => prev ? { ...prev, promptPrice: v } : prev)
+                  }}
+                />
+              </div>
+              <div>
+                <label className="block text-xs mb-1 font-medium" style={{ color: 'var(--color-text-tertiary)' }}>
+                  Completion 单价 ($/token)
+                </label>
+                <input
+                  className="input w-full"
+                  type="text"
+                  inputMode="decimal"
+                  placeholder="0.000015"
+                  value={modelDialog.completionPrice}
+                  onChange={e => {
+                    const v = e.target.value
+                    if (v !== '' && !/^[0-9]*\.?[0-9]*$/.test(v)) return
+                    setModelDialog(prev => prev ? { ...prev, completionPrice: v } : prev)
+                  }}
+                />
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                className="text-xs cursor-pointer px-3 py-1.5 rounded"
+                style={{ color: 'var(--color-text-secondary)', border: '1px solid var(--color-border)' }}
+                onClick={closeModelDialog}
+              >
+                取消
+              </button>
+              <button
+                className="btn btn-primary"
+                style={{ padding: '6px 16px', fontSize: '12px' }}
+                onClick={commitModelDialog}
+              >
+                {modelDialog.mode === 'add' ? '添加' : '保存'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

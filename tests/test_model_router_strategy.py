@@ -100,11 +100,11 @@ def _make_strategy(
             "model-e": 80,
         },
         modalities=modalities or {
-            "model-a": "generative",
-            "model-b": "generative",
-            "model-c": "generative",
-            "model-d": "generative",
-            "model-e": "generative",
+            "model-a": ["generative"],
+            "model-b": ["generative"],
+            "model-c": ["generative"],
+            "model-d": ["generative"],
+            "model-e": ["generative"],
         },
         default_model=default_model,
     )
@@ -129,7 +129,7 @@ class TestBuildModelList:
         models = strategy.get_model_list()
         model_a = next(m for m in models if m.name == "model-a")
         assert model_a.provider == "provider-a"
-        assert model_a.modality == "generative"
+        assert model_a.modality == ["generative"]
         assert model_a.capability_score == 30
         assert model_a.price_per_request == 0.01
         assert model_a.fallback_models == ["model-b", "model-c"]
@@ -139,7 +139,7 @@ class TestBuildModelList:
         """未在 model_capabilities 中注册的模型默认 score=50."""
         config = _make_config(
             capabilities={"model-a": 70},  # 只有 model-a 有配置
-            modalities={"model-a": "generative", "model-b": "generative"},
+            modalities={"model-a": ["generative"], "model-b": ["generative"]},
         )
         providers = {
             "p": {
@@ -194,11 +194,11 @@ class TestNormalRouting:
         """只选择匹配 required_modality 的模型."""
         strategy = _make_strategy(
             modalities={
-                "model-a": "llm",
-                "model-b": "generative",
-                "model-c": "generative",
-                "model-d": "mllm",
-                "model-e": "mllm",
+                "model-a": ["llm"],
+                "model-b": ["generative"],
+                "model-c": ["generative"],
+                "model-d": ["mllm"],
+                "model-e": ["mllm"],
             }
         )
         # required_modality="llm" → only model-a qualifies
@@ -211,11 +211,11 @@ class TestNormalRouting:
         """没有匹配模态的模型时使用默认模型."""
         strategy = _make_strategy(
             modalities={
-                "model-a": "generative",
-                "model-b": "generative",
-                "model-c": "generative",
-                "model-d": "generative",
-                "model-e": "generative",
+                "model-a": ["generative"],
+                "model-b": ["generative"],
+                "model-c": ["generative"],
+                "model-d": ["generative"],
+                "model-e": ["generative"],
             }
         )
         decision = asyncio.run(
@@ -223,6 +223,33 @@ class TestNormalRouting:
         )
         assert decision.selected_model == "model-a"  # default_model
         assert decision.reason == "fallback"
+
+    def test_modality_membership_multi(self):
+        """modality 列表含多个元素时，任一元素与 required_modality 相符即命中."""
+        strategy = _make_strategy(
+            modalities={
+                "model-a": ["llm", "mllm"],
+                "model-b": ["generative"],
+                "model-c": ["generative"],
+                "model-d": ["generative"],
+                "model-e": ["generative"],
+            }
+        )
+        # required_modality=llm → model-a 命中
+        d1 = asyncio.run(
+            strategy.route(complexity_score=0, required_modality="llm")
+        )
+        assert d1.selected_model == "model-a"
+        # required_modality=mllm → model-a 依旧命中
+        d2 = asyncio.run(
+            strategy.route(complexity_score=0, required_modality="mllm")
+        )
+        assert d2.selected_model == "model-a"
+        # required_modality=generative → model-a 被过滤（因不含 generative）
+        d3 = asyncio.run(
+            strategy.route(complexity_score=0, required_modality="generative")
+        )
+        assert d3.selected_model != "model-a"
 
 
 # ---------------------------------------------------------------------------

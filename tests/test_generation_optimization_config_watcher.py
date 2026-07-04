@@ -62,7 +62,7 @@ def config_file():
                 "enabled": True,
                 "default_model": "agnes-2.0-flash",
                 "model_capabilities": {"agnes-2.0-flash": 50, "agnes-video-v2.0": 90},
-                "model_modalities": {"agnes-2.0-flash": "llm", "agnes-video-v2.0": "generative"},
+                "model_modalities": {"agnes-2.0-flash": ["llm"], "agnes-video-v2.0": ["generative"]},
             },
             "token_compressor": {
                 "enabled": True,

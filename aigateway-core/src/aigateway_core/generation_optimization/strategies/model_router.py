@@ -41,7 +41,8 @@ class ModelConfig:
     Attributes:
         name: 模型标识符（如 "agnes-2.0-flash"）
         provider: 所属 provider 名称（如 "agnes"）
-        modality: 模态类别 ("llm" | "mllm" | "generative")
+        modality: 模态类别列表，元素取值 "llm" | "mllm" | "generative"，
+            允许一个模型同时属于多种模态（如 ["llm", "mllm"]）
         capability_score: 能力评分 (0-100)
         price_per_request: 每次请求的估算价格 (USD)
         fallback_models: 该 provider 分组的降级模型列表
@@ -50,7 +51,7 @@ class ModelConfig:
 
     name: str
     provider: str
-    modality: str  # "llm" | "mllm" | "generative"
+    modality: List[str]  # 元素取值 "llm" | "mllm" | "generative"
     capability_score: int  # 0-100
     price_per_request: float
     fallback_models: List[str] = field(default_factory=list)
@@ -214,7 +215,7 @@ class ModelRouterStrategy:
         # 按模态筛选可用模型
         modality_models = [
             m for m in models
-            if m.modality == required_modality and m.is_available
+            if required_modality in m.modality and m.is_available
         ]
 
         if hint_lower == "best quality":
@@ -276,7 +277,7 @@ class ModelRouterStrategy:
         """
         # Step 1: 按模态筛选
         modality_models = [
-            m for m in models if m.modality == required_modality
+            m for m in models if required_modality in m.modality
         ]
 
         if not modality_models:
@@ -364,20 +365,20 @@ class ModelRouterStrategy:
             if fb is not None and fb.is_available:
                 return fb
 
-        # 2. 跨 provider 降级: 选同模态、可用、不同 provider 的最高 capability 模型
+        # 2. 跨 provider 降级: 选模态存在交集、可用、不同 provider 的最高 capability 模型
         cross_provider = [
             m for m in all_models
-            if m.modality == model.modality
+            if set(m.modality) & set(model.modality)
             and m.is_available
             and m.provider != model.provider
         ]
         if cross_provider:
             return max(cross_provider, key=lambda m: m.capability_score)
 
-        # 3. 同 provider 中其他可用模型（同模态）
+        # 3. 同 provider 中其他可用模型（模态交集）
         same_provider = [
             m for m in all_models
-            if m.modality == model.modality
+            if set(m.modality) & set(model.modality)
             and m.is_available
             and m.name != model.name
             and m.provider == model.provider
@@ -455,17 +456,17 @@ class ModelRouterStrategy:
                     group_pricing = {}
 
                 for model_entry in group_models:
-                    # 支持两种格式：
-                    # 1. 字符串: "model-name"（向后兼容）
-                    # 2. 字典: {"name": "model-name", "modality": "llm", "capability": 80}
+                    # 只支持字典格式:
+                    # {"name": "model-name", "modality": ["llm", "mllm"], "capability": 80}
+                    # 旧的字符串格式与字符串 modality 已废弃。
                     if isinstance(model_entry, dict):
                         model_name = model_entry.get("name", "")
                         if not model_name:
                             continue
-                        # 从 model_entry 读取 modality/capability 覆盖
                         entry_modality = model_entry.get("modality")
                         entry_capability = model_entry.get("capability")
                     elif isinstance(model_entry, str) and model_entry:
+                        # 保留 name-only 便利写法：视为 modality=None，走后续兜底
                         model_name = model_entry
                         entry_modality = None
                         entry_capability = None
@@ -489,12 +490,34 @@ class ModelRouterStrategy:
                             model_name, self.config.default_capability_score
                         )
 
-                    # 获取模态（优先级：model_entry > config.model_modalities > default "generative"）
-                    if entry_modality is not None:
-                        modality = entry_modality
+                    # 获取模态列表（优先级：model_entry > config.model_modalities > ["generative"]）
+                    # 只接受 list，其它类型忽略并 log warning。
+                    modality: List[str]
+                    if entry_modality is None:
+                        modality = list(
+                            self.config.model_modalities.get(
+                                model_name, ["generative"]
+                            )
+                        )
+                    elif isinstance(entry_modality, list):
+                        modality = [str(x) for x in entry_modality if x]
+                        if not modality:
+                            modality = list(
+                                self.config.model_modalities.get(
+                                    model_name, ["generative"]
+                                )
+                            )
                     else:
-                        modality = self.config.model_modalities.get(
-                            model_name, "generative"
+                        logger.warning(
+                            "model_router._build_model_list: model=%s modality "
+                            "expected list, got %r; falling back to config/default",
+                            model_name,
+                            type(entry_modality).__name__,
+                        )
+                        modality = list(
+                            self.config.model_modalities.get(
+                                model_name, ["generative"]
+                            )
                         )
 
                     # 获取价格: 使用 pricing 中的 prompt 价格作为 price_per_request

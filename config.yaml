@@ -85,11 +85,11 @@ providers:
     model_grouper:
     - models:
       - name: agnes-2.0-flash
-        modality: mllm          # 多模态理解（文本+图片输入）
+        modality: [mllm]        # 多模态理解（文本+图片输入）
       - name: agnes-image-2.1-flash
-        modality: generative    # 图片生成
+        modality: [generative]  # 图片生成
       - name: agnes-video-v2.0
-        modality: generative    # 视频生成
+        modality: [generative]  # 视频生成
       fallback_models: []
       pricing:
         agnes-2.0-flash:
@@ -104,7 +104,7 @@ providers:
     model_grouper:
     - models:
       - name: deepseek-v4-flash
-        modality: llm           # 纯文本理解
+        modality: [llm]         # 纯文本理解
       fallback_models: []
       pricing:
         deepseek-v4-flash:

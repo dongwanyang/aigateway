@@ -46,7 +46,7 @@ class LiteLLMBridge:
         self.cost_tracker: Any = None
         self._fallback_chain: List[str] = []
         self._model_alias_map: Dict[str, str] = {}  # 裸模型名 -> Router 注册名
-        self._model_modalities: Dict[str, str] = {}  # 裸模型名 -> modality (llm/mllm/generative)
+        self._model_modalities: Dict[str, List[str]] = {}  # 裸模型名 -> modality 列表
         self._model_pricing: Dict[str, Dict[str, float]] = {}  # litellm_model -> {prompt, completion}
 
     # ------------------------------------------------------------------
@@ -129,15 +129,28 @@ class LiteLLMBridge:
                 for group in model_grouper:
                     fallback_models = group.get("fallback_models", [])
                     for model_entry in group.get("models", []):
-                        # 支持字符串或字典格式
+                        # 支持字符串或字典格式；modality 必须为 list
                         if isinstance(model_entry, dict):
                             model_name = model_entry.get("name", "")
                             if not model_name:
                                 continue
-                            model_modality = model_entry.get("modality", "generative")
+                            raw_modality = model_entry.get("modality")
+                            if isinstance(raw_modality, list):
+                                model_modality = [
+                                    str(x) for x in raw_modality if x
+                                ] or ["generative"]
+                            else:
+                                if raw_modality is not None:
+                                    logger.warning(
+                                        "litellm_bridge: model=%s modality expected list, "
+                                        "got %r; defaulting to ['generative']",
+                                        model_name,
+                                        type(raw_modality).__name__,
+                                    )
+                                model_modality = ["generative"]
                         elif isinstance(model_entry, str):
                             model_name = model_entry
-                            model_modality = "generative"
+                            model_modality = ["generative"]
                         else:
                             continue
 
@@ -741,7 +754,7 @@ class LiteLLMBridge:
                 # 去掉 provider 前缀，只保留实际模型名
                 bare_model = model_name.split("/")[-1] if "/" in model_name else model_name
                 # 从 _model_modalities 获取模态分类
-                modality = self._model_modalities.get(bare_model, "generative")
+                modality = self._model_modalities.get(bare_model, ["generative"])
                 result.append({
                     "id": bare_model,
                     "object": "model",

@@ -86,9 +86,13 @@
 
 ### 前置要求
 
-- Python 3.12+
+- **Python 3.12**（必须；paddlepaddle / llama-index-vector-stores-qdrant 目前无 3.13/3.14 wheel）
+- Node.js 20+（本地跑前端时需要）
+- Docker（用于快速起 Redis / Qdrant，或方式一的整套编排）
 - Redis 7+
-- Qdrant 1.7+（语义缓存 + RAG）
+- Qdrant 1.7+（语义缓存 + RAG 使用；不启也可以跑，语义缓存会 fail-open）
+
+> ⚠️ **不要用 Python 3.13/3.14**：paddleocr 依赖的 `paddlepaddle` 目前最新版（3.3.1）在 PyPI 上没有 cp313/cp314 wheel，`pip install` 会直接报 `No matching distribution found`。项目 Docker 镜像用的是 `python:3.12-slim`，本地开发请对齐。
 
 ### 方式一：Docker Compose（推荐）
 
@@ -111,33 +115,79 @@ docker compose up -d
 
 ### 方式二：本地开发
 
+以下步骤在 **Ubuntu 26.04 + Python 3.14 系统环境** 上完整验证通过（`uv` 拉一个 3.12 独立解释器，不污染系统 python）。其他发行版可自行替换 Python 3.12 的获取方式（`pyenv install 3.12` / `conda create -n gw python=3.12` / 源码编译均可）。
+
 ```bash
-# 1. 安装核心库（顺序重要：core 先装）
-cd aigateway-core && pip install -e .
-cd ../aigateway-api && pip install -e .
-cd ../aigateway-cli && pip install -e .
+# ------------------------------------------------------------------
+# 0. 准备 Python 3.12（如果系统已经是 3.12，可以跳过这一段）
+# ------------------------------------------------------------------
+# 用 uv 拉一个独立的 3.12 解释器（不需要 sudo，也不会替换系统 python）
+curl -LsSf https://astral.sh/uv/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"        # 建议同时写进 ~/.bashrc
+uv python install 3.12
 
-# 2. 安装可选集成（按需选择）
-pip install -e "aigateway-core[llmlingua]"        # Prompt 压缩
-pip install -e "aigateway-core[clip]"             # 视觉特征提取
-pip install -e "aigateway-core[llamaindex]"       # RAG 检索
-pip install -e "aigateway-core[langchain]"        # 对话历史压缩
-pip install -e "aigateway-core[paddleocr]"        # 中文 OCR
-pip install -e "aigateway-core[unstructured]"     # 文档解析
-pip install -e "aigateway-core[all-integrations]" # 全部安装
+# ------------------------------------------------------------------
+# 1. 创建并激活虚拟环境（--seed 会顺带装好 pip）
+# ------------------------------------------------------------------
+cd gateway2
+uv venv --python 3.12 --seed .venv
+source .venv/bin/activate
+python --version    # 应输出 Python 3.12.x
 
-# 3. 编辑 config.yaml，填入 API Key（providers 节）
+# ------------------------------------------------------------------
+# 2. 安装核心库（顺序重要：core 先装）
+# ------------------------------------------------------------------
+cd aigateway-core && pip install -e . && cd ..
+cd aigateway-api  && pip install -e . && cd ..
+cd aigateway-cli  && pip install -e . && cd ..
 
-# 4. 启动 Redis
-docker run -d --name redis -p 6379:6379 redis:7-alpine
+# ------------------------------------------------------------------
+# 3. 安装可选集成（按需选择；all-integrations 会拖 ~5GB 依赖，含 torch/CUDA/paddle）
+# ------------------------------------------------------------------
+pip install -e "aigateway-core[llmlingua]"        # Prompt Token 压缩（LLMLingua-2）
+pip install -e "aigateway-core[clip]"             # CLIP 视觉特征提取
+pip install -e "aigateway-core[comfyui]"          # ComfyUI 图片/视频生成
+pip install -e "aigateway-core[llamaindex]"       # LlamaIndex RAG 检索
+pip install -e "aigateway-core[langchain]"        # LangChain 对话历史压缩
+pip install -e "aigateway-core[paddleocr]"        # PaddleOCR 中文 OCR
+pip install -e "aigateway-core[unstructured]"     # Unstructured 文档解析
+pip install -e "aigateway-core[all-integrations]" # 一次装全部（推荐生产环境）
 
-# 5. 启动 API 服务（从项目根目录启动，确保 config.yaml 可被找到）
+# ------------------------------------------------------------------
+# 4. 编辑 config.yaml，填入 API Key（providers 节）
+#    建议改成 ${AGNES_API_KEY} / ${DEEPSEEK_API_KEY} 引用环境变量
+# ------------------------------------------------------------------
+
+# ------------------------------------------------------------------
+# 5. 启动基础设施（Redis 必须；Qdrant 是语义缓存/RAG 才需要）
+# ------------------------------------------------------------------
+docker run -d --name redis  -p 6379:6379           redis:7-alpine
+docker run -d --name qdrant -p 6333:6333 -p 6334:6334 qdrant/qdrant:latest
+
+# ------------------------------------------------------------------
+# 6. 启动 API 服务（从项目根目录启动，确保 config.yaml 可被找到）
+# ------------------------------------------------------------------
 uvicorn aigateway_api.main:app --host 0.0.0.0 --port 8000 --reload \
   --app-dir aigateway-api/src
 
-# 6. 启动前端（另一个终端）
+# ------------------------------------------------------------------
+# 7. 启动前端（另一个终端）
+# ------------------------------------------------------------------
 cd control-panel && npm install && npm run dev
+# Vite dev server: http://localhost:5173
+# 已配置 /aigateway/* 代理到 http://localhost:8000
 ```
+
+#### 常见问题排查
+
+| 现象 | 原因 & 解决 |
+|------|-------------|
+| `pip install` 报 `error: externally-managed-environment` | 没进虚拟环境。执行 `source .venv/bin/activate` 后再装。 |
+| `paddlepaddle` 报 `No matching distribution found (from versions: none)` | Python 版本不是 3.12。用 `python --version` 核对，参考上面第 0 步换 3.12。 |
+| 启动时 `ModuleNotFoundError: No module named 'lz4'` 或 `cachetools` | 旧版 `aigateway-core` 没声明这两个依赖。重新 `pip install -e .` 刷新到当前版本，或临时 `pip install lz4 cachetools` 兜底。 |
+| 启动日志 `Qdrant 连接失败，语义缓存功能不可用` | 未启动 Qdrant。执行上面第 5 步的 `docker run qdrant`。不装也可以运行，只是没有 L3 语义缓存。 |
+| 启动日志 `providers.xxx.api_key 疑似明文密钥` | `config.yaml` 里写了明文 key。建议改成 `${ENV_VAR}` 形式，并在启动前 `export AGNES_API_KEY=...`。 |
+| `[Errno 98] address already in use` | 8000 端口被占，`lsof -i:8000` 找到旧进程 kill 掉。 |
 
 ### 验证
 
