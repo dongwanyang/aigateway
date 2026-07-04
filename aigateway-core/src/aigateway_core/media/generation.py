@@ -68,9 +68,14 @@ class PromptEnhancer:
 
 
 class GenerationPipeline:
-    """Generation Pipeline — 负责 LLM 调用前后的完整流程。
+    """[DEPRECATED 未使用] Generation Pipeline — 负责 LLM 调用前后的完整流程。
 
-    职责:
+    此类为孤儿代码，全仓库 0 生产引用（仅 tests/test_media_optimization.py import）。
+    生成管道的实际职责由 generation_optimization 的 6 插件链承担
+    （ai_director → ... → cost_tracker），经 RequestDispatcher 分流后由
+    PipelineEngine[pipeline_kind="generation"] 驱动。
+
+    职责（历史）:
     1. Prompt Enhancement
     2. Model Selection（基于内容类型）
     3. LLM Completion（通过 LiteLLM Bridge）

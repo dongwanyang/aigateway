@@ -6,8 +6,6 @@ server:
   - http://localhost:5173
 auth:
   api_keys:
-  # Bootstrap key (No delete) — Gateway 自身的访问密钥，非 LLM 提供商 API Key
-  # 客户端请求 Gateway 时通过 Authorization: Bearer <此 key> 认证
   - key: gw-rRIop4dpcyJJNUTJbHmHpr9Bj3M11s5o
     user_id: admin
     is_admin: true
@@ -54,15 +52,17 @@ plugins:
   config: {}
 - name: prompt_compress
   enabled: true
-  depends_on: ["semantic_cache"]
+  depends_on:
+  - semantic_cache
   config:
     compression_ratio: 0.5
-    model_name: "microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbank"
+    model_name: microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbank
     target_token: -1
     device: cpu
 - name: rag_retriever
   enabled: true
-  depends_on: ["semantic_cache"]
+  depends_on:
+  - semantic_cache
   config:
     top_k: 5
     similarity_threshold: 0.7
@@ -70,21 +70,17 @@ plugins:
     chunk_size: 512
     chunk_overlap: 64
     collection_name: rag_documents
-    # 默认用本地 HuggingFace 模型（与 L3 语义缓存一致），无需外部 API Key
     embedding_backend: local
     embedding_model: Qwen/Qwen3-Embedding-0.6B
-    # 切换到 OpenAI 兼容端点时，把 embedding_backend 改为 openai，并填下面两项：
-    # embedding_api_base: https://apihub.agnes-ai.com/v1
-    # embedding_api_key: ${AGNES_API_KEY}
 - name: conv_compressor
   enabled: true
-  depends_on: ["semantic_cache"]
+  depends_on:
+  - semantic_cache
   config:
     max_history: 20
     summary_model: agnes-2.0-flash
     max_token_limit: 4000
     summary_interval: 5
-    # 默认让摘要 LLM 走 gateway 自己（agnes-2.0-flash），避免依赖外部 OPENAI_API_KEY
     api_base: http://localhost:8000/v1
     api_key: ${CONV_COMPRESSOR_API_KEY:-}
 providers:
@@ -94,18 +90,27 @@ providers:
     model_grouper:
     - models:
       - name: agnes-2.0-flash
-        modality: [mllm]        # 多模态理解（文本+图片输入）
+        modality:
+        - mllm
       - name: agnes-image-2.1-flash
-        modality: [generative]  # 图片生成
-        base_url: https://image-api.agnes-ai.com/v1  # per-model 覆盖：图片生成走独立端点
+        modality:
+        - generative
+        base_url: https://apihub.agnes-ai.com/v1/images/generations
       - name: agnes-video-v2.0
-        modality: [generative]  # 视频生成
-        base_url: https://video-api.agnes-ai.com/v1  # per-model 覆盖：视频走独立端点
+        modality:
+        - generative
+        base_url: https://apihub.agnes-ai.com/v1/videos
       fallback_models: []
       pricing:
         agnes-2.0-flash:
           prompt: 0.02
           completion: 1
+        agnes-image-2.1-flash:
+          prompt: 0
+          completion: 0
+        agnes-video-v2.0:
+          prompt: 0
+          completion: 0
     num_retries: 3
     retry_after: 1000
     timeout: 3600
@@ -115,7 +120,8 @@ providers:
     model_grouper:
     - models:
       - name: deepseek-v4-flash
-        modality: [llm]         # 纯文本理解
+        modality:
+        - llm
       fallback_models: []
       pricing:
         deepseek-v4-flash:
@@ -245,7 +251,9 @@ media_optimization:
     summary_preview_chars: 2000
     unstructured:
       strategy: auto
-      languages: ["chi_sim", "eng"]
+      languages:
+      - chi_sim
+      - eng
       extract_images: false
   generation:
     enhancement_level: 'off'
@@ -258,17 +266,28 @@ media_optimization:
 generation_optimization:
   enabled: true
   ai_director: {}
-  model_router: {}
+  model_router:
+    model_capabilities:
+      agnes-2.0-flash: 60
+      agnes-image-2.1-flash: 80
+      agnes-video-v2.0: 85
+    model_modalities:
+      agnes-2.0-flash:
+      - llm
+      agnes-image-2.1-flash:
+      - generative
+      agnes-video-v2.0:
+      - generative
   feature_cache: {}
   cost_tracking: {}
   prompt_templates: {}
   token_compressor:
     clip:
-      model_name: "openai/clip-vit-large-patch14"
+      model_name: openai/clip-vit-large-patch14
       device: cpu
       batch_size: 1
   draft_workflow:
     comfyui:
-      server_url: "http://localhost:8188"
+      server_url: http://localhost:8188
       connect_timeout: 10
       execution_timeout: 300

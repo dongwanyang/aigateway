@@ -435,6 +435,21 @@ async def lifespan(app: "FastAPI"):
     except Exception as exc:
         logger.warning("LiteLLM Bridge 初始化失败（部分功能不可用）: %s", exc)
 
+    # 生成管道 wiring：AIDirectorStrategy 延迟绑定 litellm_bridge。
+    # register_generation_optimization_plugins 在 bridge 建好前就跑了（在
+    # _register_builtin_plugins 内），此处从 registry 取 strategy 单例注入 bridge，
+    # 让 ai_director 真正调下游 rewrite_model，而不是走 None 透传。
+    if litellm_bridge is not None:
+        try:
+            ai_dir_reg = plugin_registry._registrations.get("ai_director")
+            if ai_dir_reg is not None:
+                strategy = ai_dir_reg.config.get("strategy")
+                if strategy is not None and hasattr(strategy, "_litellm_bridge"):
+                    strategy._litellm_bridge = litellm_bridge
+                    logger.info("AIDirectorStrategy 已绑定 litellm_bridge（生成管道 wiring）")
+        except Exception as exc:
+            logger.warning("AIDirectorStrategy 绑定 litellm_bridge 失败: %s", exc)
+
     # 初始化 PromptTemplateManager
     prompt_template_manager = None
     try:
@@ -476,6 +491,48 @@ async def lifespan(app: "FastAPI"):
     app.state.pii_detector_plugin = pii_detector_plugin
     app.state.model_router_resolver = model_router_resolver
     app.state.prompt_compress_plugin = prompt_compress_plugin
+
+    # 初始化两条管道的 PipelineEngine（总分总架构的「分」）
+    # understanding: pii/cache/semantic/model_router/compress/rag/conv
+    # generation: ai_director/.../cost_tracker
+    from aigateway_core.pipeline import PipelineEngine
+
+    understanding_engine = PipelineEngine(plugin_registry, pipeline_kind="understanding")
+    understanding_engine.initialize()
+    generation_engine = PipelineEngine(plugin_registry, pipeline_kind="generation")
+    generation_engine.initialize()
+    app.state.understanding_engine = understanding_engine
+    app.state.generation_engine = generation_engine
+
+    # 注册热重载回调：admin 改 config.yaml 后（经 atomic_swap → _notify_reload）
+    # 重建受影响的运行时组件。同步 plugins.enabled 到 registry 并重建两个 Engine。
+    def _on_config_reload(new_config: dict) -> None:
+        try:
+            registry = getattr(app.state, "plugin_registry", None)
+            if registry is None:
+                return
+            plugins_cfg = new_config.get("plugins", []) or []
+            for pcfg in plugins_cfg:
+                if not isinstance(pcfg, dict):
+                    continue
+                name = pcfg.get("name")
+                if not name:
+                    continue
+                reg = getattr(registry, "_registrations", {}).get(name)
+                if reg is not None and "enabled" in pcfg:
+                    reg.enabled = bool(pcfg["enabled"])
+            # 重建两个 Engine（重新装载按 enabled 过滤后的插件链）
+            from aigateway_core.pipeline import PipelineEngine
+            for kind, attr in (("understanding", "understanding_engine"),
+                               ("generation", "generation_engine")):
+                eng = PipelineEngine(registry, pipeline_kind=kind)
+                eng.initialize()
+                setattr(app.state, attr, eng)
+            logger.info("热重载回调完成：已同步 plugins.enabled 并重建两条管道 Engine")
+        except Exception as exc:
+            logger.error("热重载回调执行失败: %s", exc)
+
+    config_manager.on_reload(_on_config_reload)
 
     # 注册异常处理器
     _register_exception_handlers(app)

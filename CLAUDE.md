@@ -19,8 +19,9 @@ Client (OpenAI SDK / CLI / IDE)
         ▼
 ┌─────────────────────┐
 │  aigateway-api       │  FastAPI + Uvicorn (:8000)
-│  ├── main.py         │  App factory, lifespan init, router mounting
-│  ├── openai_compat.py│  POST /v1/chat/completions, GET /v1/models, /v1/embeddings
+│  ├── main.py         │  App factory, lifespan init, router mounting, 两条管道 Engine 实例
+│  ├── dispatcher.py   │  RequestDispatcher — 总分总「总入口」:分流 understanding|generation + 编排缓存/配额/LLM/回填
+│  ├── openai_compat.py│  /v1/chat/completions 入口(调 dispatcher) + 辅助函数(_apply_*/_record_request_log 等)
 │  ├── admin_routes.py │  API Key CRUD, quotas, plugin config, logs, RAG, L3 cache mgmt
 │  ├── auth_middleware.py│ Bearer/x-api-key validation via KeyStore
 │  ├── streaming.py    │  SSE generator + cached stream simulation
@@ -29,7 +30,7 @@ Client (OpenAI SDK / CLI / IDE)
 │  ├── template_routes.py│ Prompt template management endpoints
 │  └── rate_limiter.py │  IP-based rate limiting middleware
 ├── aigateway-core     │  Shared library (imported by API + CLI)
-│  ├── pipeline.py     │  Async plugin engine + 5 built-in plugins (PII, cache, semantic_cache, model_router, prompt_compress)
+│  ├── pipeline.py     │  PipelineEngine(按 pipeline_kind 装载) + 经典插件(PII/cache/semantic/model_router空壳/compress)
 │  ├── plugin_registry.py│  Registration, topological sort, lifecycle
 │  ├── context.py      │  PipelineContext — shared request state with typed namespaces
 │  ├── caching.py      │  CacheManager: L1(LRU) → L2(Redis+LZ4) → L3(Qdrant), plus LightweightReranker / CrossEncoderRerankers
@@ -104,10 +105,22 @@ Runs before LLM calls when multimodal content is detected:
 - **Audio**: transcription, format conversion
 - **Documents**: PDF/docx parsing, chunking, summarization
 
-## Request Processing Flow (openai_compat.py)
+## Request Processing Flow (总分总架构)
 
-Both stream and non-stream paths follow:
-1. Media Optimization (if multimodal) → 2. Cache lookup (L1→L2→L3 with embedding) → 3. Quota check → 4. LiteLLM Bridge completion → 5. Usage recording + cache backfill
+所有 `/v1/chat/completions` 请求经 `RequestDispatcher.dispatch()`(dispatcher.py),总分总结构:
+
+**总(入口分流)**:`classify_request(body, config_manager)` 按优先级分流:
+1. 模型名推断:body.model 命中 providers 里标记 generative 模态 → generation
+2. 模态推断:messages 含 image/audio/video content → generation
+3. 默认:understanding
+
+**分(两条管道,各跑 PipelineEngine 插件链)**:
+- **理解管道**(`PipelineEngine[pipeline_kind="understanding"]`,8 插件):media_optimization → pii → (auto model 解析) → 缓存查找 → 配额 → prompt_compress → rag/conv → LiteLLM 出口 → 回填
+- **生成管道**(`PipelineEngine[pipeline_kind="generation"]`,6 插件):ai_director → intent_evaluator → token_compressor → draft_generator → gen_model_router → cost_tracker → 配额 → LiteLLM 出口(不查理解缓存)
+
+**总(LiteLLM 统一出口)**:`LiteLLMBridge.completion()`/`completion_stream()` 是两条管道的共同出口,带 fallback 链 + CircuitBreaker。
+
+流式路径已对齐非流式行为:扣配额(`key_store.increment_usage`)、回填缓存(L1/L2/L3)、cost 用真实值。生成管道不查 prompt_cache(生成结果缓存语义复杂)。
 
 ## Three-Tier Cache
 
@@ -257,6 +270,12 @@ Tests live in `/tests/` (25 files). No conftest.py or pytest.ini — tests run d
 
 ## Architecture Decisions & Known States
 
+- **总分总架构(2026-07)** — 所有 `/v1/chat/completions` 请求经 `RequestDispatcher`(dispatcher.py)按理解/生成分流,两条管道各由 `PipelineEngine` 驱动插件链,LiteLLM 作统一出口。`PipelineEngine`/`PluginRegistry`/`Plugin`/`PipelineContext` 四类加了 `pipeline_kind` 维度。`openai_compat.py` 的手工串行链已删除,辅助函数(`_apply_*`/`_record_request_log` 等)保留供 dispatcher 复用。
+- **ModelRouterPlugin 是空壳** — 真路由由 dispatcher 的 `_resolve_auto_model`(调 ModelRouterStrategy)和 `classify_request` 承担。空壳保留注册是为了不破坏 `prompt_compress` 的 depends_on,运行时由 dispatcher 的 `_skip_names` 跳过。
+- **GenerationPipeline(media/generation.py)deprecated** — 孤儿代码 0 生产引用,生成管道由 generation_optimization 6 插件链承担。
+- **AIDirectorStrategy 延迟绑定 litellm_bridge** — `register_generation_optimization_plugins` 在 bridge 建好前跑,main.py 在 bridge 初始化后从 registry 取 strategy 单例注入 `_litellm_bridge`。
+- **热重载完整闭环** — admin PUT(global-config/plugins-config)写文件后调 `atomic_swap` → `_notify_reload` → main.py 的 `_on_config_reload` 回调同步 plugins.enabled 并重建两条管道 Engine。
+- **contextvar 日志上下文** — `ContextInjectProcessor` 用 `contextvars.ContextVar` 隔离并发请求的 trace_id(原类级共享 dict 有并发覆盖 bug)。
 - **prompt_compress** is now a real implementation using LLMLingua-2 (multilingual). `device: cpu|cuda` controls runtime; `device_map` auto-set for GPU. `compression_ratio`/`target_token` control output size.
 - **rag_retriever** & **conv_compressor** are default-enabled with local fallback behavior (no external service strictly required to start, though Qdrant is needed for full RAG retrieval).
 - **debug_mode** auto-triggers DEBUG log level — when `debug_mode: true`, `log_level` is forced to `DEBUG` regardless of the configured level. `AI_GATEWAY_ENV=production` forces `debug_mode=False` and `log_level≥INFO` as a safety net.

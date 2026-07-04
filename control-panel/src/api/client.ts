@@ -281,6 +281,8 @@ export interface PluginConfigItem {
   enabled: boolean
   depends_on: string[]
   config: Record<string, unknown>
+  pipeline_kind?: 'understanding' | 'generation'
+  priority?: number
 }
 
 export interface PluginsConfigData {

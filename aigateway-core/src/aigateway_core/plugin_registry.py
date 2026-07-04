@@ -43,6 +43,7 @@ class PluginRegistration:
         depends_on: Optional[List[str]] = None,
         priority: int = 0,
         config: Optional[Dict[str, Any]] = None,
+        pipeline_kind: str = "understanding",
     ) -> None:
         self.name = name
         self.plugin_class = plugin_class
@@ -50,6 +51,9 @@ class PluginRegistration:
         self.depends_on = depends_on or []
         self.priority = priority
         self.config = config or {}
+        # 管道归属："understanding" | "generation"。
+        # get_all(pipeline_kind=...) 按此过滤，PipelineEngine 按此装载插件链。
+        self.pipeline_kind = pipeline_kind
 
 
 # ------------------------------------------------------------------
@@ -82,6 +86,7 @@ class PluginRegistry:
         depends_on: Optional[List[str]] = None,
         priority: int = 0,
         config: Optional[Dict[str, Any]] = None,
+        pipeline_kind: str = "understanding",
     ) -> None:
         """注册一个插件。
 
@@ -89,9 +94,10 @@ class PluginRegistry:
             name: 插件名称，必须全局唯一。
             plugin_class: 插件类（需要有 execute(ctx: PipelineContext) 方法）。
             enabled: 是否启用，默认 True。
-            depends_on: 依赖的插件名称列表，默认 []。
+            depends_on: 依赖的其他插件名称列表，默认 []。
             priority: 执行优先级，数字越小越先执行，默认 0。
             config: 插件配置参数字典。
+            pipeline_kind: 管道归属 "understanding" | "generation"，默认 understanding。
 
         Raises:
             ValueError: 插件名重复时抛出。
@@ -106,14 +112,16 @@ class PluginRegistry:
             depends_on=depends_on or [],
             priority=priority,
             config=config,
+            pipeline_kind=pipeline_kind,
         )
 
         logger.info(
-            "插件注册: name=%s, enabled=%s, depends_on=%s, priority=%d",
+            "插件注册: name=%s, enabled=%s, depends_on=%s, priority=%d, pipeline_kind=%s",
             name,
             enabled,
             depends_on or [],
             priority,
+            pipeline_kind,
         )
 
     def unregister(self, name: str) -> None:
@@ -146,11 +154,15 @@ class PluginRegistry:
         """
         return self._registrations.get(name)
 
-    def get_all(self) -> List[Any]:
-        """获取所有已注册插件的实例列表。
+    def get_all(self, pipeline_kind: Optional[str] = None) -> List[Any]:
+        """获取已注册插件的实例列表。
 
         按 priority 升序排列（数字小的先执行）。
         返回的是实例化后的插件对象（调用 plugin_class()）。
+
+        Args:
+            pipeline_kind: 可选，按管道过滤 "understanding" | "generation"。
+                为 None 时返回全部管道的插件。
 
         Returns:
             插件实例列表。
@@ -159,6 +171,8 @@ class PluginRegistry:
             self._registrations.values(),
             key=lambda r: r.priority,
         )
+        if pipeline_kind is not None:
+            registrations = [r for r in registrations if r.pipeline_kind == pipeline_kind]
 
         instances: List[Any] = []
         for reg in registrations:
@@ -168,6 +182,7 @@ class PluginRegistry:
                 instance.name = reg.name  # type: ignore[attr-defined]
                 instance.enabled = reg.enabled  # type: ignore[attr-defined]
                 instance.depends_on = reg.depends_on  # type: ignore[attr-defined]
+                instance.pipeline_kind = reg.pipeline_kind  # type: ignore[attr-defined]
                 instances.append(instance)
             except TypeError as exc:
                 logger.warning(

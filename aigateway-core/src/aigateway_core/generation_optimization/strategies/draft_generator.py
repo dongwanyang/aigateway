@@ -101,6 +101,14 @@ class DraftGeneratorStrategy:
         Returns:
             DraftResult 包含 draft_id、previews、过期时间等
         """
+        # 探测 ComfyUI 服务是否可用（原代码从未调用，_comfyui_available 恒为 False，
+        # 导致永远走字符串占位）。这里在每次生成前探测一次，可用则走真生成，
+        # 不可用则走占位降级（_generate_image_preview 等已实现）。
+        try:
+            await self._check_comfyui()
+        except Exception as exc:
+            logger.warning("ComfyUI 探测失败，走占位降级: %s", exc)
+
         draft_id = uuid.uuid4().hex
         now = time.time()
         ttl_seconds = config.retention_period_hours * 3600

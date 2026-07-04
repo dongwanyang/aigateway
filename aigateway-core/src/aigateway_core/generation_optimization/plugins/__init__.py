@@ -165,13 +165,17 @@ def register_generation_optimization_plugins(
 
     # --- 定义插件注册列表（含依赖链和优先级） ---
     # priority 确保即使不依赖拓扑排序也能按正确顺序执行
+    # pipeline_kind="generation": 6 个生成优化插件归属生成管道，
+    # 由生成管道的 PipelineEngine 单独装载，不混入理解管道。
     plugin_definitions = [
         {
             "name": "ai_director",
             "plugin_class": AIDirectorPlugin,
             "enabled": global_enabled and config.ai_director.enabled,
-            "depends_on": ["prompt_cache"],
+            # 生成管道不依赖理解管道的 prompt_cache，去掉跨管道依赖
+            "depends_on": [],
             "priority": 100,
+            "pipeline_kind": "generation",
             "config": {
                 "strategy": ai_director_strategy,
                 "config": config,
@@ -183,6 +187,7 @@ def register_generation_optimization_plugins(
             "enabled": global_enabled and config.model_router.enabled,
             "depends_on": ["ai_director"],
             "priority": 110,
+            "pipeline_kind": "generation",
             "config": {
                 "strategy": intent_evaluator_strategy,
                 "config": config,
@@ -194,6 +199,7 @@ def register_generation_optimization_plugins(
             "enabled": global_enabled and config.token_compressor.enabled,
             "depends_on": ["intent_evaluator"],
             "priority": 120,
+            "pipeline_kind": "generation",
             "config": {
                 "strategy": token_compressor_strategy,
                 "cache": feature_cache,
@@ -206,6 +212,7 @@ def register_generation_optimization_plugins(
             "enabled": global_enabled and config.draft_workflow.enabled,
             "depends_on": ["token_compressor"],
             "priority": 130,
+            "pipeline_kind": "generation",
             "config": {
                 "strategy": draft_generator_strategy,
                 "config": config,
@@ -217,6 +224,7 @@ def register_generation_optimization_plugins(
             "enabled": global_enabled and config.model_router.enabled,
             "depends_on": ["draft_generator"],
             "priority": 140,
+            "pipeline_kind": "generation",
             "config": {
                 "strategy": model_router_strategy,
                 "config": config,
@@ -228,6 +236,7 @@ def register_generation_optimization_plugins(
             "enabled": global_enabled and config.cost_tracking.enabled,
             "depends_on": ["gen_model_router"],
             "priority": 150,
+            "pipeline_kind": "generation",
             "config": {
                 "tracker": cost_tracker,
                 "config": config,
@@ -247,6 +256,7 @@ def register_generation_optimization_plugins(
                 depends_on=plugin_def["depends_on"],
                 priority=plugin_def["priority"],
                 config=plugin_def["config"],
+                pipeline_kind=plugin_def.get("pipeline_kind", "generation"),
             )
             registered_count += 1
             logger.debug(

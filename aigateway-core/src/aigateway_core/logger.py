@@ -11,6 +11,7 @@ Logger — 结构化 JSON 日志
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import os
 import sys
@@ -57,30 +58,50 @@ def update_logger_config(updates: Dict[str, Any]) -> None:
 class ContextInjectProcessor:
     """structlog 处理器：自动注入 trace_id / request_id / user_id。
 
-    从 thread-local 或 structlog 的上下文字典中提取这些字段，
-    确保每条日志都包含它们。
+    上下文存在 ``contextvars.ContextVar`` 中，每个请求（async task）有独立的
+    上下文副本，并发请求互不覆盖。``set`` 返回 token，``clear`` 接收 token 还原。
     """
 
-    _context: Dict[str, Any] = {}
+    # 每个请求独立持有的上下文字典。ContextVar 保证并发 async 请求隔离。
+    _context_var: "contextvars.ContextVar[Dict[str, Any]]" = contextvars.ContextVar(
+        "aigateway_log_context", default={}
+    )
 
     @classmethod
-    def set(cls, trace_id: str, request_id: str, user_id: Optional[str] = None) -> None:
+    def set(
+        cls, trace_id: str, request_id: str, user_id: Optional[str] = None
+    ) -> "contextvars.Token[Dict[str, Any]]":
         """设置当前上下文的追踪字段。
+
+        在当前 async 上下文内绑定一份新的上下文字典，不影响其他并发请求。
+        返回的 token 应传给 :meth:`clear` 还原。
 
         Args:
             trace_id: 追踪 ID。
             request_id: 请求 ID。
             user_id: 用户 ID（可选）。
+
+        Returns:
+            contextvars.Token，用于 :meth:`clear` 还原。
         """
-        cls._context["trace_id"] = trace_id
-        cls._context["request_id"] = request_id
+        ctx = dict(cls._context_var.get())
+        ctx["trace_id"] = trace_id
+        ctx["request_id"] = request_id
         if user_id is not None:
-            cls._context["user_id"] = user_id
+            ctx["user_id"] = user_id
+        return cls._context_var.set(ctx)
 
     @classmethod
-    def clear(cls) -> None:
-        """清除当前上下文。"""
-        cls._context.clear()
+    def clear(cls, token: "Optional[contextvars.Token[Dict[str, Any]]]" = None) -> None:
+        """清除当前上下文。
+
+        若传入 :meth:`set` 返回的 token，则精确还原到 set 之前的上下文
+        （推荐用法，避免清除嵌套调用的上下文）。否则清空当前上下文。
+        """
+        if token is not None:
+            cls._context_var.reset(token)
+        else:
+            cls._context_var.set({})
 
     @classmethod
     def process(
@@ -99,8 +120,8 @@ class ContextInjectProcessor:
         Returns:
             注入后的事件字典。
         """
-        # 合并当前上下文
-        event_dict.update(cls._context)
+        # 合并当前上下文（ContextVar 隔离，并发安全）
+        event_dict.update(cls._context_var.get())
 
         # 确保必要字段存在
         if "trace_id" not in event_dict:
@@ -303,8 +324,8 @@ def log_with_context(
     """
     setup_structlog_if_needed()
 
-    # 注入上下文
-    ContextInjectProcessor.set(
+    # 注入上下文（token 用于精确还原，避免污染并发请求的上下文）
+    token = ContextInjectProcessor.set(
         trace_id=trace_id or "",
         request_id=request_id or "",
         user_id=user_id,
@@ -312,7 +333,10 @@ def log_with_context(
 
     logger = get_logger()
     log_fn = getattr(logger, level, logger.info)
-    log_fn(event, **kwargs)
+    try:
+        log_fn(event, **kwargs)
+    finally:
+        ContextInjectProcessor.clear(token)
 
 
 # ------------------------------------------------------------------

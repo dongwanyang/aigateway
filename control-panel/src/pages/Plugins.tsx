@@ -319,7 +319,23 @@ export default function Plugins() {
                         <Puzzle size={20} style={{ color: plugin.enabled ? 'white' : 'var(--color-text-tertiary)' }} />
                       </div>
                       <div>
-                        <div className="font-medium">{plugin.name}</div>
+                        <div className="font-medium flex items-center gap-2">
+                          {plugin.name}
+                          {plugin.pipeline_kind && (
+                            <span
+                              className="text-xs px-2 py-0.5 rounded"
+                              style={{
+                                backgroundColor: plugin.pipeline_kind === 'generation'
+                                  ? 'var(--color-warning, #f59e0b)'
+                                  : 'var(--color-bg-overlay)',
+                                color: plugin.pipeline_kind === 'generation' ? 'white' : 'var(--color-text-tertiary)',
+                              }}
+                              title={plugin.pipeline_kind === 'generation' ? '生成管道' : '理解管道'}
+                            >
+                              {plugin.pipeline_kind === 'generation' ? '生成' : '理解'}
+                            </span>
+                          )}
+                        </div>
                         <div className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>
                           {getPluginDescription(plugin.name)}
                         </div>

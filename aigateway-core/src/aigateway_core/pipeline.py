@@ -36,6 +36,9 @@ class Plugin(Protocol):
     name: str
     enabled: bool
     depends_on: List[str]
+    # 插件所属管道："understanding" | "generation"。
+    # 由 PluginRegistration 在注册时写入实例，Engine 按此过滤。
+    pipeline_kind: str
 
     async def execute(self, ctx: PipelineContext) -> PipelineContext:
         """执行插件逻辑。
@@ -69,22 +72,27 @@ class PipelineEngine:
         _ordered_plugins: 排序后的插件列表（在 init 时计算）。
     """
 
-    def __init__(self, registry: PluginRegistry) -> None:
+    def __init__(
+        self, registry: PluginRegistry, pipeline_kind: str = "understanding"
+    ) -> None:
         """
         Args:
             registry: PluginRegistry 实例，包含所有已注册的插件。
+            pipeline_kind: 管道类型 "understanding" | "generation"，
+                initialize 时只装载该管道的插件。
         """
         self.registry = registry
+        self.pipeline_kind = pipeline_kind
         # 缓存排序结果，避免每次请求都重新排序
         self._ordered_plugins: List[Plugin] = []
         self._initialized = False
 
     def initialize(self) -> None:
-        """初始化管线：从注册表中取出已启用的插件并按拓扑排序。
+        """初始化管线：从注册表取出本管道已启用的插件并按拓扑排序。
 
         此方法通常在服务启动时调用一次。
         """
-        all_plugins = self.registry.get_all()
+        all_plugins = self.registry.get_all(pipeline_kind=self.pipeline_kind)
         # 仅保留 enabled=True 的插件
         enabled_plugins = [p for p in all_plugins if getattr(p, "enabled", True)]
 
@@ -95,7 +103,8 @@ class PipelineEngine:
         self._initialized = True
 
         logger.info(
-            "PipelineEngine 已初始化: %d 个插件按序排列",
+            "PipelineEngine[%s] 已初始化: %d 个插件按序排列",
+            self.pipeline_kind,
             len(sorted_plugins),
         )
         for i, plugin in enumerate(sorted_plugins):
@@ -103,10 +112,10 @@ class PipelineEngine:
             logger.debug("  [%d] %s (依赖: %s)", i, plugin.name, deps)
 
     async def execute(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        """执行完整插件管线。
+        """执行完整插件管线（内部构造 ctx，pipeline_kind 取自 self）。
 
         流程:
-        1. 创建 PipelineContext
+        1. 创建 PipelineContext（pipeline_kind = self.pipeline_kind）
         2. 按序执行每个插件
         3. 任一插件短路时提前终止
         4. 返回最终响应
@@ -121,8 +130,27 @@ class PipelineEngine:
             self.initialize()
 
         # 创建上下文
-        ctx = PipelineContext(request=request)
+        ctx = PipelineContext(request=request, pipeline_kind=self.pipeline_kind)
         ctx.should_stream = bool(request.get("stream", False))
+
+        ctx = await self.execute_ctx(ctx)
+        return self._build_response(ctx)
+
+    async def execute_ctx(self, ctx: PipelineContext) -> PipelineContext:
+        """在已有 ctx 上执行本管线（供 dispatcher 注入分流结果用）。
+
+        与 :meth:`execute` 的区别：调用方负责构造 ctx（含 pipeline_kind、
+        should_stream、user_id 等），engine 不再新建 ctx，直接在传入 ctx 上
+        跑插件链。短路、fail-open、trace 逻辑与 execute 一致。
+
+        Args:
+            ctx: 调用方构造的上下文，pipeline_kind 应与 self.pipeline_kind 一致。
+
+        Returns:
+            跑完插件链后的 ctx（同一对象，原地修改）。
+        """
+        if not self._initialized:
+            self.initialize()
 
         # 记录管线开始时间
         pipeline_start = time.monotonic()
@@ -174,24 +202,46 @@ class PipelineEngine:
             # 管线执行完成
             total_ms = (time.monotonic() - pipeline_start) * 1000
             logger.info(
-                "管线执行完成: request_id=%s, total=%.2fms, stopped=%s",
+                "管线[%s]执行完成: request_id=%s, total=%.2fms, stopped=%s",
+                self.pipeline_kind,
                 ctx.request_id,
                 total_ms,
                 ctx.should_stop,
             )
 
-            # 构建响应
-            response = self._build_response(ctx)
-            return response
+            # execute_ctx 返回 ctx 本身，由 dispatcher 决定后续（缓存/配额/LLM/回填）
+            return ctx
 
         except Exception as exc:
-            # 管线级异常兜底
+            # 管线级异常兜底：标记 should_stop 并返回 ctx，不抛给 dispatcher
             logger.error(
-                "管线执行发生未捕获异常: %s, request_id=%s",
+                "管线[%s]执行发生未捕获异常: %s, request_id=%s",
+                self.pipeline_kind,
                 exc,
                 getattr(ctx, "request_id", "unknown"),
             )
-            return self._build_error_response(str(exc))
+            ctx.should_stop = True
+            ctx.extra.setdefault("pipeline_error", str(exc))
+            return ctx
+
+    async def execute(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """执行完整插件管线并返回响应字典（向后兼容入口）。
+
+        内部调用 :meth:`execute_ctx`，再用 :meth:`_build_response` 组装响应。
+
+        Args:
+            request: 原始 OpenAI 格式请求体。
+
+        Returns:
+            包含最终响应的字典，结构见 API_CONTRACT.md。
+        """
+        if not self._initialized:
+            self.initialize()
+
+        ctx = PipelineContext(request=request, pipeline_kind=self.pipeline_kind)
+        ctx.should_stream = bool(request.get("stream", False))
+        ctx = await self.execute_ctx(ctx)
+        return self._build_response(ctx)
 
     def _topological_sort(self, plugins: List[Plugin]) -> List[Plugin]:
         """对插件列表进行拓扑排序（确保 depends_on 先执行）。
@@ -583,10 +633,17 @@ class SemanticCachePlugin:
 
 
 class ModelRouterPlugin:
-    """模型路由插件 — 根据配置选择最优提供商和模型。
+    """[DEPRECATED 空壳] 模型路由插件 — 仅把 ctx.request["model"] 复制到 ctx.selected_model。
 
+    真正的路由逻辑由两部分承担，本插件不再参与:
+    1. dispatcher._resolve_auto_model —— 当 body.model=="auto" 时调 ModelRouterStrategy
+    2. classify_request —— 按模型模态分流到 understanding/generation 管道
+
+    保留注册是为了不破坏 prompt_compress 的 depends_on 声明（拓扑排序只影响顺序，
+    不做运行时存在性校验）。Engine 跑插件链时 dispatcher 的 _skip_names 也包含
+    model_router，故即使 enabled=True 也不会重复执行。
     配置参数:
-        litellm_bridge: LiteLLMBridge 实例
+        litellm_bridge: LiteLLMBridge 实例（未使用，保留兼容）
     """
 
     name: str = "model_router"

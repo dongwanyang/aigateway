@@ -63,6 +63,11 @@ class PipelineContext:
     user_id: Optional[str] = None
     extra: Dict[str, Any] = field(default_factory=dict)
 
+    # === 管道归属 ===
+    # "understanding" | "generation"，由 dispatcher 分流后注入，
+    # PipelineEngine 按此过滤插件链。默认 understanding 保持向后兼容。
+    pipeline_kind: str = "understanding"
+
     # === V2 多模态字段 ===
     is_multimodal: bool = False
     total_token_savings: int = 0

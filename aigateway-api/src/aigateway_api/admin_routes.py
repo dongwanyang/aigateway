@@ -564,6 +564,42 @@ async def get_plugins_config(
     from aigateway_api.main import app
     s = app.state
     config_manager = getattr(s, "config_manager")
+    # 从 registry 查每个插件的 pipeline_kind（注册时由代码设置，不在 YAML 里）
+    registry = getattr(s, "plugin_registry", None)
+    reg_map = {}
+    if registry is not None:
+        for name, reg in getattr(registry, "_registrations", {}).items():
+            reg_map[name] = reg
+
+    def _build_plugin_entry(p: dict) -> dict:
+        name = p.get("name", "unknown")
+        entry = {
+            "name": name,
+            "enabled": p.get("enabled", True),
+            "depends_on": p.get("depends_on", []),
+            "config": p.get("config", {}),
+        }
+        reg = reg_map.get(name)
+        if reg is not None:
+            entry["pipeline_kind"] = getattr(reg, "pipeline_kind", "understanding")
+            entry["priority"] = getattr(reg, "priority", 0)
+        return entry
+
+    def _serializable_config(cfg: dict) -> dict:
+        """过滤掉不可 JSON 序列化的 config 字段（如 strategy/tracker 实例）。
+
+        生成管道插件的 config 含 strategy 对象（带 lock、不可序列化），
+        admin 响应只展示可序列化的配置项。
+        """
+        out = {}
+        for k, v in (cfg or {}).items():
+            try:
+                import json as _json
+                _json.dumps(v)
+                out[k] = v
+            except (TypeError, ValueError):
+                out[k] = f"<non-serializable: {type(v).__name__}>"
+        return out
 
     # 直接从 YAML 文件读取最新配置（绕过可能有 stale 数据的内存缓存）
     plugins = []
@@ -578,24 +614,30 @@ async def get_plugins_config(
                 raw_plugins = raw.get("plugins", [])
                 for p in raw_plugins:
                     if isinstance(p, dict):
-                        plugins.append({
-                            "name": p.get("name", "unknown"),
-                            "enabled": p.get("enabled", True),
-                            "depends_on": p.get("depends_on", []),
-                            "config": p.get("config", {}),
-                        })
+                        plugins.append(_build_plugin_entry(p))
         except Exception as exc:
             logger.warning("读取插件配置失败，回退到内存缓存: %s", exc)
             # 回退：从内存缓存读取
             plugins_cfg = config_manager.get("plugins", [])
             for p in plugins_cfg:
                 if isinstance(p, dict):
-                    plugins.append({
-                        "name": p.get("name", "unknown"),
-                        "enabled": p.get("enabled", True),
-                        "depends_on": p.get("depends_on", []),
-                        "config": p.get("config", {}),
-                    })
+                    plugins.append(_build_plugin_entry(p))
+
+    # 补充 registry 里注册但 YAML plugins 段未列的插件（如 generation 管道 6 插件，
+    # 它们由代码注册，YAML 里没有对应条目）。前端据此显示生成管道插件。
+    seen_names = {p["name"] for p in plugins}
+    if registry is not None:
+        for name, reg in getattr(registry, "_registrations", {}).items():
+            if name in seen_names:
+                continue
+            plugins.append({
+                "name": name,
+                "enabled": getattr(reg, "enabled", True),
+                "depends_on": list(getattr(reg, "depends_on", []) or []),
+                "config": _serializable_config(getattr(reg, "config", {}) or {}),
+                "pipeline_kind": getattr(reg, "pipeline_kind", "understanding"),
+                "priority": getattr(reg, "priority", 0),
+            })
 
     return {
         "data": {"plugins": plugins},
@@ -674,11 +716,18 @@ async def update_plugins_config(
         with open(config_path, "w", encoding="utf-8") as f:
             yaml.dump(clean_config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
-        # 同步更新内存缓存
-        config_manager._set_nested(config_manager._config, "plugins", plugins_cfg)
+        # 原子交换内存配置并触发热重载回调（重建插件实例等）。
+        # 直接 _set_nested 只改内存不通知，导致插件 enabled 改动不生效——
+        # 改用 atomic_swap 走标准的 swap + _notify_reload 流程。
+        import copy
+        new_config = copy.deepcopy(config_manager._config)
+        config_manager._set_nested(new_config, "plugins", plugins_cfg)
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         lock_fd.close()
+
+    # 在锁外执行原子交换（atomic_swap 内部有自己的锁），触发 on_reload 回调
+    config_manager.atomic_swap(new_config)
 
     return {
         "data": {"name": name, "enabled": enabled},
@@ -867,6 +916,11 @@ async def update_global_config(
             file_config["debug_mode"] = debug_mode
             with open(config_path, "w", encoding="utf-8") as f:
                 yaml.dump(file_config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+    # 触发热重载回调（重建插件实例等）。config_manager.set 已改内存，
+    # 但 set 不通知回调；这里显式 atomic_swap 走 _notify_reload。
+    # 注意：set 已修改 _config，故 old==new，回调仍会被调用以重建插件。
+    config_manager.atomic_swap(config_manager._config)
 
     # 根据 hot_reload 开关启停 Watchdog
     if hot_reload:
