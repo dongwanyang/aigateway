@@ -190,7 +190,7 @@ trace_id: str  # 必传,无默认值
 ```yaml
 debug:
   frontend: false          # 前端 control-panel 浏览器日志
-  entry: false             # auth + dispatcher + 共用前置(PII/media) + quota
+  entry: false             # auth + dispatcher + 共用前置(PII/media) + quota + prompt_compress(内联)
   cache: false             # L1/L2/L3 CacheManager 全路径
   bridge: false            # LiteLLMBridge + circuit breaker + auto 解析
   plugins:
@@ -202,7 +202,6 @@ debug:
       rag_retriever: false
       conv_compressor: false
       media_optimizer: false
-      prompt_compress: false    # 挪回真插件后归这里(见 2.4)
       ai_director: false
       intent_evaluator: false
       token_compressor: false
@@ -211,18 +210,18 @@ debug:
       cost_tracker: false
 ```
 
-`model_router` 不列(已退役,见 2.5)。开关总数:4 大区(frontend/entry/cache/bridge)+ 1 插件总开关 + 12 插件 = **17 个**。用户初版说 18,差 1 因 model_router 退役,以实际 17 为准。
+`model_router` 不列(已退役,见 2.5)。`prompt_compress` 不在 `per_plugin`(保留 dispatcher 内联,归 `entry` 档,见 2.4)。开关总数:4 大区(frontend/entry/cache/bridge)+ 1 插件总开关 + 11 插件 = **16 个**。
 
 ### 2.2 getCategory 映射补全(前端依赖)
 
-`Plugins.tsx:92` 的 `getCategory(name)` 现有硬编码映射需确认覆盖所有 12 个保留插件名。本次实现时检查并补全:
+`Plugins.tsx:92` 的 `getCategory(name)` 现有硬编码映射需确认覆盖所有 12 个保留插件名(11 个 engine 插件 + prompt_compress 注册仍在)。本次实现时检查并补全:
 
 - 理解侧:`prompt_cache`/`semantic_cache`→缓存,`pii_detector`→安全,`conv_compressor`→性能,`rag_retriever`/`prompt_compress`→其他
 - 生成侧:`gen_model_router`→路由,`token_compressor`/`cost_tracker`→性能,`ai_director`/`intent_evaluator`/`draft_generator`→其他
 
 未命中的插件名一律落"其他"。`getCategory` 函数本身不改逻辑,只补映射表。
 
-### 2.2 DebugConfig dataclass + 热重载
+### 2.3 DebugConfig dataclass + 热重载
 
 新文件 `aigateway-core/src/aigateway_core/debug_config.py`:
 
@@ -250,19 +249,22 @@ class DebugConfig:
 - `kind=debug` 事件只在对应开关开启时 emit
 - `payload` 字段:开关关时为 `None`(只留耗时);开关开时填 `{input_summary, output_summary, key_vars}`(各插件自定,长度截断,敏感字段脱敏 —— 复用 `PIIDetector` 脱敏)
 - 各维度判断点:
-  - `entry`:auth/dispatcher/共用前置/quota 代码读 `debug_config.entry`
+  - `entry`:auth/dispatcher/共用前置/quota/**prompt_compress 内联** 代码读 `debug_config.entry`
   - `cache`:`CacheManager` 所有 get/set 读 `debug_config.cache`
   - `bridge`:`LiteLLMBridge.completion` / `completion_stream` + CircuitBreaker + `ModelRouterStrategy` 读 `debug_config.bridge`
-  - 插件:engine 循环或插件 `execute` 内读 `debug_config.is_plugin_debug(self.name)`
+  - 插件:engine 循环或插件 `execute` 内读 `debug_config.is_plugin_debug(self.name)`(prompt_compress 不在此列,见 2.4)
 - 前端 `frontend` 维度特殊:control-panel 启动时 fetch `/admin/config/debug` 拿 `frontend` 值,本地控制 `console.debug` + 是否打印 fetch 请求/响应;不经过后端 Redis
 
-### 2.4 prompt_compress 挪回真插件(额外代码改动)
+### 2.4 prompt_compress 保留在 dispatcher 内联(用户决定)
 
-- `dispatcher.py` 删除内联的 `prompt_compress` 调用 + 手工 `add_plugin_trace`
-- `pipeline.py` 的 `_skip_names`(`dispatcher.py:300`)不再包含 `prompt_compress`
-- `PromptCompressPlugin.execute()`(`pipeline.py:655`)真正执行(当前被 skip)
-- 归 `debug.plugins.per_plugin.prompt_compress`,UI 有独立 Debug toggle
-- `prompt_compress.depends_on` 从 `["semantic_cache"]` 保留(model_router 摘掉,见 2.5)
+用户明确"提示词压缩也还放在 dispatcher",不挪回 engine:
+
+- `dispatcher.py` 的 prompt_compress 内联调用 + 手工埋点**保留**,埋点迁移时改成 `emit(kind="stage", stage="compress")`
+- `pipeline.py` 的 `_skip_names`(`dispatcher.py:300`)**继续包含 `prompt_compress`**(engine 不跑它)
+- `PromptCompressPlugin.execute()` 仍是被 skip 的死代码(保留注册仅为兼容,与 `model_router` 不同的是它有真实内联实现,不退役)
+- 归 `entry` debug 档(无独立 per_plugin 开关)
+- **/plugins 页**:保留卡片(注册仍在,有启用/禁用 toggle),但**不显示 Debug 按钮**(因为 debug 走 entry 大区开关,不是 per_plugin)
+- `prompt_compress.depends_on` 确认摘掉 `model_router`(见 2.5)
 
 ### 2.5 model_router 彻底退役(额外代码改动)
 
@@ -312,8 +314,9 @@ class DebugConfig:
 
 - 外层循环 `['understanding','generation']`,内层循环 5 类
 - 每张插件卡保留:图标 + 名称 + 「理解/生成」badge + 描述 + 启用 toggle
-- **新增**:启用 toggle 旁加 Debug toggle(虫子图标),绑定 `plugin.debug` 字段
+- **新增**:启用 toggle 旁加 Debug toggle(虫子图标),绑定 `plugin.debug` 字段。**例外**:`prompt_compress` 卡片不显示 Debug 按钮(它保留 dispatcher 内联,debug 走 entry 大区开关,见 2.4);其余 10 个 engine 插件 + `media_optimizer`(若启用)显示 Debug 按钮
 - `model_router` 不显示(后端已不返回,见 2.5)
+- `/admin/plugins` 接口返回的每个 plugin 增加 `debug` 字段;`prompt_compress` 的 `debug` 字段固定返回 `null`(前端据此隐藏按钮)
 
 ### 3.2 /config 页调试卡片(`Config.tsx` 或对应页)
 
@@ -323,7 +326,7 @@ class DebugConfig:
 | 开关 | 说明 |
 |---|---|
 | 前端 | control-panel 浏览器内日志(console.debug + fetch 详情) |
-| 入口层 | auth + dispatcher + 共用前置(PII/media) + quota |
+| 入口层 | auth + dispatcher + 共用前置(PII/media) + quota + prompt_compress 内联 |
 | cache | L1/L2/L3 缓存查找/写入/淘汰 |
 | bridge | LiteLLM 出口 + 熔断 + auto 模型解析 |
 | 插件层总开关 | 开启后,只有单独也开的插件才打 debug 日志 |
@@ -350,7 +353,7 @@ class DebugConfig:
 
 ## 实现分 3 个 PR(用户确认)
 
-- **PR1**:trace_id 全链路 + TraceEvent 通道(第 1 部分)。包含 model_router 退役(2.5)+ prompt_compress 挪回真插件(2.4),因为埋点迁移要求插件都在 engine 循环里统一 emit,留着内联/空壳会让埋点迁移出现特例。PR1 落地后 trace 已正确,可独立验证。
+- **PR1**:trace_id 全链路 + TraceEvent 通道(第 1 部分)。包含 model_router 退役(2.5)。prompt_compress **不挪**(保留 dispatcher 内联,见 2.4),其内联埋点直接迁到 `emit(kind="stage", stage="compress")`。PR1 落地后 trace 已正确,可独立验证。
 - **PR2**:5 维度 Debug 开关(第 2 部分 2.1-2.3, 2.6)+ 后端接口(3.4)。在 PR1 的 TraceEvent 通道上加 `kind=debug` 事件 + payload 控制。
 - **PR3**:控制台 UI(第 3 部分 3.1-3.3)。前端切到新 `/admin/trace` events 接口;**切完后在 PR3 内删除旧 `plugin_trace` 字段及双写逻辑**(1.7 迁移期结束)。
 
@@ -365,14 +368,14 @@ class DebugConfig:
 ## 风险与回滚
 
 - **trace_id 必传** 改动可能漏掉某个 ctx 构造点 → 用 grep 全量扫描 `PipelineContext(` 确认,测试覆盖共用前置 + 双管道 + 流式路径
-- **prompt_compress 挪回 engine** 改变了它在管道里的位置(原内联在 cache 之后、bridge 之前;engine 里位置由 priority 决定)→ 需确认 priority 设置使其执行顺序等价,测试对比压缩前后行为
 - **Redis 新 key** 增加写入量 → TTL 7 天 + 只在请求结束时一次 flush(非每事件写),影响可控
+- **prompt_compress 保留内联** 意味着它的埋点是 `kind="stage"` 而非 `kind="plugin"`,trace 瀑布图里它和 cache/quota 同色(蓝色),非插件绿色 → UI 上需在说明里标注"内联阶段",避免用户困惑为何它没有 Debug 按钮
 - **删 debug_mode** 可能影响现有部署脚本/文档 → grep `.env*` / docs 确认无引用,INSTALL.md 同步更新
 - 回滚:每个 PR 独立,PR1 出问题回滚后 trace 恢复旧行为(多 trace_id 但不崩);PR2 回滚后 debug 开关失效但 trace 仍工作;PR3 纯前端回滚无风险
 
 ## 验证
 
-- 单元测试:`TraceCollector` 累积/flush、`DebugConfig.is_plugin_debug` AND 逻辑、`prompt_compress` 挪回后 priority 顺序
+- 单元测试:`TraceCollector` 累积/flush、`DebugConfig.is_plugin_debug` AND 逻辑、`prompt_compress` 内联埋点迁到 `emit(kind="stage")` 后顺序正确
 - 集成测试:发一次 `/v1/chat/completions` 请求,断言 `/admin/trace/{id}` 返回的 events 数组包含 auth→pii→cache→(rag/conv)→bridge 完整链路,且所有事件 trace_id 一致
 - debug 测试:开 `prompt_cache` debug,发请求,断言 events 里有 `kind=debug, stage=prompt_cache` 且 payload 非空;关掉后 payload=None
 - 前端:开 `frontend` debug,浏览器 console 看到 fetch 详情;关掉后静默
