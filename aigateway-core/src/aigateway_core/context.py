@@ -343,7 +343,12 @@ class PipelineContext:
         return self.extra.get("_plugin_trace", [])  # type: ignore[no-any-return]
 
     def add_plugin_trace(self, plugin_name: str, duration_ms: float, status: str) -> None:
-        """添加单个插件的执行痕迹。
+        """添加单个插件的执行痕迹(兼容包装)。
+
+        新代码应直接用 TraceCollector.current().emit(TraceEvent(...))。
+        此方法保留仅为不破坏尚未迁移的调用点：既镜像到 TraceCollector
+        (kind=plugin)，也继续写 extra["_plugin_trace"] 供 get_plugin_trace()
+        读取(pipeline.py 仍消费此列表)。
 
         Args:
             plugin_name: 插件名称。
@@ -357,6 +362,29 @@ class PipelineContext:
             "status": status,
         })
         self.extra["_plugin_trace"] = trace
+
+        # 镜像到 TraceCollector（若存在当前请求的 collector）
+        try:
+            from aigateway_core.trace_event import TraceCollector, TraceEvent
+            import time as _time
+            collector = TraceCollector.current()
+            if collector:
+                norm_status = (
+                    "ok" if status == "success"
+                    else ("error" if status == "failed" else "skip")
+                )
+                collector.emit(TraceEvent(
+                    trace_id=self.trace_id,
+                    ts=_time.monotonic(),
+                    stage=plugin_name,
+                    kind="plugin",
+                    name=f"{plugin_name}.execute",
+                    duration_ms=round(duration_ms, 2),
+                    status=norm_status,
+                ))
+        except Exception:
+            # 镜像失败不影响主流程
+            pass
 
     def to_dict(self) -> Dict[str, Any]:
         """将上下文转换为字典（用于调试日志）。

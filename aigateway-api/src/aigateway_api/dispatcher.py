@@ -30,6 +30,46 @@ from aigateway_core.context import PipelineContext
 logger = logging.getLogger(__name__)
 
 
+def _emit_stage(trace_id: str, stage: str, name: str, duration_ms: float,
+                status: str = "ok", payload: dict | None = None) -> None:
+    """发一条 kind=stage 的 TraceEvent(若无 collector 则静默).
+
+    dispatcher 的内联埋点(共用前置/cache/quota/compress/bridge)用此 helper
+    把事件镜像到 TraceCollector。旧的 plugin_trace.append 列表仍保留,
+    供 request.state.plugin_trace 向后兼容(后续 Task 再统一收口)。
+    """
+    from aigateway_core.trace_event import TraceCollector, TraceEvent
+    collector = TraceCollector.current()
+    if collector:
+        collector.emit(TraceEvent(
+            trace_id=trace_id,
+            ts=time.monotonic(),
+            stage=stage,
+            kind="stage",
+            name=name,
+            duration_ms=round(duration_ms, 2),
+            status=status,
+            payload=payload,
+        ))
+
+
+def _emit_plugin(trace_id: str, plugin_name: str, duration_ms: float,
+                 status: str = "ok") -> None:
+    """发一条 kind=plugin 的 TraceEvent(_run_engine_filtered 用)."""
+    from aigateway_core.trace_event import TraceCollector, TraceEvent
+    collector = TraceCollector.current()
+    if collector:
+        collector.emit(TraceEvent(
+            trace_id=trace_id,
+            ts=time.monotonic(),
+            stage=plugin_name,
+            kind="plugin",
+            name=f"{plugin_name}.execute",
+            duration_ms=round(duration_ms, 2),
+            status=status,
+        ))
+
+
 # ------------------------------------------------------------------
 # 分流器
 # ------------------------------------------------------------------
@@ -193,17 +233,21 @@ class RequestDispatcher:
         body.messages = mol_result["messages"]
         mol_meta = mol_result["meta"]
         if mol_meta:
+            _mol_ms = round((time.time() - mol_start) * 1000, 2)
             plugin_trace.append({"plugin_name": "media_optimization",
-                                 "duration_ms": round((time.time() - mol_start) * 1000, 2),
+                                 "duration_ms": _mol_ms,
                                  "status": "success"})
+            _emit_stage(request.state.trace_id, "media", "media_optimizer.process", _mol_ms, "ok")
 
         # ===== 共用前置 2: PII Detection(生成管道也受此保护)=====
         pii_start = time.time()
         pii_result = await _apply_pii_detection(body, request, state)
         if "error" in pii_result:
+            _pii_ms = round((time.time() - pii_start) * 1000, 2)
             plugin_trace.append({"plugin_name": "pii_detector",
-                                 "duration_ms": round((time.time() - pii_start) * 1000, 2),
+                                 "duration_ms": _pii_ms,
                                  "status": "rejected"})
+            _emit_stage(request.state.trace_id, "pii", "pii_detector.sanitize", _pii_ms, "error")
             request.state.plugin_trace = plugin_trace
             await _record_request_log(request=request, method="POST", endpoint="/v1/chat/completions",
                                       status_code=403, duration_ms=0, model=body.model,
@@ -212,9 +256,11 @@ class RequestDispatcher:
         body.messages = pii_result["messages"]
         pii_meta = pii_result["meta"]
         if pii_meta:
+            _pii_ok_ms = round((time.time() - pii_start) * 1000, 2)
             plugin_trace.append({"plugin_name": "pii_detector",
-                                 "duration_ms": round((time.time() - pii_start) * 1000, 2),
+                                 "duration_ms": _pii_ok_ms,
                                  "status": "success", **pii_meta})
+            _emit_stage(request.state.trace_id, "pii", "pii_detector.sanitize", _pii_ok_ms, "ok", payload=pii_meta)
 
         # 前置结果打包传给下游管道(auto 解析已下沉到 bridge,不传 router_meta)
         prefix = {
@@ -298,8 +344,10 @@ class RequestDispatcher:
                 )
                 ctx.should_stream = getattr(body, "stream", False)
                 # 过滤掉已被辅助函数处理的核心插件，避免重复执行
+                # 注：model_router 是空壳（真路由在 bridge auto 解析），不再 skip ——
+                # 让 engine 跑它以保持插件链完整，运行时它本身是 no-op。
                 ctx._skip_names = {"pii_detector", "prompt_cache", "semantic_cache",
-                                   "model_router", "prompt_compress", "media_optimization"}
+                                   "prompt_compress", "media_optimization"}
                 ctx = await self._run_engine_filtered(engine, ctx)
                 # 插件链可能改写 messages / model（rag_retriever 追加检索上下文、
                 # conv_compressor 摘要历史）——回写到 body，供后续 cache_key / LLM 调用使用。
@@ -337,9 +385,12 @@ class RequestDispatcher:
         hit_tier = cached.get("hit_tier") if cached else None
         cache_hit = cached is not None and hit_tier in ("L1", "L2", "L3")
         cache_plugin_name = "semantic_cache" if hit_tier == "L3" else "prompt_cache"
+        _cache_ms = round((time.time() - cache_start) * 1000, 2)
         plugin_trace.append({"plugin_name": cache_plugin_name,
-                             "duration_ms": round((time.time() - cache_start) * 1000, 2),
+                             "duration_ms": _cache_ms,
                              "status": "success"})
+        _emit_stage(request.state.trace_id, "cache", f"{cache_plugin_name}.lookup", _cache_ms, "ok",
+                    payload={"hit_tier": hit_tier} if hit_tier else None)
 
         # 缓存命中短路
         if cache_hit:
@@ -359,9 +410,11 @@ class RequestDispatcher:
                 key_hash=key_hash, tokens=estimated_tokens, cost=0.0
             )
             if not allowed:
+                _qfail_ms = round((time.time() - quota_start) * 1000, 2)
                 plugin_trace.append({"plugin_name": "quota_check",
-                                     "duration_ms": round((time.time() - quota_start) * 1000, 2),
+                                     "duration_ms": _qfail_ms,
                                      "status": "failed"})
+                _emit_stage(request.state.trace_id, "quota", "key_store.check_quota", _qfail_ms, "error")
                 request.state.plugin_trace = plugin_trace
                 headers = {}
                 if retry_after and retry_after > 0:
@@ -380,9 +433,11 @@ class RequestDispatcher:
                                           cache_hit=False, cache_tier=None)
                 return JSONResponse(content={"error": {"code": code, "message": fail_msg}},
                                    status_code=429, headers=headers)
+        _qok_ms = round((time.time() - quota_start) * 1000, 2)
         plugin_trace.append({"plugin_name": "quota_check",
-                             "duration_ms": round((time.time() - quota_start) * 1000, 2),
+                             "duration_ms": _qok_ms,
                              "status": "success"})
+        _emit_stage(request.state.trace_id, "quota", "key_store.check_quota", _qok_ms, "ok")
 
         # ===== Prompt Compression =====
         compress_start = time.time()
@@ -390,13 +445,17 @@ class RequestDispatcher:
         body.messages = compress_result["messages"]
         compress_meta = compress_result["meta"]
         if compress_meta and compress_meta.get("compression_ratio", 1.0) < 1.0:
+            _comp_ms = round((time.time() - compress_start) * 1000, 2)
             plugin_trace.append({"plugin_name": "prompt_compress",
-                                 "duration_ms": round((time.time() - compress_start) * 1000, 2),
+                                 "duration_ms": _comp_ms,
                                  "status": "success", **compress_meta})
+            _emit_stage(request.state.trace_id, "compress", "prompt_compress.compress", _comp_ms, "ok", payload=compress_meta)
         else:
+            _comp_skip_ms = round((time.time() - compress_start) * 1000, 2)
             plugin_trace.append({"plugin_name": "prompt_compress",
-                                 "duration_ms": round((time.time() - compress_start) * 1000, 2),
+                                 "duration_ms": _comp_skip_ms,
                                  "status": "skipped"})
+            _emit_stage(request.state.trace_id, "compress", "prompt_compress.compress", _comp_skip_ms, "skip")
 
         # ===== LiteLLM 出口 =====
         litellm_bridge = self.litellm_bridge
@@ -473,9 +532,11 @@ class RequestDispatcher:
                 key_hash=key_hash, tokens=estimated_tokens, cost=0.0
             )
             if not allowed:
+                _qfail_ms = round((time.time() - quota_start) * 1000, 2)
                 plugin_trace.append({"plugin_name": "quota_check",
-                                     "duration_ms": round((time.time() - quota_start) * 1000, 2),
+                                     "duration_ms": _qfail_ms,
                                      "status": "failed"})
+                _emit_stage(request.state.trace_id, "quota", "key_store.check_quota", _qfail_ms, "error")
                 request.state.plugin_trace = plugin_trace
                 headers = {}
                 if retry_after and retry_after > 0:
@@ -494,9 +555,11 @@ class RequestDispatcher:
                                           cache_hit=False, cache_tier=None)
                 return JSONResponse(content={"error": {"code": code, "message": fail_msg}},
                                    status_code=429, headers=headers)
+        _qok_ms = round((time.time() - quota_start) * 1000, 2)
         plugin_trace.append({"plugin_name": "quota_check",
-                             "duration_ms": round((time.time() - quota_start) * 1000, 2),
+                             "duration_ms": _qok_ms,
                              "status": "success"})
+        _emit_stage(request.state.trace_id, "quota", "key_store.check_quota", _qok_ms, "ok")
 
         # ===== LiteLLM 出口（生成管道直接调，不查缓存）=====
         # body.model 可能是 'auto',由 bridge 内部按 generation 模态解析。
@@ -566,9 +629,11 @@ class RequestDispatcher:
                 pipeline_kind=pipeline_kind,
             )
         except Exception as exc:
+            _llm_fail_ms = round((time.time() - request_start_time) * 1000, 2)
             plugin_trace.append({"plugin_name": "llm_completion",
-                                 "duration_ms": round((time.time() - request_start_time) * 1000, 2),
+                                 "duration_ms": _llm_fail_ms,
                                  "status": "failed"})
+            _emit_stage(request.state.trace_id, "bridge", "litellm_bridge.completion", _llm_fail_ms, "error")
             logger.error("LLM completion failed: %s", exc, exc_info=True)
             if tracker:
                 tracker.__exit__(type(exc), exc, exc.__traceback__)
@@ -578,9 +643,11 @@ class RequestDispatcher:
                 status_code=500,
             )
 
+        _llm_ok_ms = round((time.time() - request_start_time) * 1000, 2)
         plugin_trace.append({"plugin_name": "llm_completion",
-                             "duration_ms": round((time.time() - request_start_time) * 1000, 2),
+                             "duration_ms": _llm_ok_ms,
                              "status": "success"})
+        _emit_stage(request.state.trace_id, "bridge", "litellm_bridge.completion", _llm_ok_ms, "ok")
 
         # bridge 返回错误
         if "error" in result and "data" not in result:
@@ -714,9 +781,11 @@ class RequestDispatcher:
             body.model, user_id, key_hash, cache_key, normalized_messages, llm_start,
         )
 
+        _stream_ms = round((time.time() - llm_start) * 1000, 2)
         plugin_trace.append({"plugin_name": "llm_completion",
-                             "duration_ms": round((time.time() - llm_start) * 1000, 2),
+                             "duration_ms": _stream_ms,
                              "status": "success"})
+        _emit_stage(request.state.trace_id, "bridge", "litellm_bridge.completion_stream", _stream_ms, "ok")
         request.state.plugin_trace = plugin_trace
 
         if metrics_collector:
@@ -928,9 +997,9 @@ class RequestDispatcher:
                 ctx = await plugin.execute(ctx)
             except Exception as exc:
                 elapsed = (_time.monotonic() - pstart) * 1000
-                ctx.add_plugin_trace(plugin.name, elapsed, "failed")
+                _emit_plugin(ctx.trace_id, plugin.name, elapsed, "error")
                 logger.warning("插件 %s 执行失败（fail-open）: %s", plugin.name, exc)
                 continue
             elapsed = (_time.monotonic() - pstart) * 1000
-            ctx.add_plugin_trace(plugin.name, elapsed, "success")
+            _emit_plugin(ctx.trace_id, plugin.name, elapsed, "ok")
         return ctx
