@@ -3,7 +3,7 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-COPY package.json tsconfig.json vite.config.ts tailwind.config.js postcss.config.js index.html ./
+COPY package.json package-lock.json tsconfig.json vite.config.ts tailwind.config.js postcss.config.js index.html ./
 COPY src/ ./src/
 
 # 本地开发：空 VITE_API_BASE，直连 localhost:8000
@@ -12,7 +12,8 @@ ARG VITE_BASE_URL=/
 ENV VITE_API_BASE=$VITE_API_BASE
 ENV VITE_BASE_URL=$VITE_BASE_URL
 
-RUN npm install && npm run build
+# npm ci:有 package-lock.json 时更快、更确定、CI 友好
+RUN npm ci && npm run build
 
 # ---- Serve ----
 FROM nginx:alpine

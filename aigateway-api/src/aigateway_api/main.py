@@ -16,6 +16,16 @@ import sys
 from contextlib import asynccontextmanager
 from typing import Any, Dict, Optional
 
+# 加载 .env 文件到进程环境变量(必须在任何配置读取前执行)
+# override=False → 不覆盖已存在的环境变量,保证优先级:
+#   进程环境变量(docker environment: / shell export) > .env > config.yaml
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    # python-dotenv 未安装时静默跳过,回退到纯环境变量/config.yaml
+    pass
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 

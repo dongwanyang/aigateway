@@ -1,0 +1,50 @@
+# ============================================================
+# AI Gateway — Python 依赖清单(合并自原 Dockerfile 的 6 个 pip 层)
+# ============================================================
+# 新增/升级依赖请改本文件,而非 Dockerfile。
+# torch 单独在 Dockerfile 中安装(CPU 版,从前置层稳定缓存)。
+# ============================================================
+
+# --- Web 框架与服务 ---
+fastapi
+uvicorn[standard]
+gunicorn
+pyyaml
+watchdog
+prometheus-client
+structlog
+cachetools
+lz4
+httpx
+redis
+hiredis
+pydantic
+litellm
+Pillow
+
+# --- 多模态处理 ---
+pytesseract
+opencv-python-headless
+faster-whisper
+pymupdf
+python-docx
+beautifulsoup4
+
+# --- Embedding / 语义缓存(transformers,torch 在 Dockerfile 单独装)---
+transformers>=4.51.0
+
+# --- Prompt 压缩 ---
+llmlingua>=0.2.0
+
+# --- RAG 检索 ---
+llama-index>=0.10.0
+llama-index-vector-stores-qdrant>=0.2.0
+llama-index-embeddings-huggingface>=0.2.0
+qdrant-client
+
+# --- 对话历史压缩(langchain 1.x 把 Legacy Memory 移到 langchain-classic)---
+langchain-classic
+langchain-openai
+
+# --- 配置加载:.env 文件支持 ---
+python-dotenv

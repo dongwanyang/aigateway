@@ -1,0 +1,83 @@
+# ============================================================
+# .dockerignore — 缩小构建上下文,加速镜像构建
+# ============================================================
+# gateway 构建上下文为仓库根(.),前端为 ./control-panel
+# 排除所有不参与镜像构建的路径,避免 .venv(5GB+)等进入上下文
+# ============================================================
+
+# Python 虚拟环境与缓存(最大头:.venv 可达 5GB)
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node 依赖与构建产物(Dockerfile 内自行 npm install)
+**/node_modules/
+**/dist/
+**/build/
+**/.vite/
+*.tsbuildinfo
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# 环境与密钥(不入镜像,运行时挂载/注入)
+.env
+.env.local
+.env.production
+.env.*.local
+
+# IDE / 编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Docker 自身(避免 Dockerfile 改动影响上下文哈希)
+docker-compose.yml
+docker-compose.*.yml
+Dockerfile.frontend
+aigateway-api/Dockerfile
+**/Dockerfile*
+
+# 运行时数据卷
+redis-data/
+qdrant-data/
+grafana-data/
+prometheus-data/
+
+# 文档与脚本(不进镜像)
+docs/
+*.md
+scripts/
+project-tasks/
+src/
+
+# 工具 / 临时
+.kiro/
+.claude/
+.playwright-cli/
+1783016181584.md
+1783049238070.md
+2026-06-27-ai-gateway-design.md
+design.md
+
+# 测试(镜像不跑测试)
+tests/
+
+# 保留(白名单,确保不被误排):
+# - aigateway-core/src/aigateway_core/**
+# - aigateway-api/src/aigateway_api/**
+# - aigateway-api/requirements.txt
+# - .env.example(供参考,可入镜像)

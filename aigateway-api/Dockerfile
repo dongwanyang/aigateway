@@ -1,6 +1,9 @@
 FROM python:3.12-slim
 
-# 安装系统依赖（OCR tesseract + 视频 ffmpeg/opencv + curl healthcheck）
+# ============================================================
+# 系统依赖:OCR(tesseract + 中文/英文)+ 视频(ffmpeg/opencv 运行库)+ curl(healthcheck)
+# 几乎不变,放最前确保永久缓存
+# ============================================================
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     tesseract-ocr \
@@ -13,59 +16,32 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# 安装基础依赖
-RUN pip install --no-cache-dir \
-    fastapi uvicorn[standard] gunicorn \
-    pyyaml watchdog \
-    prometheus-client \
-    structlog \
-    cachetools lz4 \
-    httpx \
-    redis hiredis \
-    pydantic \
-    litellm \
-    Pillow
+# ============================================================
+# torch 单独前置层:最大依赖(~1GB)、最稳定,几乎不会变
+# CPU-only 版本,避免拉入 CUDA 体积
+# ============================================================
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
 
-# 安装多模态处理依赖
-RUN pip install --no-cache-dir \
-    pytesseract \
-    opencv-python-headless \
-    faster-whisper \
-    pymupdf \
-    python-docx \
-    beautifulsoup4
+# ============================================================
+# 其余全部 Python 依赖一次性安装(从 requirements.txt)
+# 合并自原 6 个分散 pip 层,单次依赖解析,缓存命中率最高
+# requirements.txt 先于源码 COPY,改业务代码不会触发重装
+# ============================================================
+COPY aigateway-api/requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
-# 安装 Embedding 模型依赖（CPU-only PyTorch + transformers）
-# 用于 L3 语义缓存的 Qwen/Qwen3-Embedding-0.6B 向量计算
-RUN pip install --no-cache-dir \
-    torch --index-url https://download.pytorch.org/whl/cpu \
-    && pip install --no-cache-dir \
-    "transformers>=4.51.0"
+# ============================================================
+# 预下载 Qwen3-Embedding-0.6B 模型权重(避免首次请求延迟)
+# 只依赖 torch+transformers,不依赖业务代码 → 放源码前,改代码不触发重下
+# ============================================================
+RUN python -c "from transformers import AutoModel, AutoTokenizer; \
+    AutoTokenizer.from_pretrained('Qwen/Qwen3-Embedding-0.6B', trust_remote_code=True); \
+    AutoModel.from_pretrained('Qwen/Qwen3-Embedding-0.6B', trust_remote_code=True); \
+    print('Model cached')"
 
-# 预下载 Qwen3-Embedding-0.6B 模型权重（避免首次请求延迟）
-RUN python -c "from transformers import AutoModel, AutoTokenizer; AutoTokenizer.from_pretrained('Qwen/Qwen3-Embedding-0.6B', trust_remote_code=True); AutoModel.from_pretrained('Qwen/Qwen3-Embedding-0.6B', trust_remote_code=True); print('Model cached')"
-
-# 安装 Prompt Token 压缩（LLMLingua-2）
-# 依赖前面已安装的 torch/transformers/nltk，只需装 llmlingua 本体
-RUN pip install --no-cache-dir llmlingua>=0.2.0
-
-# 安装 RAG 检索依赖（LlamaIndex + Qdrant 向量存储适配器 + 本地 HuggingFace embedding）
-# RAGRetrieverPlugin 缺此依赖会降级为 passthrough
-# huggingface embedding 让 RAG 复用本地 Qwen3-Embedding-0.6B，不再强依赖 OPENAI_API_KEY
-RUN pip install --no-cache-dir \
-    "llama-index>=0.10.0" \
-    "llama-index-vector-stores-qdrant>=0.2.0" \
-    "llama-index-embeddings-huggingface>=0.2.0" \
-    qdrant-client
-
-# 安装对话历史压缩依赖（LangChain classic + OpenAI 后端）
-# langchain 1.x 已将 ConversationSummaryBufferMemory 等 Legacy Memory 类移到 langchain-classic
-# ConvCompressorPlugin 缺此依赖会降级为 passthrough
-RUN pip install --no-cache-dir \
-    langchain-classic \
-    langchain-openai
-
-# 复制源码
+# ============================================================
+# 源码最后 COPY:最高频变动,放最后确保上面所有重量级层缓存命中
+# ============================================================
 COPY aigateway-core/src/aigateway_core /app/aigateway_core
 COPY aigateway-api/src/aigateway_api /app/aigateway_api
 

@@ -1,3 +1,9 @@
+# ============================================================
+# 构建加速:启用 BuildKit(并行层构建 + 增量上下文传输)
+#   set -a && source .env.docker && set +a && docker compose ...
+#   或直接:sudo DOCKER_BUILDKIT=1 docker compose up -d --build gateway
+# .dockerignore 已排除 .venv/node_modules/.git 等,构建上下文 < 10MB
+# ============================================================
 services:
   # ==========================================================
   # API Gateway 服务
@@ -8,6 +14,10 @@ services:
       dockerfile: aigateway-api/Dockerfile
     ports:
       - "8000:8000"
+    # .env 注入:容器内 os.environ 同时含 .env 与下方 environment:
+    # 优先级:environment: 段(覆盖) > .env > config.yaml
+    env_file:
+      - .env
     environment:
       - AI_GATEWAY_REDIS_URL=redis://redis:6379/0
       - AI_GATEWAY_QDRANT_URL=http://qdrant:6333

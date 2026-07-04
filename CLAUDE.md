@@ -141,8 +141,11 @@ Prometheus histogram for request duration, counters for cache hits/misses/tokens
 | `config.yaml` | Single source of truth: server, auth, plugins, providers, embedding, observability, media_optimization, cache, circuit_breaker |
 | `config.yaml.template` | Full parameter documentation with comments |
 | `docker-compose.yml` | 6 services: gateway, control-panel, redis, qdrant, prometheus, grafana |
-| `aigateway-api/Dockerfile` | Python 3.12-slim, installs all deps inline, pre-caches Qwen3-Embedding model |
-| `Dockerfile.frontend` | Multi-stage: Node 20 Alpine builder → Nginx Alpine serve |
+| `aigateway-api/Dockerfile` | Python 3.12-slim;分层安装(apt→torch→requirements.txt→Qwen3 模型→源码),改源码秒级重建 |
+| `aigateway-api/requirements.txt` | gateway 全部 Python 依赖集中清单(新增依赖改此文件) |
+| `Dockerfile.frontend` | Multi-stage: Node 20 Alpine builder(`npm ci`)→ Nginx Alpine serve |
+| `.dockerignore` | 排除 .venv/node_modules/.git 等,构建上下文 < 10MB |
+| `.env.example` / `.env.docker` | 入库模板:运行时配置 / BuildKit 开关;`.env` 本身 gitignored |
 | `docs/API_CONTRACT.md` | Request/response schemas, error formats |
 | `docs/TECH_SPEC.md` | Technology choices, config schema |
 | `docs/DB_SCHEMA.md` | Redis keys, Qdrant collections, PipelineContext structures |
@@ -181,10 +184,16 @@ Production uses nginx proxy at `/aigateway/*` → `http://gateway:8000/`.
 ### Docker Compose
 
 ```bash
+# 构建加速:启用 BuildKit(并行层构建 + 增量上下文)
+# .dockerignore 已排除 .venv/node_modules/.git,构建上下文 < 10MB
+sudo DOCKER_BUILDKIT=1 docker compose up -d --build gateway   # 重建 gateway(改源码后秒级命中缓存)
+sudo DOCKER_BUILDKIT=1 docker compose up -d --build control-panel
 docker compose up -d          # Start all 6 services
 docker compose down           # Stop everything
 docker compose up -d --build  # Rebuild and restart
 ```
+
+> 也可 `set -a && source .env.docker && set +a` 一次性导入 BuildKit 开关后省去 `DOCKER_BUILDKIT=1` 前缀。
 
 Services:
 - Gateway API: `http://localhost:8000`
@@ -209,11 +218,18 @@ Tests live in `/tests/` (25 files). No conftest.py or pytest.ini — tests run d
 
 ### Configuration
 
-- `config.yaml` — YAML config with `${ENV_VAR}` interpolation
-- `AI_GATEWAY_*` env vars override YAML sections (e.g., `AI_GATEWAY_REDIS_URL`)
-- `AI_GATEWAY_GENERATION_OPTIMIZATION_*` env vars override generation_optimization section
-- `hot_reload: true` in config enables Watchdog file watcher for live config updates
-- Environment mode: `AI_GATEWAY_ENV=production` forces debug_mode=False, log_level≥INFO
+**配置优先级(高 → 低):**
+1. 进程真实环境变量(docker-compose `environment:` 段 / shell `export`)— 最高
+2. `.env` 文件(`python-dotenv` `load_dotenv(override=False)` 加载,不覆盖已存在的环境变量)— 运维常改项
+3. `config.yaml` 明文值
+4. 代码内 `_DEFAULT_CONFIG` 默认值 — 最低
+
+- `.env`(gitignored,不入库)— 运行时变量;`.env.example` 是入库模板,列全所有可配置项。
+- `config.yaml` — YAML config with `${ENV_VAR}` / `${VAR:-default}` interpolation. Provider API keys 等敏感值已改为 `${VAR}` 引用 `.env` 变量。
+- `AI_GATEWAY_*` env vars override YAML sections (e.g., `AI_GATEWAY_REDIS_URL`);`load_dotenv()` 在 `main.py` / CLI `__main__.py` 入口最早处执行,先于 `ConfigManager` 读取。
+- `AI_GATEWAY_GENERATION_OPTIMIZATION_*` env vars override generation_optimization section.
+- `hot_reload: true` in config enables Watchdog file watcher for live config updates.
+- Environment mode: `AI_GATEWAY_ENV=production` forces debug_mode=False, log_level≥INFO.
 
 ## Important Patterns
 
@@ -225,17 +241,19 @@ Tests live in `/tests/` (25 files). No conftest.py or pytest.ini — tests run d
 
 4. **Frontend parses Prometheus text** — `client.ts::parseMetrics()` converts Prometheus text format to JSON objects client-side. No backend endpoint for structured metrics.
 
-5. **No pyproject.toml or requirements.txt** — Dependencies are installed inline in Dockerfiles via `pip install`. Local dev uses `pip install -e .` with no setup.py/pyproject.toml (editable installs work because packages are just directories under `src/`).
+5. **Dependencies via `requirements.txt`** — gateway 依赖集中在 `aigateway-api/requirements.txt`(合并自原 Dockerfile 的 6 个 pip 层 + `python-dotenv`)。新增/升级 Python 依赖改该文件,而非 Dockerfile。Local dev uses `pip install -e .` with no setup.py/pyproject.toml (editable installs work because packages are just directories under `src/`). torch 单独在 Dockerfile 前置层安装(CPU 版,最大最稳定)。
 
-6. **`.env` is gitignored** — Copy `.env.example` to `.env` for local development. Production builds use `VITE_API_BASE=/aigateway` from `.env.production`.
+6. **`.env` for runtime config** — `.env`(gitignored)holds runtime/secrets; `.env.example` is the checked-in template. `python-dotenv` `load_dotenv(override=False)` runs at the very top of `main.py` and CLI `__main__.py`, before any config read. Priority: process env > `.env` > `config.yaml` > defaults. Production builds use `VITE_API_BASE=/aigateway` from `.env.production`.
 
-7. **Generation Optimization Config Hot-Reload** — `GenerationOptimizationConfigWatcher` registers with `ConfigManager.on_reload()` callbacks. Invalid field values fall back to previous valid values (never crash the service).
+7. **Build-accelerated Docker images** — `.dockerignore` excludes `.venv`(5GB+)/`node_modules`/`.git`/`dist`/`docs`, keeping build context < 10MB. BuildKit(`DOCKER_BUILDKIT=1`,见 `.env.docker`)enables parallel layer builds. gateway Dockerfile 分层顺序:apt → torch → `pip install -r requirements.txt` → Qwen3 模型预下载 → COPY 源码(最后),改源码只重建最后两层。Frontend 用 `npm ci`。
 
-8. **Admin routes use file locking** — Config writes use `fcntl.flock()` to prevent concurrent write conflicts in multi-worker deployments.
+8. **Generation Optimization Config Hot-Reload** — `GenerationOptimizationConfigWatcher` registers with `ConfigManager.on_reload()` callbacks. Invalid field values fall back to previous valid values (never crash the service).
 
-9. **Two-layer plugin registration** — `_register_builtin_plugins()` handles the classic pipeline plugins (pii_detector, prompt_cache, etc.). `register_generation_optimization_plugins()` handles the newer generation optimization layer (ai_director, token_compressor, etc.). Both register into the same `PluginRegistry`.
+9. **Admin routes use file locking** — Config writes use `fcntl.flock()` to prevent concurrent write conflicts in multi-worker deployments.
 
-10. **Embedding model caching** — L3 semantic cache uses module-level `_l3_model_cache` in `openai_compat.py` to avoid reloading the ~600MB Qwen3-Embedding-0.6B model per request.
+10. **Two-layer plugin registration** — `_register_builtin_plugins()` handles the classic pipeline plugins (pii_detector, prompt_cache, etc.). `register_generation_optimization_plugins()` handles the newer generation optimization layer (ai_director, token_compressor, etc.). Both register into the same `PluginRegistry`.
+
+11. **Embedding model caching** — L3 semantic cache uses module-level `_l3_model_cache` in `openai_compat.py` to avoid reloading the ~600MB Qwen3-Embedding-0.6B model per request.
 
 ## Architecture Decisions & Known States
 

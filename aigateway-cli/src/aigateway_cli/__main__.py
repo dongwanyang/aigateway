@@ -14,6 +14,14 @@ aigateway-cli 入口点
 import argparse
 import sys
 
+# 加载 .env 文件到进程环境变量(在任何环境变量读取前执行)
+# override=False → 不覆盖已存在的环境变量,保证 shell export > .env
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 from aigateway_cli.__version__ import __version__  # type: ignore  # noqa: E402
 
 
