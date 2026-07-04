@@ -100,11 +100,14 @@
 # 1. 克隆项目
 git clone <repo-url> && cd gateway2
 
-# 2. 编辑 config.yaml，填入你的 LLM 提供商 API Key
-#    providers.agnes.api_key / providers.deepseek.api_key 等
+# 2. 创建 .env 并填入你的 LLM 提供商 API Key
+cp .env.example .env
+nano .env   # 至少填一个:AGNES_API_KEY 或 DEEPSEEK_API_KEY
 
-# 3. 一键启动 6 个服务
-docker compose up -d
+# 3. 一键启动 6 个服务（首次构建约 10-15 分钟,后续改代码重建秒级）
+docker compose up -d --build
+#   或用快速启动脚本(自动引导建 .env + 健康检查):
+#   bash scripts/quickstart.sh --build
 
 # 4. 访问
 # API Gateway:   http://localhost:8000
@@ -112,6 +115,10 @@ docker compose up -d
 # Prometheus:    http://localhost:9090
 # Grafana:       http://localhost:3001 (admin/admin)
 ```
+
+> 💡 **不填 API Key 也能启动**：`config.yaml` 中所有密钥用 `${VAR:-}` 引用，未设时优雅降级为空。Gateway 能正常启动（插件 fail-open），但调用 LLM 会鉴权失败 —— 填好 `.env` 后 `docker compose restart gateway` 即可。
+>
+> 📋 完整安装/配置/排查指引见 [INSTALL.md](INSTALL.md)。
 
 ### 方式二：本地开发
 
