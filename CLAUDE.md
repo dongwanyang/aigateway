@@ -254,7 +254,7 @@ After every code-changing task is complete and verified:
 ### 1. Auto-commit with conflict confirmation
 - Stage and commit all changes from the task with a clear conventional-commit message (`feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`) summarizing what changed.
 - If `git commit` or `git add` produces a merge conflict (e.g. rebase/merge needed, or uncommitted changes from another branch clash), **do NOT force-resolve**. Stop, surface the conflict details, and ask the user to confirm how to proceed before continuing.
-- Commits use the configured git identity (Gateway2). Do not push unless the user explicitly asks.
+- Commits use the configured git identity (Gateway2). Do not push unless the user explicitly asks — see rule 4 for the push-after-merge policy.
 
 ### 2. Rebuild Docker image when required
 - Determine whether the change requires a Docker rebuild to take effect:
@@ -274,3 +274,10 @@ After every code-changing task is complete and verified:
 - Maintain `CLAUDE.md` as a living document. After any task that changes architecture, adds/removes a major component, alters config schema, changes commands, or shifts a known-state item, update the corresponding section in `CLAUDE.md` in the same task.
 - Periodically (and at least when the architecture overview or pipeline flow no longer matches the code), refresh: scan `aigateway-core/src/`, `aigateway-api/src/`, and `control-panel/src/` for new/removed modules and reconcile the "Architecture at a Glance" diagram, "Plugin Pipeline Flow", "Important Patterns", and "Architecture Decisions & Known States" sections.
 - Do not let CLAUDE.md drift from reality — outdated guidance misleads future sessions more than missing guidance.
+
+### 4. Careful merge with conflict-of-function review, then push to remote
+When merging code (e.g. feature branch → `main`, or integrating another branch's changes):
+- **Before resolving conflicts, check for functional conflicts or overrides** — not just textual `<<<<<<<` markers. Two branches may both apply cleanly yet implement the same feature in incompatible ways, or one branch's change may silently override/revert the other's intended behavior (e.g. both editing the same function/section in `config.yaml`, both adding a plugin with the same name, both modifying the same route handler). Examine the merged result holistically: does every feature from both sides still work as intended, or did one side's edit negate the other's?
+- **Evaluate which to keep before asking.** When a functional conflict exists, first form your own assessment: which version is correct / more complete / better aligned with current architecture, and why. Present that recommendation along with the trade-off, then ask the user to confirm which side to keep — do **not** silently pick one, and do **not** reflexively ask without a recommendation.
+- **Never force-resolve blindly.** If unsure, surface the specific conflict (file, lines, both sides' intent) and ask.
+- **Push to remote GitHub promptly after merging into `main`.** Once a merge lands on `main` (and any required Docker rebuild + verification per rule 2 is done), push to the remote GitHub repo without waiting to be asked. This is the explicit exception to rule 1's "do not push unless asked" — merge-to-main triggers a push. If the push is rejected (non-fast-forward), pull/rebase first; if conflicts arise during that rebase, fall back to the conflict-confirmation policy above before continuing.
