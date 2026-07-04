@@ -179,7 +179,7 @@ streaming:
   cache_chunk_delay_ms: 20
   cache_chunk_count: 20
 hot_reload: true
-debug_mode: false
+debug_mode: true
 media_optimization:
   enabled: true
   download_timeouts:
