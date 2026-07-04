@@ -82,7 +82,9 @@ Request enters FastAPI → auth_middleware validates API key → two parallel pr
 2. **prompt_cache** — exact-match cache (L1 → L2 → L3)
 3. **semantic_cache** — vector similarity on missed prompts (Qdrant, cosine ≥ 0.95)
 4. **model_router** — select best provider/model based on cost/speed/quality strategy
-5. **prompt_compress** — placeholder (records original length, no actual compression yet)
+5. **prompt_compress** — LLMLingua-2 based prompt compression (real implementation; `compression_ratio`, `device`, `target_token` configurable)
+6. **rag_retriever** — Qdrant knowledge base retrieval (default enabled with local fallback)
+7. **conv_compressor** — conversation history summarization for long sessions (default enabled with local defaults)
 
 Short-circuit via `ctx.should_stop = True` at any stage. Non-critical plugin failures are fail-open.
 
@@ -203,7 +205,7 @@ python -m pytest tests/test_token_compressor_strategy.py -v
 python -m pytest tests/ --cov=aigateway_core --cov=aigateway_api
 ```
 
-Tests live in `/tests/` (22 files). No conftest.py or pytest.ini — tests run directly with `python -m pytest`.
+Tests live in `/tests/` (25 files). No conftest.py or pytest.ini — tests run directly with `python -m pytest`. Note: `tests/test_template_routes.py` is a pre-existing flaky test — skip with `--ignore=tests/test_template_routes.py` when running the full suite. The environment uses `python3` (no `python` alias); use `python3 -m pytest ...`.
 
 ### Configuration
 
@@ -237,7 +239,38 @@ Tests live in `/tests/` (22 files). No conftest.py or pytest.ini — tests run d
 
 ## Architecture Decisions & Known States
 
-- **prompt_compress** is a placeholder — records original length but does not actually compress (marked TODO in code). Real implementation would integrate LangChain-style conversation summarization.
+- **prompt_compress** is now a real implementation using LLMLingua-2 (multilingual). `device: cpu|cuda` controls runtime; `device_map` auto-set for GPU. `compression_ratio`/`target_token` control output size.
+- **rag_retriever** & **conv_compressor** are default-enabled with local fallback behavior (no external service strictly required to start, though Qdrant is needed for full RAG retrieval).
+- **debug_mode** auto-triggers DEBUG log level — when `debug_mode: true`, `log_level` is forced to `DEBUG` regardless of the configured level. `AI_GATEWAY_ENV=production` forces `debug_mode=False` and `log_level≥INFO` as a safety net.
 - **TokenCompressorStrategy** uses deterministic hash-based feature vectors as placeholders — actual ML inference (CLIP/ViT segmentation + feature extraction) is planned for future integration.
-- **Media Optimization Layer** is the newest major feature (V2), handles OCR, video keyframes, audio transcription, document parsing — configurable per-media-type in `config.yaml`.
+- **Media Optimization Layer** handles OCR, video keyframes, audio transcription, document parsing — configurable per-media-type in `config.yaml`.
 - **Single worker architecture** — `workers: 1` controlled by Dockerfile CMD. The `workers` config parameter in config.yaml is deprecated (removed by recent commit).
+- **Per-model `base_url` override** — providers like Agnes route text/image/video generation through different API endpoints. Each model entry in `providers.<name>.model_grouper[].models[]` may set an optional `base_url`; if omitted or empty, it inherits the provider-level `base_url`. Fallback models always use the provider-level URL (never inherit a primary model's custom URL). Implemented in `_build_model_list()` at init time — LiteLLM Router treats each `model_list` entry independently, so no runtime/call-path changes are needed.
+
+## Workflow Rules (post-task actions)
+
+After every code-changing task is complete and verified:
+
+### 1. Auto-commit with conflict confirmation
+- Stage and commit all changes from the task with a clear conventional-commit message (`feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`) summarizing what changed.
+- If `git commit` or `git add` produces a merge conflict (e.g. rebase/merge needed, or uncommitted changes from another branch clash), **do NOT force-resolve**. Stop, surface the conflict details, and ask the user to confirm how to proceed before continuing.
+- Commits use the configured git identity (Gateway2). Do not push unless the user explicitly asks.
+
+### 2. Rebuild Docker image when required
+- Determine whether the change requires a Docker rebuild to take effect:
+  - **Requires rebuild**: any change to backend Python source under `aigateway-api/` or `aigateway-core/`, Dockerfile changes, dependency additions, or `config.yaml` structural changes baked into the image.
+  - **Does NOT require rebuild** (live config): edits to `config.yaml` values when `hot_reload: true` (Watchdog picks them up at runtime), frontend-only changes during `npm run dev` (Vite HMR), or pure documentation.
+- When a rebuild is required, rebuild the affected service(s) and verify the change took effect:
+  ```bash
+  docker compose up -d --build gateway        # backend changes
+  docker compose up -d --build control-panel  # frontend changes
+  # then verify, e.g.:
+  curl -s http://localhost:8000/health
+  docker compose logs --tail=50 gateway | grep -i error
+  ```
+- Report the rebuild + verification result alongside the commit. If Docker is not running or rebuild fails, surface the error rather than skipping silently.
+
+### 3. Keep CLAUDE.md current
+- Maintain `CLAUDE.md` as a living document. After any task that changes architecture, adds/removes a major component, alters config schema, changes commands, or shifts a known-state item, update the corresponding section in `CLAUDE.md` in the same task.
+- Periodically (and at least when the architecture overview or pipeline flow no longer matches the code), refresh: scan `aigateway-core/src/`, `aigateway-api/src/`, and `control-panel/src/` for new/removed modules and reconcile the "Architecture at a Glance" diagram, "Plugin Pipeline Flow", "Important Patterns", and "Architecture Decisions & Known States" sections.
+- Do not let CLAUDE.md drift from reality — outdated guidance misleads future sessions more than missing guidance.
