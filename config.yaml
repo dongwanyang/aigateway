@@ -86,10 +86,10 @@ plugins:
     summary_interval: 5
     # 默认让摘要 LLM 走 gateway 自己（agnes-2.0-flash），避免依赖外部 OPENAI_API_KEY
     api_base: http://localhost:8000/v1
-    api_key: gw-rRIop4dpcyJJNUTJbHmHpr9Bj3M11s5o
+    api_key: ${CONV_COMPRESSOR_API_KEY}
 providers:
   agnes:
-    api_key: sk-Idz9oi7Cvx946OY6ipSp5FjU0T1S8IHQXRnVAnu2j1Q2zPBK
+    api_key: ${AGNES_API_KEY}
     base_url: https://apihub.agnes-ai.com/v1
     model_grouper:
     - models:
@@ -97,8 +97,10 @@ providers:
         modality: [mllm]        # 多模态理解（文本+图片输入）
       - name: agnes-image-2.1-flash
         modality: [generative]  # 图片生成
+        base_url: https://image-api.agnes-ai.com/v1  # per-model 覆盖：图片生成走独立端点
       - name: agnes-video-v2.0
         modality: [generative]  # 视频生成
+        base_url: https://video-api.agnes-ai.com/v1  # per-model 覆盖：视频走独立端点
       fallback_models: []
       pricing:
         agnes-2.0-flash:
@@ -108,7 +110,7 @@ providers:
     retry_after: 1000
     timeout: 3600
   deepseek:
-    api_key: sk-d10ef482afad4b86a37f680ddb336d37
+    api_key: ${DEEPSEEK_API_KEY}
     base_url: https://api.deepseek.com/v1
     model_grouper:
     - models:
