@@ -98,11 +98,23 @@ def _register_exception_handlers(app_instance: "FastAPI") -> None:
         request_id = _get_request_id(request)
         body = {"error": {"code": code, "message": msg}}
 
-        # 5xx 错误：调试模式下增加 detail
+        # 5xx 错误：调试模式下增加 detail（脱敏处理，防止泄露 PII/密钥）
         if status >= 500 and not _is_debug_mode():
             body["error"]["message"] = "Internal server error"
         elif status >= 500 and _is_debug_mode():
-            body["error"]["detail"] = f"{type(exc).__name__}: {msg}"
+            # 脱敏：移除常见敏感模式（API key、连接字符串、密码、内部路径）
+            import re as _re
+            _safe_msg = msg
+            _patterns = [
+                r'sk-[a-zA-Z0-9]{20,}',           # API keys
+                r'password\s*[:=]\s*\S+',            # password=...
+                r'(mongodb|mysql|postgres|redis)://\S+:@',  # connection strings
+                r'/home/\S+|/app/\S+|/opt/\S+',      # internal file paths
+                r'\b\d{13,16}\b',                    # credit card numbers
+            ]
+            for _p in _patterns:
+                _safe_msg = _re.sub(_p, '[REDACTED]', _safe_msg)
+            body["error"]["detail"] = f"{type(exc).__name__}: {_safe_msg}"
 
         return JSONResponse(
             status_code=status,

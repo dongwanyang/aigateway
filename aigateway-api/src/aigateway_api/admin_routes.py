@@ -855,19 +855,18 @@ async def update_global_config(
     config_manager.set("hot_reload", hot_reload)
     config_manager.set("debug_mode", debug_mode)
 
-    # 写回 config.yaml（只追加这两个键）
+    # 写回 config.yaml（只更新这两个键，保留其余 section 不变）
     config_path = config_manager.config_path
     if config_path:
         import os
         if os.path.isfile(config_path):
             with open(config_path, "r", encoding="utf-8") as f:
                 file_config = yaml.safe_load(f) or {}
+            # 仅覆写 admin 可编辑的键，不丢弃其他 section
             file_config["hot_reload"] = hot_reload
             file_config["debug_mode"] = debug_mode
-            writable_keys = {"server", "auth", "plugins", "providers", "embedding", "observability", "hot_reload", "debug_mode"}
-            clean_config = {k: v for k, v in file_config.items() if k in writable_keys}
             with open(config_path, "w", encoding="utf-8") as f:
-                yaml.dump(clean_config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+                yaml.dump(file_config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
     # 根据 hot_reload 开关启停 Watchdog
     if hot_reload:
@@ -875,10 +874,16 @@ async def update_global_config(
     else:
         config_manager.stop_watching()
 
-    # 根据 debug_mode 调整日志级别
+    # 根据 debug_mode 调整日志级别（双向：开启时切 DEBUG，关闭时恢复原级别）
     if debug_mode:
         from aigateway_core.logger import setup_logging
         setup_logging(log_level="DEBUG")
+    else:
+        # 关闭调试模式时，恢复为 observability.log_level 配置的级别（默认 INFO）
+        _obs = config_manager.get("observability") or {}
+        _restore_level = (_obs.get("log_level", "info") if isinstance(_obs, dict) else "info")
+        from aigateway_core.logger import setup_logging
+        setup_logging(log_level=_restore_level.upper())
 
     return {
         "data": {"hot_reload": hot_reload, "debug_mode": debug_mode},

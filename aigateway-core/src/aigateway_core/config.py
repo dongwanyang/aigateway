@@ -198,6 +198,13 @@ class ConfigManager:
         elif env == "development":
             config.setdefault("hot_reload", True)
             config.setdefault("debug_mode", True)
+            # 安全警告：如果 config.yaml 显式写了 debug_mode=true 且未设置 AI_GATEWAY_ENV=production，
+            # 提醒运维此配置不应被部署到共享/生产环境
+            if config.get("debug_mode") is True:
+                logger.warning(
+                    "[SECURITY] debug_mode=True 在开发模式下生效。"
+                    "若部署到非本地环境，请设置 AI_GATEWAY_ENV=production 或将 debug_mode 改为 False。"
+                )
             logger.info("开发环境模式: hot_reload=True, debug_mode=True")
         else:
             logger.info("运行环境: %s", env)
