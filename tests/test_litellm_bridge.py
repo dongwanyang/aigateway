@@ -342,3 +342,135 @@ class TestGetRegisteredModels:
         assert "gpt-4o-mini" in models
         assert "gpt-3.5-turbo" in models
         assert "agnes-2.0-flash" in models
+
+
+# ==================================================================
+# Per-Model base_url Override Tests
+# ==================================================================
+
+
+class TestPerModelBaseUrl:
+    """Per-model base_url override 行为测试。"""
+
+    def test_per_model_base_url_overrides_provider(self):
+        """设置了 per-model base_url 的模型应使用自己的 URL。"""
+        bridge = _create_bridge_with_models({
+            "agnes": {
+                "api_key": "sk-test",
+                "base_url": "https://provider-default.com/v1",
+                "model_grouper": [{
+                    "models": [
+                        {"name": "text-model"},
+                        {"name": "image-model", "base_url": "https://image-endpoint.com/v1"},
+                        {"name": "video-model", "base_url": "https://video-endpoint.com/v1"},
+                    ],
+                    "fallback_models": [],
+                }],
+            },
+        })
+        model_list = bridge._build_model_list(bridge.config.get("providers", {}))
+
+        text_entry = next(m for m in model_list if m["model_name"] == "openai/text-model")
+        image_entry = next(m for m in model_list if m["model_name"] == "openai/image-model")
+        video_entry = next(m for m in model_list if m["model_name"] == "openai/video-model")
+
+        assert text_entry["litellm_params"]["base_url"] == "https://provider-default.com/v1"
+        assert image_entry["litellm_params"]["base_url"] == "https://image-endpoint.com/v1"
+        assert video_entry["litellm_params"]["base_url"] == "https://video-endpoint.com/v1"
+
+    def test_fallback_uses_provider_base_url_not_per_model(self):
+        """Fallback 模型必须始终使用 provider 级别 base_url，不继承主模型的 custom URL。"""
+        providers_config = {
+            "agnes": {
+                "api_key": "sk-test",
+                "base_url": "https://provider-default.com/v1",
+                "model_grouper": [{
+                    "models": [
+                        {"name": "primary", "base_url": "https://custom.com/v1"},
+                    ],
+                    "fallback_models": ["fb-model"],
+                }],
+            },
+        }
+        bridge = LiteLLMBridge(config={"providers": providers_config})
+        model_list = bridge._build_model_list(providers_config)
+
+        fb_entry = next(m for m in model_list if m["model_name"] == "openai/fb-model")
+        assert fb_entry["litellm_params"]["base_url"] == "https://provider-default.com/v1"
+
+    def test_no_per_model_base_url_falls_back_to_provider(self):
+        """未设置 per-model base_url 的模型回退到 provider 级别。"""
+        bridge = _create_bridge_with_models({
+            "agnes": {
+                "api_key": "sk-test",
+                "base_url": "https://provider-default.com/v1",
+                "model_grouper": [{
+                    "models": [
+                        {"name": "no-override"},
+                    ],
+                    "fallback_models": [],
+                }],
+            },
+        })
+        model_list = bridge._build_model_list(bridge.config.get("providers", {}))
+        entry = next(m for m in model_list if m["model_name"] == "openai/no-override")
+        assert entry["litellm_params"]["base_url"] == "https://provider-default.com/v1"
+
+    def test_string_format_models_use_provider_base_url(self):
+        """字符串格式的旧式 model entry 仍使用 provider 级别 base_url。"""
+        bridge = _create_bridge_with_models({
+            "openai": {
+                "api_key": "sk-test",
+                "base_url": "https://openai.com/v1",
+                "model_grouper": [{
+                    "models": ["gpt-4o"],
+                    "fallback_models": [],
+                }],
+            },
+        })
+        model_list = bridge._build_model_list(bridge.config.get("providers", {}))
+        entry = next(m for m in model_list if m["model_name"] == "openai/gpt-4o")
+        assert entry["litellm_params"]["base_url"] == "https://openai.com/v1"
+
+    def test_empty_string_base_url_treated_as_not_set(self):
+        """空字符串的 per-model base_url 应等同未设置，回退到 provider 级别。"""
+        bridge = _create_bridge_with_models({
+            "agnes": {
+                "api_key": "sk-test",
+                "base_url": "https://provider.com/v1",
+                "model_grouper": [{
+                    "models": [
+                        {"name": "empty-url", "base_url": ""},
+                    ],
+                    "fallback_models": [],
+                }],
+            },
+        })
+        model_list = bridge._build_model_list(bridge.config.get("providers", {}))
+        entry = next(m for m in model_list if m["model_name"] == "openai/empty-url")
+        assert entry["litellm_params"]["base_url"] == "https://provider.com/v1"
+
+    def test_per_model_base_url_when_provider_has_none(self):
+        """Provider 无 base_url 但模型有 per-model base_url 时，模型走 OpenAI 兼容模式。"""
+        bridge = _create_bridge_with_models({
+            "custom": {
+                "api_key": "sk-test",
+                # provider 级别无 base_url
+                "model_grouper": [{
+                    "models": [
+                        {"name": "text-only"},
+                        {"name": "custom-endpoint", "base_url": "https://custom.com/v1"},
+                    ],
+                    "fallback_models": [],
+                }],
+            },
+        })
+        model_list = bridge._build_model_list(bridge.config.get("providers", {}))
+
+        # 无任何 base_url 的模型走 native 路由前缀
+        text_entry = next(m for m in model_list if m["model_name"] == "custom/text-only")
+        assert text_entry["litellm_params"]["base_url"] is None
+
+        # 有 per-model base_url 的模型走 openai/ 前缀
+        custom_entry = next(m for m in model_list if m["model_name"] == "openai/custom-endpoint")
+        assert custom_entry["litellm_params"]["base_url"] == "https://custom.com/v1"
