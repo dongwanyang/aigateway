@@ -292,6 +292,7 @@ class RequestDispatcher:
             try:
                 ctx = PipelineContext(
                     request={"messages": body.messages, "model": body.model, "stream": getattr(body, "stream", False)},
+                    trace_id=request.state.trace_id,
                     pipeline_kind="understanding",
                     user_id=user_id,
                 )
@@ -385,7 +386,7 @@ class RequestDispatcher:
 
         # ===== Prompt Compression =====
         compress_start = time.time()
-        compress_result = await _apply_prompt_compression(body, state)
+        compress_result = await _apply_prompt_compression(body, state, request)
         body.messages = compress_result["messages"]
         compress_meta = compress_result["meta"]
         if compress_meta and compress_meta.get("compression_ratio", 1.0) < 1.0:
@@ -447,6 +448,7 @@ class RequestDispatcher:
                 ctx = PipelineContext(
                     request={"messages": body.messages, "model": body.model,
                              "stream": getattr(body, "stream", False)},
+                    trace_id=request.state.trace_id,
                     pipeline_kind="generation",
                     user_id=user_id,
                 )

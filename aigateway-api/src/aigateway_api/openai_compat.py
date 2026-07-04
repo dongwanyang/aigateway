@@ -272,7 +272,8 @@ async def _record_request_log(
 
     # 从 request.state 获取 request_id/trace_id/user_id
     request_id = getattr(request.state, "request_id", "") or str(uuid.uuid4().hex[:12])
-    trace_id = getattr(request.state, "trace_id", "") or str(uuid.uuid4().hex[:12])
+    trace_id = getattr(request.state, "trace_id", "")
+    # 不再 fallback mint —— TraceMiddleware 已保证 request.state.trace_id 一定存在
     user_id = getattr(request.state, "user_id", "") or ""
     if not user_id:
         api_key_data = getattr(request.state, "api_key_data", None)
@@ -342,7 +343,8 @@ async def _apply_media_optimization(
     try:
         from aigateway_core.context import PipelineContext
 
-        ctx = PipelineContext(request={"messages": body.messages, "model": body.model})
+        ctx = PipelineContext(request={"messages": body.messages, "model": body.model},
+                              trace_id=request.state.trace_id)
         if hasattr(request.state, "user_id"):
             ctx.user_id = request.state.user_id
 
@@ -393,7 +395,8 @@ async def _apply_pii_detection(
     try:
         from aigateway_core.context import PipelineContext
 
-        ctx = PipelineContext(request={"messages": body.messages, "model": body.model})
+        ctx = PipelineContext(request={"messages": body.messages, "model": body.model},
+                              trace_id=request.state.trace_id)
         if hasattr(request.state, "user_id"):
             ctx.user_id = request.state.user_id
 
@@ -512,6 +515,7 @@ async def _resolve_auto_model(
 async def _apply_prompt_compression(
     body: "ChatCompletionRequest",
     state: Dict[str, Any],
+    request: Request,
 ) -> Dict[str, Any]:
     """Apply prompt compression before LLM call.
 
@@ -528,7 +532,8 @@ async def _apply_prompt_compression(
     try:
         from aigateway_core.context import PipelineContext
 
-        ctx = PipelineContext(request={"messages": body.messages, "model": body.model})
+        ctx = PipelineContext(request={"messages": body.messages, "model": body.model},
+                              trace_id=request.state.trace_id)
         ctx = await compress_plugin.execute(ctx)
 
         pc_ns = ctx.prompt_compress
