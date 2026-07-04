@@ -506,10 +506,33 @@ async def lifespan(app: "FastAPI"):
 
     # 注册热重载回调：admin 改 config.yaml 后（经 atomic_swap → _notify_reload）
     # 重建受影响的运行时组件。同步 plugins.enabled 到 registry 并重建两个 Engine。
+    # 只有 plugins 段真变化时才重建 engine，避免 update_global_config 之类的 no-op reload
+    # 无谓地重跑拓扑排序 / 重建策略实例。
+    _last_plugins_snapshot: Dict[str, Any] = {"data": None}
+
+    def _plugins_diff(new_config: dict) -> bool:
+        """粗粒度 diff:比较 plugins 段的 (name, enabled) 集合。"""
+        new_plugins = new_config.get("plugins", []) or []
+        try:
+            snap = tuple(
+                (p.get("name"), bool(p.get("enabled", True)))
+                for p in new_plugins if isinstance(p, dict)
+            )
+        except Exception:
+            snap = None
+        prev = _last_plugins_snapshot["data"]
+        _last_plugins_snapshot["data"] = snap
+        # 首次调用（prev is None）当作有变化处理，保证初始化后的第一次 reload 生效
+        return prev is None or snap != prev
+
     def _on_config_reload(new_config: dict) -> None:
         try:
             registry = getattr(app.state, "plugin_registry", None)
             if registry is None:
+                return
+            # 无 plugins 变化 → 跳过 registry 同步和 engine 重建
+            if not _plugins_diff(new_config):
+                logger.debug("热重载:plugins 段无变化，跳过 engine 重建")
                 return
             plugins_cfg = new_config.get("plugins", []) or []
             for pcfg in plugins_cfg:

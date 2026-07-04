@@ -267,8 +267,17 @@ class RequestDispatcher:
                 ctx.should_stream = getattr(body, "stream", False)
                 # 过滤掉已被辅助函数处理的核心插件，避免重复执行
                 ctx._skip_names = {"pii_detector", "prompt_cache", "semantic_cache",
-                                   "model_router", "prompt_compress", "media_optimizer"}
+                                   "model_router", "prompt_compress", "media_optimization"}
                 ctx = await self._run_engine_filtered(engine, ctx)
+                # 插件链可能改写 messages / model（rag_retriever 追加检索上下文、
+                # conv_compressor 摘要历史）——回写到 body，供后续 cache_key / LLM 调用使用。
+                req = ctx.request
+                if isinstance(req, dict):
+                    new_messages = req.get("messages")
+                    if new_messages:
+                        body.messages = new_messages
+                    if req.get("model"):
+                        body.model = req["model"]
             except Exception as exc:
                 logger.warning("理解管道 engine 执行异常（fail-open 继续）: %s", exc)
 
@@ -311,7 +320,9 @@ class RequestDispatcher:
         key_store = self.key_store
         quota_start = time.time()
         if key_hash and key_store:
-            estimated_tokens = sum(len(json.dumps(m)) for m in body.messages) // 4
+            # ensure_ascii=False 保证 CJK/emoji 按真实字符长度计数,否则 Chinese
+            # 字符会被展开成 \uXXXX 六字节序列,导致配额估算膨胀 ~6x
+            estimated_tokens = sum(len(json.dumps(m, ensure_ascii=False)) for m in body.messages) // 4
             allowed, fail_msg, retry_after = await key_store.check_quota(
                 key_hash=key_hash, tokens=estimated_tokens, cost=0.0
             )
@@ -366,11 +377,12 @@ class RequestDispatcher:
         if getattr(body, "stream", False):
             return await self._call_llm_stream(
                 body, request, litellm_bridge, plugin_trace, request_start_time,
-                user_id, key_hash, cache_key,
+                user_id, key_hash, cache_key, normalized_messages,
             )
         return await self._call_llm_nonstream(
             body, request, litellm_bridge, plugin_trace, request_start_time,
-            user_id, key_hash, cache_key, pii_meta, router_meta, mol_meta, compress_meta,
+            user_id, key_hash, cache_key, normalized_messages,
+            pii_meta, router_meta, mol_meta, compress_meta,
         )
 
     # ------------------------------------------------------------------
@@ -415,7 +427,8 @@ class RequestDispatcher:
         key_store = self.key_store
         quota_start = time.time()
         if key_hash and key_store:
-            estimated_tokens = sum(len(json.dumps(m)) for m in body.messages) // 4
+            # ensure_ascii=False:见 _dispatch_understanding 中的等价注释
+            estimated_tokens = sum(len(json.dumps(m, ensure_ascii=False)) for m in body.messages) // 4
             allowed, fail_msg, retry_after = await key_store.check_quota(
                 key_hash=key_hash, tokens=estimated_tokens, cost=0.0
             )
@@ -456,11 +469,15 @@ class RequestDispatcher:
         if getattr(body, "stream", False):
             return await self._call_llm_stream(
                 body, request, litellm_bridge, plugin_trace, request_start_time,
-                user_id, key_hash, cache_key=None,  # 生成管道不回填
+                user_id, key_hash,
+                cache_key=None,  # 生成管道不回填
+                normalized_messages=None,
             )
         return await self._call_llm_nonstream(
             body, request, litellm_bridge, plugin_trace, request_start_time,
-            user_id, key_hash, cache_key=None,  # 生成管道不回填
+            user_id, key_hash,
+            cache_key=None,  # 生成管道不回填
+            normalized_messages=None,
             pii_meta=None, router_meta=None, mol_meta=None, compress_meta=None,
         )
 
@@ -470,10 +487,13 @@ class RequestDispatcher:
 
     async def _call_llm_nonstream(
         self, body, request, litellm_bridge, plugin_trace, request_start_time,
-        user_id, key_hash, cache_key,
+        user_id, key_hash, cache_key, normalized_messages,
         pii_meta=None, router_meta=None, mol_meta=None, compress_meta=None,
     ) -> JSONResponse:
-        """非流式调 LiteLLM 出口 + 用量记录 + 缓存回填。"""
+        """非流式调 LiteLLM 出口 + 用量记录 + 缓存回填。
+
+        normalized_messages: 用于 L3 语义缓存回填（生成管道传 None,不做 L3 回填）。
+        """
         from aigateway_api.openai_compat import _estimate_cost, _record_request_log
 
         metrics_collector = self.metrics_collector
@@ -567,13 +587,14 @@ class RequestDispatcher:
                     await cache_manager.l2_set(cache_key, value_str)
                 except Exception as exc:
                     logger.warning("L2 回填失败: %s", exc)
-                # L3 异步回填
-                import asyncio
-                from aigateway_api.openai_compat import _safe_l3_backfill
-                asyncio.create_task(_safe_l3_backfill(
-                    cache_manager, cache_key, value_str,
-                    normalized_messages, body.model, user_id or "", tt,
-                ))
+                # L3 异步回填（需要 normalized_messages 计算 embedding；缺则跳过）
+                if normalized_messages:
+                    import asyncio
+                    from aigateway_api.openai_compat import _safe_l3_backfill
+                    asyncio.create_task(_safe_l3_backfill(
+                        cache_manager, cache_key, value_str,
+                        normalized_messages, body.model, user_id or "", tt,
+                    ))
             except Exception as exc:
                 logger.warning("缓存回填失败: %s", exc)
 
@@ -598,15 +619,17 @@ class RequestDispatcher:
 
     async def _call_llm_stream(
         self, body, request, litellm_bridge, plugin_trace, request_start_time,
-        user_id, key_hash, cache_key,
+        user_id, key_hash, cache_key, normalized_messages,
     ) -> JSONResponse:
         """流式调 LiteLLM 出口。
 
         流式修正（对齐非流式）:
         - 扣配额:流结束后从 last_chunk.usage 取 token 调 increment_usage
-        - 回填缓存:cache_key 非空时回填 L1/L2/L3
+        - 回填缓存:cache_key 非空时回填 L1/L2/L3（累积真实 chunk 内容，不写空 choices）
         - cost 真实值:优先用 bridge 返回,否则估算
         - llm_completion duration_ms 不写死 0
+
+        normalized_messages: 用于 L3 语义缓存回填（生成管道传 None）。
         """
         from aigateway_api.openai_compat import (
             _estimate_cost, _record_request_log,
@@ -635,7 +658,7 @@ class RequestDispatcher:
         # 包装生成器：消费完后做配额扣减 + 缓存回填 + metrics（修正后行为）
         completion_gen = self._wrap_stream_full(
             completion_gen, metrics_collector, cache_manager, key_store,
-            body.model, user_id, key_hash, cache_key, llm_start,
+            body.model, user_id, key_hash, cache_key, normalized_messages, llm_start,
         )
 
         plugin_trace.append({"plugin_name": "llm_completion",
@@ -655,21 +678,40 @@ class RequestDispatcher:
 
     async def _wrap_stream_full(
         self, gen, metrics_collector, cache_manager, key_store,
-        model, user_id, key_hash, cache_key, llm_start,
+        model, user_id, key_hash, cache_key, normalized_messages, llm_start,
     ):
         """流式包装器:透传 chunk + 末尾做配额/缓存/metrics。
 
         合并了原 _wrap_stream_for_metrics 的 metrics 逻辑，并新增:
         - increment_usage（原流式不扣，本次修正）
         - 缓存回填（原流式不回填，本次修正）
+          回填内容 = 累积所有 chunk 的 delta.content 拼成完整 message，
+          与非流式响应格式一致，供后续 simulate_stream_from_cache 回放。
         """
         from aigateway_api.openai_compat import _estimate_cost
 
         last_chunk = {}
-        collected = []
+        # 累积每个 choice 的 content / role / tool_calls，用于组装非流式格式
+        accum: Dict[int, Dict[str, Any]] = {}
         async for chunk in gen:
             last_chunk = chunk
-            collected.append(chunk)
+            # 累积 delta 到 accum（供缓存回填使用）
+            if isinstance(chunk, dict):
+                for choice in chunk.get("choices", []) or []:
+                    if not isinstance(choice, dict):
+                        continue
+                    idx = choice.get("index", 0)
+                    slot = accum.setdefault(idx, {"role": "assistant", "content": ""})
+                    delta = choice.get("delta") or {}
+                    if isinstance(delta, dict):
+                        if delta.get("role"):
+                            slot["role"] = delta["role"]
+                        piece = delta.get("content")
+                        if isinstance(piece, str):
+                            slot["content"] += piece
+                    fr = choice.get("finish_reason")
+                    if fr:
+                        slot["finish_reason"] = fr
             yield chunk
 
         usage = last_chunk.get("usage", {}) if isinstance(last_chunk, dict) else {}
@@ -700,16 +742,44 @@ class RequestDispatcher:
             except Exception as exc:
                 logger.warning("流式 increment_usage 失败: %s", exc)
 
-        # 缓存回填（修正点：原流式不回填）
-        if cache_key and cache_manager and collected:
+        # 缓存回填（修正点：原流式回填时写空 choices→simulate_stream_from_cache
+        # 短路返回 Empty response 错误。本次改成累积真实 delta.content 后回填）
+        if cache_key and cache_manager and accum:
             try:
-                # 拼一个非流式格式的 data 用于回填
-                value_str = json.dumps({"choices": [], "usage": usage})
+                choices_out = []
+                for idx in sorted(accum.keys()):
+                    slot = accum[idx]
+                    # 内容为空则跳过该 choice（避免依然写出空 message 触发投毒）
+                    if not slot.get("content"):
+                        continue
+                    choices_out.append({
+                        "index": idx,
+                        "message": {
+                            "role": slot.get("role", "assistant"),
+                            "content": slot["content"],
+                        },
+                        "finish_reason": slot.get("finish_reason", "stop"),
+                    })
+                if not choices_out:
+                    return  # 没有可用内容，不投毒
+                value_str = json.dumps({
+                    "choices": choices_out,
+                    "usage": usage,
+                    "model": model,
+                }, ensure_ascii=False)
                 cache_manager.l1_set(cache_key, value_str)
                 try:
                     await cache_manager.l2_set(cache_key, value_str)
                 except Exception as exc:
                     logger.warning("流式 L2 回填失败: %s", exc)
+                # L3 异步回填（与非流式对齐；需要 normalized_messages 计算 embedding）
+                if normalized_messages:
+                    import asyncio
+                    from aigateway_api.openai_compat import _safe_l3_backfill
+                    asyncio.create_task(_safe_l3_backfill(
+                        cache_manager, cache_key, value_str,
+                        normalized_messages, model, user_id or "", tt,
+                    ))
             except Exception as exc:
                 logger.warning("流式缓存回填失败: %s", exc)
 

@@ -112,13 +112,10 @@ class PipelineEngine:
             logger.debug("  [%d] %s (依赖: %s)", i, plugin.name, deps)
 
     async def execute(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        """执行完整插件管线（内部构造 ctx，pipeline_kind 取自 self）。
+        """执行完整插件管线并返回响应字典（向后兼容入口）。
 
-        流程:
-        1. 创建 PipelineContext（pipeline_kind = self.pipeline_kind）
-        2. 按序执行每个插件
-        3. 任一插件短路时提前终止
-        4. 返回最终响应
+        内部调用 :meth:`execute_ctx`，再用 :meth:`_build_response` 组装响应。
+        新代码应直接调 :meth:`execute_ctx`（dispatcher 用的就是它）。
 
         Args:
             request: 原始 OpenAI 格式请求体。
@@ -129,10 +126,8 @@ class PipelineEngine:
         if not self._initialized:
             self.initialize()
 
-        # 创建上下文
         ctx = PipelineContext(request=request, pipeline_kind=self.pipeline_kind)
         ctx.should_stream = bool(request.get("stream", False))
-
         ctx = await self.execute_ctx(ctx)
         return self._build_response(ctx)
 
@@ -223,25 +218,6 @@ class PipelineEngine:
             ctx.should_stop = True
             ctx.extra.setdefault("pipeline_error", str(exc))
             return ctx
-
-    async def execute(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        """执行完整插件管线并返回响应字典（向后兼容入口）。
-
-        内部调用 :meth:`execute_ctx`，再用 :meth:`_build_response` 组装响应。
-
-        Args:
-            request: 原始 OpenAI 格式请求体。
-
-        Returns:
-            包含最终响应的字典，结构见 API_CONTRACT.md。
-        """
-        if not self._initialized:
-            self.initialize()
-
-        ctx = PipelineContext(request=request, pipeline_kind=self.pipeline_kind)
-        ctx.should_stream = bool(request.get("stream", False))
-        ctx = await self.execute_ctx(ctx)
-        return self._build_response(ctx)
 
     def _topological_sort(self, plugins: List[Plugin]) -> List[Plugin]:
         """对插件列表进行拓扑排序（确保 depends_on 先执行）。
