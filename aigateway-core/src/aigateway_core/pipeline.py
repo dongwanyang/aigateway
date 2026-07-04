@@ -21,6 +21,7 @@ from .caching import CacheManager
 from .context import PipelineContext
 from .plugin_registry import PluginRegistry
 from .security import PIIDetector
+from .trace_event import TraceCollector, TraceEvent
 
 logger = logging.getLogger(__name__)
 
@@ -157,8 +158,17 @@ class PipelineEngine:
                 if ctx.should_stop:
                     # 记录跳过的插件
                     skipped_ms = (time.monotonic() - pipeline_start) * 1000
-                    plugin_start = time.monotonic()
-                    ctx.add_plugin_trace(plugin.name, skipped_ms, "skipped")
+                    collector = TraceCollector.current()
+                    if collector:
+                        collector.emit(TraceEvent(
+                            trace_id=ctx.trace_id,
+                            ts=time.monotonic(),
+                            stage=plugin.name,
+                            kind="plugin",
+                            name=f"{plugin.name}.skip",
+                            duration_ms=round(skipped_ms, 2),
+                            status="skip",
+                        ))
                     logger.debug(
                         "插件 %s 被跳过 (should_stop=True, request_id=%s)",
                         plugin.name,
@@ -174,7 +184,17 @@ class PipelineEngine:
                     ctx = await plugin.execute(ctx)
                 except Exception as exc:
                     elapsed_ms = (time.monotonic() - plugin_start) * 1000
-                    ctx.add_plugin_trace(plugin_name, elapsed_ms, "failed")
+                    collector = TraceCollector.current()
+                    if collector:
+                        collector.emit(TraceEvent(
+                            trace_id=ctx.trace_id,
+                            ts=time.monotonic(),
+                            stage=plugin_name,
+                            kind="plugin",
+                            name=f"{plugin_name}.execute",
+                            duration_ms=round(elapsed_ms, 2),
+                            status="error",
+                        ))
                     logger.error(
                         "插件 %s 执行失败: %s, request_id=%s",
                         plugin_name,
@@ -186,7 +206,17 @@ class PipelineEngine:
                     continue
 
                 elapsed_ms = (time.monotonic() - plugin_start) * 1000
-                ctx.add_plugin_trace(plugin_name, elapsed_ms, "success")
+                collector = TraceCollector.current()
+                if collector:
+                    collector.emit(TraceEvent(
+                        trace_id=ctx.trace_id,
+                        ts=time.monotonic(),
+                        stage=plugin_name,
+                        kind="plugin",
+                        name=f"{plugin_name}.execute",
+                        duration_ms=round(elapsed_ms, 2),
+                        status="ok",
+                    ))
                 logger.debug(
                     "插件 %s 执行完毕: %.2fms, request_id=%s",
                     plugin_name,
