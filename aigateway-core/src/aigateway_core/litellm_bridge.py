@@ -48,6 +48,87 @@ class LiteLLMBridge:
         self._model_alias_map: Dict[str, str] = {}  # 裸模型名 -> Router 注册名
         self._model_modalities: Dict[str, List[str]] = {}  # 裸模型名 -> modality 列表
         self._model_pricing: Dict[str, Dict[str, float]] = {}  # litellm_model -> {prompt, completion}
+        # auto 模型解析器(可选,由 main.py 注入)
+        # bridge 收到 model=='auto' 时用它按 pipeline_kind + complexity 选模型,
+        # 让「选哪个模型」的决策在管道链末端而不是入口做。
+        self._auto_resolver: Any = None
+
+    def set_auto_resolver(self, resolver: Any) -> None:
+        """注入 auto 模型解析器(通常是 ModelRouterStrategy 单例)。
+
+        没注入时,收到 model=='auto' 会回落到「取第一个已注册模型」。
+        """
+        self._auto_resolver = resolver
+
+    async def _resolve_auto(
+        self,
+        messages: List[Dict[str, Any]],
+        pipeline_kind: str,
+    ) -> Dict[str, Any]:
+        """把 model=='auto' 解析为真实模型名。
+
+        Args:
+            messages: 当前请求 messages(已过 PII/media 前置),用于估算 complexity。
+            pipeline_kind: "understanding" | "generation",决定候选池模态。
+
+        Returns:
+            {"model": <resolved>, "meta": {...}} 或
+            {"error": {...}} 表示无可用模型。
+        """
+        # 按管道确定所需模态
+        required_modality = "generative" if pipeline_kind == "generation" else "llm"
+
+        # 估算 complexity(与原 _resolve_auto_model 保持一致)
+        full_text_parts: List[str] = []
+        for m in messages or []:
+            content = m.get("content", "") if isinstance(m, dict) else ""
+            if isinstance(content, str):
+                full_text_parts.append(content)
+            elif isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        full_text_parts.append(block.get("text", ""))
+        full_text = " ".join(full_text_parts)
+        complexity_score = min(100, max(0, len(full_text) // 50))
+
+        if self._auto_resolver is not None:
+            try:
+                decision = await self._auto_resolver.route(
+                    complexity_score=complexity_score,
+                    required_modality=required_modality,
+                )
+                return {
+                    "model": decision.selected_model,
+                    "meta": {
+                        "selected_model": decision.selected_model,
+                        "selected_provider": decision.selected_provider,
+                        "reason": decision.reason,
+                        "estimated_cost": decision.estimated_cost,
+                        "pipeline_kind": pipeline_kind,
+                    },
+                }
+            except Exception as exc:
+                logger.warning("bridge auto 解析失败,回落到 fallback: %s", exc)
+
+        # Fallback: 取第一个符合模态的已注册模型
+        registered = self.get_registered_models()
+        for m in registered:
+            mods = self._model_modalities.get(m, [])
+            if required_modality == "generative":
+                if any(x in mods for x in ("generative", "image", "video")):
+                    return {"model": m, "meta": {"selected_model": m, "reason": "auto_fallback",
+                                                  "pipeline_kind": pipeline_kind}}
+            else:
+                # understanding: llm / mllm / 未标记的都当理解模型
+                if not mods or any(x in mods for x in ("llm", "mllm")):
+                    return {"model": m, "meta": {"selected_model": m, "reason": "auto_fallback",
+                                                  "pipeline_kind": pipeline_kind}}
+        if registered:
+            return {"model": registered[0], "meta": {"selected_model": registered[0],
+                                                       "reason": "auto_last_resort",
+                                                       "pipeline_kind": pipeline_kind}}
+        return {"error": {"code": "model_not_found",
+                          "message": f"'auto' 无可用 {required_modality} 模型"}}
 
     # ------------------------------------------------------------------
     # 初始化
@@ -375,15 +456,17 @@ class LiteLLMBridge:
         fallback_chain: Optional[List[str]] = None,
         max_retries: Optional[int] = None,
         extra_headers: Optional[Dict[str, str]] = None,
+        pipeline_kind: str = "understanding",
     ) -> Dict[str, Any]:
         """发送聊天补全请求到下游 LLM。
 
-        支持重试和 fallback 链。当主模型调用失败时，
-        依次尝试 fallback_chain 中的模型。
+        支持 model=='auto' 的末端解析:bridge 内部按 pipeline_kind 选模型,
+        让「选哪个模型」的决策发生在管道链末端而非入口。
+        支持重试和 fallback 链——当主模型调用失败时,依次尝试 fallback_chain 中的模型。
 
         Args:
             messages: 消息列表，OpenAI 格式。
-            model: 目标模型名称。
+            model: 目标模型名称。传 'auto' 时由 bridge 结合 pipeline_kind 内部解析。
             user_id: 用户 ID，用于用量追踪。
             temperature: 采样温度。
             max_tokens: 最大输出 token 数。
@@ -397,14 +480,27 @@ class LiteLLMBridge:
             fallback_chain: 降级模型列表 [{model, provider}]。
             max_retries: 最大重试次数。
             extra_headers: 额外 HTTP 请求头（用于 trace context 传播等）。
+            pipeline_kind: 请求所属管道 "understanding" | "generation",
+                仅在 model=='auto' 时用于筛选候选池模态。
 
         Returns:
-            完整的响应字典（OpenAI 格式）。
+            完整的响应字典（OpenAI 格式）。model=='auto' 时 _meta.model_router
+            会记录实际选中的模型。
         """
         max_retries = max_retries or 3
         attempts = 0
         last_error: Optional[Exception] = None
         fallback_used: List[str] = []
+
+        # ===== model=='auto' 末端解析(总分总架构:让 bridge 决定用哪个模型)=====
+        auto_router_meta: Optional[Dict[str, Any]] = None
+        if model == "auto":
+            resolved = await self._resolve_auto(messages, pipeline_kind)
+            if "error" in resolved:
+                return {"error": resolved["error"]}
+            model = resolved["model"]
+            auto_router_meta = resolved.get("meta")
+            logger.info("bridge auto 解析: pipeline=%s → model=%s", pipeline_kind, model)
 
         # 前置校验：检查模型是否已注册
         if not self.is_model_registered(model):
@@ -465,7 +561,10 @@ class LiteLLMBridge:
                             "fallback_chain": fallback_used,
                         },
                         "cost": request_cost,
+                        # auto 解析结果(model=='auto' 时才有,None 表示走的是显式模型)
+                        "model_router": auto_router_meta,
                     },
+                    "usage": result.get("usage", {}) if isinstance(result, dict) else {},
                 }
 
             except Exception as exc:
@@ -795,12 +894,25 @@ class LiteLLMBridge:
         stop: Optional[Any] = None,
         fallback_chain: Optional[List[str]] = None,
         max_retries: Optional[int] = None,
+        pipeline_kind: str = "understanding",
     ) -> AsyncIterator[Dict[str, Any]]:
         """流式发送聊天补全请求到下游 LLM。
+
+        支持 model=='auto':按 pipeline_kind 内部解析,首个 chunk 里 _meta 会带
+        model_router 信息(客户端如需 SSE frame 里的选中模型可从此读)。
 
         Yields:
             每个 chunk 的字典（OpenAI 流式格式）。
         """
+        # ===== model=='auto' 末端解析 =====
+        if model == "auto":
+            resolved = await self._resolve_auto(messages, pipeline_kind)
+            if "error" in resolved:
+                yield {"error": resolved["error"]}
+                return
+            model = resolved["model"]
+            logger.info("bridge auto 流式解析: pipeline=%s → model=%s", pipeline_kind, model)
+
         # 前置校验：检查模型是否已注册
         if not self.is_model_registered(model):
             registered = self.get_registered_models()

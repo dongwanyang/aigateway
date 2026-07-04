@@ -225,6 +225,12 @@
 
 ### C.1 目标架构图
 
+> **落地状态(2026-07-04):已实现。** `RequestDispatcher` 已存在(dispatcher.py),
+> 两条管道各一个 `PipelineEngine` 实例,LiteLLMBridge 作统一出口。
+> 采纳 C.3 决策 1「共用前置」:media_optimization + PII 提到分流前,生成管道也过 PII。
+> auto 模型解析下沉到 bridge(`set_auto_resolver` 注入 `ModelRouterStrategy`),
+> 分流器只看模态/意图不看 model——「选哪个模型」由 LiteLLM 在管道末端决定。
+
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
 │  客户端  POST /v1/chat/completions                                    │
@@ -235,16 +241,20 @@
 └──────────────────────────────┬───────────────────────────────────────┘
                                ▼
 ┌──────────────────────────────────────────────────────────────────────┐
-│  ▶ 总入口:RequestDispatcher  (★ 新写,当前不存在)                     │
+│  ▶ 总入口:RequestDispatcher  (dispatcher.py)                          │
 │                                                                        │
-│  职责:把每个请求分类为 "understanding" | "generation"                  │
-│  分类依据(优先级序):                                                  │
-│    1. 显式标记:body 里的 generation_intent / modality 字段(若有)      │
-│    2. 模态推断:messages 含 image/audio/video content → 倾向生成/多模态 │
-│    3. 模型名推断:body.model 命中 generative 能力模型 → 生成            │
-│    4. 默认:understanding                                              │
+│  【共用前置】(C.3 决策 1,两管道共享,分流前跑)                         │
+│    1. media_optimization — 多模态 content 转文本                       │
+│    2. PII detection — sanitize/reject/hash(生成管道也受保护)          │
+│                                                                        │
+│  【分流】classify_request(只看模态/意图,不看 model)                  │
+│    1. 显式意图:body.generation_intent == True → generation            │
+│    2. 模态推断:messages 含 image/audio/video 生成块 → generation      │
+│    3. 模型名推断(非 auto):命中 generative 模型 → generation          │
+│    4. 默认:understanding(含 model=='auto' 的纯文本请求)              │
+│  ⚠ auto 不在入口解析——交给 bridge 在管道末端决定                      │
+│                                                                        │
 │  输出:PipelineContext.pipeline_kind = "understanding"|"generation"    │
-│  ⚠ 这是整个建议里唯一需要从零写的核心组件                              │
 └──────────────────────────────┬───────────────────────────────────────┘
                                │
               ┌────────────────┴────────────────┐
@@ -274,7 +284,7 @@
                └───────────────────┬───────────────────┘
                                    ▼
 ┌──────────────────────────────────────────────────────────────────────┐
-│  ▶ 总出口:LiteLLMBridge  (★ 已存在,无需新建,仅强化)                  │
+│  ▶ 总出口:LiteLLMBridge  (litellm_bridge.py)                          │
 │                                                                        │
 │  两个管道的请求都汇到这里 → 统一调下游                                   │
 │    understanding → completion() / completion_stream()                  │
@@ -282,14 +292,18 @@
 │  (生成类请求若需要多次调用,如 Draft→HiRes,由生成管道内部编排,          │
 │   每次单调用仍走此出口)                                                │
 │                                                                        │
+│  【auto 末端解析】(本次落地)                                          │
+│    model=='auto' 时,bridge 用注入的 ModelRouterStrategy 按             │
+│    pipeline_kind 选候选池(understanding→llm/mllm,                      │
+│    generation→generative),complexity 评分选最优,                       │
+│    结果写 _meta.model_router。「选哪个模型」的决策在管道末端,           │
+│    不在入口——避免分流器越权。                                          │
+│                                                                        │
 │  已有能力(沿用):                                                      │
 │    - litellm.Router 多 provider 调用                                   │
 │    - fallback 链 (主模型失败自动降级)                                  │
 │    - CircuitBreaker 包裹                                               │
 │    - per-model base_url 覆盖(Agnes 文/图/视频走不同端点)               │
-│  建议强化:                                                            │
-│    - 配置 litellm 库自身 logger(当前 0 处配置,调试时全是黑盒)          │
-│    - fallback 命中时记 info 日志(当前只写 _meta 不记日志)              │
 └──────────────────────────────┬───────────────────────────────────────┘
                                ▼
 ┌──────────────────────────────────────────────────────────────────────┐
@@ -314,11 +328,11 @@
 | 缓存层 L1/L2/L3 | ✅ 已有 | 理解管道内(生成管道通常不缓存) | 位置明确 |
 | 配额 KeyStore | ✅ 已有 | 分流后、管道内 | 位置明确 |
 
-### C.3 关键设计决策(需你拍板的点)
+### C.3 关键设计决策(已拍板)
 
-1. **分流器放哪?**——在 auth 之后、所有处理之前。这样 media_optimization 可以放分流器里(两管道共用),也可以放分流后(各自处理)。我建议**共用前置**:PII 和 media 在分流前跑一遍,两管道都不用重复。
-2. **缓存只放理解管道**——生成结果(图片/视频)缓存语义复杂(同一 prompt 出图不同),建议生成管道默认不查缓存,或用单独的媒体缓存(`MediaCacheManager` 已存在)。
-3. **debug 开关的统一作用点**——这是本次需求的落点。两个管道都用 `PipelineEngine` 驱动后,每个插件实例上挂一个 `debug_enabled` 属性,`execute()` 入口处按属性门控 `logger.debug()`。全局 debug 按钮(前端+后端+监控)独立于插件 debug,互不耦合。**详见下面的架构建议第 1 条。**
+1. **分流器放哪?**——✅ **已采纳「共用前置」(2026-07-04)**。media_optimization + PII 在 `dispatch()` 里、`classify_request` 之前跑,两管道共享。生成管道也过 PII(用户往 prompt 里粘的邮箱/API key 会被脱敏)。auto 模型解析**不**在共用前置——下沉到 LiteLLMBridge 在管道末端按 pipeline_kind 解析,分流器只看模态/意图。
+2. **缓存只放理解管道**——✅ 已落地。生成管道 `cache_key=None`,不查不回填 prompt_cache。
+3. **debug 开关的统一作用点**——见架构建议第 1 条(独立演进,不在总分总落地范围内)。
 
 ---
 

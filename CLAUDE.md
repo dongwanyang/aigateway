@@ -109,16 +109,20 @@ Runs before LLM calls when multimodal content is detected:
 
 所有 `/v1/chat/completions` 请求经 `RequestDispatcher.dispatch()`(dispatcher.py),总分总结构:
 
-**总(入口分流)**:`classify_request(body, config_manager)` 按优先级分流:
-1. 模型名推断:body.model 命中 providers 里标记 generative 模态 → generation
-2. 模态推断:messages 含 image/audio/video content → generation
-3. 默认:understanding
+**总(共用前置 + 入口分流)**:
+1. **共用前置**(C.3 决策 1,两管道共享,分流前跑):media_optimization → PII 检测。生成管道也过 PII(用户 prompt 里粘的邮箱/API key 会被脱敏)。
+2. **分流** `classify_request(body, config_manager)` 只看模态/意图,**不看 model**:
+   - 显式意图 `body.generation_intent == True` → generation
+   - 模态推断:messages 含 image/audio/video 生成块 → generation
+   - 模型名推断(仅非 auto):命中 generative 模型 → generation
+   - 默认:understanding(含 `model=='auto'` 的纯文本请求)
+3. **auto 不在入口解析** —— `model=='auto'` 原封传给 LiteLLMBridge,在管道末端按 pipeline_kind 解析(见下)。
 
 **分(两条管道,各跑 PipelineEngine 插件链)**:
-- **理解管道**(`PipelineEngine[pipeline_kind="understanding"]`,8 插件):media_optimization → pii → (auto model 解析) → 缓存查找 → 配额 → prompt_compress → rag/conv → LiteLLM 出口 → 回填
+- **理解管道**(`PipelineEngine[pipeline_kind="understanding"]`,8 插件):rag/conv(其余 pii/cache/semantic/model_router/compress/media 已由共用前置或本管道后续步骤处理,engine 跑前用 `_skip_names` 过滤)→ 缓存查找 → 配额 → prompt_compress → LiteLLM 出口 → 回填
 - **生成管道**(`PipelineEngine[pipeline_kind="generation"]`,6 插件):ai_director → intent_evaluator → token_compressor → draft_generator → gen_model_router → cost_tracker → 配额 → LiteLLM 出口(不查理解缓存)
 
-**总(LiteLLM 统一出口)**:`LiteLLMBridge.completion()`/`completion_stream()` 是两条管道的共同出口,带 fallback 链 + CircuitBreaker。
+**总(LiteLLM 统一出口 + auto 末端解析)**:`LiteLLMBridge.completion()`/`completion_stream()` 是两条管道的共同出口,带 fallback 链 + CircuitBreaker。`model=='auto'` 时 bridge 用注入的 `ModelRouterStrategy`(`set_auto_resolver`)按 pipeline_kind 选候选池(understanding→llm/mllm,generation→generative),complexity 评分选最优,结果写 `_meta.model_router`。「选哪个模型」的决策在管道末端,不在入口。
 
 流式路径已对齐非流式行为:扣配额(`key_store.increment_usage`)、回填缓存(L1/L2/L3)、cost 用真实值。生成管道不查 prompt_cache(生成结果缓存语义复杂)。
 
@@ -270,8 +274,10 @@ Tests live in `/tests/` (25 files). No conftest.py or pytest.ini — tests run d
 
 ## Architecture Decisions & Known States
 
-- **总分总架构(2026-07)** — 所有 `/v1/chat/completions` 请求经 `RequestDispatcher`(dispatcher.py)按理解/生成分流,两条管道各由 `PipelineEngine` 驱动插件链,LiteLLM 作统一出口。`PipelineEngine`/`PluginRegistry`/`Plugin`/`PipelineContext` 四类加了 `pipeline_kind` 维度。`openai_compat.py` 的手工串行链已删除,辅助函数(`_apply_*`/`_record_request_log` 等)保留供 dispatcher 复用。
-- **ModelRouterPlugin 是空壳** — 真路由由 dispatcher 的 `_resolve_auto_model`(调 ModelRouterStrategy)和 `classify_request` 承担。空壳保留注册是为了不破坏 `prompt_compress` 的 depends_on,运行时由 dispatcher 的 `_skip_names` 跳过。
+- **总分总架构(2026-07)** — 所有 `/v1/chat/completions` 请求经 `RequestDispatcher`(dispatcher.py):共用前置(media+PII)→ 分流(只看模态/意图)→ 两条管道各由 `PipelineEngine` 驱动插件链 → LiteLLM 统一出口。`PipelineEngine`/`PluginRegistry`/`Plugin`/`PipelineContext` 四类加了 `pipeline_kind` 维度。`openai_compat.py` 的手工串行链已删除,辅助函数(`_apply_*`/`_record_request_log` 等)保留供 dispatcher 复用。
+- **auto 模型解析下沉到 bridge(2026-07-04)** — `model=='auto'` 不再在 dispatcher 入口解析。`classify_request` 只看模态/意图,auto 请求按模态分流后原封传给 `LiteLLMBridge`。bridge 通过 `set_auto_resolver(ModelRouterStrategy)` 注入解析器,在管道末端按 `pipeline_kind` 选候选池(understanding→llm/mllm,generation→generative),complexity 评分选最优,结果写 `_meta.model_router`。理由:让「选哪个模型」的决策发生在管道链末端(可拿到 PII/压缩/RAG 信号),而非入口越权决定。
+- **共用前置(C.3 决策 1,2026-07-04)** — media_optimization + PII 在 `dispatch()` 里、`classify_request` 之前跑,两管道共享。生成管道也过 PII(用户 prompt 里粘的邮箱/API key 会被脱敏)。auto 解析不在共用前置(属路由决策,见上一条)。
+- **ModelRouterPlugin 是空壳** — 真路由由 bridge 的 auto 解析(注入 ModelRouterStrategy)承担,`classify_request` 只做模态分流。空壳保留注册是为了不破坏 `prompt_compress` 的 depends_on,运行时由 dispatcher 的 `_skip_names` 跳过。
 - **GenerationPipeline(media/generation.py)deprecated** — 孤儿代码 0 生产引用,生成管道由 generation_optimization 6 插件链承担。
 - **AIDirectorStrategy 延迟绑定 litellm_bridge** — `register_generation_optimization_plugins` 在 bridge 建好前跑,main.py 在 bridge 初始化后从 registry 取 strategy 单例注入 `_litellm_bridge`。
 - **热重载完整闭环** — admin PUT(global-config/plugins-config)写文件后调 `atomic_swap` → `_notify_reload` → main.py 的 `_on_config_reload` 回调同步 plugins.enabled 并重建两条管道 Engine。

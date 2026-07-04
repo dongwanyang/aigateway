@@ -70,17 +70,39 @@ def _content_modality_hint(messages: list) -> Optional[str]:
 def classify_request(body: Any, config_manager: Any) -> str:
     """把请求分类为 understanding | generation。
 
+    分类不做路由决策——只判断请求「想干什么」,让 LiteLLM 在管道末端
+    决定「用哪个模型」。所以对 model=='auto' 请求,分类器只看模态/意图,
+    不试图先解析 auto。
+
+    优先级(高→低):
+    1. 显式意图:body.generation_intent == True(可选字段,给客户端一个明确入口)
+    2. 模态推断:messages 含 image/audio/video 生成块 → generation
+    3. 已知的 generative 模型名(仅当非 auto):body.model 命中 providers
+       里标记 generative 的模型 → generation
+    4. 默认:understanding(纯文本理解、mllm 多模态理解都走这条)
+
     Args:
         body: ChatCompletionRequest（或 dict），需有 model 和 messages。
-        config_manager: ConfigManager，用于查 providers 模型模态配置。
+        config_manager: ConfigManager,用于查 providers 模型模态配置。
 
     Returns:
         "understanding" | "generation"
     """
     model = getattr(body, "model", None) or (body.get("model") if isinstance(body, dict) else None)
     messages = getattr(body, "messages", None) or (body.get("messages") if isinstance(body, dict) else None)
+    generation_intent = getattr(body, "generation_intent", None)
+    if generation_intent is None and isinstance(body, dict):
+        generation_intent = body.get("generation_intent")
 
-    # 1. 模型名推断：查 providers 里该模型是否标记为 generative 模态
+    # 1. 显式意图
+    if generation_intent is True:
+        return "generation"
+
+    # 2. 模态推断
+    if messages and _content_modality_hint(messages) == "generation":
+        return "generation"
+
+    # 3. 模型名推断(仅当非 auto——auto 的语义就是「你帮我选」,交给 bridge)
     if model and model != "auto" and config_manager is not None:
         try:
             providers = config_manager.get("providers", {}) or {}
@@ -103,11 +125,7 @@ def classify_request(body: Any, config_manager: Any) -> str:
         except Exception as exc:
             logger.debug("classify_request 模型推断异常: %s", exc)
 
-    # 2. 模态推断：含多模态输入块倾向 generation
-    if messages and _content_modality_hint(messages) == "generation":
-        return "generation"
-
-    # 3. 默认 understanding
+    # 4. 默认 understanding(含 model=='auto' 的纯文本请求)
     return "understanding"
 
 
@@ -140,12 +158,74 @@ class RequestDispatcher:
     async def dispatch(self, body: Any, request: Request) -> JSONResponse:
         """分发请求到对应管道。
 
+        总分总架构（采纳 C.3 决策 1「共用前置」+ auto 解析下沉到 LiteLLM）:
+        1. 【共用前置】所有请求先跑 media_optimization → PII 检测。
+           两者是「输入规范化」——纯输入变换,不涉及路由决策,两条管道都受益
+           (生成管道也会脱敏用户 prompt 里粘的 API key/邮箱)。
+        2. 【分流】按模态/意图分类,不看 body.model。理由:
+           auto 请求最终选哪个模型由 LiteLLM 在管道末端决定,分类器不该越权。
+        3. 【管道】按 pipeline_kind 走对应 engine + 后续插件链。
+        4. 【末端路由】body.model 原封传给 litellm_bridge。若 model=='auto',
+           bridge 内部结合 pipeline 上下文(PII/压缩/RAG 信号)选具体模型
+           调 LiteLLM Router;若已指定模型,直接调用+走 fallback 链。
+
         body.should_stream 决定走流式还是非流式编排。
         """
+        from aigateway_api.openai_compat import (
+            _apply_media_optimization,
+            _apply_pii_detection,
+            _record_request_log,
+        )
+
+        request_start_time = time.time()
+        plugin_trace: list = []
+        state = self.state
+
         # 解析 user_id / key_hash（从鉴权中间件注入）
         user_id, key_hash = self._resolve_identity(request)
 
-        # 分流
+        # ===== 共用前置 1: Media Optimization =====
+        # 多模态 content(图片/音频/视频)先转文本,PII 才能扫到图片 OCR 出的敏感文本。
+        # 注意:生成管道的图片输入(文生图不适用,图生图适用)按理不该 OCR,
+        # 但 media_optimization 内部已按 content type 判断,这里放心跑。
+        mol_start = time.time()
+        mol_result = await _apply_media_optimization(body, request, state)
+        body.messages = mol_result["messages"]
+        mol_meta = mol_result["meta"]
+        if mol_meta:
+            plugin_trace.append({"plugin_name": "media_optimization",
+                                 "duration_ms": round((time.time() - mol_start) * 1000, 2),
+                                 "status": "success"})
+
+        # ===== 共用前置 2: PII Detection(生成管道也受此保护)=====
+        pii_start = time.time()
+        pii_result = await _apply_pii_detection(body, request, state)
+        if "error" in pii_result:
+            plugin_trace.append({"plugin_name": "pii_detector",
+                                 "duration_ms": round((time.time() - pii_start) * 1000, 2),
+                                 "status": "rejected"})
+            request.state.plugin_trace = plugin_trace
+            await _record_request_log(request=request, method="POST", endpoint="/v1/chat/completions",
+                                      status_code=403, duration_ms=0, model=body.model,
+                                      cache_hit=False, cache_tier=None)
+            return JSONResponse(content=pii_result["error"], status_code=403)
+        body.messages = pii_result["messages"]
+        pii_meta = pii_result["meta"]
+        if pii_meta:
+            plugin_trace.append({"plugin_name": "pii_detector",
+                                 "duration_ms": round((time.time() - pii_start) * 1000, 2),
+                                 "status": "success", **pii_meta})
+
+        # 前置结果打包传给下游管道(auto 解析已下沉到 bridge,不传 router_meta)
+        prefix = {
+            "plugin_trace": plugin_trace,
+            "request_start_time": request_start_time,
+            "mol_meta": mol_meta,
+            "pii_meta": pii_meta,
+        }
+
+        # ===== 分流(只看模态和显式意图,不看 body.model)=====
+        # auto 请求最终选哪个模型由 bridge 决定,分流器不越权。
         pipeline_kind = classify_request(body, self.config_manager)
         logger.info(
             "dispatch: pipeline_kind=%s, model=%s, stream=%s",
@@ -157,8 +237,8 @@ class RequestDispatcher:
         engine = self.understanding_engine if pipeline_kind == "understanding" else self.generation_engine
 
         if pipeline_kind == "understanding":
-            return await self._dispatch_understanding(body, request, engine, user_id, key_hash)
-        return await self._dispatch_generation(body, request, engine, user_id, key_hash)
+            return await self._dispatch_understanding(body, request, engine, user_id, key_hash, prefix)
+        return await self._dispatch_generation(body, request, engine, user_id, key_hash, prefix)
 
     # ------------------------------------------------------------------
     # 身份解析
@@ -184,79 +264,30 @@ class RequestDispatcher:
     # ------------------------------------------------------------------
 
     async def _dispatch_understanding(
-        self, body: Any, request: Request, engine: Any, user_id: Optional[str], key_hash: Optional[str]
+        self, body: Any, request: Request, engine: Any,
+        user_id: Optional[str], key_hash: Optional[str], prefix: Dict[str, Any],
     ) -> JSONResponse:
-        """理解管道：engine 插件链 → 缓存 → 配额 → LiteLLM → 回填。
+        """理解管道：engine 插件链 → 缓存 → 配额 → prompt_compress → LiteLLM → 回填。
 
-        复用 openai_compat 的辅助函数（_apply_media_optimization 等），
-        dispatcher 只负责编排顺序和短路返回。
+        media_optimization / PII / auto 模型解析已由 dispatch() 共用前置完成,
+        本方法从 prefix 拿到那三步的 meta 和累计 plugin_trace。
         """
         from aigateway_api.openai_compat import (
-            _apply_media_optimization,
-            _apply_pii_detection,
             _apply_prompt_compression,
             _record_request_log,
-            _resolve_auto_model,
         )
-        from aigateway_api.streaming import create_sse_response, simulate_stream_from_cache
 
-        request_start_time = time.time()
-        plugin_trace: list = []
         state = self.state
-
-        # ===== 前置共享处理（两管道共用，分流后仍跑一遍）=====
-        # Media Optimization
-        mol_start = time.time()
-        mol_result = await _apply_media_optimization(body, request, state)
-        body.messages = mol_result["messages"]
-        mol_meta = mol_result["meta"]
-        if mol_meta:
-            plugin_trace.append({"plugin_name": "media_optimization",
-                                 "duration_ms": round((time.time() - mol_start) * 1000, 2),
-                                 "status": "success"})
-
-        # PII Detection
-        pii_start = time.time()
-        pii_result = await _apply_pii_detection(body, request, state)
-        if "error" in pii_result:
-            plugin_trace.append({"plugin_name": "pii_detector",
-                                 "duration_ms": round((time.time() - pii_start) * 1000, 2),
-                                 "status": "rejected"})
-            request.state.plugin_trace = plugin_trace
-            await _record_request_log(request=request, method="POST", endpoint="/v1/chat/completions",
-                                      status_code=403, duration_ms=0, model=body.model,
-                                      cache_hit=False, cache_tier=None)
-            return JSONResponse(content=pii_result["error"], status_code=403)
-        body.messages = pii_result["messages"]
-        pii_meta = pii_result["meta"]
-        if pii_meta:
-            plugin_trace.append({"plugin_name": "pii_detector",
-                                 "duration_ms": round((time.time() - pii_start) * 1000, 2),
-                                 "status": "success", **pii_meta})
-
-        # Model Router (auto)
-        router_start = time.time()
-        router_result = await _resolve_auto_model(body, state)
-        if "error" in router_result:
-            plugin_trace.append({"plugin_name": "model_router",
-                                 "duration_ms": round((time.time() - router_start) * 1000, 2),
-                                 "status": "failed"})
-            request.state.plugin_trace = plugin_trace
-            await _record_request_log(request=request, method="POST", endpoint="/v1/chat/completions",
-                                      status_code=400, duration_ms=0, model=body.model,
-                                      cache_hit=False, cache_tier=None)
-            return JSONResponse(content=router_result["error"], status_code=400)
-        body.model = router_result["model"]
-        router_meta = router_result["meta"]
-        if router_meta:
-            plugin_trace.append({"plugin_name": "model_router",
-                                 "duration_ms": round((time.time() - router_start) * 1000, 2),
-                                 "status": "success", **router_meta})
+        plugin_trace: list = prefix["plugin_trace"]
+        request_start_time: float = prefix["request_start_time"]
+        mol_meta = prefix.get("mol_meta")
+        pii_meta = prefix.get("pii_meta")
+        # router_meta 由 bridge 在 auto 解析后回填(见 _call_llm_nonstream/stream)
+        router_meta: Optional[Dict[str, Any]] = None
 
         # ===== 跑理解管道 engine 插件链（rag_retriever / conv_compressor 等）=====
-        # 注意：pii/cache/semantic/model_router/compress 已由上面的辅助函数处理
-        # （它们各自建独立 ctx 调插件），engine 这里跑的是注册到 understanding 且
-        # 未被上述辅助函数覆盖的插件。为避免重复执行，engine 跑前先过滤掉已处理的。
+        # 注意：pii/cache/semantic/model_router/compress/media_optimization 已在
+        # dispatch() 共用前置或本方法后续步骤中处理，engine 跑前先过滤掉重复项。
         if engine is not None:
             try:
                 ctx = PipelineContext(
@@ -378,11 +409,13 @@ class RequestDispatcher:
             return await self._call_llm_stream(
                 body, request, litellm_bridge, plugin_trace, request_start_time,
                 user_id, key_hash, cache_key, normalized_messages,
+                pipeline_kind="understanding",
             )
         return await self._call_llm_nonstream(
             body, request, litellm_bridge, plugin_trace, request_start_time,
             user_id, key_hash, cache_key, normalized_messages,
             pii_meta, router_meta, mol_meta, compress_meta,
+            pipeline_kind="understanding",
         )
 
     # ------------------------------------------------------------------
@@ -390,18 +423,23 @@ class RequestDispatcher:
     # ------------------------------------------------------------------
 
     async def _dispatch_generation(
-        self, body: Any, request: Request, engine: Any, user_id: Optional[str], key_hash: Optional[str]
+        self, body: Any, request: Request, engine: Any,
+        user_id: Optional[str], key_hash: Optional[str], prefix: Dict[str, Any],
     ) -> JSONResponse:
         """生成管道：engine 插件链 → 配额 → LiteLLM（不查理解缓存）。
 
+        media_optimization / PII 已由 dispatch() 共用前置完成,本方法从 prefix
+        拿到 meta 和累计 plugin_trace。
         生成结果（图片/视频）缓存语义复杂，本管道默认不查 prompt_cache；
         可选走 MediaCacheManager（本次不接入，留待后续）。
         """
         from aigateway_api.openai_compat import _record_request_log
 
-        request_start_time = time.time()
-        plugin_trace: list = []
         state = self.state
+        plugin_trace: list = prefix["plugin_trace"]
+        request_start_time: float = prefix["request_start_time"]
+        mol_meta = prefix.get("mol_meta")
+        pii_meta = prefix.get("pii_meta")
 
         # 跑生成管道 engine 插件链（ai_director → ... → cost_tracker）
         if engine is not None:
@@ -459,6 +497,7 @@ class RequestDispatcher:
                              "status": "success"})
 
         # ===== LiteLLM 出口（生成管道直接调，不查缓存）=====
+        # body.model 可能是 'auto',由 bridge 内部按 generation 模态解析。
         litellm_bridge = self.litellm_bridge
         if litellm_bridge is None:
             return JSONResponse(
@@ -472,13 +511,15 @@ class RequestDispatcher:
                 user_id, key_hash,
                 cache_key=None,  # 生成管道不回填
                 normalized_messages=None,
+                pipeline_kind="generation",
             )
         return await self._call_llm_nonstream(
             body, request, litellm_bridge, plugin_trace, request_start_time,
             user_id, key_hash,
             cache_key=None,  # 生成管道不回填
             normalized_messages=None,
-            pii_meta=None, router_meta=None, mol_meta=None, compress_meta=None,
+            pii_meta=pii_meta, router_meta=None, mol_meta=mol_meta, compress_meta=None,
+            pipeline_kind="generation",
         )
 
     # ------------------------------------------------------------------
@@ -489,10 +530,12 @@ class RequestDispatcher:
         self, body, request, litellm_bridge, plugin_trace, request_start_time,
         user_id, key_hash, cache_key, normalized_messages,
         pii_meta=None, router_meta=None, mol_meta=None, compress_meta=None,
+        pipeline_kind: str = "understanding",
     ) -> JSONResponse:
         """非流式调 LiteLLM 出口 + 用量记录 + 缓存回填。
 
         normalized_messages: 用于 L3 语义缓存回填（生成管道传 None,不做 L3 回填）。
+        pipeline_kind: 传给 bridge,body.model=='auto' 时按此选候选池模态。
         """
         from aigateway_api.openai_compat import _estimate_cost, _record_request_log
 
@@ -518,6 +561,7 @@ class RequestDispatcher:
                 tools=body.tools,
                 tool_choice=body.tool_choice,
                 stop=body.stop,
+                pipeline_kind=pipeline_kind,
             )
         except Exception as exc:
             plugin_trace.append({"plugin_name": "llm_completion",
@@ -605,10 +649,14 @@ class RequestDispatcher:
                                   model=body.model, cache_hit=False, cache_tier=None)
 
         meta = dict(result.get("_meta", {}))
+        # bridge 已在 result["_meta"]["model_router"] 里写好了 auto 解析结果(如有);
+        # 如果 dispatcher 层没传 router_meta(通常都不传了),从 bridge 结果拿。
+        bridge_router_meta = meta.get("model_router")
+        effective_router_meta = router_meta or bridge_router_meta
         meta.update({
             "media_optimization": mol_meta,
             "pii_detector": pii_meta,
-            "model_router": router_meta,
+            "model_router": effective_router_meta,
             "prompt_compress": compress_meta,
         })
         meta = {k: v for k, v in meta.items() if v}
@@ -620,6 +668,7 @@ class RequestDispatcher:
     async def _call_llm_stream(
         self, body, request, litellm_bridge, plugin_trace, request_start_time,
         user_id, key_hash, cache_key, normalized_messages,
+        pipeline_kind: str = "understanding",
     ) -> JSONResponse:
         """流式调 LiteLLM 出口。
 
@@ -630,6 +679,7 @@ class RequestDispatcher:
         - llm_completion duration_ms 不写死 0
 
         normalized_messages: 用于 L3 语义缓存回填（生成管道传 None）。
+        pipeline_kind: 传给 bridge,body.model=='auto' 时按此选候选池模态。
         """
         from aigateway_api.openai_compat import (
             _estimate_cost, _record_request_log,
@@ -653,6 +703,7 @@ class RequestDispatcher:
             tools=body.tools,
             tool_choice=body.tool_choice,
             stop=body.stop,
+            pipeline_kind=pipeline_kind,
         )
 
         # 包装生成器：消费完后做配额扣减 + 缓存回填 + metrics（修正后行为）

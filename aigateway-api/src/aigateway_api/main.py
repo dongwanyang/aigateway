@@ -430,6 +430,10 @@ async def lifespan(app: "FastAPI"):
         providers_cfg = config_manager.get("providers", {})
         if providers_cfg:
             lb.initialize(providers_cfg)
+        # 注入 auto 解析器:bridge 收到 model=='auto' 时用它按 pipeline_kind 选模型
+        # (总分总架构:「选哪个模型」的决策在管道末端,不在入口)
+        if model_router_resolver is not None:
+            lb.set_auto_resolver(model_router_resolver)
         litellm_bridge = lb
         logger.info("LiteLLM Bridge 初始化完成")
     except Exception as exc:
