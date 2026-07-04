@@ -514,8 +514,8 @@ async def _resolve_auto_model(
 
 async def _apply_prompt_compression(
     body: "ChatCompletionRequest",
-    state: Dict[str, Any],
     request: Request,
+    state: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Apply prompt compression before LLM call.
 

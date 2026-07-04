@@ -386,7 +386,7 @@ class RequestDispatcher:
 
         # ===== Prompt Compression =====
         compress_start = time.time()
-        compress_result = await _apply_prompt_compression(body, state, request)
+        compress_result = await _apply_prompt_compression(body, request, state)
         body.messages = compress_result["messages"]
         compress_meta = compress_result["meta"]
         if compress_meta and compress_meta.get("compression_ratio", 1.0) < 1.0:
