@@ -344,6 +344,11 @@ media_optimization:
 # ==========================
 # 6 大策略降低图片/视频生成成本
 generation_optimization:
+  ai_director: {}              # Prompt 结构化改写
+  model_router: {}             # 生成模型路由策略
+  feature_cache: {}            # 特征向量缓存
+  cost_tracking: {}            # 成本追踪配置
+  prompt_templates: {}         # Prompt 模板管理
   token_compressor:          # 视觉 Token 压缩（CLIP 特征提取）
     clip:
       model_name: "openai/clip-vit-large-patch14"  # CLIP 模型

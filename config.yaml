@@ -245,6 +245,11 @@ media_optimization:
   media_cache_ttl: 604800
   max_concurrent_processors: 4
 generation_optimization:
+  ai_director: {}
+  model_router: {}
+  feature_cache: {}
+  cost_tracking: {}
+  prompt_templates: {}
   token_compressor:
     clip:
       model_name: "openai/clip-vit-large-patch14"
