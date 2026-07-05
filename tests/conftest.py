@@ -75,4 +75,5 @@ pytest_plugins = [
     "tests.fixtures.clients",
     "tests.fixtures.prom",
     "tests.fixtures.config",
+    "tests.fixtures.trace",
 ]

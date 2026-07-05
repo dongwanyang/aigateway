@@ -36,8 +36,10 @@ def user_client(admin_client, unique_prefix):
     if resp.status_code not in (200, 201):
         pytest.skip(f"Cannot create test user key: {resp.status_code} {resp.text}")
     data = resp.json()
-    key_value = data.get("key") or data.get("api_key") or data.get("value")
-    key_id = data.get("key_id") or data.get("id")
+    # Unwrap {data: {...}} envelope if present
+    inner = data.get("data", data)
+    key_value = inner.get("key") or inner.get("api_key") or inner.get("value")
+    key_id = inner.get("key_id") or inner.get("id")
     assert key_value, f"Unexpected /admin/api-keys response shape: {data}"
     c = httpx.Client(
         base_url=BASE,
