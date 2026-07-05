@@ -571,6 +571,10 @@ async def get_plugins_config(
         for name, reg in getattr(registry, "_registrations", {}).items():
             reg_map[name] = reg
 
+    # 读当前 DebugConfig(per_plugin)用于回填每个插件的 debug 字段
+    from aigateway_core.debug_config import get_debug_config
+    _debug_cfg = get_debug_config()
+
     def _build_plugin_entry(p: dict) -> dict:
         name = p.get("name", "unknown")
         entry = {
@@ -578,6 +582,8 @@ async def get_plugins_config(
             "enabled": p.get("enabled", True),
             "depends_on": p.get("depends_on", []),
             "config": p.get("config", {}),
+            # prompt_compress 归 entry 维度(dispatcher 内联),无 per_plugin 开关 → null
+            "debug": None if name == "prompt_compress" else bool(_debug_cfg.per_plugin.get(name, False)),
         }
         reg = reg_map.get(name)
         if reg is not None:
@@ -637,6 +643,7 @@ async def get_plugins_config(
                 "config": _serializable_config(getattr(reg, "config", {}) or {}),
                 "pipeline_kind": getattr(reg, "pipeline_kind", "understanding"),
                 "priority": getattr(reg, "priority", 0),
+                "debug": None if name == "prompt_compress" else bool(_debug_cfg.per_plugin.get(name, False)),
             })
 
     return {
@@ -835,6 +842,85 @@ async def get_quota(
             "last_request_at": data.get("last_used_at") or None,
             "total_requests_today": int(data.get("daily_tokens_used", 0)),
             "total_tokens_today": daily_used,
+        },
+        "message": "success",
+    }
+
+
+# ------------------------------------------------------------------
+# POST /admin/plugins/{name}/debug — 切换单个插件的 debug 开关
+# GET  /admin/config/debug — 读当前 DebugConfig(5 维度 + per_plugin)
+# ------------------------------------------------------------------
+
+
+@router.post("/plugins/{plugin_name}/debug")
+async def set_plugin_debug(
+    plugin_name: str,
+    request: Request,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+    """开关单个插件的 debug 日志 —— 写 config.yaml 的 debug.plugins.per_plugin[name]。
+
+    使用 fcntl.flock 防止并发写冲突(参照现有 admin 写配置模式)。
+    写完后触发 atomic_swap → _notify_reload → DebugConfigWatcher 更新。
+    """
+    import fcntl
+    import os
+    import yaml
+    from aigateway_api.main import app
+    s = app.state
+    config_manager = getattr(s, "config_manager")
+    if not config_manager:
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "ConfigManager not initialized"}})
+
+    body = await request.json()
+    enabled = bool(body.get("enabled", False))
+
+    config_path = config_manager.config_path
+    if not config_path or not os.path.isfile(config_path):
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "config.yaml not found"}})
+
+    # 文件锁读改写:只更新 debug.plugins.per_plugin[plugin_name],不动其他 section
+    with open(config_path, "r+", encoding="utf-8") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            raw = yaml.safe_load(f) or {}
+            debug_section = raw.get("debug") or {}
+            plugins_section = debug_section.get("plugins") or {}
+            per_plugin = plugins_section.get("per_plugin") or {}
+            per_plugin[plugin_name] = enabled
+            plugins_section["per_plugin"] = per_plugin
+            debug_section["plugins"] = plugins_section
+            raw["debug"] = debug_section
+            f.seek(0)
+            f.truncate()
+            yaml.dump(raw, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+    # 内存更新 + 触发热重载(DebugConfigWatcher 在 on_reload 回调里 atomic swap)
+    config_manager.set("debug", raw.get("debug", {}))
+    config_manager.atomic_swap(config_manager._config)
+
+    return {"data": {"plugin": plugin_name, "debug": enabled}, "message": "success"}
+
+
+@router.get("/config/debug")
+async def get_debug_config_endpoint(
+    request: Request,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+    """返回当前 DebugConfig(5 维度 + plugins.enabled + per_plugin)。"""
+    from aigateway_core.debug_config import get_debug_config
+    cfg = get_debug_config()
+    return {
+        "data": {
+            "frontend": cfg.frontend,
+            "entry": cfg.entry,
+            "cache": cfg.cache,
+            "bridge": cfg.bridge,
+            "plugins_enabled": cfg.plugins_enabled,
+            "per_plugin": cfg.per_plugin,
         },
         "message": "success",
     }
