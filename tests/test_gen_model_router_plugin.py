@@ -73,6 +73,7 @@ def mock_strategy():
 def ctx_with_intent_result():
     """PipelineContext with intent_evaluator result pre-populated."""
     ctx = PipelineContext(
+        trace_id="test-trace",
         request={"messages": [{"role": "user", "content": "two cats fighting"}]}
     )
     ctx.extra[NS_GENERATION_OPTIMIZATION] = {
@@ -110,6 +111,7 @@ class TestGenModelRouterPluginDisabled:
         """Disabled plugin returns ctx without modification."""
         plugin = GenModelRouterPlugin(strategy=mock_strategy, config=disabled_config)
         ctx = PipelineContext(
+            trace_id="test-trace",
             request={"messages": [{"role": "user", "content": "test prompt"}]}
         )
 
@@ -124,6 +126,7 @@ class TestGenModelRouterPluginDisabled:
         """Disabled plugin does not invoke the strategy."""
         plugin = GenModelRouterPlugin(strategy=mock_strategy, config=disabled_config)
         ctx = PipelineContext(
+            trace_id="test-trace",
             request={"messages": [{"role": "user", "content": "test"}]}
         )
 
@@ -184,6 +187,7 @@ class TestGenModelRouterPluginEnabled:
         """Plugin passes routing_hint from request to strategy."""
         plugin = GenModelRouterPlugin(strategy=mock_strategy, config=default_config)
         ctx = PipelineContext(
+            trace_id="test-trace",
             request={
                 "messages": [{"role": "user", "content": "test"}],
                 "routing_hint": "best quality",
@@ -203,6 +207,7 @@ class TestGenModelRouterPluginEnabled:
         """Plugin passes model_override (target_model) from request to strategy."""
         plugin = GenModelRouterPlugin(strategy=mock_strategy, config=default_config)
         ctx = PipelineContext(
+            trace_id="test-trace",
             request={
                 "messages": [{"role": "user", "content": "test"}],
                 "target_model": "agnes-video-v2.0",
@@ -222,6 +227,7 @@ class TestGenModelRouterPluginEnabled:
         """Plugin reads required_modality from request."""
         plugin = GenModelRouterPlugin(strategy=mock_strategy, config=default_config)
         ctx = PipelineContext(
+            trace_id="test-trace",
             request={
                 "messages": [{"role": "user", "content": "test"}],
                 "required_modality": "mllm",
@@ -250,6 +256,7 @@ class TestGenModelRouterPluginErrorHandling:
 
         plugin = GenModelRouterPlugin(strategy=mock_strat, config=default_config)
         ctx = PipelineContext(
+            trace_id="test-trace",
             request={"messages": [{"role": "user", "content": "test"}]}
         )
         ctx.extra[NS_GENERATION_OPTIMIZATION] = {
@@ -275,6 +282,7 @@ class TestGenModelRouterPluginErrorHandling:
 
         plugin = GenModelRouterPlugin(strategy=mock_strat, config=default_config)
         ctx = PipelineContext(
+            trace_id="test-trace",
             request={"messages": [{"role": "user", "content": "test"}]}
         )
         ctx.extra[NS_GENERATION_OPTIMIZATION] = {
@@ -306,6 +314,7 @@ class TestGenModelRouterPluginErrorHandling:
 
         plugin = GenModelRouterPlugin(strategy=mock_strat, config=default_config)
         ctx = PipelineContext(
+            trace_id="test-trace",
             request={"messages": [{"role": "user", "content": "test"}]}
         )
         # No intent_evaluator result in context

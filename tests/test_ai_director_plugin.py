@@ -98,6 +98,7 @@ class TestAIDirectorPluginDisabled:
         """Disabled plugin returns ctx without modification."""
         plugin = AIDirectorPlugin(strategy=strategy, config=disabled_config)
         ctx = PipelineContext(
+            trace_id="test-trace",
             request={"messages": [{"role": "user", "content": "test prompt"}]}
         )
 
@@ -111,6 +112,7 @@ class TestAIDirectorPluginDisabled:
         """Disabled plugin does not invoke the strategy."""
         plugin = AIDirectorPlugin(strategy=mock_strategy, config=disabled_config)
         ctx = PipelineContext(
+            trace_id="test-trace",
             request={"messages": [{"role": "user", "content": "test prompt"}]}
         )
 
@@ -127,6 +129,7 @@ class TestAIDirectorPluginEnabled:
         """Enabled plugin invokes optimize_prompt on the strategy."""
         plugin = AIDirectorPlugin(strategy=mock_strategy, config=default_config)
         ctx = PipelineContext(
+            trace_id="test-trace",
             request={"messages": [{"role": "user", "content": "a cat jumping"}]}
         )
 
@@ -143,6 +146,7 @@ class TestAIDirectorPluginEnabled:
         """Plugin writes optimization result to ctx.extra."""
         plugin = AIDirectorPlugin(strategy=mock_strategy, config=default_config)
         ctx = PipelineContext(
+            trace_id="test-trace",
             request={"messages": [{"role": "user", "content": "a cat jumping"}]}
         )
 
@@ -161,6 +165,7 @@ class TestAIDirectorPluginEnabled:
         """Without reference images, modality should be 'llm'."""
         plugin = AIDirectorPlugin(strategy=mock_strategy, config=default_config)
         ctx = PipelineContext(
+            trace_id="test-trace",
             request={"messages": [{"role": "user", "content": "a sunset scene"}]}
         )
 
@@ -176,6 +181,7 @@ class TestAIDirectorPluginEnabled:
         """With reference images, modality should be 'mllm'."""
         plugin = AIDirectorPlugin(strategy=mock_strategy, config=default_config)
         ctx = PipelineContext(
+            trace_id="test-trace",
             request={
                 "messages": [
                     {
@@ -204,6 +210,7 @@ class TestAIDirectorPluginEnabled:
         """Reference images from media_optimization namespace detected."""
         plugin = AIDirectorPlugin(strategy=mock_strategy, config=default_config)
         ctx = PipelineContext(
+            trace_id="test-trace",
             request={"messages": [{"role": "user", "content": "enhance"}]}
         )
         # Pre-populate media_optimization with image results
@@ -232,6 +239,7 @@ class TestAIDirectorPluginErrorHandling:
 
         plugin = AIDirectorPlugin(strategy=mock_strat, config=default_config)
         ctx = PipelineContext(
+            trace_id="test-trace",
             request={"messages": [{"role": "user", "content": "original prompt"}]}
         )
 
@@ -248,7 +256,7 @@ class TestAIDirectorPluginErrorHandling:
     async def test_empty_messages_handled(self, default_config, mock_strategy):
         """Plugin handles empty messages gracefully."""
         plugin = AIDirectorPlugin(strategy=mock_strategy, config=default_config)
-        ctx = PipelineContext(request={"messages": []})
+        ctx = PipelineContext(request={"messages": []}, trace_id="test-trace")
 
         await plugin.execute(ctx)
 

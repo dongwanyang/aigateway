@@ -227,7 +227,7 @@ class TestPipelineContextV2:
 
     def test_media_optimization_namespace(self):
         """media_optimization 命名空间自动创建"""
-        ctx = PipelineContext(request={"messages": []})
+        ctx = PipelineContext(request={"messages": []}, trace_id="test-trace")
         ns = ctx.media_optimization
         assert isinstance(ns, dict)
         assert "detected_types" in ns
@@ -235,7 +235,7 @@ class TestPipelineContextV2:
 
     def test_generation_pipeline_namespace(self):
         """generation_pipeline 命名空间自动创建"""
-        ctx = PipelineContext(request={"messages": []})
+        ctx = PipelineContext(request={"messages": []}, trace_id="test-trace")
         ns = ctx.generation_pipeline
         assert isinstance(ns, dict)
         assert ns["prompt_enhanced"] is False
@@ -243,7 +243,7 @@ class TestPipelineContextV2:
 
     def test_namespace_isolation(self):
         """各命名空间互不影响"""
-        ctx = PipelineContext(request={"messages": []})
+        ctx = PipelineContext(request={"messages": []}, trace_id="test-trace")
         ctx.media_optimization["total_savings"] = 1000
         ctx.generation_pipeline["selected_model"] = "gpt-4o"
 
@@ -254,12 +254,12 @@ class TestPipelineContextV2:
 
     def test_is_multimodal_default(self):
         """is_multimodal 默认为 False"""
-        ctx = PipelineContext(request={"messages": []})
+        ctx = PipelineContext(request={"messages": []}, trace_id="test-trace")
         assert ctx.is_multimodal is False
 
     def test_total_token_savings_default(self):
         """total_token_savings 默认为 0"""
-        ctx = PipelineContext(request={"messages": []})
+        ctx = PipelineContext(request={"messages": []}, trace_id="test-trace")
         assert ctx.total_token_savings == 0
 
 
@@ -304,7 +304,7 @@ class TestMediaOptimizationLayer:
     async def test_text_message_passthrough(self):
         """纯文本消息不变 (Property 5)"""
         mol = self._make_mol()
-        ctx = PipelineContext(request={"messages": []})
+        ctx = PipelineContext(request={"messages": []}, trace_id="test-trace")
 
         messages = [{"role": "user", "content": "Hello world"}]
         result = await mol.process_messages(messages, ctx)
@@ -315,7 +315,7 @@ class TestMediaOptimizationLayer:
     async def test_multimodal_image_processing(self):
         """图片消息被 MOL 处理"""
         mol = self._make_mol()
-        ctx = PipelineContext(request={"messages": []})
+        ctx = PipelineContext(request={"messages": []}, trace_id="test-trace")
 
         messages = [
             {
@@ -342,7 +342,7 @@ class TestMediaOptimizationLayer:
     async def test_multimodal_audio_processing(self):
         """音频消息被 MOL 处理"""
         mol = self._make_mol()
-        ctx = PipelineContext(request={"messages": []})
+        ctx = PipelineContext(request={"messages": []}, trace_id="test-trace")
 
         messages = [
             {
@@ -367,7 +367,7 @@ class TestMediaOptimizationLayer:
     async def test_token_savings_non_negative(self):
         """Property 2: token_savings >= 0"""
         mol = self._make_mol()
-        ctx = PipelineContext(request={"messages": []})
+        ctx = PipelineContext(request={"messages": []}, trace_id="test-trace")
 
         messages = [
             {
@@ -390,7 +390,7 @@ class TestMediaOptimizationLayer:
     async def test_unsupported_type_passthrough(self):
         """不支持的媒体类型原样透传"""
         mol = self._make_mol()
-        ctx = PipelineContext(request={"messages": []})
+        ctx = PipelineContext(request={"messages": []}, trace_id="test-trace")
 
         # 视频 URL 但 MOL 没有注册 Video Pipeline
         messages = [
@@ -421,7 +421,7 @@ class TestPromptEnhancer:
     async def test_off_level_passthrough(self):
         """off 级别不修改请求"""
         enhancer = PromptEnhancer(level="off")
-        ctx = PipelineContext(request={"messages": []})
+        ctx = PipelineContext(request={"messages": []}, trace_id="test-trace")
 
         request = {
             "messages": [{"role": "user", "content": "Hello"}],
@@ -434,7 +434,7 @@ class TestPromptEnhancer:
     async def test_light_adds_system_prompt(self):
         """light 级别添加 system prompt"""
         enhancer = PromptEnhancer(level="light")
-        ctx = PipelineContext(request={"messages": []})
+        ctx = PipelineContext(request={"messages": []}, trace_id="test-trace")
 
         request = {
             "messages": [{"role": "user", "content": "Hello"}],
@@ -448,7 +448,7 @@ class TestPromptEnhancer:
     async def test_light_skips_if_system_exists(self):
         """light 级别: 已有 system prompt 时不重复添加"""
         enhancer = PromptEnhancer(level="light")
-        ctx = PipelineContext(request={"messages": []})
+        ctx = PipelineContext(request={"messages": []}, trace_id="test-trace")
 
         request = {
             "messages": [
@@ -463,7 +463,7 @@ class TestPromptEnhancer:
     async def test_aggressive_adds_cot(self):
         """aggressive 级别注入 CoT"""
         enhancer = PromptEnhancer(level="aggressive")
-        ctx = PipelineContext(request={"messages": []})
+        ctx = PipelineContext(request={"messages": []}, trace_id="test-trace")
 
         request = {
             "messages": [{"role": "user", "content": "Solve this problem"}],
@@ -546,7 +546,7 @@ class TestCorrectnessProperties:
                 return content
 
         mol = MediaOptimizationLayer(pipelines={MediaType.IMAGE: MockPipeline()})
-        ctx = PipelineContext(request={"messages": []})
+        ctx = PipelineContext(request={"messages": []}, trace_id="test-trace")
 
         messages = [
             {
@@ -591,7 +591,7 @@ class TestCorrectnessProperties:
         from aigateway_core.media.types import MediaType
 
         mol = MediaOptimizationLayer(pipelines={})
-        ctx = PipelineContext(request={"messages": []})
+        ctx = PipelineContext(request={"messages": []}, trace_id="test-trace")
 
         original = [
             {"role": "user", "content": "Hello world"},
@@ -617,6 +617,7 @@ class TestMediaOptimizationPlugin:
 
         plugin = MediaOptimizationPlugin(config={"enabled": True})
         ctx = PipelineContext(
+            trace_id="test-trace",
             request={
                 "messages": [{"role": "user", "content": "Hello"}],
                 "model": "gpt-4o",
@@ -634,6 +635,7 @@ class TestMediaOptimizationPlugin:
 
         plugin = MediaOptimizationPlugin(config={"enabled": False})
         ctx = PipelineContext(
+            trace_id="test-trace",
             request={
                 "messages": [
                     {

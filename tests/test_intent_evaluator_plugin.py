@@ -98,6 +98,7 @@ class TestIntentEvaluatorPluginDisabled:
         """Disabled plugin returns ctx without modification."""
         plugin = IntentEvaluatorPlugin(strategy=strategy, config=disabled_config)
         ctx = PipelineContext(
+            trace_id="test-trace",
             request={"messages": [{"role": "user", "content": "test prompt"}]}
         )
 
@@ -113,6 +114,7 @@ class TestIntentEvaluatorPluginDisabled:
         """Disabled plugin does not invoke the strategy."""
         plugin = IntentEvaluatorPlugin(strategy=mock_strategy, config=disabled_config)
         ctx = PipelineContext(
+            trace_id="test-trace",
             request={"messages": [{"role": "user", "content": "test prompt"}]}
         )
 
@@ -129,6 +131,7 @@ class TestIntentEvaluatorPluginEnabled:
         """Enabled plugin invokes evaluate on the strategy."""
         plugin = IntentEvaluatorPlugin(strategy=mock_strategy, config=default_config)
         ctx = PipelineContext(
+            trace_id="test-trace",
             request={"messages": [{"role": "user", "content": "two cats fighting"}]}
         )
 
@@ -143,6 +146,7 @@ class TestIntentEvaluatorPluginEnabled:
         """Plugin writes evaluation result to ctx.extra."""
         plugin = IntentEvaluatorPlugin(strategy=mock_strategy, config=default_config)
         ctx = PipelineContext(
+            trace_id="test-trace",
             request={"messages": [{"role": "user", "content": "two cats fighting"}]}
         )
 
@@ -160,6 +164,7 @@ class TestIntentEvaluatorPluginEnabled:
         """Plugin prefers the optimized prompt from AI Director."""
         plugin = IntentEvaluatorPlugin(strategy=mock_strategy, config=default_config)
         ctx = PipelineContext(
+            trace_id="test-trace",
             request={"messages": [{"role": "user", "content": "original prompt"}]}
         )
         # Pre-populate AI Director result
@@ -182,6 +187,7 @@ class TestIntentEvaluatorPluginEnabled:
         """Without AI Director result, uses the original request prompt."""
         plugin = IntentEvaluatorPlugin(strategy=mock_strategy, config=default_config)
         ctx = PipelineContext(
+            trace_id="test-trace",
             request={"messages": [{"role": "user", "content": "a cat sleeping"}]}
         )
 
@@ -197,6 +203,7 @@ class TestIntentEvaluatorPluginEnabled:
         """Plugin extracts generation params like width/height from request."""
         plugin = IntentEvaluatorPlugin(strategy=mock_strategy, config=default_config)
         ctx = PipelineContext(
+            trace_id="test-trace",
             request={
                 "messages": [{"role": "user", "content": "a landscape"}],
                 "width": 1920,
@@ -216,6 +223,7 @@ class TestIntentEvaluatorPluginEnabled:
         """Plugin handles OpenAI-format 'size' parameter."""
         plugin = IntentEvaluatorPlugin(strategy=mock_strategy, config=default_config)
         ctx = PipelineContext(
+            trace_id="test-trace",
             request={
                 "messages": [{"role": "user", "content": "generate image"}],
                 "size": "1024x1024",
@@ -241,6 +249,7 @@ class TestIntentEvaluatorPluginErrorHandling:
 
         plugin = IntentEvaluatorPlugin(strategy=mock_strat, config=default_config)
         ctx = PipelineContext(
+            trace_id="test-trace",
             request={"messages": [{"role": "user", "content": "test prompt"}]}
         )
 
@@ -257,7 +266,7 @@ class TestIntentEvaluatorPluginErrorHandling:
     async def test_empty_messages_handled(self, default_config, mock_strategy):
         """Plugin handles empty messages gracefully."""
         plugin = IntentEvaluatorPlugin(strategy=mock_strategy, config=default_config)
-        ctx = PipelineContext(request={"messages": []})
+        ctx = PipelineContext(request={"messages": []}, trace_id="test-trace")
 
         await plugin.execute(ctx)
 

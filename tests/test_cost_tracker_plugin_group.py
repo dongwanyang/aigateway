@@ -82,6 +82,7 @@ class TestCostTrackerPluginGroupInjection:
         plugin = CostTrackerPlugin(tracker=tracker_with_groups, config=config)
 
         ctx = PipelineContext(
+            trace_id="test-trace",
             request={"messages": [], "model": "test-model"},
             user_id="admin",
         )
@@ -117,6 +118,7 @@ class TestCostTrackerPluginGroupInjection:
         plugin = CostTrackerPlugin(tracker=tracker_with_groups, config=config)
 
         ctx = PipelineContext(
+            trace_id="test-trace",
             request={"messages": [], "model": "test-model"},
             user_id=None,
         )
@@ -150,6 +152,7 @@ class TestCostTrackerPluginGroupInjection:
         plugin = CostTrackerPlugin(tracker=tracker, config=config)
 
         ctx = PipelineContext(
+            trace_id="test-trace",
             request={"messages": [], "model": "test-model"},
             user_id="dev1",  # Should resolve to "engineering" group
         )
@@ -187,6 +190,7 @@ class TestCostTrackerPluginGroupInjection:
         plugin = CostTrackerPlugin(tracker=tracker, config=config)
 
         ctx = PipelineContext(
+            trace_id="test-trace",
             request={"messages": [], "model": "test-model"},
             user_id="unknown_user",  # Not in api_key_groups
         )
@@ -223,6 +227,7 @@ class TestCostTrackerPluginGroupInjection:
         plugin = CostTrackerPlugin(tracker=tracker, config=config)
 
         ctx = PipelineContext(
+            trace_id="test-trace",
             request={"messages": [], "model": "test-model"},
             user_id="admin",
         )

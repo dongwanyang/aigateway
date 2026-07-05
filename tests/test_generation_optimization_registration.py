@@ -297,7 +297,7 @@ class TestDisabledPluginPassthrough:
         # Create a mock PipelineContext
         from aigateway_core.context import PipelineContext
 
-        ctx = PipelineContext(request={"messages": [{"role": "user", "content": "hello"}]})
+        ctx = PipelineContext(request={"messages": [{"role": "user", "content": "hello"}]}, trace_id="test-trace")
         original_extra = dict(ctx.extra)
 
         # Execute disabled plugin — should pass through
@@ -328,7 +328,7 @@ class TestDisabledPluginPassthrough:
 
         from aigateway_core.context import PipelineContext
 
-        ctx = PipelineContext(request={"messages": [{"role": "user", "content": "hello"}]})
+        ctx = PipelineContext(request={"messages": [{"role": "user", "content": "hello"}]}, trace_id="test-trace")
 
         result_ctx = await token_compressor.execute(ctx)
         assert result_ctx is ctx
