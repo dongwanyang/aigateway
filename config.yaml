@@ -114,6 +114,23 @@ providers:
     num_retries: 3
     retry_after: 1000
     timeout: 3600
+  test-broken:
+    api_key: dummy-not-used
+    base_url: http://127.0.0.1:59999
+    model_grouper:
+    - models:
+      - name: test-broken-model
+        modality:
+        - llm
+      fallback_models:
+      - agnes-2.0-flash
+      pricing:
+        test-broken-model:
+          prompt: 0
+          completion: 0
+    num_retries: 1
+    retry_after: 100
+    timeout: 5
   deepseek:
     api_key: ${DEEPSEEK_API_KEY:-}
     base_url: https://api.deepseek.com/v1
