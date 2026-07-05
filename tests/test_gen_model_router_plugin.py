@@ -330,59 +330,42 @@ class TestGenModelRouterPluginErrorHandling:
 
 
 class TestGenModelRouterPluginTracing:
-    """Test tracing/span creation."""
+    """Test plugin TraceEvent emission (post Task 7: span → emit_plugin_event)."""
 
     @pytest.mark.asyncio
-    async def test_creates_child_span(
+    async def test_emits_plugin_trace_event(
         self, default_config, mock_strategy, ctx_with_intent_result
     ):
-        """Plugin creates a child span via TracingManager."""
+        """Plugin emits a kind='plugin' TraceEvent on success."""
+        from aigateway_core.trace_event import TraceCollector
+
         plugin = GenModelRouterPlugin(strategy=mock_strategy, config=default_config)
         ctx_with_intent_result.trace_id = "routertrace789"
+        collector = TraceCollector.start("routertrace789")
 
-        with patch(
-            "aigateway_core.generation_optimization.plugins.gen_model_router_plugin.get_tracing_manager"
-        ) as mock_get_tracing:
-            mock_tracing = MagicMock()
-            mock_tracing.create_plugin_span.return_value = {
-                "plugin_name": "gen_model_router",
-                "started_at": 0.0,
-                "attributes": {"trace.id": "routertrace789"},
-            }
-            mock_get_tracing.return_value = mock_tracing
+        await plugin.execute(ctx_with_intent_result)
 
-            await plugin.execute(ctx_with_intent_result)
-
-            mock_tracing.create_plugin_span.assert_called_once_with(
-                span_context={"trace_id": "routertrace789"},
-                plugin_name="gen_model_router",
-                request_id=ctx_with_intent_result.request_id,
-            )
+        events = [e for e in collector.events if e.kind == "plugin" and e.stage == "gen_model_router"]
+        assert len(events) == 1
+        assert events[0].trace_id == "routertrace789"
+        assert events[0].status == "ok"
 
     @pytest.mark.asyncio
-    async def test_span_records_routing_attributes(
+    async def test_writes_routing_attributes_to_context(
         self, default_config, mock_strategy, ctx_with_intent_result
     ):
-        """Plugin records model, provider, reason, score in span attributes."""
+        """Plugin writes model, provider, reason, score to ctx.extra (replaces span attrs)."""
+        from aigateway_core.trace_event import TraceCollector
+
         plugin = GenModelRouterPlugin(strategy=mock_strategy, config=default_config)
         ctx_with_intent_result.trace_id = "traceXYZ"
+        collector = TraceCollector.start("traceXYZ")
 
-        span_attrs = {}
-        with patch(
-            "aigateway_core.generation_optimization.plugins.gen_model_router_plugin.get_tracing_manager"
-        ) as mock_get_tracing:
-            mock_tracing = MagicMock()
-            mock_tracing.create_plugin_span.return_value = {
-                "plugin_name": "gen_model_router",
-                "started_at": 0.0,
-                "attributes": span_attrs,
-            }
-            mock_get_tracing.return_value = mock_tracing
+        await plugin.execute(ctx_with_intent_result)
 
-            await plugin.execute(ctx_with_intent_result)
-
-        assert span_attrs["gen_model_router.selected_model"] == "agnes-image-2.1-flash"
-        assert span_attrs["gen_model_router.selected_provider"] == "agnes"
-        assert span_attrs["gen_model_router.reason"] == "complexity"
-        assert span_attrs["gen_model_router.complexity_score"] == 65
-        assert span_attrs["gen_model_router.estimated_cost"] == 0.05
+        result = ctx_with_intent_result.extra["generation_optimization"]["model_router"]
+        assert result["selected_model"] == "agnes-image-2.1-flash"
+        assert result["selected_provider"] == "agnes"
+        assert result["reason"] == "complexity"
+        assert result["complexity_score"] == 65
+        assert result["estimated_cost"] == 0.05

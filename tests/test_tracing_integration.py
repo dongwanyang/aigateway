@@ -1,19 +1,19 @@
 """
 Tests for full-pipeline tracing integration (Task 13.1).
 
-Verifies:
-1. All plugins get trace_id from ctx.trace_id
-2. All plugins create child spans via TracingManager.create_plugin_span()
-3. Strategy-specific attributes are recorded on spans
-4. Errors are marked on spans via mark_span_error()
-5. Downstream LLM calls propagate trace context via inject_trace_context()
+Verifies (post Task 7 — gen-opt 插件删 create_plugin_span,改 emit_plugin_event):
+1. All plugins emit a `kind="plugin"` TraceEvent tagged with ctx.trace_id
+2. On success the event status == "ok"; on exception status == "error"
+3. Strategy-specific data is no longer on OTel span attrs — we assert the
+   plugin's ctx.extra output instead (the span-attr layer is gone)
+4. Downstream LLM calls still propagate trace context via inject_trace_context()
+   (this OTel-mechanic test is unaffected by the plugin-span removal)
 """
 
 from __future__ import annotations
 
 import asyncio
 import uuid
-from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -25,12 +25,7 @@ sys.path.insert(0, "aigateway-core/src")
 from aigateway_core.context import PipelineContext
 from aigateway_core.generation_optimization.config import (
     AIDirectorConfig,
-    CostTrackingConfig,
-    DraftWorkflowConfig,
-    FeatureCacheConfig,
     GenerationOptimizationConfig,
-    ModelRouterConfig,
-    TokenCompressorConfig,
 )
 from aigateway_core.generation_optimization.plugins.ai_director_plugin import (
     AIDirectorPlugin,
@@ -50,7 +45,7 @@ from aigateway_core.generation_optimization.plugins.gen_model_router_plugin impo
 from aigateway_core.generation_optimization.plugins.cost_tracker_plugin import (
     CostTrackerPlugin,
 )
-from aigateway_core.tracing import TracingManager
+from aigateway_core.trace_event import TraceCollector
 
 
 # ---------------------------------------------------------------------------
@@ -73,17 +68,22 @@ def make_config(**kwargs) -> GenerationOptimizationConfig:
     return GenerationOptimizationConfig(**kwargs)
 
 
+def plugin_events(collector: TraceCollector, name: str) -> List:
+    """Filter collector.events for kind=='plugin' and stage==name."""
+    return [e for e in collector.events if e.kind == "plugin" and e.stage == name]
+
+
 # ---------------------------------------------------------------------------
-# Test: trace_id flows from ctx to all plugins' span creation
+# Test: trace_id flows from ctx into emitted plugin TraceEvents
 # ---------------------------------------------------------------------------
 
 
 class TestTraceIdPropagation:
-    """Verify trace_id from ctx.trace_id is used consistently by all plugins."""
+    """Verify each plugin emits a TraceEvent carrying ctx.trace_id."""
 
     @pytest.mark.asyncio
-    async def test_ai_director_uses_ctx_trace_id(self):
-        """AI Director plugin creates a span using ctx.trace_id."""
+    async def test_ai_director_emits_trace_event_with_trace_id(self):
+        """AI Director emits a plugin TraceEvent tagged with ctx.trace_id."""
         trace_id = "trace-ai-director-001"
         ctx = make_ctx(trace_id=trace_id)
         config = make_config()
@@ -100,24 +100,20 @@ class TestTraceIdPropagation:
         )
 
         plugin = AIDirectorPlugin(strategy=strategy, config=config)
+        collector = TraceCollector.start(trace_id)
 
-        with patch("aigateway_core.generation_optimization.plugins.ai_director_plugin.get_tracing_manager") as mock_tracing:
-            mock_tm = MagicMock()
-            mock_tm.create_plugin_span.return_value = {"trace_id": trace_id, "attributes": {}}
-            mock_tracing.return_value = mock_tm
+        await plugin.execute(ctx)
 
-            await plugin.execute(ctx)
-
-            # Verify create_plugin_span was called with the correct trace_id
-            mock_tm.create_plugin_span.assert_called_once_with(
-                span_context={"trace_id": trace_id},
-                plugin_name="ai_director",
-                request_id=ctx.request_id,
-            )
+        events = plugin_events(collector, "ai_director")
+        assert len(events) == 1
+        assert events[0].trace_id == trace_id
+        assert events[0].kind == "plugin"
+        assert events[0].name == "ai_director.execute"
+        assert events[0].status == "ok"
 
     @pytest.mark.asyncio
-    async def test_intent_evaluator_uses_ctx_trace_id(self):
-        """Intent Evaluator plugin creates a span using ctx.trace_id."""
+    async def test_intent_evaluator_emits_trace_event_with_trace_id(self):
+        """Intent Evaluator emits a plugin TraceEvent tagged with ctx.trace_id."""
         trace_id = "trace-intent-eval-002"
         ctx = make_ctx(trace_id=trace_id)
         config = make_config()
@@ -128,23 +124,18 @@ class TestTraceIdPropagation:
         )
 
         plugin = IntentEvaluatorPlugin(strategy=strategy, config=config)
+        collector = TraceCollector.start(trace_id)
 
-        with patch("aigateway_core.generation_optimization.plugins.intent_evaluator_plugin.get_tracing_manager") as mock_tracing:
-            mock_tm = MagicMock()
-            mock_tm.create_plugin_span.return_value = {"trace_id": trace_id, "attributes": {}}
-            mock_tracing.return_value = mock_tm
+        await plugin.execute(ctx)
 
-            await plugin.execute(ctx)
-
-            mock_tm.create_plugin_span.assert_called_once_with(
-                span_context={"trace_id": trace_id},
-                plugin_name="intent_evaluator",
-                request_id=ctx.request_id,
-            )
+        events = plugin_events(collector, "intent_evaluator")
+        assert len(events) == 1
+        assert events[0].trace_id == trace_id
+        assert events[0].status == "ok"
 
     @pytest.mark.asyncio
-    async def test_gen_model_router_uses_ctx_trace_id(self):
-        """GenModelRouter plugin creates a span using ctx.trace_id."""
+    async def test_gen_model_router_emits_trace_event_with_trace_id(self):
+        """GenModelRouter emits a plugin TraceEvent tagged with ctx.trace_id."""
         trace_id = "trace-router-003"
         ctx = make_ctx(trace_id=trace_id)
         # Pre-populate intent evaluator result
@@ -165,32 +156,31 @@ class TestTraceIdPropagation:
         )
 
         plugin = GenModelRouterPlugin(strategy=strategy, config=config)
+        collector = TraceCollector.start(trace_id)
 
-        with patch("aigateway_core.generation_optimization.plugins.gen_model_router_plugin.get_tracing_manager") as mock_tracing:
-            mock_tm = MagicMock()
-            mock_tm.create_plugin_span.return_value = {"trace_id": trace_id, "attributes": {}}
-            mock_tracing.return_value = mock_tm
+        await plugin.execute(ctx)
 
-            await plugin.execute(ctx)
-
-            mock_tm.create_plugin_span.assert_called_once_with(
-                span_context={"trace_id": trace_id},
-                plugin_name="gen_model_router",
-                request_id=ctx.request_id,
-            )
+        events = plugin_events(collector, "gen_model_router")
+        assert len(events) == 1
+        assert events[0].trace_id == trace_id
+        assert events[0].status == "ok"
 
 
 # ---------------------------------------------------------------------------
-# Test: mark_span_error is called on exceptions
+# Test: error path emits status="error" TraceEvent (replaces mark_span_error)
 # ---------------------------------------------------------------------------
 
 
-class TestMarkSpanError:
-    """Verify that mark_span_error is called when plugins encounter exceptions."""
+class TestPluginErrorEmit:
+    """Verify plugins emit a status='error' TraceEvent on exceptions.
+
+    Replaces the old TestMarkSpanError which asserted TracingManager.mark_span_error
+    was called — that fake-span path is gone; gen-opt plugins now emit TraceEvents.
+    """
 
     @pytest.mark.asyncio
-    async def test_ai_director_marks_span_error(self):
-        """AI Director marks span error on exception."""
+    async def test_ai_director_emits_error_event_on_exception(self):
+        """AI Director emits status='error' TraceEvent on exception."""
         ctx = make_ctx()
         config = make_config()
 
@@ -198,25 +188,20 @@ class TestMarkSpanError:
         strategy.optimize_prompt = AsyncMock(side_effect=RuntimeError("LLM call failed"))
 
         plugin = AIDirectorPlugin(strategy=strategy, config=config)
+        collector = TraceCollector.start(ctx.trace_id)
 
-        with patch("aigateway_core.generation_optimization.plugins.ai_director_plugin.get_tracing_manager") as mock_tracing:
-            mock_tm = MagicMock()
-            mock_span = MagicMock()
-            mock_tm.create_plugin_span.return_value = {"trace_id": ctx.trace_id, "span": mock_span, "attributes": {}}
-            mock_tracing.return_value = mock_tm
+        # Plugin degrades gracefully (no re-raise) — execute returns ctx
+        result = await plugin.execute(ctx)
+        assert result is ctx
 
-            with patch.object(TracingManager, "mark_span_error") as mock_mark_error:
-                result = await plugin.execute(ctx)
-
-                # Should have called mark_span_error
-                mock_mark_error.assert_called_once()
-                call_args = mock_mark_error.call_args
-                assert call_args[0][0] == mock_span  # otel_span
-                assert isinstance(call_args[0][1], RuntimeError)  # error
+        events = plugin_events(collector, "ai_director")
+        assert len(events) == 1
+        assert events[0].status == "error"
+        assert events[0].duration_ms is not None
 
     @pytest.mark.asyncio
-    async def test_intent_evaluator_marks_span_error(self):
-        """Intent Evaluator marks span error on exception."""
+    async def test_intent_evaluator_emits_error_event_on_exception(self):
+        """Intent Evaluator emits status='error' TraceEvent on exception."""
         ctx = make_ctx()
         config = make_config()
 
@@ -224,24 +209,17 @@ class TestMarkSpanError:
         strategy.evaluate.side_effect = ValueError("Evaluation failed")
 
         plugin = IntentEvaluatorPlugin(strategy=strategy, config=config)
+        collector = TraceCollector.start(ctx.trace_id)
 
-        with patch("aigateway_core.generation_optimization.plugins.intent_evaluator_plugin.get_tracing_manager") as mock_tracing:
-            mock_tm = MagicMock()
-            mock_span = MagicMock()
-            mock_tm.create_plugin_span.return_value = {"trace_id": ctx.trace_id, "span": mock_span, "attributes": {}}
-            mock_tracing.return_value = mock_tm
+        await plugin.execute(ctx)
 
-            with patch.object(TracingManager, "mark_span_error") as mock_mark_error:
-                await plugin.execute(ctx)
-
-                mock_mark_error.assert_called_once()
-                call_args = mock_mark_error.call_args
-                assert call_args[0][0] == mock_span
-                assert isinstance(call_args[0][1], ValueError)
+        events = plugin_events(collector, "intent_evaluator")
+        assert len(events) == 1
+        assert events[0].status == "error"
 
     @pytest.mark.asyncio
-    async def test_gen_model_router_marks_span_error_on_generic_exception(self):
-        """GenModelRouter marks span error on generic exception."""
+    async def test_gen_model_router_emits_error_event_on_generic_exception(self):
+        """GenModelRouter emits status='error' TraceEvent on generic exception."""
         ctx = make_ctx()
         ctx.extra["generation_optimization"] = {
             "intent_evaluator": {"score": 50, "factors": {}, "recommended_model": ""}
@@ -252,46 +230,31 @@ class TestMarkSpanError:
         strategy.route = AsyncMock(side_effect=RuntimeError("Router failure"))
 
         plugin = GenModelRouterPlugin(strategy=strategy, config=config)
+        collector = TraceCollector.start(ctx.trace_id)
 
-        with patch("aigateway_core.generation_optimization.plugins.gen_model_router_plugin.get_tracing_manager") as mock_tracing:
-            mock_tm = MagicMock()
-            mock_span = MagicMock()
-            mock_tm.create_plugin_span.return_value = {"trace_id": ctx.trace_id, "span": mock_span, "attributes": {}}
-            mock_tracing.return_value = mock_tm
+        await plugin.execute(ctx)
 
-            with patch.object(TracingManager, "mark_span_error") as mock_mark_error:
-                await plugin.execute(ctx)
-
-                mock_mark_error.assert_called_once()
-                call_args = mock_mark_error.call_args
-                assert call_args[0][0] == mock_span
-                assert isinstance(call_args[0][1], RuntimeError)
+        events = plugin_events(collector, "gen_model_router")
+        assert len(events) == 1
+        assert events[0].status == "error"
 
     @pytest.mark.asyncio
-    async def test_cost_tracker_marks_span_error(self):
-        """Cost Tracker marks span error on exception."""
+    async def test_cost_tracker_emits_error_event_on_exception(self):
+        """Cost Tracker emits status='error' TraceEvent on exception."""
         ctx = make_ctx()
         config = make_config()
 
-        # CostTrackerPlugin expects a GenerationCostTracker instance
         tracker = MagicMock()
         tracker.record_total_saving.side_effect = ZeroDivisionError("division error")
 
         plugin = CostTrackerPlugin(tracker=tracker, config=config)
+        collector = TraceCollector.start(ctx.trace_id)
 
-        with patch("aigateway_core.generation_optimization.plugins.cost_tracker_plugin.get_tracing_manager") as mock_tracing:
-            mock_tm = MagicMock()
-            mock_span = MagicMock()
-            mock_tm.create_plugin_span.return_value = {"trace_id": ctx.trace_id, "span": mock_span, "attributes": {}}
-            mock_tracing.return_value = mock_tm
+        await plugin.execute(ctx)
 
-            with patch.object(TracingManager, "mark_span_error") as mock_mark_error:
-                await plugin.execute(ctx)
-
-                mock_mark_error.assert_called_once()
-                call_args = mock_mark_error.call_args
-                assert call_args[0][0] == mock_span
-                assert isinstance(call_args[0][1], ZeroDivisionError)
+        events = plugin_events(collector, "cost_tracker")
+        assert len(events) == 1
+        assert events[0].status == "error"
 
 
 # ---------------------------------------------------------------------------
@@ -300,7 +263,13 @@ class TestMarkSpanError:
 
 
 class TestInjectTraceContext:
-    """Verify that inject_trace_context is called for downstream LLM calls."""
+    """Verify that inject_trace_context is called for downstream LLM calls.
+
+    This tests the OTel/W3C traceparent header format produced by
+    TracingManager.inject_trace_context — independent of the plugin-span
+    removal (plugins no longer create spans, but downstream LLM calls still
+    propagate trace context via this static helper).
+    """
 
     @pytest.mark.asyncio
     async def test_ai_director_strategy_injects_trace_context(self):
@@ -324,7 +293,7 @@ class TestInjectTraceContext:
 
         strategy = AIDirectorStrategy(config=ai_config, litellm_bridge=mock_bridge)
 
-        result = await strategy.optimize_prompt(
+        await strategy.optimize_prompt(
             prompt="A beautiful sunset over the ocean with dramatic clouds",
             reference_images=[],
             config=ai_config,
@@ -343,6 +312,8 @@ class TestInjectTraceContext:
 
     def test_inject_trace_context_format(self):
         """inject_trace_context produces correct W3C traceparent format."""
+        from aigateway_core.tracing import TracingManager
+
         headers: Dict[str, str] = {}
         TracingManager.inject_trace_context(
             headers=headers,
@@ -356,16 +327,21 @@ class TestInjectTraceContext:
 
 
 # ---------------------------------------------------------------------------
-# Test: Strategy-specific attributes recorded on spans
+# Test: plugin results land in ctx.extra (replaces span-attribute assertions)
 # ---------------------------------------------------------------------------
 
 
-class TestSpanAttributes:
-    """Verify strategy-specific attributes are recorded on child spans."""
+class TestPluginResultsInContext:
+    """Verify strategy-specific outputs are written to ctx.extra.
+
+    Replaces the old TestSpanAttributes — span attributes no longer exist;
+    the same data is instead written to ctx.extra["generation_optimization"][...]
+    by each plugin, which is what downstream code consumes.
+    """
 
     @pytest.mark.asyncio
-    async def test_ai_director_records_span_attributes(self):
-        """AI Director records model_used, modality, prompt_length on span."""
+    async def test_ai_director_writes_result_to_context(self):
+        """AI Director writes model_used, modality, prompt_length-equivalent to ctx.extra."""
         ctx = make_ctx()
         config = make_config()
 
@@ -381,24 +357,21 @@ class TestSpanAttributes:
         )
 
         plugin = AIDirectorPlugin(strategy=strategy, config=config)
+        collector = TraceCollector.start(ctx.trace_id)
 
-        with patch("aigateway_core.generation_optimization.plugins.ai_director_plugin.get_tracing_manager") as mock_tracing:
-            mock_tm = MagicMock()
-            span_attrs = {}
-            mock_tm.create_plugin_span.return_value = {"trace_id": ctx.trace_id, "attributes": span_attrs}
-            mock_tracing.return_value = mock_tm
+        await plugin.execute(ctx)
 
-            await plugin.execute(ctx)
-
-            assert "ai_director.model_used" in span_attrs
-            assert span_attrs["ai_director.model_used"] == "gpt-4o-mini"
-            assert "ai_director.modality" in span_attrs
-            assert "ai_director.prompt_length" in span_attrs
-            assert "ai_director.duration_ms" in span_attrs
+        result = ctx.extra["generation_optimization"]["ai_director"]
+        assert result["model_used"] == "gpt-4o-mini"
+        assert result["modality"] == "llm"
+        assert result["cost_usd"] == 0.001
+        assert "duration_ms" in result
+        # TraceEvent also emitted
+        assert len(plugin_events(collector, "ai_director")) == 1
 
     @pytest.mark.asyncio
-    async def test_intent_evaluator_records_complexity_score(self):
-        """Intent Evaluator records complexity_score on span."""
+    async def test_intent_evaluator_writes_complexity_score_to_context(self):
+        """Intent Evaluator writes complexity_score to ctx.extra."""
         ctx = make_ctx()
         config = make_config()
 
@@ -408,20 +381,18 @@ class TestSpanAttributes:
         )
 
         plugin = IntentEvaluatorPlugin(strategy=strategy, config=config)
+        collector = TraceCollector.start(ctx.trace_id)
 
-        with patch("aigateway_core.generation_optimization.plugins.intent_evaluator_plugin.get_tracing_manager") as mock_tracing:
-            mock_tm = MagicMock()
-            span_attrs = {}
-            mock_tm.create_plugin_span.return_value = {"trace_id": ctx.trace_id, "attributes": span_attrs}
-            mock_tracing.return_value = mock_tm
+        await plugin.execute(ctx)
 
-            await plugin.execute(ctx)
-
-            assert span_attrs["intent_evaluator.complexity_score"] == 72
+        result = ctx.extra["generation_optimization"]["intent_evaluator"]
+        assert result["score"] == 72
+        assert result["factors"] == {"subject_count": 2}
+        assert len(plugin_events(collector, "intent_evaluator")) == 1
 
     @pytest.mark.asyncio
-    async def test_gen_model_router_records_routing_decision(self):
-        """GenModelRouter records routing_decision attributes on span."""
+    async def test_gen_model_router_writes_routing_decision_to_context(self):
+        """GenModelRouter writes routing decision to ctx.extra."""
         ctx = make_ctx()
         ctx.extra["generation_optimization"] = {
             "intent_evaluator": {"score": 60, "factors": {}, "recommended_model": ""}
@@ -440,16 +411,14 @@ class TestSpanAttributes:
         )
 
         plugin = GenModelRouterPlugin(strategy=strategy, config=config)
+        collector = TraceCollector.start(ctx.trace_id)
 
-        with patch("aigateway_core.generation_optimization.plugins.gen_model_router_plugin.get_tracing_manager") as mock_tracing:
-            mock_tm = MagicMock()
-            span_attrs = {}
-            mock_tm.create_plugin_span.return_value = {"trace_id": ctx.trace_id, "attributes": span_attrs}
-            mock_tracing.return_value = mock_tm
+        await plugin.execute(ctx)
 
-            await plugin.execute(ctx)
-
-            assert span_attrs["gen_model_router.selected_model"] == "agnes-image-2.1-flash"
-            assert span_attrs["gen_model_router.selected_provider"] == "agnes"
-            assert span_attrs["gen_model_router.reason"] == "complexity"
-            assert span_attrs["gen_model_router.complexity_score"] == 60
+        result = ctx.extra["generation_optimization"]["model_router"]
+        assert result["selected_model"] == "agnes-image-2.1-flash"
+        assert result["selected_provider"] == "agnes"
+        assert result["reason"] == "complexity"
+        assert result["complexity_score"] == 60
+        assert result["estimated_cost"] == 0.05
+        assert len(plugin_events(collector, "gen_model_router")) == 1

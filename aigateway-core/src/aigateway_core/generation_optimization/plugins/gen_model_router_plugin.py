@@ -3,7 +3,7 @@ GenModelRouterPlugin — 智能模型路由插件封装
 =============================================
 
 将 ModelRouterStrategy 封装为 PipelineEngine 插件，注册到 PluginRegistry。
-在 execute() 中创建子 span，记录路由决策到请求元数据（模型、provider、原因、分数）。
+在 execute() 中通过 emit_plugin_event 发 TraceEvent,记录路由决策到请求元数据（模型、provider、原因、分数）。
 ModelRoutingError 时返回错误响应，其他异常时回退到配置的 default_model 并记录日志。
 
 需求: 2.7, 2.8, 1.8
@@ -23,7 +23,6 @@ from aigateway_core.generation_optimization.models import RoutingDecision
 from aigateway_core.generation_optimization.strategies.model_router import (
     ModelRouterStrategy,
 )
-from aigateway_core.tracing import TracingManager, get_tracing_manager
 
 logger = logging.getLogger(__name__)
 
@@ -104,14 +103,6 @@ class GenModelRouterPlugin:
 
         start_time = time.monotonic()
 
-        # 创建子 span
-        tracing = get_tracing_manager()
-        span_context = tracing.create_plugin_span(
-            span_context={"trace_id": ctx.trace_id},
-            plugin_name=self.name,
-            request_id=ctx.request_id,
-        )
-
         try:
             # 获取复杂度评分
             complexity_score = self._get_complexity_score(ctx)
@@ -141,16 +132,6 @@ class GenModelRouterPlugin:
             ctx.model_router["selected_model"] = decision.selected_model
             ctx.model_router["selected_provider"] = decision.selected_provider
 
-            # 记录 span 属性
-            if span_context:
-                attrs = span_context.get("attributes", {})
-                attrs["gen_model_router.selected_model"] = decision.selected_model
-                attrs["gen_model_router.selected_provider"] = decision.selected_provider
-                attrs["gen_model_router.reason"] = decision.reason
-                attrs["gen_model_router.complexity_score"] = decision.complexity_score
-                attrs["gen_model_router.estimated_cost"] = decision.estimated_cost
-                attrs["gen_model_router.duration_ms"] = round(duration_ms, 2)
-
             logger.info(
                 "generation_optimization.gen_model_router.completed",
                 extra={
@@ -165,13 +146,19 @@ class GenModelRouterPlugin:
                 },
             )
 
+            # 发 TraceEvent(成功)
+            from aigateway_core.generation_optimization.plugins import emit_plugin_event
+
+            emit_plugin_event(ctx, self.name, duration_ms, "ok")
+
         except ModelRoutingError as exc:
             # ModelRoutingError: 返回错误响应，标记管线停止
             duration_ms = (time.monotonic() - start_time) * 1000.0
 
-            # 标记 span 为错误状态
-            if span_context:
-                TracingManager.mark_span_error(span_context.get("span"), exc)
+            # 发 TraceEvent(失败)
+            from aigateway_core.generation_optimization.plugins import emit_plugin_event
+
+            emit_plugin_event(ctx, self.name, duration_ms, "error")
 
             logger.error(
                 "generation_optimization.gen_model_router.routing_error",
@@ -198,9 +185,10 @@ class GenModelRouterPlugin:
             duration_ms = (time.monotonic() - start_time) * 1000.0
             default_model = self._config.model_router.default_model
 
-            # 标记 span 为错误状态
-            if span_context:
-                TracingManager.mark_span_error(span_context.get("span"), exc)
+            # 发 TraceEvent(失败)
+            from aigateway_core.generation_optimization.plugins import emit_plugin_event
+
+            emit_plugin_event(ctx, self.name, duration_ms, "error")
 
             logger.warning(
                 "generation_optimization.gen_model_router.fallback",

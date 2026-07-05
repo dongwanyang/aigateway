@@ -11,7 +11,7 @@ enabling proper Prometheus metric labeling by API Key group.
 
 import os
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -35,14 +35,17 @@ from aigateway_core.generation_optimization.plugins.cost_tracker_plugin import (
 
 @pytest.fixture
 def mock_tracing():
-    """Mock the tracing manager."""
-    with patch(
-        "aigateway_core.generation_optimization.plugins.cost_tracker_plugin.get_tracing_manager"
-    ) as mock:
-        tracing = MagicMock()
-        tracing.create_plugin_span.return_value = {"attributes": {}}
-        mock.return_value = tracing
-        yield tracing
+    """Provide a TraceCollector for the request.
+
+    Post Task 7 the gen-opt plugins no longer call TracingManager.create_plugin_span;
+    they emit TraceEvents via emit_plugin_event, which writes to
+    TraceCollector.current(). Starting a collector here keeps that path exercised
+    (and the old get_tracing_manager patch path is gone).
+    """
+    from aigateway_core.trace_event import TraceCollector
+
+    collector = TraceCollector.start("test-trace-cost-tracker")
+    yield collector
 
 
 @pytest.fixture

@@ -3,7 +3,7 @@ IntentEvaluatorPlugin — 意图评估插件封装
 ==========================================
 
 将 IntentEvaluatorStrategy 封装为 PipelineEngine 插件，注册到 PluginRegistry。
-在 execute() 中创建子 span，记录 complexity_score，禁用时透传请求不做修改。
+在 execute() 中通过 emit_plugin_event 发 TraceEvent,记录 complexity_score，禁用时透传请求不做修改。
 评估失败时使用默认分数并记录日志。
 
 需求: 2.7, 2.8, 1.8
@@ -21,7 +21,6 @@ from aigateway_core.generation_optimization.models import ComplexityEvaluation
 from aigateway_core.generation_optimization.strategies.intent_evaluator import (
     IntentEvaluatorStrategy,
 )
-from aigateway_core.tracing import TracingManager, get_tracing_manager
 
 logger = logging.getLogger(__name__)
 
@@ -100,14 +99,6 @@ class IntentEvaluatorPlugin:
 
         start_time = time.monotonic()
 
-        # 创建子 span
-        tracing = get_tracing_manager()
-        span_context = tracing.create_plugin_span(
-            span_context={"trace_id": ctx.trace_id},
-            plugin_name=self.name,
-            request_id=ctx.request_id,
-        )
-
         try:
             # 从上下文中提取 prompt（优先使用 AI Director 优化后的 prompt）
             prompt = self._extract_prompt(ctx)
@@ -137,13 +128,6 @@ class IntentEvaluatorPlugin:
                 "duration_ms": duration_ms,
             }
 
-            # 记录 span 属性
-            if span_context:
-                attrs = span_context.get("attributes", {})
-                attrs["intent_evaluator.complexity_score"] = evaluation.score
-                attrs["intent_evaluator.duration_ms"] = round(duration_ms, 2)
-                attrs["intent_evaluator.factors"] = str(evaluation.factors)
-
             logger.info(
                 "generation_optimization.intent_evaluator.completed",
                 extra={
@@ -155,12 +139,18 @@ class IntentEvaluatorPlugin:
                 },
             )
 
+            # 发 TraceEvent(成功)
+            from aigateway_core.generation_optimization.plugins import emit_plugin_event
+
+            emit_plugin_event(ctx, self.name, duration_ms, "ok")
+
         except Exception as exc:
             duration_ms = (time.monotonic() - start_time) * 1000.0
 
-            # 标记 span 为错误状态
-            if span_context:
-                TracingManager.mark_span_error(span_context.get("span"), exc)
+            # 发 TraceEvent(失败)
+            from aigateway_core.generation_optimization.plugins import emit_plugin_event
+
+            emit_plugin_event(ctx, self.name, duration_ms, "error")
 
             logger.warning(
                 "generation_optimization.intent_evaluator.error",

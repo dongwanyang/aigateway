@@ -276,57 +276,40 @@ class TestIntentEvaluatorPluginErrorHandling:
 
 
 class TestIntentEvaluatorPluginTracing:
-    """Test tracing/span creation."""
+    """Test plugin TraceEvent emission (post Task 7: span → emit_plugin_event)."""
 
     @pytest.mark.asyncio
-    async def test_creates_child_span(self, default_config, mock_strategy):
-        """Plugin creates a child span via TracingManager."""
+    async def test_emits_plugin_trace_event(self, default_config, mock_strategy):
+        """Plugin emits a kind='plugin' TraceEvent on success."""
+        from aigateway_core.trace_event import TraceCollector
+
         plugin = IntentEvaluatorPlugin(strategy=mock_strategy, config=default_config)
         ctx = PipelineContext(
             request={"messages": [{"role": "user", "content": "test"}]},
             trace_id="trace123",
         )
+        collector = TraceCollector.start("trace123")
 
-        with patch(
-            "aigateway_core.generation_optimization.plugins.intent_evaluator_plugin.get_tracing_manager"
-        ) as mock_get_tracing:
-            mock_tracing = MagicMock()
-            mock_tracing.create_plugin_span.return_value = {
-                "plugin_name": "intent_evaluator",
-                "started_at": 0.0,
-                "attributes": {"trace.id": "trace123"},
-            }
-            mock_get_tracing.return_value = mock_tracing
+        await plugin.execute(ctx)
 
-            await plugin.execute(ctx)
-
-            mock_tracing.create_plugin_span.assert_called_once_with(
-                span_context={"trace_id": "trace123"},
-                plugin_name="intent_evaluator",
-                request_id=ctx.request_id,
-            )
+        events = [e for e in collector.events if e.kind == "plugin" and e.stage == "intent_evaluator"]
+        assert len(events) == 1
+        assert events[0].trace_id == "trace123"
+        assert events[0].status == "ok"
 
     @pytest.mark.asyncio
-    async def test_span_records_complexity_score(self, default_config, mock_strategy):
-        """Plugin records complexity_score in the span attributes."""
+    async def test_writes_complexity_score_to_context(self, default_config, mock_strategy):
+        """Plugin records complexity_score in ctx.extra (replaces span attrs)."""
+        from aigateway_core.trace_event import TraceCollector
+
         plugin = IntentEvaluatorPlugin(strategy=mock_strategy, config=default_config)
         ctx = PipelineContext(
             request={"messages": [{"role": "user", "content": "test"}]},
             trace_id="trace456",
         )
+        collector = TraceCollector.start("trace456")
 
-        span_attrs = {}
-        with patch(
-            "aigateway_core.generation_optimization.plugins.intent_evaluator_plugin.get_tracing_manager"
-        ) as mock_get_tracing:
-            mock_tracing = MagicMock()
-            mock_tracing.create_plugin_span.return_value = {
-                "plugin_name": "intent_evaluator",
-                "started_at": 0.0,
-                "attributes": span_attrs,
-            }
-            mock_get_tracing.return_value = mock_tracing
+        await plugin.execute(ctx)
 
-            await plugin.execute(ctx)
-
-        assert span_attrs["intent_evaluator.complexity_score"] == 65
+        result = ctx.extra["generation_optimization"]["intent_evaluator"]
+        assert result["score"] == 65

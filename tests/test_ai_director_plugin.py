@@ -266,32 +266,24 @@ class TestAIDirectorPluginErrorHandling:
 
 
 class TestAIDirectorPluginTracing:
-    """Test tracing/span creation."""
+    """Test plugin TraceEvent emission (post Task 7: span → emit_plugin_event)."""
 
     @pytest.mark.asyncio
-    async def test_creates_child_span(self, default_config, mock_strategy):
-        """Plugin creates a child span via TracingManager."""
+    async def test_emits_plugin_trace_event(self, default_config, mock_strategy):
+        """Plugin emits a kind='plugin' TraceEvent on success."""
+        from aigateway_core.trace_event import TraceCollector
+
         plugin = AIDirectorPlugin(strategy=mock_strategy, config=default_config)
         ctx = PipelineContext(
             request={"messages": [{"role": "user", "content": "test"}]},
             trace_id="abc123trace",
         )
+        collector = TraceCollector.start("abc123trace")
 
-        with patch(
-            "aigateway_core.generation_optimization.plugins.ai_director_plugin.get_tracing_manager"
-        ) as mock_get_tracing:
-            mock_tracing = MagicMock()
-            mock_tracing.create_plugin_span.return_value = {
-                "plugin_name": "ai_director",
-                "started_at": 0.0,
-                "attributes": {"trace.id": "abc123trace"},
-            }
-            mock_get_tracing.return_value = mock_tracing
+        await plugin.execute(ctx)
 
-            await plugin.execute(ctx)
-
-            mock_tracing.create_plugin_span.assert_called_once_with(
-                span_context={"trace_id": "abc123trace"},
-                plugin_name="ai_director",
-                request_id=ctx.request_id,
-            )
+        events = [e for e in collector.events if e.kind == "plugin" and e.stage == "ai_director"]
+        assert len(events) == 1
+        assert events[0].trace_id == "abc123trace"
+        assert events[0].status == "ok"
+        assert events[0].name == "ai_director.execute"

@@ -3,7 +3,7 @@ DraftGeneratorPlugin — 渐进式生成工作流插件封装
 ================================================
 
 将 DraftGeneratorStrategy 封装为 PipelineEngine 插件，注册到 PluginRegistry。
-在 execute() 中创建子 span，判断是否为生成请求并启用 Draft 工作流，
+在 execute() 中通过 emit_plugin_event 发 TraceEvent,判断是否为生成请求并启用 Draft 工作流，
 启用时生成低分辨率草图供用户预览确认。
 
 需求: 3.6, 1.8
@@ -24,7 +24,6 @@ from aigateway_core.generation_optimization.models import (
 from aigateway_core.generation_optimization.strategies.draft_generator import (
     DraftGeneratorStrategy,
 )
-from aigateway_core.tracing import TracingManager, get_tracing_manager
 
 logger = logging.getLogger(__name__)
 
@@ -103,14 +102,6 @@ class DraftGeneratorPlugin:
 
         start_time = time.monotonic()
 
-        # 创建子 span (需求 1.8)
-        tracing = get_tracing_manager()
-        span_context = tracing.create_plugin_span(
-            span_context={"trace_id": ctx.trace_id},
-            plugin_name=self.name,
-            request_id=ctx.request_id,
-        )
-
         try:
             # 判断是否为生成请求（需要 Draft 工作流）
             if not self._is_generation_request(ctx):
@@ -129,6 +120,12 @@ class DraftGeneratorPlugin:
                         "reason": "not_a_generation_request",
                     },
                 )
+                # 非生成请求视为 ok(skip),仍发 TraceEvent 便于全链路观测
+                from aigateway_core.generation_optimization.plugins import (
+                    emit_plugin_event,
+                )
+
+                emit_plugin_event(ctx, self.name, duration_ms, "ok")
                 return ctx
 
             # 从上下文构建 GenerationRequest
@@ -161,14 +158,6 @@ class DraftGeneratorPlugin:
                 "duration_ms": duration_ms,
             }
 
-            # 记录 span 属性
-            if span_context:
-                attrs = span_context.get("attributes", {})
-                attrs["draft_generator.draft_id"] = draft_result.draft_id
-                attrs["draft_generator.preview_count"] = len(draft_result.previews)
-                attrs["draft_generator.attempt_number"] = draft_result.attempt_number
-                attrs["draft_generator.duration_ms"] = round(duration_ms, 2)
-
             logger.info(
                 "generation_optimization.draft_generator.completed",
                 extra={
@@ -181,12 +170,18 @@ class DraftGeneratorPlugin:
                 },
             )
 
+            # 发 TraceEvent(成功)
+            from aigateway_core.generation_optimization.plugins import emit_plugin_event
+
+            emit_plugin_event(ctx, self.name, duration_ms, "ok")
+
         except Exception as exc:
             duration_ms = (time.monotonic() - start_time) * 1000.0
 
-            # 标记 span 为错误状态
-            if span_context:
-                TracingManager.mark_span_error(span_context.get("span"), exc)
+            # 发 TraceEvent(失败)
+            from aigateway_core.generation_optimization.plugins import emit_plugin_event
+
+            emit_plugin_event(ctx, self.name, duration_ms, "error")
 
             logger.warning(
                 "generation_optimization.draft_generator.error",

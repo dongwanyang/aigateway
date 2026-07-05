@@ -3,7 +3,7 @@ CostTrackerPlugin — 成本追踪插件封装
 ======================================
 
 将 GenerationCostTracker 封装为 PipelineEngine 插件，注册到 PluginRegistry。
-在 execute() 中创建子 span，汇总各优化策略带来的成本节省，
+在 execute() 中通过 emit_plugin_event 发 TraceEvent,汇总各优化策略带来的成本节省，
 记录到请求元数据并上报 Prometheus 指标。
 
 需求: 7.1, 1.8
@@ -20,7 +20,6 @@ from aigateway_core.context import PipelineContext
 from aigateway_core.generation_optimization.config import GenerationOptimizationConfig
 from aigateway_core.generation_optimization.metrics import GenerationCostTracker
 from aigateway_core.generation_optimization.models import CostSavingRecord
-from aigateway_core.tracing import TracingManager, get_tracing_manager
 
 logger = logging.getLogger(__name__)
 
@@ -105,14 +104,6 @@ class CostTrackerPlugin:
 
         start_time = time.monotonic()
 
-        # 2. 创建子 span (需求 1.8)
-        tracing = get_tracing_manager()
-        span_context = tracing.create_plugin_span(
-            span_context={"trace_id": ctx.trace_id},
-            plugin_name=self.name,
-            request_id=ctx.request_id,
-        )
-
         try:
             # 3. 收集各策略数据
             gen_opt = ctx.extra.get(NS_GENERATION_OPTIMIZATION, {})
@@ -150,19 +141,6 @@ class CostTrackerPlugin:
                 "duration_ms": duration_ms,
             }
 
-            # 8. 记录 span 属性
-            if span_context:
-                attrs = span_context.get("attributes", {})
-                attrs["cost_tracker.model_routing_saving_usd"] = record.model_routing_saving_usd
-                attrs["cost_tracker.token_compression_saving_usd"] = (
-                    record.token_compression_saving_usd
-                )
-                attrs["cost_tracker.prompt_optimization_saving_usd"] = (
-                    record.prompt_optimization_saving_usd
-                )
-                attrs["cost_tracker.total_saving_usd"] = record.total_saving_usd
-                attrs["cost_tracker.duration_ms"] = round(duration_ms, 2)
-
             logger.info(
                 "generation_optimization.cost_tracker.completed",
                 extra={
@@ -176,13 +154,19 @@ class CostTrackerPlugin:
                 },
             )
 
+            # 发 TraceEvent(成功)
+            from aigateway_core.generation_optimization.plugins import emit_plugin_event
+
+            emit_plugin_event(ctx, self.name, duration_ms, "ok")
+
         except Exception as exc:
             # 任何错误不阻断管线，记录零节省 (需求 7.5)
             duration_ms = (time.monotonic() - start_time) * 1000.0
 
-            # 标记 span 为错误状态
-            if span_context:
-                TracingManager.mark_span_error(span_context.get("span"), exc)
+            # 发 TraceEvent(失败)
+            from aigateway_core.generation_optimization.plugins import emit_plugin_event
+
+            emit_plugin_event(ctx, self.name, duration_ms, "error")
 
             logger.warning(
                 "generation_optimization.cost_tracker.error",

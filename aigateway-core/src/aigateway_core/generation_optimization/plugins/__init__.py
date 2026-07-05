@@ -44,6 +44,48 @@ from aigateway_core.generation_optimization.plugins.token_compressor_plugin impo
 logger = logging.getLogger(__name__)
 
 
+def emit_plugin_event(
+    ctx: Any,
+    name: str,
+    duration_ms: float,
+    status: str = "ok",
+    payload: Optional[dict] = None,
+) -> None:
+    """gen-opt 插件发 TraceEvent 的统一入口.
+
+    取代旧的 tracing.create_plugin_span / mark_span_error 假 span 路径——
+    6 个 gen-opt 插件在 execute() 成功/失败两路都调本函数,把一条 kind="plugin"
+    的 TraceEvent 累积到当前请求的 TraceCollector(由 contextvar 隔离)。
+    collector 不存在(单元测试未 start)时静默 no-op,不影响插件主逻辑。
+
+    Args:
+        ctx: PipelineContext,取 ctx.trace_id 关联到当前 collector
+        name: 插件名(如 "ai_director"),作为 stage 与事件名前缀
+        duration_ms: 本次 execute 耗时(毫秒)
+        status: "ok" | "error" | "skip"
+        payload: 可选附加字段(对应 debug 开关打开时填的内容)
+    """
+    import time as _time
+
+    from aigateway_core.trace_event import TraceCollector, TraceEvent
+
+    collector = TraceCollector.current()
+    if collector is None:
+        return
+    collector.emit(
+        TraceEvent(
+            trace_id=ctx.trace_id,
+            ts=_time.monotonic(),
+            stage=name,
+            kind="plugin",
+            name=f"{name}.execute",
+            duration_ms=round(duration_ms, 2),
+            status=status,
+            payload=payload,
+        )
+    )
+
+
 def register_generation_optimization_plugins(
     registry: Any,
     config_manager: Any = None,
@@ -285,5 +327,6 @@ __all__ = [
     "GenModelRouterPlugin",
     "IntentEvaluatorPlugin",
     "TokenCompressorPlugin",
+    "emit_plugin_event",
     "register_generation_optimization_plugins",
 ]

@@ -3,7 +3,7 @@ TokenCompressorPlugin — 视觉 Token 压缩插件封装
 ================================================
 
 将 TokenCompressorStrategy 封装为 PipelineEngine 插件，注册到 PluginRegistry。
-在 execute() 中创建子 span，先查询 Feature Cache（命中则跳过压缩），
+在 execute() 中通过 emit_plugin_event 发 TraceEvent,先查询 Feature Cache（命中则跳过压缩），
 未命中则压缩后存入缓存，禁用时透传参考图不做修改。
 记录 token 节省到请求元数据。
 
@@ -26,7 +26,6 @@ from aigateway_core.generation_optimization.strategies.token_compressor import (
     TokenCompressorStrategy,
 )
 from aigateway_core.media.types import MediaContent, MediaType
-from aigateway_core.tracing import TracingManager, get_tracing_manager
 
 logger = logging.getLogger(__name__)
 
@@ -113,14 +112,6 @@ class TokenCompressorPlugin:
 
         start_time = time.monotonic()
 
-        # 创建子 span (需求 1.8)
-        tracing = get_tracing_manager()
-        span_context = tracing.create_plugin_span(
-            span_context={"trace_id": ctx.trace_id},
-            plugin_name=self.name,
-            request_id=ctx.request_id,
-        )
-
         try:
             # 从上下文中提取参考图
             reference_images = self._extract_reference_images(ctx)
@@ -138,6 +129,12 @@ class TokenCompressorPlugin:
                     "compression_count": 0,
                     "duration_ms": duration_ms,
                 }
+                # 无参考图视为 skip,仍发一条 TraceEvent 便于全链路观测
+                from aigateway_core.generation_optimization.plugins import (
+                    emit_plugin_event,
+                )
+
+                emit_plugin_event(ctx, self.name, duration_ms, "ok")
                 return ctx
 
             # 提取请求中的 character_id 和 api_key_id
@@ -186,24 +183,6 @@ class TokenCompressorPlugin:
                 "duration_ms": duration_ms,
             }
 
-            # 记录 span 属性
-            if span_context:
-                attrs = span_context.get("attributes", {})
-                attrs["token_compressor.total_savings"] = total_savings
-                attrs["token_compressor.compression_count"] = compression_count
-                attrs["token_compressor.cache_hits"] = cache_hits
-                attrs["token_compressor.total_original_tokens"] = total_original_tokens
-                attrs["token_compressor.total_compressed_tokens"] = total_compressed_tokens
-                attrs["token_compressor.duration_ms"] = round(duration_ms, 2)
-                # 计算并记录压缩率
-                if total_original_tokens > 0:
-                    compression_ratio = round(
-                        total_compressed_tokens / total_original_tokens, 4
-                    )
-                else:
-                    compression_ratio = 0.0
-                attrs["token_compressor.compression_ratio"] = compression_ratio
-
             logger.info(
                 "generation_optimization.token_compressor.completed",
                 extra={
@@ -217,12 +196,18 @@ class TokenCompressorPlugin:
                 },
             )
 
+            # 发 TraceEvent(成功)
+            from aigateway_core.generation_optimization.plugins import emit_plugin_event
+
+            emit_plugin_event(ctx, self.name, duration_ms, "ok")
+
         except Exception as exc:
             duration_ms = (time.monotonic() - start_time) * 1000.0
 
-            # 标记 span 为错误状态
-            if span_context:
-                TracingManager.mark_span_error(span_context.get("span"), exc)
+            # 发 TraceEvent(失败)
+            from aigateway_core.generation_optimization.plugins import emit_plugin_event
+
+            emit_plugin_event(ctx, self.name, duration_ms, "error")
 
             logger.warning(
                 "generation_optimization.token_compressor.error",

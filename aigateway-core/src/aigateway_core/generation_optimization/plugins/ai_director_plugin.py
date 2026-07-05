@@ -3,7 +3,7 @@ AIDirectorPlugin — AI 导演插件封装
 ===================================
 
 将 AIDirectorStrategy 封装为 PipelineEngine 插件，注册到 PluginRegistry。
-在 execute() 中创建子 span，记录 trace_id，禁用时透传请求不做修改。
+在 execute() 中通过 emit_plugin_event 发 TraceEvent(成功/失败两路),禁用时透传请求不做修改。
 根据是否有参考图选择模态: 有参考图用 mllm 模型，无参考图用 llm 模型。
 
 需求: 1.7, 1.8, 2.10
@@ -21,7 +21,6 @@ from aigateway_core.generation_optimization.strategies.ai_director import (
     AIDirectorStrategy,
 )
 from aigateway_core.media.types import MediaContent, MediaType
-from aigateway_core.tracing import TracingManager, get_tracing_manager
 
 logger = logging.getLogger(__name__)
 
@@ -72,12 +71,11 @@ class AIDirectorPlugin:
 
         流程:
         1. 检查 AI Director 是否启用，禁用时直接透传
-        2. 创建子 span 用于追踪
-        3. 从请求中提取用户 prompt 和参考图
-        4. 根据是否有参考图确定模态（mllm/llm）
-        5. 调用 strategy.optimize_prompt() 执行优化
-        6. 将结果写入 ctx.extra["generation_optimization"]["ai_director"]
-        7. 记录 span 属性
+        2. 从请求中提取用户 prompt 和参考图
+        3. 根据是否有参考图确定模态（mllm/llm）
+        4. 调用 strategy.optimize_prompt() 执行优化
+        5. 将结果写入 ctx.extra["generation_optimization"]["ai_director"]
+        6. 成功/失败两路各发一条 TraceEvent(emit_plugin_event)
 
         Args:
             ctx: 管线上下文
@@ -97,14 +95,6 @@ class AIDirectorPlugin:
             return ctx
 
         start_time = time.monotonic()
-
-        # 创建子 span
-        tracing = get_tracing_manager()
-        span_context = tracing.create_plugin_span(
-            span_context={"trace_id": ctx.trace_id},
-            plugin_name=self.name,
-            request_id=ctx.request_id,
-        )
 
         try:
             # 从请求中提取 prompt（最后一条 user message 的 content）
@@ -142,17 +132,6 @@ class AIDirectorPlugin:
                 "reference_image_count": len(reference_images),
             }
 
-            # 记录 span 属性
-            if span_context:
-                attrs = span_context.get("attributes", {})
-                attrs["ai_director.model_used"] = result.model_used or ""
-                attrs["ai_director.modality"] = modality
-                attrs["ai_director.prompt_length"] = len(result.optimized_prompt)
-                attrs["ai_director.original_prompt_length"] = len(result.original_prompt)
-                attrs["ai_director.duration_ms"] = round(duration_ms, 2)
-                attrs["ai_director.cost_usd"] = result.cost_usd
-                attrs["ai_director.has_reference_images"] = bool(reference_images)
-
             logger.info(
                 "generation_optimization.ai_director.completed",
                 extra={
@@ -165,12 +144,18 @@ class AIDirectorPlugin:
                 },
             )
 
+            # 发 TraceEvent(成功)
+            from aigateway_core.generation_optimization.plugins import emit_plugin_event
+
+            emit_plugin_event(ctx, self.name, duration_ms, "ok")
+
         except Exception as exc:
             duration_ms = (time.monotonic() - start_time) * 1000.0
 
-            # 标记 span 为错误状态
-            if span_context:
-                TracingManager.mark_span_error(span_context.get("span"), exc)
+            # 发 TraceEvent(失败) — 旧路径调 mark_span_error,现统一走 TraceCollector
+            from aigateway_core.generation_optimization.plugins import emit_plugin_event
+
+            emit_plugin_event(ctx, self.name, duration_ms, "error")
 
             logger.warning(
                 "generation_optimization.ai_director.error",
