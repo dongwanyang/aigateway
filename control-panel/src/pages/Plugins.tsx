@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react'
-import { Puzzle, Key, Save, X, RefreshCw } from 'lucide-react'
+import { Puzzle, Key, Save, X, RefreshCw, Bug } from 'lucide-react'
 import Card from '@/components/Card'
 import {
   getPluginsConfig,
   togglePlugin,
   getGlobalConfig,
   updateGlobalConfig,
+  setPluginDebug,
   saveApiKey,
   getSavedApiKey,
 } from '@/api/client'
@@ -73,6 +74,17 @@ export default function Plugins() {
       await togglePlugin(name, newEnabled)
     } catch {
       setPlugins(prev => prev.map(p => p.name === name ? { ...p, enabled: currentEnabled } : p))
+    }
+  }
+
+  const toggleDebug = async (name: string, currentDebug: boolean | null) => {
+    if (currentDebug === null) return  // prompt_compress 等不支持单独 debug
+    const newDebug = !currentDebug
+    setPlugins(prev => prev.map(p => p.name === name ? { ...p, debug: newDebug } : p))
+    try {
+      await setPluginDebug(name, newDebug)
+    } catch {
+      setPlugins(prev => prev.map(p => p.name === name ? { ...p, debug: currentDebug } : p))
     }
   }
 
@@ -303,55 +315,83 @@ export default function Plugins() {
           </div>
         </Card>
       ) : (
-        ['缓存', '安全', '性能', '路由', '其他'].map(catLabel => {
-          const catPlugins = plugins.filter(p => getCategory(p.name) === catLabel)
-          if (catPlugins.length === 0) return null
+        (['understanding', 'generation'] as const).map(kind => {
+          const kindPlugins = plugins.filter(p => (p.pipeline_kind || 'understanding') === kind)
+          if (kindPlugins.length === 0) return null
           return (
-            <div key={catLabel}>
-              <h3 className="text-sm font-semibold mb-3 uppercase tracking-wide" style={{ color: 'var(--color-text-tertiary)' }}>
-                {catLabel}
+            <div key={kind} className="mb-8">
+              <h3 className="text-lg font-semibold mb-4" style={{ color: 'var(--color-text-primary)' }}>
+                {kind === 'understanding' ? '理解管道' : '生成管道'}
+                <span className="ml-2 text-sm font-normal" style={{ color: 'var(--color-text-tertiary)' }}>
+                  ({kindPlugins.length} 插件)
+                </span>
               </h3>
-              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-                {catPlugins.map(plugin => (
-                  <Card key={plugin.name} className="flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      <div className="p-2 rounded-lg" style={{ backgroundColor: plugin.enabled ? 'var(--color-primary)' : 'var(--color-bg-overlay)' }}>
-                        <Puzzle size={20} style={{ color: plugin.enabled ? 'white' : 'var(--color-text-tertiary)' }} />
-                      </div>
-                      <div>
-                        <div className="font-medium flex items-center gap-2">
-                          {plugin.name}
-                          {plugin.pipeline_kind && (
-                            <span
-                              className="text-xs px-2 py-0.5 rounded"
-                              style={{
-                                backgroundColor: plugin.pipeline_kind === 'generation'
-                                  ? 'var(--color-warning, #f59e0b)'
-                                  : 'var(--color-bg-overlay)',
-                                color: plugin.pipeline_kind === 'generation' ? 'white' : 'var(--color-text-tertiary)',
-                              }}
-                              title={plugin.pipeline_kind === 'generation' ? '生成管道' : '理解管道'}
-                            >
-                              {plugin.pipeline_kind === 'generation' ? '生成' : '理解'}
-                            </span>
-                          )}
-                        </div>
-                        <div className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>
-                          {getPluginDescription(plugin.name)}
-                        </div>
-                      </div>
+              {['缓存', '安全', '性能', '路由', '其他'].map(catLabel => {
+                const catPlugins = kindPlugins.filter(p => getCategory(p.name) === catLabel)
+                if (catPlugins.length === 0) return null
+                return (
+                  <div key={catLabel} className="mb-4">
+                    <div className="text-sm font-medium mb-2" style={{ color: 'var(--color-text-secondary)' }}>
+                      {catLabel}
                     </div>
-                    <label className="toggle cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={plugin.enabled}
-                        onChange={() => toggle(plugin.name, plugin.enabled)}
-                      />
-                      <span className="toggle-slider" />
-                    </label>
-                  </Card>
-                ))}
-              </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                      {catPlugins.map(plugin => (
+                        <Card key={plugin.name} className="flex items-center justify-between">
+                          <div className="flex items-center gap-3">
+                            <div className="p-2 rounded-lg" style={{ backgroundColor: plugin.enabled ? 'var(--color-primary)' : 'var(--color-bg-overlay)' }}>
+                              <Puzzle size={20} style={{ color: plugin.enabled ? 'white' : 'var(--color-text-tertiary)' }} />
+                            </div>
+                            <div>
+                              <div className="font-medium flex items-center gap-2">
+                                {plugin.name}
+                                {plugin.pipeline_kind && (
+                                  <span
+                                    className="text-xs px-2 py-0.5 rounded"
+                                    style={{
+                                      backgroundColor: plugin.pipeline_kind === 'generation'
+                                        ? 'var(--color-warning, #f59e0b)'
+                                        : 'var(--color-bg-overlay)',
+                                      color: plugin.pipeline_kind === 'generation' ? 'white' : 'var(--color-text-tertiary)',
+                                    }}
+                                    title={plugin.pipeline_kind === 'generation' ? '生成管道' : '理解管道'}
+                                  >
+                                    {plugin.pipeline_kind === 'generation' ? '生成' : '理解'}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>
+                                {getPluginDescription(plugin.name)}
+                              </div>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            {plugin.debug !== null && plugin.debug !== undefined && (
+                              <button
+                                onClick={() => toggleDebug(plugin.name, plugin.debug ?? false)}
+                                title="Debug 日志"
+                                className="p-2 rounded-lg cursor-pointer"
+                                style={{
+                                  backgroundColor: plugin.debug ? 'var(--color-warning, #f59e0b)' : 'var(--color-bg-overlay)',
+                                }}
+                              >
+                                <Bug size={16} style={{ color: plugin.debug ? 'white' : 'var(--color-text-tertiary)' }} />
+                              </button>
+                            )}
+                            <label className="toggle cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={plugin.enabled}
+                                onChange={() => toggle(plugin.name, plugin.enabled)}
+                              />
+                              <span className="toggle-slider" />
+                            </label>
+                          </div>
+                        </Card>
+                      ))}
+                    </div>
+                  </div>
+                )
+              })}
             </div>
           )
         })

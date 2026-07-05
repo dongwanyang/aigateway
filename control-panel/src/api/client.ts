@@ -283,6 +283,8 @@ export interface PluginConfigItem {
   config: Record<string, unknown>
   pipeline_kind?: 'understanding' | 'generation'
   priority?: number
+  /** 该插件 debug 开关当前值;null 表示不支持单独 debug(如 prompt_compress 归 entry 维度) */
+  debug?: boolean | null
 }
 
 export interface PluginsConfigData {
