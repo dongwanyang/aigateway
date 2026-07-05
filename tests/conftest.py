@@ -72,4 +72,5 @@ def _reset_trace_collector():
 # ---- 让 tests/fixtures/*.py 里的 fixture 被 pytest 全局识别 ----
 pytest_plugins = [
     "tests.fixtures.data",
+    "tests.fixtures.clients",
 ]

@@ -27,3 +27,11 @@ def test_qdrant_reachable():
 def test_unique_prefix_fixture(unique_prefix):
     assert unique_prefix.startswith("test-e2e-")
     assert len(unique_prefix) == len("test-e2e-XXXXXXXX-")
+
+
+def test_admin_client_fixture(admin_client):
+    r = admin_client.get("/admin/config/debug")
+    assert r.status_code == 200
+    data = r.json()
+    # 5 维度 debug 段应有 5 个 bool 字段(frontend/entry/cache/bridge/plugins_enabled)
+    assert isinstance(data, dict)
