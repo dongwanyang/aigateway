@@ -332,8 +332,9 @@ class RequestDispatcher:
         router_meta: Optional[Dict[str, Any]] = None
 
         # ===== 跑理解管道 engine 插件链（rag_retriever / conv_compressor 等）=====
-        # 注意：pii/cache/semantic/model_router/compress/media_optimization 已在
+        # 注意：pii/cache/semantic/compress/media_optimization 已在
         # dispatch() 共用前置或本方法后续步骤中处理，engine 跑前先过滤掉重复项。
+        # model_router 不在此列(空壳,engine 跑它以保持链完整,本身 no-op)。
         if engine is not None:
             try:
                 ctx = PipelineContext(
