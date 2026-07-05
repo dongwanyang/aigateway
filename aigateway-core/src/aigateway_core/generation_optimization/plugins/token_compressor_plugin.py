@@ -134,7 +134,7 @@ class TokenCompressorPlugin:
                     emit_plugin_event,
                 )
 
-                emit_plugin_event(ctx, self.name, duration_ms, "ok")
+                emit_plugin_event(ctx, self.name, duration_ms, "skip")
                 return ctx
 
             # 提取请求中的 character_id 和 api_key_id

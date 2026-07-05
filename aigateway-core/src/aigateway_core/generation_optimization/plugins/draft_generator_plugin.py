@@ -120,12 +120,12 @@ class DraftGeneratorPlugin:
                         "reason": "not_a_generation_request",
                     },
                 )
-                # 非生成请求视为 ok(skip),仍发 TraceEvent 便于全链路观测
+                # 非生成请求视为 skip,仍发 TraceEvent 便于全链路观测
                 from aigateway_core.generation_optimization.plugins import (
                     emit_plugin_event,
                 )
 
-                emit_plugin_event(ctx, self.name, duration_ms, "ok")
+                emit_plugin_event(ctx, self.name, duration_ms, "skip")
                 return ctx
 
             # 从上下文构建 GenerationRequest
