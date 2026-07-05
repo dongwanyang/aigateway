@@ -26,6 +26,11 @@ from .trace_event import TraceCollector, TraceEvent
 logger = logging.getLogger(__name__)
 
 
+def _truncate(s: str, n: int = 500) -> str:
+    """截断字符串用于 debug payload(避免 Redis hash 写入过大)."""
+    return s if len(s) <= n else s[:n] + "..."
+
+
 # ------------------------------------------------------------------
 # 插件协议
 # ------------------------------------------------------------------
@@ -217,6 +222,12 @@ class PipelineEngine:
                         duration_ms=round(elapsed_ms, 2),
                         status="ok",
                     ))
+                    # 若该插件 debug 开关开,镜像 kind=debug 事件(payload 填请求摘要)
+                    collector.emit_debug(
+                        stage=plugin_name, name=f"{plugin_name}.execute",
+                        duration_ms=elapsed_ms, status="ok", dimension="plugin",
+                        payload={"input_summary": _truncate(str(ctx.request.get("messages", ""))[:500])},
+                    )
                 logger.debug(
                     "插件 %s 执行完毕: %.2fms, request_id=%s",
                     plugin_name,

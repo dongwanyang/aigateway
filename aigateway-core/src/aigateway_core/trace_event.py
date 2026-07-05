@@ -56,6 +56,40 @@ class TraceCollector:
     def emit(self, ev: TraceEvent) -> None:
         self.events.append(ev)
 
+    def emit_debug(self, stage: str, name: str, duration_ms: float,
+                   status: str, dimension: str, payload: dict[str, Any] | None) -> None:
+        """发 kind=debug 事件 —— 仅当对应维度开关开启时才发且填 payload.
+
+        Args:
+            stage: 与对应 kind=stage/plugin 事件同 stage(便于关联)
+            name: 同上,具体动作名
+            duration_ms: 同上,耗时
+            status: "ok"|"skip"|"error"
+            dimension: "entry"|"cache"|"bridge"|"plugin" —— 决定查哪个开关
+            payload: debug 详情(开关关时被忽略,只发 stage 事件本身的耗时)
+        """
+        from aigateway_core.debug_config import get_debug_config
+        cfg = get_debug_config()
+        if dimension == "entry":
+            enabled = cfg.entry
+        elif dimension == "cache":
+            enabled = cfg.cache
+        elif dimension == "bridge":
+            enabled = cfg.bridge
+        elif dimension == "plugin":
+            enabled = cfg.is_plugin_debug(stage)
+        else:
+            enabled = False
+        if not enabled:
+            return
+        import time as _time
+        self.emit(TraceEvent(
+            trace_id=self.trace_id, ts=_time.monotonic(),
+            stage=stage, kind="debug", name=name,
+            duration_ms=round(duration_ms, 2) if duration_ms is not None else None,
+            status=status, payload=payload,
+        ))
+
     def to_dict(self) -> dict[str, Any]:
         """序列化为可写 Redis 的字典."""
         return {

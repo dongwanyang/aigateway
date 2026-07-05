@@ -50,6 +50,25 @@ L3_DEFAULT_TTL = 86400         # 24 小时过期
 L3_CLEANUP_INTERVAL = 3600     # 每小时清理一次过期向量
 
 
+def _emit_cache_debug(key: str, tier_hit: str, start_monotonic: float,
+                      status: str = "ok") -> None:
+    """若 cache 维度 debug 开关开启,发一条 kind=debug TraceEvent.
+
+    在 CacheManager.get 的各命中/MISS 路径调用,key 用 hash 截断避免泄露 prompt 内容。
+    """
+    from aigateway_core.trace_event import TraceCollector
+    import time as _time
+    collector = TraceCollector.current()
+    if collector is None:
+        return
+    collector.emit_debug(
+        stage="cache", name="cache_manager.get",
+        duration_ms=(_time.monotonic() - start_monotonic) * 1000,
+        status=status, dimension="cache",
+        payload={"key_hash": hash(str(key)) % 10**8, "tier_hit": tier_hit},
+    )
+
+
 class CacheManager:
     """三级缓存管理器。
 
@@ -515,9 +534,12 @@ class CacheManager:
         Returns:
             缓存结果字典 {hit_tier, value, meta} 或 None。
         """
+        import time as _time
+        _start = _time.monotonic()
         # L1 查询
         cached = self.l1_get(key)
         if cached is not None:
+            _emit_cache_debug(key, "L1", _start, "ok")
             return {"hit_tier": "L1", "value": cached, "meta": params}
 
         # L2 查询
@@ -525,6 +547,7 @@ class CacheManager:
         if l2_value is not None:
             # L2 命中 → 回填 L1
             await self.backfill_on_l2_hit(key, l2_value)
+            _emit_cache_debug(key, "L2", _start, "ok")
             return {"hit_tier": "L2", "value": l2_value, "meta": params}
 
         # L3 查询（语义缓存，需要先计算向量）
@@ -539,6 +562,7 @@ class CacheManager:
                 if response_json:
                     # L3 命中 → 仅回填 L1（不回填 L2）
                     await self.backfill_on_l3_hit(key, response_json)
+                    _emit_cache_debug(key, "L3", _start, "ok")
                     return {"hit_tier": "L3", "value": response_json, "meta": l3_result}
 
         # 三级均未命中，调用 value_fn 获取数据
@@ -559,8 +583,10 @@ class CacheManager:
                     token_count=token_count,
                     compute_embedding_fn=compute_embedding_fn,
                 )
+                _emit_cache_debug(key, "MISS", _start, "ok")
                 return {"hit_tier": "MISS", "value": value_str, "meta": extra}
 
+        _emit_cache_debug(key, "none", _start, "skip")
         return None
 
 

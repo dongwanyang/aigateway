@@ -20,6 +20,21 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
+def _emit_bridge_debug(start_monotonic: float, status: str,
+                       payload: Optional[Dict[str, Any]] = None) -> None:
+    """若 bridge 维度 debug 开关开启,发一条 kind=debug TraceEvent."""
+    import time as _time
+    from aigateway_core.trace_event import TraceCollector
+    collector = TraceCollector.current()
+    if collector is None:
+        return
+    collector.emit_debug(
+        stage="bridge", name="litellm_bridge.completion",
+        duration_ms=(_time.monotonic() - start_monotonic) * 1000,
+        status=status, dimension="bridge", payload=payload or {},
+    )
+
+
 class LiteLLMBridge:
     """LiteLLM 桥接封装。
 
@@ -487,6 +502,8 @@ class LiteLLMBridge:
             完整的响应字典（OpenAI 格式）。model=='auto' 时 _meta.model_router
             会记录实际选中的模型。
         """
+        import time as _time
+        _start = _time.monotonic()
         max_retries = max_retries or 3
         attempts = 0
         last_error: Optional[Exception] = None
@@ -655,11 +672,13 @@ class LiteLLMBridge:
 
             # 将流式 chunks 合成为非流式响应格式（因为上层期望字典返回）
             aggregated = self._aggregate_stream_chunks(chunks)
+            _emit_bridge_debug(_start, "ok", {"model": model, "stream": True})
             return aggregated
 
         # 非流式
         response = await self.router.acompletion(**params)
         response_data = response.dict() if hasattr(response, "dict") else dict(response)
+        _emit_bridge_debug(_start, "ok", {"model": model, "stream": False})
         return response_data
 
     def _aggregate_stream_chunks(

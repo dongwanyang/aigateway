@@ -37,6 +37,8 @@ def _emit_stage(trace_id: str, stage: str, name: str, duration_ms: float,
     dispatcher 的内联埋点(共用前置/cache/quota/compress/bridge)用此 helper
     把事件镜像到 TraceCollector。旧的 plugin_trace.append 列表仍保留,
     供 request.state.plugin_trace 向后兼容(后续 Task 再统一收口)。
+
+    若 entry 维度 debug 开关开启,同时镜像一条 kind=debug 事件(payload 填充)。
     """
     from aigateway_core.trace_event import TraceCollector, TraceEvent
     collector = TraceCollector.current()
@@ -51,6 +53,8 @@ def _emit_stage(trace_id: str, stage: str, name: str, duration_ms: float,
             status=status,
             payload=payload,
         ))
+        # 若 entry 维度 debug 开,镜像 kind=debug 事件(payload 填充)
+        collector.emit_debug(stage, name, duration_ms, status, "entry", payload)
 
 
 def _emit_plugin(trace_id: str, plugin_name: str, duration_ms: float,
