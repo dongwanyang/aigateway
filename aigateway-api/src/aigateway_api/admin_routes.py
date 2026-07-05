@@ -1047,7 +1047,13 @@ async def get_trace_detail(
     trace_id: str,
     _auth: Dict[str, Any] = Depends(authenticate_admin),
 ):
-    """根据 trace_id 查询该请求的全链路信息（包括插件执行步骤）。"""
+    """根据 trace_id 查询该请求的全链路信息（包括插件执行步骤）。
+
+    优先读新通道 `aigateway:trace:{trace_id}`(TraceCollector.flush 写入,含完整
+    kind=stage/plugin/debug 事件流);未命中时 fallback 到旧 ZSET 扫描(过渡期兼容)。
+    响应始终包含 `events` 数组(新)+ `plugin_trace` 数组(旧字段,filter kind=plugin
+    构建,供旧前端兼容,PR3 前端切换完成后 Task 21 会删)。
+    """
     from aigateway_api.main import app
     s = app.state
     redis_mgr = getattr(s, "redis_manager")
@@ -1055,21 +1061,43 @@ async def get_trace_detail(
     if redis_mgr is None or redis_mgr.redis is None:
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Redis not connected"}})
 
-    # 从 Redis 日志中按 trace_id 搜索（扫描最近 1000 条）
+    # ---- 新通道: aigateway:trace:{trace_id} hash ----
+    key = f"aigateway:trace:{trace_id}"
+    raw = await redis_mgr.redis.hget(key, "data")
+    if raw:
+        data = json.loads(raw.decode() if isinstance(raw, bytes) else raw)
+        events = data.get("events", []) or []
+        # 兼容字段:plugin_trace = events 中 kind==plugin 的子集
+        plugin_trace = [
+            {
+                "plugin_name": e.get("stage"),
+                "duration_ms": e.get("duration_ms"),
+                "status": e.get("status"),
+            }
+            for e in events if e.get("kind") == "plugin"
+        ]
+        return {
+            "data": {
+                "trace_id": trace_id,
+                "events": events,
+                "plugin_trace": plugin_trace,  # 兼容旧前端,PR3 收尾时删
+                "meta": {"wall_start": data.get("wall_start")},
+            },
+            "message": "success",
+        }
+
+    # ---- Fallback: 旧 ZSET 扫描(TraceMiddleware 未启动或 flush 前请求)----
     all_logs = await redis_mgr.redis.zrevrange("aigateway:logs:requests", 0, 999, withscores=True)
     matched = []
-    for raw, score in all_logs:
-        entry = json.loads(raw.decode() if isinstance(raw, bytes) else raw)
+    for raw_entry, score in all_logs:
+        entry = json.loads(raw_entry.decode() if isinstance(raw_entry, bytes) else raw_entry)
         if entry.get("trace_id") == trace_id:
             matched.append(entry)
 
     if not matched:
         raise HTTPException(status_code=404, detail={"error": {"code": "not_found", "message": f"Trace {trace_id} not found"}})
 
-    # 以第一条匹配为主记录（通常一个 trace_id 对应一个请求）
     primary = matched[0]
-
-    # 构建全链路视图
     trace_detail = {
         "trace_id": trace_id,
         "request_id": primary.get("request_id", ""),
@@ -1081,6 +1109,7 @@ async def get_trace_detail(
         "cache_hit": primary.get("cache_hit", False),
         "cache_tier": primary.get("tier"),
         "timestamp": primary.get("timestamp", 0),
+        "events": [],  # 旧 ZSET 无 events;仅 plugin_trace 提供插件耗时
         "plugin_trace": primary.get("plugin_trace", []),
         "related_requests": matched[1:] if len(matched) > 1 else [],
     }
