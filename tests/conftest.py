@@ -67,3 +67,9 @@ def _reset_trace_collector():
         TraceCollector._current.set(None)
     except ImportError:
         pass
+
+
+# ---- 让 tests/fixtures/*.py 里的 fixture 被 pytest 全局识别 ----
+pytest_plugins = [
+    "tests.fixtures.data",
+]
