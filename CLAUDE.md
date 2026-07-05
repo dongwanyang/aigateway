@@ -74,6 +74,64 @@ Client (OpenAI SDK / CLI / IDE)
     └── src/hooks/      │  useAuth, usePoll, useTheme
 ```
 
+### aigateway 智能体的两个入口(目标形态)
+
+> ⭐ **未来最终形态** — 当前入口 A ✅,入口 B 🚧(spec: `docs/superpowers/specs/2026-07-05-control-panel-chat-agent-design.md`)。入口 A 完成,入口 B 由本 spec 推进。未来若新增第三入口(MCP / IDE 插件 / bot),右侧继续扩,左侧内核不变。
+
+aigateway 不是"OpenAI 代理 + 附加聊天窗",而是**一个智能体本体,面向机器和面向人各开一个入口**。两个入口共享 dispatcher + 两条管道 + LiteLLM 出口,入口 B 额外挂 agent tool loop(HITL / audit / trust)。
+
+```
+                        ┌─────────────────────────────────────┐
+                        │      aigateway 智能体                 │
+                        └─────────────────────────────────────┘
+
+╔═══════════════════════════════╗          ╔═══════════════════════════════╗
+║  入口 A(机器面,现有)          ║          ║  入口 B(真人面,🚧 本 spec)    ║
+║  /v1/chat/completions         ║          ║  /admin/agent/chat            ║
+║  OpenAI-兼容 · JSON/SSE       ║          ║  SSE · 控制台 /chat 页面       ║
+╚═══════════════════════════════╝          ╚═══════════════════════════════╝
+             │                                            │
+             ▼                                            ▼
+             │                                   ┌────────────────────┐
+             │                                   │ ChatRouter         │
+             │                                   │ (task/gen/und 分类)  │
+             │                                   └────────────────────┘
+             │                                            │
+             │                       ┌────── task ────────┤
+             │                       │                    │
+             │                       ▼                    │
+             │                ┌────────────────┐          │
+             │                │ AgentLoop      │          │
+             │                │ (tool calling) │          │
+             │                │ + HITL/Audit   │          │
+             │                └────────┬───────┘          │
+             │                         │ loopback         │ 直连
+             ▼                         ▼                  ▼
+   ┌───────────────────────────────────────────────────────────┐
+                     RequestDispatcher.dispatch()
+          ① media_optimization → PII    ② classify_request
+          ③ 理解管道  or  生成管道  →  LiteLLMBridge
+   └───────────────────────────────────────────────────────────┘
+        │            │           │             │
+        ▼            ▼           ▼             ▼
+     OpenAI     Anthropic     Agnes       DeepSeek/…
+   (gpt-4o…)   (claude…)   (image/video)       
+
+```
+
+对比:
+
+| 维度 | 入口 A | 入口 B |
+|---|---|---|
+| 面向谁 | 机器(SDK/CLI/IDE/curl) | 控制台真人(admin + 终端用户) |
+| protocol | OpenAI chat completions | SSE 事件流 |
+| 能力 | 理解 + 生成管道 | tool 循环 + 理解 + 生成管道 |
+| `tools` 参数 | 透传上游,不代执行 | AgentLoop 代执行 |
+| HITL | ✗ | ✓(写工具) |
+| 改运维状态 | ✗ | ✓(admin 工具集) |
+
+详见 spec 1.1 节完整对照表。
+
 ## Plugin Pipeline Flow
 
 Request enters FastAPI → auth_middleware validates API key → two parallel processing paths:
