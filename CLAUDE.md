@@ -211,19 +211,32 @@ Prometheus histogram for request duration, counters for cache hits/misses/tokens
 
 ## Key Files
 
-| File | Purpose |
+| File | Purpose / 何时去这里 |
 |------|---------|
-| `config.yaml` | Single source of truth: server, auth, plugins, providers, embedding, observability, media_optimization, cache, circuit_breaker |
-| `config.yaml.template` | Full parameter documentation with comments |
-| `docker-compose.yml` | 6 services: gateway, control-panel, redis, qdrant, prometheus, grafana |
-| `aigateway-api/Dockerfile` | Python 3.12-slim;分层安装(apt→torch→requirements.txt→Qwen3 模型→源码),改源码秒级重建 |
-| `aigateway-api/requirements.txt` | gateway 全部 Python 依赖集中清单(新增依赖改此文件) |
-| `Dockerfile.frontend` | Multi-stage: Node 20 Alpine builder(`npm ci`)→ Nginx Alpine serve |
-| `.dockerignore` | 排除 .venv/node_modules/.git 等,构建上下文 < 10MB |
-| `.env.example` / `.env.docker` | 入库模板:运行时配置 / BuildKit 开关;`.env` 本身 gitignored |
-| `docs/API_CONTRACT.md` | Request/response schemas, error formats |
-| `docs/TECH_SPEC.md` | Technology choices, config schema |
-| `docs/DB_SCHEMA.md` | Redis keys, Qdrant collections, PipelineContext structures |
+| `config.yaml` | Single source of truth: server, auth, plugins, providers, embedding, observability, media_optimization, cache, circuit_breaker。**改任何运行参数、加 provider、调插件开关先改这里**(`hot_reload: true` 时热生效)。 |
+| `config.yaml.template` | Full parameter documentation with comments。**改 config 字段前先看这里确认 schema**。 |
+| `docker-compose.yml` | 6 services: gateway, control-panel, redis, qdrant, prometheus, grafana。**加服务/改端口/改环境变量去这里**。 |
+| `aigateway-api/Dockerfile` | Python 3.12-slim;分层安装(apt→torch→requirements.txt→Qwen3 模型→源码),改源码秒级重建。**加 Python 依赖层/改构建步骤去这里**。 |
+| `aigateway-api/requirements.txt` | gateway 全部 Python 依赖集中清单。**新增/升级 Python 依赖改此文件,不是 Dockerfile**。 |
+| `Dockerfile.frontend` | Multi-stage: Node 20 Alpine builder(`npm ci`)→ Nginx Alpine serve。 |
+| `.dockerignore` | 排除 .venv/node_modules/.git 等,构建上下文 < 10MB。 |
+| `.env.example` / `.env.docker` | 入库模板:运行时配置 / BuildKit 开关;`.env` 本身 gitignored。**加环境变量先在 .env.example 建模板**。 |
+| `docs/API_CONTRACT.md` | Request/response schemas, error formats。**改 API 字段/错误码先核对此契约**。 |
+| `docs/TECH_SPEC.md` | Technology choices, config schema。 |
+| `docs/DB_SCHEMA.md` | Redis keys, Qdrant collections, PipelineContext structures。**改缓存 key/Redis 结构先核对此文档**。 |
+| `aigateway-api/src/aigateway_api/dispatcher.py` | RequestDispatcher — 总分总入口:共用前置(media+PII)→ 分流 → 两条管道 → LiteLLM 出口。**改请求流程/分流逻辑/缓存回填先读它**。 |
+| `aigateway-api/src/aigateway_api/openai_compat.py` | `/v1/chat/completions` 入口(调 dispatcher) + 辅助函数。**改 SSE 流式/响应组装/请求日志记录去这里**。 |
+| `aigateway-api/src/aigateway_api/admin_routes.py` | API Key CRUD, quotas, plugin config, logs, RAG, L3 cache mgmt。**加 admin 接口去这里**。 |
+| `aigateway-api/src/aigateway_api/main.py` | App factory, lifespan init, router mounting, 两条管道 Engine 实例。**加路由/改启动初始化/改 sys.path 去这里**。 |
+| `aigateway-core/src/aigateway_core/pipeline.py` | PipelineEngine(按 pipeline_kind 装载) + 经典插件(PII/cache/semantic/compress)。**改插件链/加经典插件去这里**。 |
+| `aigateway-core/src/aigateway_core/context.py` | PipelineContext — 共享请求状态。**改请求级上下文字段去这里**。 |
+| `aigateway-core/src/aigateway_core/caching.py` | CacheManager: L1→L2→L3 + reranker。**改缓存命中/回填策略去这里**。 |
+| `aigateway-core/src/aigateway_core/security.py` | KeyStore(配额/rate-limit) + PIIDetector(20+ 模式)。**改鉴权/配额/PII 脱敏去这里**。 |
+| `aigateway-core/src/aigateway_core/litellm_bridge.py` | LiteLLM Router 多 provider + fallback + CircuitBreaker。**改模型调用/fallback/auto 解析去这里**。 |
+| `aigateway-core/src/aigateway_core/generation_optimization/` | 6 插件 8 策略的生成优化层。**改 ai_director/token_compressor/draft_generator 等去这里**。 |
+| `aigateway-core/src/aigateway_core/media/` | Media Optimization Layer V2。**改图片/视频/音频/文档处理去这里**。 |
+| `control-panel/src/pages/` | 9 个页面组件。**改控制台某页面 UI 去对应 .tsx**。 |
+| `control-panel/src/api/client.ts` | VITE_API_BASE 前缀 fetch + Prometheus 文本解析。**加前端 API 调用去这里**。 |
 
 ## Development Commands
 
@@ -386,3 +399,15 @@ When merging code (e.g. feature branch → `main`, or integrating another branch
 - **Evaluate which to keep before asking.** When a functional conflict exists, first form your own assessment: which version is correct / more complete / better aligned with current architecture, and why. Present that recommendation along with the trade-off, then ask the user to confirm which side to keep — do **not** silently pick one, and do **not** reflexively ask without a recommendation.
 - **Never force-resolve blindly.** If unsure, surface the specific conflict (file, lines, both sides' intent) and ask.
 - **Push to remote GitHub promptly after merging into `main`.** Once a merge lands on `main` (and any required Docker rebuild + verification per rule 2 is done), push to the remote GitHub repo without waiting to be asked. This is the explicit exception to rule 1's "do not push unless asked" — merge-to-main triggers a push. If the push is rejected (non-fast-forward), pull/rebase first; if conflicts arise during that rebase, fall back to the conflict-confirmation policy above before continuing.
+
+### 5. Token-efficient navigation (避免全量扫描)
+
+省 token 的核心:用「导航 + 精准读」替代「全量扫描」。每次任务只读真正需要的 1-3 个文件,不整库翻阅。
+
+- **先查 CLAUDE.md 定位,再读具体文件。** 接到任务先扫 CLAUDE.md 的 `Key Files` 表(带"何时去这里"触发词)、`Architecture at a Glance` 图、`Architecture Decisions & Known States` 段,据此锁定目标文件,再 `Read` 该文件。禁止为"了解架构"而全量读 `repomix-output.md` 或 `cat` 整个目录。
+- **Grep/Glob 精准定位,Read 带 offset/limit。** 找某符号/逻辑用 `Grep "pattern"` 命中文件,再 `Read` 该文件相关区间(传 `offset`/`limit`),不要无参 Read 整个大文件再翻。例如找某插件:`Grep "class.*Plugin"` → 命中文件 → Read 该类定义 ±50 行。
+- **修 bug 从堆栈/trace_id 直达。** 用报错堆栈或 trace_id 定位 `file:line`,Read 该文件 ±50 行即可,不要扫整库。trace_id 可查 `/admin/trace/{id}` 拿 events 数组。
+- **架构调整先画影响面。** 改动某符号/接口前,用 `Grep "from.*import|import "` 列出所有引用方,确认影响范围后再动手,绝不"先通读全部相关文件再改"。
+- **多文件广度搜索派 subagent。** 涉及多文件的广度搜索(找所有调用点/所有实现某接口的类/跨包追踪数据流),优先派 `Explore` 或 `general-purpose` subagent 去扫,主上下文只接收其结论(几百 token),不把几十个文件原文灌进来。
+- **`repomix-output.md` 仅作目录索引参考,禁止整文件读入。** 需要时只 `Grep` 其中的 directoryStructure 段定位文件路径,具体内容去读源文件。
+- **Config/契约类改动先核对应处文档。** 改 API 字段查 `docs/API_CONTRACT.md`,改缓存 key 查 `docs/DB_SCHEMA.md`,改 config 字段查 `config.yaml.template`,避免改出不一致。
