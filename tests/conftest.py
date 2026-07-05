@@ -73,4 +73,5 @@ def _reset_trace_collector():
 pytest_plugins = [
     "tests.fixtures.data",
     "tests.fixtures.clients",
+    "tests.fixtures.prom",
 ]

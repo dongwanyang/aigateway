@@ -35,3 +35,13 @@ def test_admin_client_fixture(admin_client):
     data = r.json()
     # 5 维度 debug 段应有 5 个 bool 字段(frontend/entry/cache/bridge/plugins_enabled)
     assert isinstance(data, dict)
+
+
+def test_prom_scrape_parses(prom_scrape):
+    snap = prom_scrape.snapshot()
+    # gateway 一直有 up gauge 和请求耗时 histogram HELP 行,至少 gateway_ 前缀的 metric 数据点存在
+    assert "gateway_up" in snap or \
+           "gateway_request_duration_seconds_count" in snap or \
+           "gateway_request_duration_seconds_bucket" in snap or \
+           any(k.startswith("gateway_") for k in snap), \
+           f"No gateway_ metric found. Sample keys: {list(snap.keys())[:10]}"
