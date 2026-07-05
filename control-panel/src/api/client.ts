@@ -377,6 +377,17 @@ export interface LogEntry {
   plugin_trace?: PluginTraceStep[]
 }
 
+export interface TraceEvent {
+  trace_id: string
+  ts: number
+  stage: string
+  kind: string
+  name: string
+  duration_ms: number
+  status: string
+  payload?: Record<string, unknown> | null
+}
+
 export interface TraceDetail {
   trace_id: string
   request_id: string
@@ -388,8 +399,10 @@ export interface TraceDetail {
   cache_hit: boolean
   cache_tier: string | null
   timestamp: number
+  events: TraceEvent[]
   plugin_trace: PluginTraceStep[]
   related_requests: LogEntry[]
+  meta?: { wall_start?: number } | null
 }
 
 export interface LogsData {

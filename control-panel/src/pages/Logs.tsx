@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react'
-import { Search, Filter, Trash2, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, X } from 'lucide-react'
+import { Search, Filter, Trash2, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, X, Bug, Activity, Clock } from 'lucide-react'
 import Card from '@/components/Card'
 import { getRequestLogs, deleteAllLogs, getTraceDetail } from '@/api/client'
 import type { LogEntry, TraceDetail } from '@/api/client'
@@ -102,6 +102,7 @@ export default function Logs() {
           cache_hit: primary.cache_hit,
           cache_tier: primary.tier,
           timestamp: primary.timestamp,
+          events: [],
           plugin_trace: primary.plugin_trace || [],
           related_requests: matched.slice(1),
         })
@@ -384,74 +385,93 @@ export default function Logs() {
               </div>
             </div>
 
-            {/* 插件执行链路 */}
+            {/* 事件瀑布流 */}
             <div style={{ marginBottom: 16 }}>
-              <h4 className="font-semibold mb-3" style={{ fontSize: 'var(--font-size-sm)' }}>插件执行链路</h4>
-              {traceDetail.plugin_trace.length === 0 ? (
+              <h4 className="font-semibold mb-3" style={{ fontSize: 'var(--font-size-sm)' }}>
+                全链路事件 <span style={{ color: 'var(--color-text-tertiary)' }}>({traceDetail.events.length})</span>
+              </h4>
+              {traceDetail.events.length === 0 ? (
                 <div style={{ color: 'var(--color-text-tertiary)', fontSize: 'var(--font-size-sm)', padding: '12px 0' }}>
-                  暂无插件追踪数据（旧日志可能未包含此信息）
+                  暂无事件数据（旧请求或未启用 TraceCollector）
                 </div>
               ) : (
-                <div style={{ position: 'relative', paddingLeft: 20 }}>
+                <div style={{ position: 'relative', paddingLeft: 24 }}>
                   {/* 竖线 */}
                   <div style={{
-                    position: 'absolute', left: 7, top: 8, bottom: 8,
+                    position: 'absolute', left: 11, top: 6, bottom: 6,
                     width: 2, backgroundColor: 'var(--color-border)',
                   }} />
-                  {traceDetail.plugin_trace.map((step, i) => (
-                    <div key={i} style={{ position: 'relative', padding: '8px 0', display: 'flex', alignItems: 'center', gap: 12 }}>
-                      {/* 节点圆点 */}
-                      <div style={{
-                        position: 'absolute', left: -16, top: '50%', transform: 'translateY(-50%)',
-                        width: 12, height: 12, borderRadius: '50%',
-                        backgroundColor: step.status === 'success' ? 'var(--color-success)'
-                          : step.status === 'failed' ? 'var(--color-danger)'
-                          : 'var(--color-text-quaternary)',
-                        border: '2px solid var(--color-bg-elevated)',
-                      }} />
-                      <div style={{ flex: 1 }}>
-                        <span className="font-medium" style={{ fontSize: 'var(--font-size-sm)' }}>{step.plugin_name}</span>
-                        <span className={`badge ml-2 ${step.status === 'success' ? 'badge-success' : step.status === 'failed' ? 'badge-danger' : 'badge-neutral'}`}>
-                          {step.status}
-                        </span>
-                      </div>
-                      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--font-size-xs)', color: 'var(--color-text-tertiary)' }}>
-                        {step.duration_ms.toFixed(1)}ms
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {/* 耗时分布条 */}
-            {traceDetail.plugin_trace.length > 0 && (
-              <div style={{ marginBottom: 16 }}>
-                <h4 className="font-semibold mb-2" style={{ fontSize: 'var(--font-size-sm)' }}>耗时分布</h4>
-                <div style={{ display: 'flex', height: 24, borderRadius: 6, overflow: 'hidden', border: '1px solid var(--color-border)' }}>
-                  {traceDetail.plugin_trace.filter(s => s.status !== 'skipped').map((step, i) => {
-                    const totalPluginMs = traceDetail.plugin_trace.filter(s => s.status !== 'skipped').reduce((s, p) => s + p.duration_ms, 0)
-                    const pct = totalPluginMs > 0 ? (step.duration_ms / totalPluginMs) * 100 : 0
-                    const colors = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899']
+                  {traceDetail.events.map((evt, i) => {
+                    const kindColor = evt.kind === 'plugin' ? 'var(--color-primary)'
+                      : evt.kind === 'stage' ? 'var(--color-success)'
+                      : evt.kind === 'debug' ? 'var(--color-warning, #f59e0b)'
+                      : 'var(--color-text-tertiary)'
+                    const kindLabel = evt.kind === 'plugin' ? '插件'
+                      : evt.kind === 'stage' ? '阶段'
+                      : evt.kind === 'debug' ? '调试'
+                      : evt.kind
+                    const Icon = evt.kind === 'plugin' ? Activity
+                      : evt.kind === 'stage' ? Clock
+                      : evt.kind === 'debug' ? Bug
+                      : Activity
                     return (
-                      <div
-                        key={i}
-                        title={`${step.plugin_name}: ${step.duration_ms.toFixed(1)}ms`}
-                        style={{
-                          width: `${Math.max(pct, 2)}%`,
-                          backgroundColor: step.status === 'failed' ? '#EF4444' : colors[i % colors.length],
+                      <div key={i} style={{ position: 'relative', padding: '8px 0 8px 24px' }}>
+                        {/* 节点 */}
+                        <div style={{
+                          position: 'absolute', left: 3, top: 12,
+                          width: 18, height: 18, borderRadius: '50%',
+                          backgroundColor: evt.status === 'success' || evt.status === 'hit' ? kindColor
+                            : evt.status === 'miss' ? 'var(--color-warning, #f59e0b)'
+                            : 'var(--color-danger)',
+                          border: '2px solid var(--color-bg-elevated)',
                           display: 'flex', alignItems: 'center', justifyContent: 'center',
-                          fontSize: 'var(--font-size-xs)', color: '#fff', fontWeight: 500,
-                          overflow: 'hidden', whiteSpace: 'nowrap',
-                        }}
-                      >
-                        {pct > 15 ? step.plugin_name : ''}
+                        }}>
+                          <Icon size={10} style={{ color: 'white' }} />
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                          <span className="font-medium" style={{ fontSize: 'var(--font-size-sm)' }}>
+                            {evt.stage}
+                          </span>
+                          <span className="badge" style={{
+                            backgroundColor: kindColor + '22',
+                            color: kindColor,
+                            fontSize: 'var(--font-size-xs)',
+                          }}>
+                            {kindLabel}
+                          </span>
+                          <span className={`badge ${evt.status === 'success' || evt.status === 'hit' ? 'badge-success'
+                            : evt.status === 'miss' ? 'badge-warning'
+                            : 'badge-danger'}`}>
+                            {evt.status}
+                          </span>
+                          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--font-size-xs)', color: 'var(--color-text-tertiary)' }}>
+                            {evt.duration_ms > 0 ? `${evt.duration_ms}ms` : '—'}
+                          </span>
+                          {evt.name && evt.name !== evt.stage && (
+                            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--font-size-xs)', color: 'var(--color-text-quaternary)' }}>
+                              {evt.name}
+                            </span>
+                          )}
+                        </div>
+                        {/* Debug payload */}
+                        {evt.kind === 'debug' && evt.payload && (
+                          <details style={{ marginTop: 4, fontSize: 'var(--font-size-xs)', fontFamily: 'var(--font-mono)' }}>
+                            <summary style={{ cursor: 'pointer', color: 'var(--color-text-tertiary)' }}>payload</summary>
+                            <pre style={{
+                              marginTop: 4, padding: 8, borderRadius: 6,
+                              backgroundColor: 'var(--color-bg-overlay)',
+                              overflow: 'auto', maxHeight: 120,
+                            }}>
+                              {JSON.stringify(evt.payload, null, 2)}
+                            </pre>
+                          </details>
+                        )}
                       </div>
                     )
                   })}
                 </div>
-              </div>
-            )}
+              )}
+            </div>
 
             <div className="flex justify-end">
               <button
