@@ -124,6 +124,17 @@ class ContextInjectProcessor:
         event_dict.update(cls._context_var.get())
 
         # 确保必要字段存在
+        # 优先从 TraceCollector.current() 取 trace_id（由 TraceMiddleware 注入，
+        # 全链路统一），失败再回退到 ContextVar / 空串。惰性 import 避免循环依赖。
+        if "trace_id" not in event_dict or not event_dict.get("trace_id"):
+            try:
+                from aigateway_core.trace_event import TraceCollector
+
+                collector = TraceCollector.current()
+                if collector and collector.trace_id:
+                    event_dict["trace_id"] = collector.trace_id
+            except Exception:
+                pass
         if "trace_id" not in event_dict:
             event_dict["trace_id"] = ""
         if "request_id" not in event_dict:

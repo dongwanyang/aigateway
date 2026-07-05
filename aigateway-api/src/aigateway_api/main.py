@@ -76,16 +76,6 @@ def _register_exception_handlers(app_instance: "FastAPI") -> None:
             return request.state.request_id
         return uuid.uuid4().hex[:12]
 
-    def _is_debug_mode() -> bool:
-        """检查当前是否为调试模式。"""
-        try:
-            config_manager = getattr(app_instance.state, "config_manager", None)
-            if config_manager:
-                return bool(config_manager.get("debug_mode", False))
-        except Exception:
-            pass
-        return False
-
     @app_instance.exception_handler(GatewayError)
     async def gateway_error_handler(
         request: "Request",  # type: ignore[name-defined]
@@ -108,10 +98,8 @@ def _register_exception_handlers(app_instance: "FastAPI") -> None:
         request_id = _get_request_id(request)
         body = {"error": {"code": code, "message": msg}}
 
-        # 5xx 错误：调试模式下增加 detail（脱敏处理，防止泄露 PII/密钥）
-        if status >= 500 and not _is_debug_mode():
-            body["error"]["message"] = "Internal server error"
-        elif status >= 500 and _is_debug_mode():
+        # 5xx 错误：固定回显 redacted detail（脱敏），不再受 debug_mode 控制
+        if status >= 500:
             # 脱敏：移除常见敏感模式（API key、连接字符串、密码、内部路径）
             import re as _re
             _safe_msg = msg
@@ -219,28 +207,20 @@ async def lifespan(app: "FastAPI"):
     config_path = os.environ.get("AI_GATEWAY_CONFIG_PATH", "./config.yaml")
     config_manager = ConfigManager(config_path=config_path)
 
-    # 日志级别决策优先级：环境变量 > config.yaml observability.log_level > "info"
-    # 若 config.yaml 里 debug_mode=true 且用户没显式指定级别，则自动升到 DEBUG
+    # 日志级别决策优先级：环境变量 > config.yaml observability.log_level > "INFO"
+    # （debug_mode 不再强制 DEBUG；AI_GATEWAY_ENV=production 在 config.py 里强制 ≥INFO）
     obs_cfg = config_manager.get("observability", {}) or {}
     env_level = os.environ.get("AI_GATEWAY_LOG_LEVEL")
     cfg_level = obs_cfg.get("log_level")
-    debug_mode = bool(config_manager.get("debug_mode", False))
     if env_level:
         log_level = env_level.upper()
     elif cfg_level:
         log_level = str(cfg_level).upper()
-    elif debug_mode:
-        log_level = "DEBUG"
     else:
         log_level = "INFO"
-    # 若 debug_mode=true 但用户设了更高的级别，仍强制拉到 DEBUG（除非环境变量显式指定）
-    if debug_mode and not env_level and log_level not in ("DEBUG",):
-        log_level = "DEBUG"
 
     setup_logging(log_level=log_level)
-    logger.info(
-        "AI Gateway API 启动中... (log_level=%s, debug_mode=%s)", log_level, debug_mode
-    )
+    logger.info("AI Gateway API 启动中... (log_level=%s)", log_level)
 
     logger.info("ConfigManager 初始化完成: %s", config_manager.config_path)
 
@@ -625,6 +605,14 @@ def _configure_cors(app: "FastAPI", config_manager: "ConfigManager") -> None:
         allow_credentials=True,
     )
     logger.info("CORS 中间件已配置: origins=%s", cors_origins)
+
+    # TraceMiddleware —— 统一 trace_id 注入 + 启动 TraceCollector。
+    # add_middleware 按逆序入栈，故后添加的更靠外；放在 CORS 之后使其成为最外层，
+    # 早于 auth/rate_limiter 运行，保证全链路 trace_id 一致。
+    from aigateway_api.trace_middleware import TraceMiddleware
+
+    app.add_middleware(TraceMiddleware)
+    logger.info("TraceMiddleware 已挂载")
 
 
 # ------------------------------------------------------------------
