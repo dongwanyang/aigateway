@@ -76,6 +76,24 @@ def _register_exception_handlers(app_instance: "FastAPI") -> None:
             return request.state.request_id
         return uuid.uuid4().hex[:12]
 
+    def _redact_5xx_msg(msg: str) -> str:
+        """5xx 错误信息脱敏 —— 移除常见敏感模式（API key、连接字符串、密码、内部路径、卡号）。
+
+        供 GatewayError 处理器和兜底 Exception 处理器共用，避免 pattern 漂移。
+        """
+        import re as _re
+        _safe_msg = msg
+        _patterns = [
+            r'sk-[a-zA-Z0-9]{20,}',           # API keys
+            r'password\s*[:=]\s*\S+',            # password=...
+            r'(mongodb|mysql|postgres|redis)://\S+:@',  # connection strings
+            r'/home/\S+|/app/\S+|/opt/\S+',      # internal file paths
+            r'\b\d{13,16}\b',                    # credit card numbers
+        ]
+        for _p in _patterns:
+            _safe_msg = _re.sub(_p, '[REDACTED]', _safe_msg)
+        return _safe_msg
+
     @app_instance.exception_handler(GatewayError)
     async def gateway_error_handler(
         request: "Request",  # type: ignore[name-defined]
@@ -100,19 +118,7 @@ def _register_exception_handlers(app_instance: "FastAPI") -> None:
 
         # 5xx 错误：固定回显 redacted detail（脱敏），不再受 debug_mode 控制
         if status >= 500:
-            # 脱敏：移除常见敏感模式（API key、连接字符串、密码、内部路径）
-            import re as _re
-            _safe_msg = msg
-            _patterns = [
-                r'sk-[a-zA-Z0-9]{20,}',           # API keys
-                r'password\s*[:=]\s*\S+',            # password=...
-                r'(mongodb|mysql|postgres|redis)://\S+:@',  # connection strings
-                r'/home/\S+|/app/\S+|/opt/\S+',      # internal file paths
-                r'\b\d{13,16}\b',                    # credit card numbers
-            ]
-            for _p in _patterns:
-                _safe_msg = _re.sub(_p, '[REDACTED]', _safe_msg)
-            body["error"]["detail"] = f"{type(exc).__name__}: {_safe_msg}"
+            body["error"]["detail"] = f"{type(exc).__name__}: {_redact_5xx_msg(msg)}"
 
         return JSONResponse(
             status_code=status,
@@ -138,6 +144,39 @@ def _register_exception_handlers(app_instance: "FastAPI") -> None:
             content=body,
             headers={"X-Request-ID": request_id},
         )
+
+    @app_instance.exception_handler(Exception)
+    async def unhandled_exception_handler(
+        request: "Request",  # type: ignore[name-defined]
+        exc: Exception,
+    ) -> JSONResponse:
+        """兜底处理器 —— 捕获所有未被上面覆盖的非 GatewayError 异常。
+
+        保证任何 5xx 都返回统一错误结构 {error:{code,message,detail}} + X-Request-ID，
+        而不是落到 FastAPI 默认的 {"detail":"Internal Server Error"}。服务端记录完整
+        traceback，客户端只回显脱敏后的 type+msg。
+        """
+        request_id = _get_request_id(request)
+        redacted_msg = _redact_5xx_msg(str(exc))
+        logger.exception(
+            "Unhandled exception (request_id=%s, type=%s): %s",
+            request_id,
+            type(exc).__name__,
+            exc,
+        )
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": {
+                    "code": "internal_error",
+                    "message": "Internal Server Error",
+                    "detail": f"{type(exc).__name__}: {redacted_msg}",
+                }
+            },
+            headers={"X-Request-ID": request_id},
+        )
+
+
 def _create_app() -> "FastAPI":
     """创建 FastAPI 应用实例。"""
     # 从环境变量读取 basePath（子路径部署）
@@ -179,6 +218,13 @@ def _create_app() -> "FastAPI":
         protected_prefixes=("/admin",),
         exempt_paths={"/health", "/metrics"},
     )
+
+    # TraceMiddleware —— 必须最后添加（Starlette last-added = outermost），使其成为
+    # 最外层中间件，早于 RateLimiter/CORS 运行，保证 trace_id 全链路一致（含 429 短路场景）。
+    from aigateway_api.trace_middleware import TraceMiddleware
+
+    app_instance.add_middleware(TraceMiddleware)
+    logger.info("TraceMiddleware 已挂载（最外层）")
 
     return app_instance
 
@@ -605,14 +651,6 @@ def _configure_cors(app: "FastAPI", config_manager: "ConfigManager") -> None:
         allow_credentials=True,
     )
     logger.info("CORS 中间件已配置: origins=%s", cors_origins)
-
-    # TraceMiddleware —— 统一 trace_id 注入 + 启动 TraceCollector。
-    # add_middleware 按逆序入栈，故后添加的更靠外；放在 CORS 之后使其成为最外层，
-    # 早于 auth/rate_limiter 运行，保证全链路 trace_id 一致。
-    from aigateway_api.trace_middleware import TraceMiddleware
-
-    app.add_middleware(TraceMiddleware)
-    logger.info("TraceMiddleware 已挂载")
 
 
 # ------------------------------------------------------------------
