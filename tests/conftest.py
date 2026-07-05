@@ -15,7 +15,10 @@ REDIS_URL = "redis://localhost:6379/0"
 QDRANT_URL = "http://localhost:6333"
 PROM_URL = "http://localhost:9090"
 GRAFANA_URL = "http://localhost:3001"
-HOST_CONFIG_YAML = "/home/ubuntu/gateway2/config.yaml"
+# 宿主 config.yaml —— 必须指向 gateway 容器实际 bind-mount 的文件。
+# worktree 下的 config.yaml 才是被 mount 进 /app/config.yaml 的那份,
+# 不是主 checkout 的 /home/ubuntu/gateway2/config.yaml。
+HOST_CONFIG_YAML = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.yaml")
 AGNES_TEXT_MODEL = "agnes-2.0-flash"
 AGNES_IMAGE_MODEL = "agnes-image-2.1-flash"
 AGNES_VIDEO_MODEL = "agnes-video-v2.0"

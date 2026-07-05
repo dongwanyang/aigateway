@@ -39,9 +39,10 @@ class TraceMiddleware:
         collector = TraceCollector.start(trace_id)
 
         # 拿 redis 用于 flush(scope["state"] 在 app.state 之外)
-        # app.state.redis 在 lifespan 里设置;这里通过 scope["app"] 拿
+        # app.state.redis_manager 在 lifespan 里设置
         app_obj = scope.get("app")
-        redis_client = getattr(app_obj.state, "redis", None) if app_obj else None
+        redis_mgr = getattr(app_obj.state, "redis_manager", None) if app_obj else None
+        redis_client = getattr(redis_mgr, "redis", None) if redis_mgr else None
 
         status_holder = {"status": 500}
 

@@ -637,6 +637,11 @@ class LiteLLMBridge:
         if self.router is None:
             raise RuntimeError("LiteLLM Router 未初始化，请先调用 initialize()")
 
+        # debug emit 测的是本次实际 completion 调用耗时(不含外层 auto 解析/重试退避),
+        # 所以 _start 必须在本方法作用域内定义 —— 675/681 行的 _emit_bridge_debug 引用它。
+        import time as _time
+        _start = _time.monotonic()
+
         # 解析裸模型名为 Router 注册的全名
         resolved_model = self.resolve_model(model)
 

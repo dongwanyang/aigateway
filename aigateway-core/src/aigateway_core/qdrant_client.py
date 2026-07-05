@@ -255,6 +255,11 @@ class QdrantClientManager:
             json=query_payload,
             headers=self._headers(),
         )
+        # 集合尚未创建(首次部署或被清空)时 Qdrant 返回 404 —— 视为未命中,
+        # 由后续 set_l3 首次写入时懒创建集合,避免让异常冒到 dispatcher 变 5xx。
+        if resp.status_code == 404:
+            logger.debug("L3 集合 %s 不存在, 视为 miss", collection)
+            return None
         resp.raise_for_status()
         result = resp.json().get("result", [])
 
@@ -334,6 +339,11 @@ class QdrantClientManager:
             json=query_payload,
             headers=self._headers(),
         )
+        # 集合尚未创建(首次部署或被清空)时 Qdrant 返回 404 —— 视为未命中,
+        # 由后续 set_l3 首次写入时懒创建集合,避免让异常冒到 dispatcher 变 5xx。
+        if resp.status_code == 404:
+            logger.debug("L3 集合 %s 不存在, 视为 miss", collection)
+            return None
         resp.raise_for_status()
         result = resp.json().get("result", [])
 

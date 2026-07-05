@@ -198,7 +198,7 @@ circuit_breaker:
   recovery_timeout: 60
   long_open_alert_seconds: 300
 rate_limiter:
-  max_requests: 30
+  max_requests: 10000
   window_seconds: 60
 streaming:
   cache_chunk_delay_ms: 20

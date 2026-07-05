@@ -7,24 +7,32 @@ import pytest
 
 
 def get_trace_events(admin_client, trace_id: str) -> list[dict]:
-    """GET /admin/trace/{id} 返回 events 数组;不存在返回 []."""
+    """GET /admin/trace/{id} 返回 events 数组;不存在或限流返回 []."""
     r = admin_client.get(f"/admin/trace/{trace_id}")
-    if r.status_code == 404:
+    if r.status_code in (404, 429):
         return []
     r.raise_for_status()
     data = r.json()
-    return data.get("events", [])
+    # Response 形如 {data: {events: [...], plugin_trace: [...], ...}, message: "success"}
+    inner = data.get("data", data) if isinstance(data, dict) else data
+    return inner.get("events", []) if isinstance(inner, dict) else []
 
 
 def wait_for_trace(admin_client, trace_id: str, timeout: float = 5.0) -> list[dict]:
-    """轮询直到 trace 落 redis,或超时."""
+    """轮询直到 trace 落 redis,或超时。
+
+    Admin `/admin/*` 有 IP 级速率限制 30 req/60s。这里用 1.0s 的间隔
+    (最多 timeout 秒 poll timeout+1 次)避免撑爆 rate limiter。
+    """
     deadline = time.time() + timeout
+    interval = 1.0
     while time.time() < deadline:
         evs = get_trace_events(admin_client, trace_id)
         if evs:
             return evs
-        time.sleep(0.2)
-    return []
+        time.sleep(interval)
+    # 最后再试一次
+    return get_trace_events(admin_client, trace_id)
 
 
 def filter_events(events: list[dict], **matchers) -> list[dict]:

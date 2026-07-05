@@ -32,17 +32,29 @@ class DebugConfig:
 
     @classmethod
     def from_yaml(cls, d: dict[str, Any] | None) -> "DebugConfig":
-        """从 config.yaml 的 debug: 段构造(缺失返回默认)."""
+        """从 config.yaml 的 debug: 段构造(缺失返回默认).
+
+        兼容两种写法:
+        - 嵌套(官方 config.yaml):debug.plugins.enabled / debug.plugins.per_plugin
+        - 扁平(admin /admin/config/debug 回显或前端发的):debug.plugins_enabled
+        两者并存时嵌套优先(因为 config.yaml 原文用嵌套)。
+        """
         if not d:
             return cls.default()
         plugins = d.get("plugins") or {}
         per_plugin = plugins.get("per_plugin") or {}
+        # 扁平回退:某些 admin 路径(如 /admin/config/debug GET 回显)用 plugins_enabled
+        plugins_enabled_nested = plugins.get("enabled")
+        if plugins_enabled_nested is not None:
+            plugins_enabled = bool(plugins_enabled_nested)
+        else:
+            plugins_enabled = bool(d.get("plugins_enabled", False))
         return cls(
             frontend=bool(d.get("frontend", False)),
             entry=bool(d.get("entry", False)),
             cache=bool(d.get("cache", False)),
             bridge=bool(d.get("bridge", False)),
-            plugins_enabled=bool(plugins.get("enabled", False)),
+            plugins_enabled=plugins_enabled,
             per_plugin={k: bool(v) for k, v in per_plugin.items()},
         )
 

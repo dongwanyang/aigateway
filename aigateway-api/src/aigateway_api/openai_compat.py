@@ -46,6 +46,8 @@ class ChatCompletionRequest(BaseModel):
     tool_choice: Optional[Any] = None
     stop: Optional[Any] = None
     user: Optional[str] = None
+    # 显式生成意图开关(classify_request 据此分流到 generation 管道)
+    generation_intent: Optional[bool] = False
 
 
 class EmbeddingRequest(BaseModel):
@@ -128,6 +130,12 @@ def _get_app_state() -> Dict[str, Any]:
         "pii_detector_plugin": getattr(s, "pii_detector_plugin", None),
         "model_router_resolver": getattr(s, "model_router_resolver", None),
         "prompt_compress_plugin": getattr(s, "prompt_compress_plugin", None),
+        # 两条管道的 PipelineEngine —— RequestDispatcher.__init__ 用 state.get()
+        # 拿它们跑插件链。缺失会让 dispatcher 静默跳过整条 engine 循环
+        # (understanding 侧无 rag/conv,generation 侧 6 个 gen-opt 插件全部
+        # 不执行),trace 事件里插件事件全部缺失但没有任何报错日志。
+        "understanding_engine": getattr(s, "understanding_engine", None),
+        "generation_engine": getattr(s, "generation_engine", None),
     }
 
 

@@ -986,8 +986,12 @@ async def update_global_config(
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "ConfigManager not initialized"}})
 
     raw = await request.json()
-    hot_reload = raw.get("hot_reload", False)
-    debug_mode = raw.get("debug_mode", False)
+    # hot_reload / debug_mode 缺失时保留当前值,而非默认 False
+    # (避免只传 debug 段的调用意外停掉 Watchdog 或重置日志级别)。
+    cur_hot_reload = bool(config_manager.get("hot_reload", False)) if config_manager else False
+    cur_debug_mode = bool(config_manager.get("debug_mode", False)) if config_manager else False
+    hot_reload = bool(raw.get("hot_reload", cur_hot_reload))
+    debug_mode = bool(raw.get("debug_mode", cur_debug_mode))
     debug_section = raw.get("debug")  # None 表示不改;dict 表示整段覆盖
 
     # 更新内存缓存
