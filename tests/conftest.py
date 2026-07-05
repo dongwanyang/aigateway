@@ -36,8 +36,9 @@ def pytest_configure(config):
             "export AI_GATEWAY_ADMIN_KEY=gw-rRIop4dpcyJJNUTJbHmHpr9Bj3M11s5o",
             returncode=2,
         )
+    # /health 走 dispatcher 的完整前置链,这个环境实测约 7-8s,给 15s 余量
     try:
-        r = httpx.get(f"{BASE}/health", timeout=3)
+        r = httpx.get(f"{BASE}/health", timeout=15)
     except Exception as exc:
         pytest.exit(f"Gateway {BASE}/health unreachable: {exc}", returncode=2)
     if r.status_code != 200:
