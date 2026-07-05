@@ -45,3 +45,16 @@ def test_prom_scrape_parses(prom_scrape):
            "gateway_request_duration_seconds_bucket" in snap or \
            any(k.startswith("gateway_") for k in snap), \
            f"No gateway_ metric found. Sample keys: {list(snap.keys())[:10]}"
+
+
+def test_host_config_read(host_config):
+    cfg = host_config.read()
+    assert "providers" in cfg
+    assert "agnes" in cfg["providers"]
+    assert "test-broken" in cfg["providers"]  # Task 0.2 已加
+
+
+def test_host_config_snapshot_restore(host_config):
+    orig = host_config.raw()
+    # 不真改 config,只验 snapshot 记住了内容
+    assert host_config._snapshot == orig
