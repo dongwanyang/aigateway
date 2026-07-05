@@ -638,50 +638,6 @@ class SemanticCachePlugin:
             return None
 
 
-class ModelRouterPlugin:
-    """[DEPRECATED 空壳] 模型路由插件 — 仅把 ctx.request["model"] 复制到 ctx.selected_model。
-
-    真正的路由逻辑由两部分承担，本插件不再参与:
-    1. dispatcher._resolve_auto_model —— 当 body.model=="auto" 时调 ModelRouterStrategy
-    2. classify_request —— 按模型模态分流到 understanding/generation 管道
-
-    保留注册是为了不破坏 prompt_compress 的 depends_on 声明（拓扑排序只影响顺序，
-    不做运行时存在性校验）。Engine 跑插件链时 dispatcher 的 _skip_names 也包含
-    model_router，故即使 enabled=True 也不会重复执行。
-    配置参数:
-        litellm_bridge: LiteLLMBridge 实例（未使用，保留兼容）
-    """
-
-    name: str = "model_router"
-    enabled: bool = True
-    depends_on: list = ["semantic_cache"]
-
-    def __init__(self, litellm_bridge: Any = None) -> None:
-        self.litellm_bridge = litellm_bridge
-
-    async def execute(self, ctx: PipelineContext) -> PipelineContext:
-        """执行模型路由决策。"""
-        if self.litellm_bridge is None:
-            return ctx
-
-        model = ctx.request.get("model", "")
-        if not model:
-            return ctx
-
-        # 路由决策：选择最佳 provider
-        # 此处简化为记录所选模型，实际应实现负载均衡/成本优化逻辑
-        ctx.selected_model = model
-        ctx.model_router["selected_model"] = model
-
-        logger.debug(
-            "模型路由: model=%s, request_id=%s",
-            model,
-            ctx.request_id,
-        )
-
-        return ctx
-
-
 class PromptCompressPlugin:
     """Prompt 压缩插件 — LLMLingua-2 Token 级压缩。
 
@@ -693,7 +649,7 @@ class PromptCompressPlugin:
 
     name: str = "prompt_compress"
     enabled: bool = True
-    depends_on: list = ["model_router", "rag_retriever", "conv_compressor"]
+    depends_on: list = ["rag_retriever", "conv_compressor"]
 
     def __init__(
         self,
@@ -931,7 +887,6 @@ def _register_builtin_plugins(registry: PluginRegistry, config_manager: Any = No
         "pii_detector": (PIIDetectorPlugin, {"strategy": "sanitize"}),
         "prompt_cache": (PromptCachePlugin, {}),
         "semantic_cache": (SemanticCachePlugin, {}),
-        "model_router": (ModelRouterPlugin, {}),
         "prompt_compress": (PromptCompressPlugin, prompt_compress_kwargs),
     }
 
