@@ -218,7 +218,7 @@ class ConfigManager:
         """
         allowed_top_level = {
             "server", "auth", "plugins", "providers", "embedding",
-            "observability", "hot_reload", "debug_mode", "infrastructure",
+            "observability", "hot_reload", "debug_mode", "debug", "infrastructure",
             "cache", "media_optimization", "circuit_breaker", "rate_limiter",
             "streaming", "generation_optimization",
         }
@@ -563,7 +563,7 @@ class ConfigManager:
             writable_keys = {
                 "server", "auth", "plugins", "providers",
                 "embedding", "observability", "infrastructure",
-                "hot_reload", "debug_mode", "cache",
+                "hot_reload", "debug_mode", "debug", "cache",
             }
             clean_config = {k: v for k, v in self._config.items() if k in writable_keys}
             with open(self.config_path, 'w', encoding='utf-8') as f:
@@ -743,7 +743,7 @@ class ConfigManager:
         issues = []
         allowed_top_level = {
             "server", "auth", "plugins", "providers", "embedding",
-            "observability", "hot_reload", "debug_mode", "infrastructure",
+            "observability", "hot_reload", "debug_mode", "debug", "infrastructure",
             "cache", "media_optimization", "circuit_breaker", "rate_limiter",
             "streaming", "generation_optimization",
         }

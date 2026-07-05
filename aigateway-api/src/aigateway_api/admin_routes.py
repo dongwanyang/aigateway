@@ -863,6 +863,7 @@ async def get_global_config(
 
     hot_reload = False
     debug_mode = False
+    debug: Dict[str, Any] = {}  # 5 维度 debug 开关(PR2)
 
     if config_manager:
         config_path = config_manager.config_path
@@ -871,11 +872,13 @@ async def get_global_config(
                 file_config = yaml.safe_load(f) or {}
             hot_reload = file_config.get("hot_reload", False)
             debug_mode = file_config.get("debug_mode", False)
+            debug = file_config.get("debug", {}) or {}
 
     return {
         "data": {
             "hot_reload": hot_reload,
             "debug_mode": debug_mode,
+            "debug": debug,
         },
         "message": "success",
     }
@@ -899,12 +902,15 @@ async def update_global_config(
     raw = await request.json()
     hot_reload = raw.get("hot_reload", False)
     debug_mode = raw.get("debug_mode", False)
+    debug_section = raw.get("debug")  # None 表示不改;dict 表示整段覆盖
 
     # 更新内存缓存
     config_manager.set("hot_reload", hot_reload)
     config_manager.set("debug_mode", debug_mode)
+    if isinstance(debug_section, dict):
+        config_manager.set("debug", debug_section)
 
-    # 写回 config.yaml（只更新这两个键，保留其余 section 不变）
+    # 写回 config.yaml（只更新这些键，保留其余 section 不变）
     config_path = config_manager.config_path
     if config_path:
         import os
@@ -914,6 +920,8 @@ async def update_global_config(
             # 仅覆写 admin 可编辑的键，不丢弃其他 section
             file_config["hot_reload"] = hot_reload
             file_config["debug_mode"] = debug_mode
+            if isinstance(debug_section, dict):
+                file_config["debug"] = debug_section
             with open(config_path, "w", encoding="utf-8") as f:
                 yaml.dump(file_config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
@@ -940,7 +948,7 @@ async def update_global_config(
         setup_logging(log_level=_restore_level.upper())
 
     return {
-        "data": {"hot_reload": hot_reload, "debug_mode": debug_mode},
+        "data": {"hot_reload": hot_reload, "debug_mode": debug_mode, "debug": debug_section},
         "message": "success",
     }
 

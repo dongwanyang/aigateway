@@ -504,6 +504,13 @@ async def lifespan(app: "FastAPI"):
     # 挂载到 app.state，供 FastAPI 中间件/依赖注入使用
     app.state.key_store = key_store
     app.state.config_manager = config_manager
+
+    # 初始化 5 维度 Debug 开关(PR2 2026-07-05)。attach 到 ConfigManager.on_reload
+    # 后,后续 config.yaml 变更自动 atomic swap;首次加载在 attach 内完成。
+    from aigateway_core.debug_config import init_debug_config_watcher
+    app.state.debug_config_watcher = init_debug_config_watcher(config_manager)
+    logger.info("DebugConfigWatcher 已初始化并挂 ConfigManager.on_reload")
+
     app.state.cache_manager = cache_manager
     app.state.plugin_registry = plugin_registry
     app.state.circuit_breaker_factory = cb_factory

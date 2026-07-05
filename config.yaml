@@ -187,7 +187,28 @@ streaming:
   cache_chunk_delay_ms: 20
   cache_chunk_count: 20
 hot_reload: true
-debug_mode: false
+# 5 维度 Debug 开关(替换旧 debug_mode 单开关,PR2 落地 2026-07-05)。
+# 每档独立开关,插件层用 AND 逻辑(总开关+单个开都开才发 kind=debug 事件+payload)。
+debug:
+  frontend: false          # 前端 control-panel 浏览器日志
+  entry: false             # auth + dispatcher + 共用前置(PII/media) + quota + prompt_compress 内联
+  cache: false             # L1/L2/L3 CacheManager 全路径
+  bridge: false            # LiteLLMBridge + circuit breaker + auto 解析
+  plugins:
+    enabled: false         # 插件层总开关(AND:总开 + 单个开才生效)
+    per_plugin:
+      pii_detector: false
+      prompt_cache: false
+      semantic_cache: false
+      rag_retriever: false
+      conv_compressor: false
+      media_optimizer: false
+      ai_director: false
+      intent_evaluator: false
+      token_compressor: false
+      draft_generator: false
+      gen_model_router: false
+      cost_tracker: false
 media_optimization:
   enabled: true
   download_timeouts:

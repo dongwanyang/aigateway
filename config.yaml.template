@@ -259,7 +259,30 @@ streaming:
 # 热重载与调试
 # ==========================
 hot_reload: true             # 是否启用配置文件热重载（Watchdog 监听变更）
-debug_mode: false            # 调试模式（启用后日志级别强制 DEBUG）
+
+# 5 维度 Debug 开关(2026-07-05 PR2 起替换旧 debug_mode 单开关)。
+# 各维度独立控制发 kind=debug TraceEvent + payload;插件层用 AND 逻辑
+# (总开关 + 单个 per_plugin 开关都开才生效)。生产环境务必全部为 false。
+debug:
+  frontend: false             # 前端 control-panel 浏览器日志(console.debug + fetch 详情)
+  entry: false                # auth + dispatcher + 共用前置(PII/media) + quota + prompt_compress 内联
+  cache: false                # L1/L2/L3 CacheManager 全路径
+  bridge: false               # LiteLLMBridge + circuit breaker + auto 解析
+  plugins:
+    enabled: false            # 插件层总开关(必须与下面某个 per_plugin 同时开才生效)
+    per_plugin:
+      pii_detector: false
+      prompt_cache: false
+      semantic_cache: false
+      rag_retriever: false
+      conv_compressor: false
+      media_optimizer: false
+      ai_director: false
+      intent_evaluator: false
+      token_compressor: false
+      draft_generator: false
+      gen_model_router: false
+      cost_tracker: false
 
 # ==========================
 # 多模态优化配置 (Media Optimization Layer)
