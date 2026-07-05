@@ -26,6 +26,35 @@
 
 ---
 
+## Reviewer Notes(审核要点 — 执行前需确认)
+
+以下 6 条是计划作者认为最可能有争议或需要拍板的点,执行前请先 review:
+
+1. **Task 1 admin_service 抽取的边界** —— 把 8 个业务函数(list_api_keys / get_key_quota / update_key_quota / query_logs / get_plugins_config / set_plugin_enabled / list_l3_entries / get_trace)抽成独立函数,会动 `admin_routes.py` 现有 route handler,侵入性最大。
+   - **保守替代方案**:admin_service 只新增、route 不动,tool handler 直接调 admin_service 新函数 + 部分复用 route 内联逻辑。若选此方案,Task 1 Step 6-7 改为"不重构 route,只新增 admin_service"。
+   - **需决策**:重构现有 route,还是只新增?
+
+2. **Task 1 Step 3 的 pytest-asyncio 处理** —— 项目现有测试未确认是否已装 pytest-asyncio,计划给了 fallback(asyncio.run 风格)。
+   - 执行时若装不上 pytest-asyncio,所有 async 测试要统一改 asyncio.run 风格(每个 test 函数用 `asyncio.run(...)` 包裹异步调用)。
+   - **执行时先跑** `python3 -c "import pytest_asyncio"` 确认。
+
+3. **Task 9 AgentLoop 的 approval 并发模型** —— SSE generator 里 `await ctx.approval_callback`(内部 await Future),由独立 POST `/agent/approval` 唤醒。这是整个方案最 tricky 的地方。
+   - 单元测试(Task 6)能覆盖 AgentSession 的 Future 逻辑,但真实 SSE + 并发 POST 的集成可能要调试。
+   - **风险**:asyncio event loop 跨请求的 Future 共享、SSE 连接断开时 Future 的 cancel 处理,实测时可能踩坑。
+
+4. **Task 10 的 `test_agent_approval_flow.py` 简化** —— 计划里注明了简化(完整并发集成测试复杂,MVP 阶段以 Task 6 单测覆盖为主)。
+   - 若要完整的两-task 并发集成测试(一个 task 跑 SSE、另一个 task POST approval),这块要加码,开发量 +0.5 天。
+   - **需决策**:MVP 接受简化,还是补完整集成测试?
+
+5. **Task 12 前端 localStorage key 名** —— 计划用了 `localStorage.getItem("aigateway:key_id")` 和 `aigateway:token` 作为登录态 key,但**未核实项目现有 useAuth hook 实际用什么 key 存**。
+   - 执行 Task 11/12 前必须先看 `control-panel/src/hooks/useAuth.ts` 确认实际 key 名,否则 localStorage 读不到登录态/token。
+   - **执行前动作**:Read useAuth.ts,把计划里的 `aigateway:key_id` / `aigateway:token` 替换成真实 key 名。
+
+6. **MVP 范围** —— 9 个工具、SSE 断连即取消、无 Redis 历史、无前端单测,与 spec §12 一致。
+   - 执行中若想临时加(如 SSE 重发、Redis 历史、第 10-15 个工具),需先更新 spec §12 Out of scope 再改计划,不要悄悄扩范围。
+
+---
+
 ## File Structure
 
 ### 新增文件
