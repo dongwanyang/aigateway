@@ -287,6 +287,7 @@ Tests live in `/tests/` (25 files). No conftest.py or pytest.ini — tests run d
 - **contextvar 日志上下文** — `ContextInjectProcessor` 用 `contextvars.ContextVar` 隔离并发请求的 trace_id(原类级共享 dict 有并发覆盖 bug)。
 - **prompt_compress** is now a real implementation using LLMLingua-2 (multilingual). `device: cpu|cuda` controls runtime; `device_map` auto-set for GPU. `compression_ratio`/`target_token` control output size.
 - **rag_retriever** & **conv_compressor** are default-enabled with local fallback behavior (no external service strictly required to start, though Qdrant is needed for full RAG retrieval).
+- **L3 集合 404 容错**(2026-07-05) — `qdrant_client.py` 的 `search`/`retrieve` 路径在 Qdrant 返回 404(集合尚未创建/被清空)时视为 miss 返回 `None`,而非 `raise_for_status()` 冒泡成 5xx。集合由首次 `set_l3` 写入时懒创建。这避免了首次部署或 Qdrant 数据清空后,语义缓存查找让整个请求失败。
 - **debug_mode**(2026-07-05 起废弃单开关语义) — `debug_mode` 现只用于向后兼容;`_is_debug_mode()` 已删,不再强制 DEBUG 日志级别,不再控制 5xx detail 回显。`AI_GATEWAY_ENV=production` 仍强制 `debug_mode=False` + `log_level≥INFO` 作为生产安全网(config.py 中)。PR2 已落地 5 维度开关(见上一条),debug_mode 字段仅 config.py production 安全网保留。
 - **TokenCompressorStrategy** uses deterministic hash-based feature vectors as placeholders — actual ML inference (CLIP/ViT segmentation + feature extraction) is planned for future integration.
 - **Media Optimization Layer** handles OCR, video keyframes, audio transcription, document parsing — configurable per-media-type in `config.yaml`.
