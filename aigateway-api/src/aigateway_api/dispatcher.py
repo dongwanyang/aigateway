@@ -336,9 +336,9 @@ class RequestDispatcher:
         router_meta: Optional[Dict[str, Any]] = None
 
         # ===== 跑理解管道 engine 插件链（rag_retriever / conv_compressor 等）=====
-        # 注意：pii/cache/semantic/compress/media_optimization 已在
+        # 注意：pii/cache/semantic/compress/media 已在
         # dispatch() 共用前置或本方法后续步骤中处理，engine 跑前先过滤掉重复项。
-        # model_router 不在此列(空壳,engine 跑它以保持链完整,本身 no-op)。
+        # （经典 model_router 插件已删除，真路由在 bridge 的 auto 解析；此处无需 skip。）
         if engine is not None:
             try:
                 ctx = PipelineContext(
@@ -349,10 +349,10 @@ class RequestDispatcher:
                 )
                 ctx.should_stream = getattr(body, "stream", False)
                 # 过滤掉已被辅助函数处理的核心插件，避免重复执行
-                # 注：model_router 是空壳（真路由在 bridge auto 解析），不再 skip ——
-                # 让 engine 跑它以保持插件链完整，运行时它本身是 no-op。
+                # 注意名字必须与注册名一致（media 注册名为 media_optimizer，
+                # 非 media_optimization——曾因写错导致 skip 失效、media 双跑）。
                 ctx._skip_names = {"pii_detector", "prompt_cache", "semantic_cache",
-                                   "prompt_compress", "media_optimization"}
+                                   "prompt_compress", "media_optimizer"}
                 ctx = await self._run_engine_filtered(engine, ctx)
                 # 插件链可能改写 messages / model（rag_retriever 追加检索上下文、
                 # conv_compressor 摘要历史）——回写到 body，供后续 cache_key / LLM 调用使用。
