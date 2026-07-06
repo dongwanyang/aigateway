@@ -483,7 +483,6 @@ async def get_metrics_json(
     from aigateway_api.main import app
     s = app.state
     metrics_collector = getattr(s, "metrics_collector")
-    circuit_breaker_factory = getattr(s, "circuit_breaker_factory")
     key_store = getattr(s, "key_store")
 
     # 收集 Prometheus 指标
@@ -528,11 +527,11 @@ async def get_metrics_json(
             if cursor == 0:
                 break
 
-    # 熔断器状态
+    # 熔断器状态(从 litellm bridge tracker 读)
     cb_states: Dict[str, Any] = {}
-    if circuit_breaker_factory:
-        for provider, breaker in circuit_breaker_factory._breakers.items():
-            cb_states[provider] = breaker.get_status()
+    litellm_bridge_for_cb = getattr(s, "litellm_bridge", None)
+    if litellm_bridge_for_cb:
+        cb_states = litellm_bridge_for_cb.get_cooldown_status()
 
     return {
         "data": {
