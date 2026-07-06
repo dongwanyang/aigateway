@@ -13,6 +13,7 @@ Admin Routes — 管理接口实现
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -1550,8 +1551,13 @@ async def import_rag_document(
                 st_model = SentenceTransformer(_model_name)
                 _set_embedding_model(st_model)
 
-            # 批量 encode
-            vectors = st_model.encode(chunks, normalize_embeddings=True, show_progress_bar=False)
+            # 批量 encode — 注意：encode() 是同步 CPU 密集型操作，
+            # 必须在线程池中执行，避免阻塞 Uvicorn 事件循环（其他页面请求会排队）
+            _loop = asyncio.get_running_loop()
+            vectors = await _loop.run_in_executor(
+                None,
+                lambda: st_model.encode(chunks, normalize_embeddings=True, show_progress_bar=False),
+            )
             vectors_list = [v.tolist() for v in vectors]
         else:
             # 回退方案：使用 litellm embedding API 或哈希向量
