@@ -602,8 +602,8 @@ async def list_models(request: Request) -> JSONResponse:
         )
 
     return JSONResponse(content={
-        "data": {"object": "list", "data": models},
-        "message": "success",
+        "object": "list",
+        "data": models,
     })
 
 
