@@ -35,8 +35,7 @@ Client (OpenAI SDK / CLI / IDE)
 │  ├── context.py      │  PipelineContext — shared request state with typed namespaces
 │  ├── caching.py      │  CacheManager: L1(LRU) → L2(Redis+LZ4) → L3(Qdrant), plus LightweightReranker / CrossEncoderRerankers
 │  ├── security.py     │  KeyStore (Redis-backed quotas/rate-limits), PIIDetector (20+ PII patterns)
-│  ├── litellm_bridge.py│  Wraps LiteLLM Router for multi-provider calls with fallback chains
-│  ├── circuit_breaker.py│  Per-provider CLOSED/OPEN/HALF-OPEN state machine
+│  ├── litellm_bridge.py│  Wraps LiteLLM Router for multi-provider calls with fallback chains + 内置 cooldown 熔断(via ProviderCooldownTracker)
 │  ├── config.py       │  YAML loader, env var overrides, Watchdog hot-reload
 │  ├── metrics.py      │  Prometheus counters/histograms/gauges
 │  ├── tracing.py      │  OpenTelemetry trace integration
@@ -183,7 +182,7 @@ Runs before LLM calls when multimodal content is detected:
 
 **总(LiteLLM 统一出口 + auto 末端解析)**:`LiteLLMBridge.completion()`/`completion_stream()` 是两条管道的共同出口,带 fallback 链(`fallback_chain` 列表)。`model=='auto'` 时 bridge 用注入的 `ModelRouterStrategy`(`set_auto_resolver`)按 pipeline_kind 选候选池(understanding→llm/mllm,generation→generative),complexity 评分选最优,结果写 `_meta.model_router`。「选哪个模型」的决策在管道末端,不在入口。
 
-> ⚠️ **CircuitBreaker 未接入 LLM 调用路径**(2026-07-06 核实) — `litellm_bridge.py` 中无任何 `circuit_breaker` 引用,`.protect()`/`allow_request`/`record_*` 全仓零调用。`CircuitBreakerFactory` 的唯一消费者是 `routes.py`/`admin_routes.py` 读 `_breakers` 状态暴露给 `/metrics`/`/health`/admin。即 CircuitBreaker 当前是**纯观测基础设施,OPEN 状态不会真正熔断请求**。fallback 仅靠 `fallback_chain` 顺序重试。如需真正熔断,需在 `LiteLLMBridge.completion`/`_do_completion` 内调 `cb_factory.get(provider).protect(...)` 并在成功/失败时 record。
+> ✅ **熔断由 litellm 内置 cooldown 承担**(2026-07-06) — 自实现的 `circuit_breaker.py`(CircuitBreaker + CircuitBreakerFactory,439 行)从未接入 LLM 调用路径,已删除。改用 litellm 1.83.7 Router 内置 cooldown(`allowed_fails` + `cooldown_time`,与 fallback 同一调度链协同)。config.yaml `circuit_breaker:` 段字段向前兼容(`failure_threshold`→`allowed_fails`,`recovery_timeout`→`cooldown_time`,`long_open_alert_seconds` 保留用于告警日志)。`LiteLLMBridge` 内 `ProviderCooldownTracker` 通过 append 到 `litellm._async_success_callback` / `litellm._async_failure_callback` 接收事件,维护 per-model 状态,供 `/metrics`(按 provider 聚合)与 `/admin/metrics-json`(展全字段)同步读取。不实现 HALF-OPEN(litellm 无对应概念)。
 
 流式路径已对齐非流式行为:扣配额(`key_store.increment_usage`)、回填缓存(L1/L2/L3)、cost 用真实值。生成管道不查 prompt_cache(生成结果缓存语义复杂)。
 
@@ -235,7 +234,7 @@ Prometheus histogram for request duration, counters for cache hits/misses/tokens
 | `aigateway-core/src/aigateway_core/context.py` | PipelineContext — 共享请求状态。**改请求级上下文字段去这里**。 |
 | `aigateway-core/src/aigateway_core/caching.py` | CacheManager: L1→L2→L3 + reranker。**改缓存命中/回填策略去这里**。 |
 | `aigateway-core/src/aigateway_core/security.py` | KeyStore(配额/rate-limit) + PIIDetector(20+ 模式)。**改鉴权/配额/PII 脱敏去这里**。 |
-| `aigateway-core/src/aigateway_core/litellm_bridge.py` | LiteLLM Router 多 provider + fallback(`fallback_chain`)。**改模型调用/fallback/auto 解析去这里**。注意:CircuitBreaker 未接入此文件(见 Known States)。 |
+| `aigateway-core/src/aigateway_core/litellm_bridge.py` | LiteLLM Router 多 provider + fallback + 内置 cooldown 熔断(`ProviderCooldownTracker` 镜像状态)。**改模型调用/fallback/auto 解析/熔断阈值去这里**。cooldown 参数从 `config.yaml` 的 `circuit_breaker:` 段读(`failure_threshold`→`allowed_fails`,`recovery_timeout`→`cooldown_time`)。 |
 | `aigateway-core/src/aigateway_core/generation_optimization/` | 6 插件 8 策略的生成优化层。**改 ai_director/token_compressor/draft_generator 等去这里**。 |
 | `aigateway-core/src/aigateway_core/media/` | Media Optimization Layer V2。**改图片/视频/音频/文档处理去这里**。 |
 | `control-panel/src/pages/` | 9 个页面组件。**改控制台某页面 UI 去对应 .tsx**。 |
@@ -324,7 +323,7 @@ Tests live in `/tests/` (25 files). No conftest.py or pytest.ini — tests run d
 
 ## Important Patterns
 
-1. **App state via FastAPI lifespan** — All shared components (ConfigManager, KeyStore, CacheManager, LiteLLMBridge, PluginRegistry, CircuitBreakerFactory, MediaOptimizationPlugin, PromptTemplateManager) are initialized in `main.py`'s `lifespan()` context manager and stored on `app.state`. Route handlers read from `_get_app_state()`.
+1. **App state via FastAPI lifespan** — All shared components (ConfigManager, KeyStore, CacheManager, LiteLLMBridge, PluginRegistry, MediaOptimizationPlugin, PromptTemplateManager) are initialized in `main.py`'s `lifespan()` context manager and stored on `app.state`. Route handlers read from `_get_app_state()`.
 
 2. **Sys path manipulation** — `main.py` manually prepends `aigateway-core/src` to `sys.path` so imports work. The Dockerfile copies both packages into `/app/` so the prod path differs from local dev.
 

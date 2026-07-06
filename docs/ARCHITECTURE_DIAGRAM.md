@@ -122,7 +122,7 @@
                    │  流式:   litellm_bridge.completion_stream() │
                    │  → litellm.Router.acompletion     │
                    │  → 真实 provider (OpenAI/Agnes/...)│
-                   │  CircuitBreaker 包裹,失败走 fallback │
+                   │  litellm 内置 cooldown 熔断+ fallback │
                    └──────────────┬──────────────────┘
                                   ▼
                    ┌─────────────────────────────────┐
@@ -302,7 +302,8 @@
 │  已有能力(沿用):                                                      │
 │    - litellm.Router 多 provider 调用                                   │
 │    - fallback 链 (主模型失败自动降级)                                  │
-│    - CircuitBreaker 包裹                                               │
+│    - litellm 内置 cooldown 熔断(allowed_fails/cooldown_time,          │
+│      与 fallback 同一调度链协同;`ProviderCooldownTracker` 镜像状态)   │
 │    - per-model base_url 覆盖(Agnes 文/图/视频走不同端点)               │
 └──────────────────────────────┬───────────────────────────────────────┘
                                ▼
