@@ -449,6 +449,21 @@ export async function deleteAllLogs(): Promise<ApiResponse<{ deleted: boolean }>
   }
 }
 
+export async function batchDeleteLogs(requestIds: string[]): Promise<ApiResponse<{ deleted: number; requested: number }>> {
+  const headers = await ensureAuthHeaders()
+  const res = await fetch(`${API_BASE}/admin/logs/batch-delete`, {
+    method: 'POST',
+    headers: { ...headers, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ request_ids: requestIds }),
+  })
+  if (!res.ok) throw new Error(`Failed to batch-delete logs: ${res.status}`)
+  try {
+    return await res.json()
+  } catch {
+    throw new Error('Batch delete returned invalid response')
+  }
+}
+
 export async function getTraceDetail(traceId: string): Promise<ApiResponse<TraceDetail>> {
   const headers = await ensureAuthHeaders()
   const res = await fetch(`${API_BASE}/admin/trace/${encodeURIComponent(traceId)}`, { headers })

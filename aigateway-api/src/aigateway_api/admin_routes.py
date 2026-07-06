@@ -1242,6 +1242,72 @@ async def delete_all_logs(
         "message": "success",
     }
 
+
+# ------------------------------------------------------------------
+# POST /admin/logs/batch-delete — 按 request_id 批量删除请求日志
+# ------------------------------------------------------------------
+
+
+class BatchDeleteLogsRequest(BaseModel):
+    request_ids: List[str] = Field(..., min_length=1, max_length=1000,
+                                    description="要删除的 request_id 列表(1-1000)")
+
+
+@router.post("/logs/batch-delete")
+async def batch_delete_logs(
+    payload: BatchDeleteLogsRequest,
+    request: Request,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+    """按 request_id 批量删除请求日志。
+
+    Redis ZSET `aigateway:logs:requests` 的 member 是完整 JSON 字符串,不能
+    直接 ZREM。本接口先按 rank 拉取最近 10000 条(与写入侧的 zremrangebyrank
+    保留数一致),命中 request_id 的 member 用 pipeline 批量 ZREM。
+
+    Args:
+        request_ids: 要删除的 request_id 列表(1-1000)。
+
+    Returns:
+        {"deleted": N, "requested": M}  N 为实际删除条数,M 为请求 id 数。
+    """
+    from aigateway_api.main import app
+    s = app.state
+    redis_mgr = getattr(s, "redis_manager")
+
+    if redis_mgr is None or redis_mgr.redis is None:
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Redis not connected"}})
+
+    ids_set = set(payload.request_ids)
+    zset_key = "aigateway:logs:requests"
+
+    # 拉近 10000 条(与写入侧的保留窗口对齐)
+    entries = await redis_mgr.redis.zrange(zset_key, 0, 9999)
+    to_remove: List[bytes] = []
+    for raw in entries:
+        try:
+            entry = json.loads(raw.decode() if isinstance(raw, bytes) else raw)
+        except (ValueError, AttributeError):
+            continue
+        if entry.get("request_id") in ids_set:
+            to_remove.append(raw)
+            if len(to_remove) >= len(ids_set):
+                break  # 全部找到,提前退出
+
+    deleted = 0
+    if to_remove:
+        # pipeline 一次批量 ZREM,避免逐条 RTT
+        pipe = redis_mgr.redis.pipeline()
+        for m in to_remove:
+            pipe.zrem(zset_key, m)
+        results = await pipe.execute()
+        deleted = sum(int(r or 0) for r in results)
+
+    return {
+        "data": {"deleted": deleted, "requested": len(ids_set)},
+        "message": "success",
+    }
+
 # ------------------------------------------------------------------
 # GET/PUT /admin/config — 完整配置编辑 (Req 15)
 # ------------------------------------------------------------------
