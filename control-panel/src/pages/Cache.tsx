@@ -10,13 +10,14 @@ import {
 } from '@/api/client'
 
 const initialCacheData = [
-  { tier: 'L1', hits: 0, misses: 0 },
-  { tier: 'L2', hits: 0, misses: 0 },
-  { tier: 'L3', hits: 0, misses: 0 },
+  { tier: 'L1', hits: 0 },
+  { tier: 'L2', hits: 0 },
+  { tier: 'L3', hits: 0 },
 ]
 
 export default function Cache() {
   const [cacheData, setCacheData] = useState(initialCacheData)
+  const [totalMisses, setTotalMisses] = useState(0)
   const [loading, setLoading] = useState(true)
   const [activeTab, setActiveTab] = useState<'overview' | 'l3-manage'>('overview')
 
@@ -47,17 +48,19 @@ export default function Cache() {
           hitsByTier[tier] = (hitsByTier[tier] || 0) + s.value
         })
 
-        const l1Hits = hitsByTier['L1'] || 0
-        const l2Hits = hitsByTier['L2'] || 0
-        const l3Hits = hitsByTier['L3'] || 0
-        const l1Misses = missValue
-
+        // 语义修正(2026-07-06):
+        // 后端只有一个 gateway_cache_misses_total(三级都没命中的次数),
+        // 不存在"L1_misses / L2_misses / L3_misses"。旧代码用
+        // (misses_total - l2_hits) 之类的减法算 tier-level misses,数字无
+        // 物理意义(L2 hit 时 L1 也 miss,但后端不会计 misses_total)。
+        // 现改为:每个 tier 只展示命中数,MISS 单独一个数字。
         if (!cancelled) {
           setCacheData([
-            { tier: 'L1', hits: Math.round(l1Hits), misses: Math.round(l1Misses) },
-            { tier: 'L2', hits: Math.round(l2Hits), misses: Math.round(Math.max(0, l1Misses - l2Hits)) },
-            { tier: 'L3', hits: Math.round(l3Hits), misses: Math.round(Math.max(0, l1Misses - l2Hits - l3Hits)) },
+            { tier: 'L1', hits: Math.round(hitsByTier['L1'] || 0) },
+            { tier: 'L2', hits: Math.round(hitsByTier['L2'] || 0) },
+            { tier: 'L3', hits: Math.round(hitsByTier['L3'] || 0) },
           ])
+          setTotalMisses(Math.round(missValue))
           setLoading(false)
         }
       } catch {
@@ -154,9 +157,14 @@ export default function Cache() {
   }
 
   const totalHits = cacheData.reduce((s, d) => s + d.hits, 0)
-  const totalMisses = cacheData.reduce((s, d) => s + d.misses, 0)
   const total = totalHits + totalMisses
   const hitRate = total > 0 ? Math.round(totalHits / total * 100) : 0
+
+  // 图表数据:每个 tier 一根 hits 柱 + 全局一根 MISS 柱
+  const chartData = [
+    ...cacheData,
+    { tier: 'MISS', hits: totalMisses },
+  ]
 
   return (
     <div className="space-y-6">
@@ -191,7 +199,7 @@ export default function Cache() {
       {activeTab === 'overview' && (
         <>
           {/* 汇总 */}
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
             <Card>
               <div className="flex items-center gap-3 mb-2">
                 <Database size={20} style={{ color: 'var(--color-primary)' }} />
@@ -212,7 +220,7 @@ export default function Cache() {
                 {loading ? '...' : `${cacheData[0].hits}`}
               </div>
               <div className="text-sm mt-1" style={{ color: 'var(--color-text-tertiary)' }}>
-                {total > 0 ? `${Math.round(cacheData[0].hits / (cacheData[0].hits + cacheData[0].misses || 1) * 100)}%` : '0%'} / {cacheData[0].misses} misses
+                {total > 0 ? `${Math.round(cacheData[0].hits / total * 100)}% of ${total}` : '0%'}
               </div>
             </Card>
             <Card>
@@ -223,7 +231,7 @@ export default function Cache() {
                 {loading ? '...' : `${cacheData[1].hits}`}
               </div>
               <div className="text-sm mt-1" style={{ color: 'var(--color-text-tertiary)' }}>
-                {total > 0 ? `${Math.round(cacheData[1].hits / (cacheData[1].hits + cacheData[1].misses || 1) * 100)}%` : '0%'} / {cacheData[1].misses} misses
+                {total > 0 ? `${Math.round(cacheData[1].hits / total * 100)}% of ${total}` : '0%'}
               </div>
             </Card>
             <Card>
@@ -234,22 +242,32 @@ export default function Cache() {
                 {loading ? '...' : `${cacheData[2].hits}`}
               </div>
               <div className="text-sm mt-1" style={{ color: 'var(--color-text-tertiary)' }}>
-                {total > 0 ? `${Math.round(cacheData[2].hits / (cacheData[2].hits + cacheData[2].misses || 1) * 100)}%` : '0%'} / {cacheData[2].misses} misses
+                {total > 0 ? `${Math.round(cacheData[2].hits / total * 100)}% of ${total}` : '0%'}
+              </div>
+            </Card>
+            <Card>
+              <div className="flex items-center gap-3 mb-2">
+                <span className="text-sm" style={{ color: 'var(--color-text-secondary)' }}>全部未命中</span>
+              </div>
+              <div className="text-3xl font-bold" style={{ color: 'var(--color-danger)' }}>
+                {loading ? '...' : `${totalMisses}`}
+              </div>
+              <div className="text-sm mt-1" style={{ color: 'var(--color-text-tertiary)' }}>
+                {total > 0 ? `${Math.round(totalMisses / total * 100)}% of ${total}` : '0%'}
               </div>
             </Card>
           </div>
 
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-            <Card title="各级缓存命中/未命中">
+            <Card title="各级缓存命中 vs 全局 MISS">
               <ResponsiveContainer width="100%" height={280}>
-                <BarChart data={cacheData}>
+                <BarChart data={chartData}>
                   <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
                   <XAxis dataKey="tier" tick={{ fontSize: 12, fill: 'var(--color-text-secondary)' }} />
                   <YAxis tick={{ fontSize: 11, fill: 'var(--color-text-quaternary)' }} />
                   <Tooltip contentStyle={{ backgroundColor: 'var(--color-bg-elevated)', border: '1px solid var(--color-border)', borderRadius: 8 }} />
                   <Legend />
-                  <Bar dataKey="hits" fill="var(--color-success)" name="Hits" radius={[4, 4, 0, 0]} />
-                  <Bar dataKey="misses" fill="var(--color-danger)" name="Misses" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="hits" fill="var(--color-success)" name="Count" radius={[4, 4, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
             </Card>

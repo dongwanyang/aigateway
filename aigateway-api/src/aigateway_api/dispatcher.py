@@ -1000,7 +1000,8 @@ class RequestDispatcher:
             chat_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
             stream_gen = simulate_stream_from_cache(cached["value"], hit_tier=hit_tier)
             if metrics_collector:
-                metrics_collector.inc_cache_hits(tier=hit_tier)
+                # 注:inc_cache_hits 已在 _dispatch_understanding 缓存查找块统一
+                # 打点,这里不再重复打(否则会双倍计数)。仅记录请求 + 节省 token。
                 metrics_collector.record_request("POST", "/v1/chat/completions", "200")
                 metrics_collector.record_duration("/v1/chat/completions", 0.001)
             try:
@@ -1019,7 +1020,8 @@ class RequestDispatcher:
         # 非流式
         response_data = json.loads(cached["value"])
         if metrics_collector:
-            metrics_collector.inc_cache_hits(tier=hit_tier)
+            # 注:inc_cache_hits 已在 _dispatch_understanding 缓存查找块统一
+            # 打点,这里不再重复打(否则会双倍计数)。
             saved = response_data.get("usage", {}).get("total_tokens", 0)
             if saved > 0:
                 metrics_collector.record_tokens_saved(saved)
