@@ -49,7 +49,7 @@ async def get_metrics(request: Request) -> FastAPIResponse:
         litellm_bridge = getattr(app.state, "litellm_bridge", None)
 
         # 更新熔断器状态指标(从 litellm cooldown tracker 读,按 provider 聚合)
-        if litellm_bridge and metrics_collector:
+        if litellm_bridge and metrics_collector and hasattr(litellm_bridge, "get_cooldown_status_by_provider"):
             provider_states = litellm_bridge.get_cooldown_status_by_provider()
             for provider, state in provider_states.items():
                 metrics_collector.set_circuit_breaker_state(
@@ -140,7 +140,7 @@ async def get_health(request: Request) -> JSONResponse:
     # 构建熔断器状态(从 litellm bridge tracker 读)
     cb_status: Dict[str, Dict[str, Any]] = {}
     litellm_bridge_for_cb = getattr(s, "litellm_bridge", None)
-    if litellm_bridge_for_cb:
+    if litellm_bridge_for_cb is not None and hasattr(litellm_bridge_for_cb, "get_cooldown_status"):
         cb_status = litellm_bridge_for_cb.get_cooldown_status()
 
     # 确定整体状态

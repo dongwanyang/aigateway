@@ -311,8 +311,12 @@ class LiteLLMBridge:
                 cooldown_time=cooldown_time,
             )
 
-            # 注册 litellm deployment callback,把失败/成功事件转发给 tracker
-            # litellm 1.83.7 callback 签名:async def(kwargs, response, start_time, end_time)
+            # 注册 litellm deployment callback,把失败/成功事件转发给 tracker。
+            # 直接覆盖 Router 实例上的方法不生效,因为 Router.__init__ 已把它的
+            # 绑定方法注册进 litellm.{success,failure,_async_*}_callback 列表。
+            # 正确做法:往 litellm 全局 callback 列表 append 我们的回调,这样
+            # litellm 每次成功/失败时会依次调用我们与 Router 的回调。
+            # litellm 1.83.7 callback 签名:(kwargs, response, start_time, end_time)
             tracker_ref = self._cooldown_tracker
 
             async def _on_failure(kwargs, response, start_time, end_time):
@@ -331,8 +335,16 @@ class LiteLLMBridge:
                 except Exception as exc:
                     logger.warning("cooldown tracker on_success 异常: %s", exc)
 
-            self.router.deployment_callback_on_failure = _on_failure
-            self.router.deployment_callback_on_success = _on_success
+            import litellm as _litellm
+            if not isinstance(_litellm._async_failure_callback, list):
+                _litellm._async_failure_callback = []
+            if not isinstance(_litellm._async_success_callback, list):
+                _litellm._async_success_callback = []
+            # 只 append 一次(避免热重载/多 bridge 场景重复注册)
+            if _on_failure not in _litellm._async_failure_callback:
+                _litellm._async_failure_callback.append(_on_failure)
+            if _on_success not in _litellm._async_success_callback:
+                _litellm._async_success_callback.append(_on_success)
 
             if CostTracker is not None:
                 self.cost_tracker = CostTracker()

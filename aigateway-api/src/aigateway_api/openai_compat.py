@@ -122,7 +122,6 @@ def _get_app_state() -> Dict[str, Any]:
         "metrics_collector": getattr(s, "metrics_collector"),
         "config_manager": getattr(s, "config_manager"),
         "plugin_registry": getattr(s, "plugin_registry"),
-        "circuit_breaker_factory": getattr(s, "circuit_breaker_factory"),
         "redis_manager": getattr(s, "redis_manager"),
         "qdrant_manager": getattr(s, "qdrant_manager"),
         "media_optimization_layer": getattr(s, "media_optimization_layer", None),

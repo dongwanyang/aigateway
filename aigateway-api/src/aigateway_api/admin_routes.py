@@ -530,7 +530,7 @@ async def get_metrics_json(
     # 熔断器状态(从 litellm bridge tracker 读)
     cb_states: Dict[str, Any] = {}
     litellm_bridge_for_cb = getattr(s, "litellm_bridge", None)
-    if litellm_bridge_for_cb:
+    if litellm_bridge_for_cb is not None and hasattr(litellm_bridge_for_cb, "get_cooldown_status"):
         cb_states = litellm_bridge_for_cb.get_cooldown_status()
 
     return {
