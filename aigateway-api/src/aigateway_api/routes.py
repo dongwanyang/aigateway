@@ -46,16 +46,16 @@ async def get_metrics(request: Request) -> FastAPIResponse:
     try:
         from aigateway_api.main import app
         metrics_collector = getattr(app.state, "metrics_collector")
-        circuit_breaker_factory = getattr(app.state, "circuit_breaker_factory")
+        litellm_bridge = getattr(app.state, "litellm_bridge", None)
 
-        # 更新熔断器状态指标
-        if circuit_breaker_factory:
-            for provider, breaker in circuit_breaker_factory._breakers.items():
-                if metrics_collector:
-                    metrics_collector.set_circuit_breaker_state(
-                        provider=provider,
-                        state=breaker.get_state_value(),
-                    )
+        # 更新熔断器状态指标(从 litellm cooldown tracker 读,按 provider 聚合)
+        if litellm_bridge and metrics_collector:
+            provider_states = litellm_bridge.get_cooldown_status_by_provider()
+            for provider, state in provider_states.items():
+                metrics_collector.set_circuit_breaker_state(
+                    provider=provider,
+                    state=state,
+                )
 
         # 单 worker 模式：使用 MetricsCollector 持有的 registry
         if metrics_collector and metrics_collector._registry is not None:
@@ -95,7 +95,6 @@ async def get_health(request: Request) -> JSONResponse:
     redis_mgr = getattr(s, "redis_manager")
     qdrant_mgr = getattr(s, "qdrant_manager")
     config_manager = getattr(s, "config_manager")
-    circuit_breaker_factory = getattr(s, "circuit_breaker_factory")
     plugin_registry = getattr(s, "plugin_registry")
     start_time = getattr(s, "_start_time", 0)
 
@@ -138,11 +137,11 @@ async def get_health(request: Request) -> JSONResponse:
                 "status": "healthy" if enabled else "disabled",
             }
 
-    # 构建熔断器状态
+    # 构建熔断器状态(从 litellm bridge tracker 读)
     cb_status: Dict[str, Dict[str, Any]] = {}
-    if circuit_breaker_factory:
-        for provider, breaker in circuit_breaker_factory._breakers.items():
-            cb_status[provider] = breaker.get_status()
+    litellm_bridge_for_cb = getattr(s, "litellm_bridge", None)
+    if litellm_bridge_for_cb:
+        cb_status = litellm_bridge_for_cb.get_cooldown_status()
 
     # 确定整体状态
     dependencies = {
