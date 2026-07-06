@@ -404,10 +404,11 @@ When merging code (e.g. feature branch → `main`, or integrating another branch
 
 省 token 的核心:用「导航 + 精准读」替代「全量扫描」。每次任务只读真正需要的 1-3 个文件,不整库翻阅。
 
+- **优先用 LSP 查符号,而非 grep 文本匹配。** 找定义/引用/类型/符号时,优先用 LSP 工具(`goToDefinition`/`findReferences`/`hover`/`documentSymbol`/`workspaceSymbol`/`goToImplementation`/`prepareCallHierarchy`+incoming/outgoing)——语言感知、跟 import/re-export、知类型,比 grep 精准且不产生假阳性(注释/影子名/子串)。覆盖:`.ts/.tsx/.js/.jsx` → typescript-lsp,`.py/.pyi` → pyright-lsp,`.go` → gopls-lsp。**若 LSP 工具报 `No LSP server available`,说明本环境未装/未生效**,按 `README.md` 的「开发 → 配置 Claude Code 的 LSP 代码智能」五步装好(pyright/typescript-language-server 二进制 + `claude plugin install` + `ENABLE_LSP_TOOL=1` + `claude plugin details` 验证 + 重启会话),再继续。仅当 LSP 不适用时才退回 grep:搜字符串/正则/文本模式(非代码符号)、查注释/配置/文档内容、LSP 不覆盖的文件类型。
 - **先查 CLAUDE.md 定位,再读具体文件。** 接到任务先扫 CLAUDE.md 的 `Key Files` 表(带"何时去这里"触发词)、`Architecture at a Glance` 图、`Architecture Decisions & Known States` 段,据此锁定目标文件,再 `Read` 该文件。禁止为"了解架构"而全量读 `repomix-output.md` 或 `cat` 整个目录。
-- **Grep/Glob 精准定位,Read 带 offset/limit。** 找某符号/逻辑用 `Grep "pattern"` 命中文件,再 `Read` 该文件相关区间(传 `offset`/`limit`),不要无参 Read 整个大文件再翻。例如找某插件:`Grep "class.*Plugin"` → 命中文件 → Read 该类定义 ±50 行。
+- **LSP 优先;grep/glob 作退路,Read 带 offset/limit。** 定位代码符号先 `LSP`(见上条);LSP 不适用时用 `Grep "pattern"` 命中文件。命中后 `Read` 该文件相关区间(传 `offset`/`limit`),不要无参 Read 整个大文件再翻。例如找某插件:先 `workspaceSymbol "XPlugin"`,失败再 `Grep "class.*Plugin"` → 命中文件 → Read 该类定义 ±50 行。
 - **修 bug 从堆栈/trace_id 直达。** 用报错堆栈或 trace_id 定位 `file:line`,Read 该文件 ±50 行即可,不要扫整库。trace_id 可查 `/admin/trace/{id}` 拿 events 数组。
-- **架构调整先画影响面。** 改动某符号/接口前,用 `Grep "from.*import|import "` 列出所有引用方,确认影响范围后再动手,绝不"先通读全部相关文件再改"。
+- **架构调整先画影响面。** 改动某符号/接口前,先 `LSP findReferences` 列出所有调用方;LSP 不适用时再用 `Grep "from.*import|import "`。确认影响范围后再动手,绝不"先通读全部相关文件再改"。
 - **多文件广度搜索派 subagent。** 涉及多文件的广度搜索(找所有调用点/所有实现某接口的类/跨包追踪数据流),优先派 `Explore` 或 `general-purpose` subagent 去扫,主上下文只接收其结论(几百 token),不把几十个文件原文灌进来。
 - **`repomix-output.md` 仅作目录索引参考,禁止整文件读入。** 需要时只 `Grep` 其中的 directoryStructure 段定位文件路径,具体内容去读源文件。
 - **Config/契约类改动先核对应处文档。** 改 API 字段查 `docs/API_CONTRACT.md`,改缓存 key 查 `docs/DB_SCHEMA.md`,改 config 字段查 `config.yaml.template`,避免改出不一致。
