@@ -25,26 +25,19 @@ Pillow
 # --- 多模态处理 ---
 pytesseract
 opencv-python-headless
-faster-whisper
 pymupdf
 python-docx
 beautifulsoup4
 
 # --- Embedding / 语义缓存(transformers,torch 在 Dockerfile 单独装)---
 transformers>=4.51.0
+sentence-transformers
 
 # --- Prompt 压缩 ---
 llmlingua>=0.2.0
 
-# --- RAG 检索 ---
-llama-index>=0.10.0
-llama-index-vector-stores-qdrant>=0.2.0
-llama-index-embeddings-huggingface>=0.2.0
+# --- Qdrant 客户端(RAG 存储) ---
 qdrant-client
-
-# --- 对话历史压缩(langchain 1.x 把 Legacy Memory 移到 langchain-classic)---
-langchain-classic
-langchain-openai
 
 # --- 配置加载:.env 文件支持 ---
 python-dotenv

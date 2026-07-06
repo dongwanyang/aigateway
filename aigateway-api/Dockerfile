@@ -1,10 +1,10 @@
 FROM python:3.12-slim
 
 # ============================================================
-# 系统依赖:OCR(tesseract + 中文/英文)+ 视频(ffmpeg/opencv 运行库)+ curl(healthcheck)
-# 几乎不变,放最前确保永久缓存
+# 系统依赖: OCR + 视频 + curl(healthcheck)
 # ============================================================
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
     curl \
     tesseract-ocr \
     tesseract-ocr-chi-sim \
@@ -17,30 +17,30 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # ============================================================
-# torch 单独前置层:最大依赖(~1GB)、最稳定,几乎不会变
-# CPU-only 版本,避免拉入 CUDA 体积
+# CPU-only torch — 最重 (~900MB)，几乎不变
 # ============================================================
-RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 # ============================================================
-# 其余全部 Python 依赖一次性安装(从 requirements.txt)
-# 合并自原 6 个分散 pip 层,单次依赖解析,缓存命中率最高
-# requirements.txt 先于源码 COPY,改业务代码不会触发重装
+# Python 依赖
+# --mount=type=cache,target=/root/.cache/pip 跨构建复用 pip 缓存
 # ============================================================
 COPY aigateway-api/requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r /tmp/requirements.txt
 
 # ============================================================
-# 预下载 Qwen3-Embedding-0.6B 模型权重(避免首次请求延迟)
-# 只依赖 torch+transformers,不依赖业务代码 → 放源码前,改代码不触发重下
+# 预下载 Qwen3-Embedding-0.6B 模型权重
+# 权重存 HuggingFace 缓存（~600MB），用独立 cache mount
 # ============================================================
-RUN python -c "from transformers import AutoModel, AutoTokenizer; \
+RUN --mount=type=cache,target=/root/.cache/huggingface \
+    python -c "from transformers import AutoModel, AutoTokenizer; \
     AutoTokenizer.from_pretrained('Qwen/Qwen3-Embedding-0.6B', trust_remote_code=True); \
-    AutoModel.from_pretrained('Qwen/Qwen3-Embedding-0.6B', trust_remote_code=True); \
-    print('Model cached')"
+    AutoModel.from_pretrained('Qwen/Qwen3-Embedding-0.6B', trust_remote_code=True)"
 
 # ============================================================
-# 源码最后 COPY:最高频变动,放最后确保上面所有重量级层缓存命中
+# 源码（最高频变动）
 # ============================================================
 COPY aigateway-core/src/aigateway_core /app/aigateway_core
 COPY aigateway-api/src/aigateway_api /app/aigateway_api
