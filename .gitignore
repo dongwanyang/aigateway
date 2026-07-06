@@ -34,3 +34,10 @@ grafana-data/
 
 # QA evidence
 docs/qa-evidence-*
+
+# Local tooling / generated artifacts
+.claude/
+.repomixignore
+repomix-output.md
+.kiro/
+.playwright-cli/

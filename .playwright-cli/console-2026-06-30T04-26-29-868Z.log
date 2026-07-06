@@ -1,4 +1,0 @@
-[   48543ms] [ERROR] Failed to load resource: the server responded with a status of 401 (Unauthorized) @ http://localhost:3000/aigateway/admin/global-config:0
-[   48543ms] [ERROR] Failed to load resource: the server responded with a status of 401 (Unauthorized) @ http://localhost:3000/aigateway/admin/plugins-config:0
-[  180446ms] [ERROR] Failed to load resource: the server responded with a status of 401 (Unauthorized) @ http://localhost:3000/aigateway/admin/api-keys?page=1&pageSize=20:0
-[  254077ms] [ERROR] Failed to load resource: the server responded with a status of 401 (Unauthorized) @ http://localhost:3000/aigateway/admin/logs?pageSize=100:0
