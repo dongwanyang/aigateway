@@ -180,6 +180,8 @@ class LiteLLMBridge:
         # bridge 收到 model=='auto' 时用它按 pipeline_kind + complexity 选模型,
         # 让「选哪个模型」的决策在管道链末端而不是入口做。
         self._auto_resolver: Any = None
+        # cooldown tracker(在 initialize() 里创建,init 时占位)
+        self._cooldown_tracker: Optional[ProviderCooldownTracker] = None
 
     def set_auto_resolver(self, resolver: Any) -> None:
         """注入 auto 模型解析器(通常是 ModelRouterStrategy 单例)。
@@ -286,13 +288,51 @@ class LiteLLMBridge:
             model_list = self._build_model_list(providers)
             routing_strategy_config = self._build_routing_strategy(providers)
 
+            # 读取 circuit_breaker 段(向前兼容),映射到 litellm cooldown 参数
+            cb_cfg = self.config.get("circuit_breaker", {}) if isinstance(self.config, dict) else {}
+            allowed_fails = int(cb_cfg.get("failure_threshold", 5)) if cb_cfg else 5
+            cooldown_time = int(cb_cfg.get("recovery_timeout", 60)) if cb_cfg else 60
+            long_open_alert = int(cb_cfg.get("long_open_alert_seconds", 300)) if cb_cfg else 300
+
+            # 创建 tracker(供 /metrics 与 /admin/health 同步读)
+            self._cooldown_tracker = ProviderCooldownTracker(
+                allowed_fails=allowed_fails,
+                cooldown_time=cooldown_time,
+                long_open_alert_seconds=long_open_alert,
+            )
+
             self.router = Router(
                 model_list=model_list,
                 routing_strategy=routing_strategy_config,
                 num_retries=getattr(self.config, "num_retries", 3)
                 if hasattr(self.config, "num_retries")
                 else 3,
+                allowed_fails=allowed_fails,
+                cooldown_time=cooldown_time,
             )
+
+            # 注册 litellm deployment callback,把失败/成功事件转发给 tracker
+            # litellm 1.83.7 callback 签名:async def(kwargs, response, start_time, end_time)
+            tracker_ref = self._cooldown_tracker
+
+            async def _on_failure(kwargs, response, start_time, end_time):
+                try:
+                    model = kwargs.get("model", "") or (kwargs.get("litellm_params") or {}).get("model", "")
+                    if tracker_ref is not None:
+                        tracker_ref.on_failure(model)
+                except Exception as exc:
+                    logger.warning("cooldown tracker on_failure 异常: %s", exc)
+
+            async def _on_success(kwargs, response, start_time, end_time):
+                try:
+                    model = kwargs.get("model", "") or (kwargs.get("litellm_params") or {}).get("model", "")
+                    if tracker_ref is not None:
+                        tracker_ref.on_success(model)
+                except Exception as exc:
+                    logger.warning("cooldown tracker on_success 异常: %s", exc)
+
+            self.router.deployment_callback_on_failure = _on_failure
+            self.router.deployment_callback_on_success = _on_success
 
             if CostTracker is not None:
                 self.cost_tracker = CostTracker()
@@ -541,6 +581,22 @@ class LiteLLMBridge:
     def get_registered_models(self) -> List[str]:
         """返回所有已注册的裸模型名列表。"""
         return list(self._model_alias_map.keys())
+
+    def get_cooldown_status(self) -> Dict[str, Any]:
+        """返回所有 model 的 cooldown 状态(供 /admin/health 读)。"""
+        if self._cooldown_tracker is None:
+            return {}
+        return self._cooldown_tracker.get_all_status()
+
+    def get_cooldown_status_by_provider(self) -> Dict[str, int]:
+        """按 provider 聚合状态(供 /metrics 上报 Prometheus)。
+
+        Returns:
+            {provider: 0|1} 字典,0=CLOSED, 1=OPEN。
+        """
+        if self._cooldown_tracker is None:
+            return {}
+        return self._cooldown_tracker.get_provider_states()
 
     def _build_routing_strategy(self, providers_config: Dict[str, Any]) -> str:
         """构建路由策略配置。
