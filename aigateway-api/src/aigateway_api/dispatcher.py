@@ -317,7 +317,7 @@ class RequestDispatcher:
         self, body: Any, request: Request, engine: Any,
         user_id: Optional[str], key_hash: Optional[str], prefix: Dict[str, Any],
     ) -> JSONResponse:
-        """理解管道：engine 插件链 → 缓存 → 配额 → prompt_compress → LiteLLM → 回填。
+        """理解管道：缓存 → 配额 → engine 插件链 → prompt_compress → LiteLLM → 回填。
 
         media_optimization / PII / auto 模型解析已由 dispatch() 共用前置完成,
         本方法从 prefix 拿到那三步的 meta 和累计 plugin_trace。
@@ -335,38 +335,7 @@ class RequestDispatcher:
         # router_meta 由 bridge 在 auto 解析后回填(见 _call_llm_nonstream/stream)
         router_meta: Optional[Dict[str, Any]] = None
 
-        # ===== 跑理解管道 engine 插件链（rag_retriever / conv_compressor 等）=====
-        # 注意：pii/cache/semantic/compress/media 已在
-        # dispatch() 共用前置或本方法后续步骤中处理，engine 跑前先过滤掉重复项。
-        # （经典 model_router 插件已删除，真路由在 bridge 的 auto 解析；此处无需 skip。）
-        if engine is not None:
-            try:
-                ctx = PipelineContext(
-                    request={"messages": body.messages, "model": body.model, "stream": getattr(body, "stream", False)},
-                    trace_id=request.state.trace_id,
-                    pipeline_kind="understanding",
-                    user_id=user_id,
-                )
-                ctx.should_stream = getattr(body, "stream", False)
-                # 过滤掉已被辅助函数处理的核心插件，避免重复执行
-                # 注意名字必须与注册名一致（media 注册名为 media_optimizer，
-                # 非 media_optimization——曾因写错导致 skip 失效、media 双跑）。
-                ctx._skip_names = {"pii_detector", "prompt_cache", "semantic_cache",
-                                   "prompt_compress", "media_optimizer"}
-                ctx = await self._run_engine_filtered(engine, ctx)
-                # 插件链可能改写 messages / model（rag_retriever 追加检索上下文、
-                # conv_compressor 摘要历史）——回写到 body，供后续 cache_key / LLM 调用使用。
-                req = ctx.request
-                if isinstance(req, dict):
-                    new_messages = req.get("messages")
-                    if new_messages:
-                        body.messages = new_messages
-                    if req.get("model"):
-                        body.model = req["model"]
-            except Exception as exc:
-                logger.warning("理解管道 engine 执行异常（fail-open 继续）: %s", exc)
-
-        # ===== 缓存查找 =====
+        # ===== 缓存查找（engine 之前，避免 RAG 等插件浪费 token）=====
         cache_manager = self.cache_manager
         normalized_messages = json.dumps(body.messages, sort_keys=True, ensure_ascii=False)
         cache_key = cache_manager.generate_cache_key(
@@ -443,6 +412,37 @@ class RequestDispatcher:
                              "duration_ms": _qok_ms,
                              "status": "success"})
         _emit_stage(request.state.trace_id, "quota", "key_store.check_quota", _qok_ms, "ok")
+
+        # ===== 跑理解管道 engine 插件链（rag_retriever / conv_compressor 等）=====
+        # 注意：pii/cache/semantic/compress/media 已在
+        # dispatch() 共用前置或本方法前面步骤中处理，engine 跑前先过滤掉重复项。
+        # （经典 model_router 插件已删除，真路由在 bridge 的 auto 解析；此处无需 skip。）
+        if engine is not None:
+            try:
+                ctx = PipelineContext(
+                    request={"messages": body.messages, "model": body.model, "stream": getattr(body, "stream", False)},
+                    trace_id=request.state.trace_id,
+                    pipeline_kind="understanding",
+                    user_id=user_id,
+                )
+                ctx.should_stream = getattr(body, "stream", False)
+                # 过滤掉已被辅助函数处理的核心插件，避免重复执行
+                # 注意名字必须与注册名一致（media 注册名为 media_optimizer，
+                # 非 media_optimization——曾因写错导致 skip 失效、media 双跑）。
+                ctx._skip_names = {"pii_detector", "prompt_cache", "semantic_cache",
+                                   "prompt_compress", "media_optimizer"}
+                ctx = await self._run_engine_filtered(engine, ctx)
+                # 插件链可能改写 messages / model（rag_retriever 追加检索上下文、
+                # conv_compressor 摘要历史）——回写到 body，供后续 prompt_compress / LLM 调用使用。
+                req = ctx.request
+                if isinstance(req, dict):
+                    new_messages = req.get("messages")
+                    if new_messages:
+                        body.messages = new_messages
+                    if req.get("model"):
+                        body.model = req["model"]
+            except Exception as exc:
+                logger.warning("理解管道 engine 执行异常（fail-open 继续）: %s", exc)
 
         # ===== Prompt Compression =====
         compress_start = time.time()
