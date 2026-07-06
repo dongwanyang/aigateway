@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { BookOpen, Plus, Trash2, Globe, FileText, Settings } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { BookOpen, Plus, Trash2, Globe, Upload, Settings, X } from 'lucide-react'
 import Card from '@/components/Card'
 import { listRagDocuments, importRagDocument, deleteRagDocument } from '@/api/client'
 import type { RagDocument } from '@/api/client'
@@ -13,13 +13,19 @@ export default function Knowledge() {
   const [importError, setImportError] = useState<string | null>(null)
 
   // Import form
-  const [importMode, setImportMode] = useState<'url' | 'text'>('url')
+  const [importMode, setImportMode] = useState<'url' | 'file'>('url')
   const [url, setUrl] = useState('')
   const [content, setContent] = useState('')
   const [filename, setFilename] = useState('')
+  const [fileReading, setFileReading] = useState(false)
+  const [fileError, setFileError] = useState<string | null>(null)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [chunkStrategy, setChunkStrategy] = useState('fixed_size')
   const [chunkSize, setChunkSize] = useState(512)
   const [chunkOverlap, setChunkOverlap] = useState(64)
+
+  const MAX_FILE_BYTES = 5 * 1024 * 1024 // 5MB — 纯文本文档单次导入上限
+  const ACCEPT_EXT = '.txt,.md,.markdown,.json,.csv,.tsv,.log,.html,.htm,.xml,.yaml,.yml,.py,.js,.ts,.tsx,.jsx,.java,.go,.rs,.c,.cpp,.h,.sh'
 
   useEffect(() => {
     loadDocuments()
@@ -49,6 +55,7 @@ export default function Knowledge() {
       if (importMode === 'url') {
         params.url = url
       } else {
+        if (!content) throw new Error('请先选择要上传的文件')
         params.content = content
         params.filename = filename || 'document.txt'
       }
@@ -57,12 +64,44 @@ export default function Knowledge() {
       setUrl('')
       setContent('')
       setFilename('')
+      setFileError(null)
+      if (fileInputRef.current) fileInputRef.current.value = ''
       await loadDocuments()
     } catch (e: any) {
       setImportError(e.message || '导入失败')
     } finally {
       setImporting(false)
     }
+  }
+
+  async function handleFilePick(file: File | undefined | null) {
+    setFileError(null)
+    if (!file) return
+    if (file.size > MAX_FILE_BYTES) {
+      setFileError(`文件过大（${(file.size / 1024 / 1024).toFixed(2)} MB），上限 ${MAX_FILE_BYTES / 1024 / 1024} MB`)
+      setContent('')
+      setFilename('')
+      return
+    }
+    setFileReading(true)
+    try {
+      const text = await file.text()
+      setContent(text)
+      setFilename(file.name)
+    } catch (e: any) {
+      setFileError(`读取失败: ${e?.message || '未知错误'}`)
+      setContent('')
+      setFilename('')
+    } finally {
+      setFileReading(false)
+    }
+  }
+
+  function clearPickedFile() {
+    setContent('')
+    setFilename('')
+    setFileError(null)
+    if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
   async function handleDelete(docId: string, docName: string) {
@@ -99,11 +138,11 @@ export default function Knowledge() {
               <Globe size={14} /> 网页 URL
             </button>
             <button
-              className={`btn ${importMode === 'text' ? 'btn-primary' : 'btn-secondary'}`}
+              className={`btn ${importMode === 'file' ? 'btn-primary' : 'btn-secondary'}`}
               style={{ padding: '6px 16px', fontSize: '13px' }}
-              onClick={() => setImportMode('text')}
+              onClick={() => setImportMode('file')}
             >
-              <FileText size={14} /> 文本内容
+              <Upload size={14} /> 上传文件
             </button>
           </div>
 
@@ -119,26 +158,68 @@ export default function Knowledge() {
               />
             </div>
           ) : (
-            <div className="space-y-3 mb-4">
-              <div>
-                <label className="block text-sm mb-1" style={{ color: 'var(--color-text-secondary)' }}>文件名</label>
-                <input
-                  className="input w-full"
-                  placeholder="document.txt"
-                  value={filename}
-                  onChange={e => setFilename(e.target.value)}
-                />
+            <div className="mb-4">
+              <label className="block text-sm mb-1" style={{ color: 'var(--color-text-secondary)' }}>从本地选择文件</label>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept={ACCEPT_EXT}
+                style={{ display: 'none' }}
+                onChange={e => handleFilePick(e.target.files?.[0])}
+              />
+              {!filename ? (
+                <button
+                  className="btn btn-secondary"
+                  style={{ padding: '10px 20px', width: '100%', justifyContent: 'center' }}
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={fileReading}
+                >
+                  <Upload size={16} />
+                  {fileReading ? '读取中...' : '点击选择文件'}
+                </button>
+              ) : (
+                <div
+                  className="flex items-center justify-between p-3 rounded-lg"
+                  style={{ backgroundColor: 'var(--color-bg-tertiary)', border: '1px solid var(--color-border)' }}
+                >
+                  <div className="flex items-center gap-2" style={{ minWidth: 0, flex: 1 }}>
+                    <Upload size={16} style={{ color: 'var(--color-primary)', flexShrink: 0 }} />
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontFamily: 'var(--font-mono)', fontSize: '13px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {filename}
+                      </div>
+                      <div className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>
+                        {content.length.toLocaleString()} 字符 · ~{Math.ceil(content.length / 4).toLocaleString()} tokens
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2" style={{ flexShrink: 0 }}>
+                    <button
+                      className="btn btn-secondary"
+                      style={{ padding: '4px 12px', fontSize: '12px' }}
+                      onClick={() => fileInputRef.current?.click()}
+                    >
+                      重选
+                    </button>
+                    <button
+                      className="p-1.5 rounded cursor-pointer"
+                      style={{ color: 'var(--color-text-tertiary)' }}
+                      onClick={clearPickedFile}
+                      title="清除"
+                    >
+                      <X size={16} />
+                    </button>
+                  </div>
+                </div>
+              )}
+              <div className="text-xs mt-2" style={{ color: 'var(--color-text-tertiary)' }}>
+                支持文本类文件（txt/md/json/csv/log/html/xml/yaml 及常见源码）,单文件 ≤ 5 MB
               </div>
-              <div>
-                <label className="block text-sm mb-1" style={{ color: 'var(--color-text-secondary)' }}>文本内容</label>
-                <textarea
-                  className="input w-full"
-                  style={{ height: '120px', padding: '12px', resize: 'vertical' }}
-                  placeholder="粘贴文档内容..."
-                  value={content}
-                  onChange={e => setContent(e.target.value)}
-                />
-              </div>
+              {fileError && (
+                <div className="mt-2 p-2 rounded" style={{ backgroundColor: 'rgba(239, 68, 68, 0.1)', color: 'var(--color-danger)', fontSize: '13px' }}>
+                  {fileError}
+                </div>
+              )}
             </div>
           )}
 
@@ -173,7 +254,7 @@ export default function Knowledge() {
             <button
               className="btn btn-primary"
               onClick={handleImport}
-              disabled={importing || (importMode === 'url' ? !url : !content)}
+              disabled={importing || fileReading || (importMode === 'url' ? !url : !content)}
             >
               {importing ? '导入中...' : '开始导入'}
             </button>
