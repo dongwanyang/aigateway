@@ -31,13 +31,92 @@ import asyncio
 import hashlib
 import logging
 import lz4.frame
+import re
 import threading
 import time
+import unicodedata
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from cachetools import LRUCache
 
 logger = logging.getLogger(__name__)
+
+# ------------------------------------------------------------------
+# Cache key v2 常量
+# ------------------------------------------------------------------
+# 参数分桶:粗粒度合并,让 SDK 默认值细微偏差落到同一 bucket
+_TEMPERATURE_BUCKETS: List[tuple] = [
+    (0.05, "exact_zero"),   # <= 0.05 视为确定性,单独一桶
+    (0.3,  "det"),          # 0.05 ~ 0.3 确定性偏低
+    (0.9,  "bal"),          # 0.3 ~ 0.9 平衡
+    (float("inf"), "cre"),  # > 0.9 创意
+]
+_MAX_TOKENS_BUCKETS: List[int] = [256, 512, 1024, 2048, 4096, 8192, 16384]
+
+# model_family:去掉尾部日期 snapshot,如 gpt-4o-2024-08-06 → gpt-4o,
+# claude-3-5-sonnet-20241022 → claude-3-5-sonnet。
+# 匹配:
+#   -YYYYMMDD           如 20241022
+#   -YYYY-MM-DD         如 2024-08-06
+#   -latest             如 gpt-4-latest(有些厂商)
+_MODEL_SNAPSHOT_RE = re.compile(r"-(?:\d{8}|\d{4}-\d{2}-\d{2}|latest)$")
+
+
+def _bucket_temperature(t: Optional[float]) -> str:
+    """把 temperature 映射到粗粒度桶。None 视为 1.0(OpenAI 默认)。"""
+    if t is None:
+        t = 1.0
+    for upper, name in _TEMPERATURE_BUCKETS:
+        if t <= upper:
+            return name
+    return "cre"
+
+
+def _bucket_max_tokens(mt: Optional[int]) -> str:
+    """把 max_tokens 映射到就近的分桶。None / 0 → any。"""
+    if not mt or mt <= 0:
+        return "any"
+    # 就近向上取,超过最大档 → 最大档
+    for edge in _MAX_TOKENS_BUCKETS:
+        if mt <= edge:
+            return f"le_{edge}"
+    return f"gt_{_MAX_TOKENS_BUCKETS[-1]}"
+
+
+def _model_family(model: str) -> str:
+    """从 model_id 提取 family,去掉尾部日期 snapshot。
+
+    - gpt-4o                       → gpt-4o
+    - gpt-4o-2024-08-06            → gpt-4o
+    - gpt-4o-mini-2024-07-18       → gpt-4o-mini
+    - claude-3-5-sonnet-20241022   → claude-3-5-sonnet
+    - claude-sonnet-4-5-20250929   → claude-sonnet-4-5
+    - auto                         → auto(特殊值不动)
+    - openai/gpt-4o                → openai/gpt-4o(provider 前缀保留)
+    """
+    if not model:
+        return ""
+    # 保留 provider/ 前缀,只处理 model 部分
+    if "/" in model:
+        prefix, tail = model.rsplit("/", 1)
+        return f"{prefix}/{_MODEL_SNAPSHOT_RE.sub('', tail)}"
+    return _MODEL_SNAPSHOT_RE.sub("", model)
+
+
+def _normalize_prompt(text: str) -> str:
+    """归一化 prompt 文本:NFKC + 折叠空白 + strip。
+
+    - NFKC:全半角、组合字符统一(如 "ａ" → "a",带音标字符合并)
+    - 多个连续空白(含制表/换行)折叠为一个空格
+    - 首尾空白去除
+
+    目的:让语义等价但格式细微差异的 prompt 生成同一 hash。
+    """
+    if not text:
+        return ""
+    normalized = unicodedata.normalize("NFKC", text)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized
 
 # ------------------------------------------------------------------
 # 容量保护常量
@@ -186,19 +265,21 @@ class CacheManager:
     async def l2_get(self, key: str) -> Optional[str]:
         """从 L2 Redis 缓存读取。
 
-        DB_SCHEMA §3: Key 格式 aigateway:cache:v1:{cache_key_hash}
+        DB_SCHEMA §3: Key 格式 aigateway:cache:v2:{cache_key_hash}
+        (v1 前缀已废弃,v2 加入 pipeline_kind / model_family / 参数分桶 /
+         cache_scope 分层设计,详见 generate_cache_key 文档)
 
         Args:
-            key: 缓存键（SHA-256 哈希）。
+            key: 缓存键(SHA-256 哈希)。
 
         Returns:
-            响应 JSON 字符串，未命中返回 None。
+            响应 JSON 字符串,未命中返回 None。
         """
         if self._redis_client is None:
             logger.warning("L2 缓存: Redis 客户端未初始化")
             return None
 
-        redis_key = f"aigateway:cache:v1:{key}"
+        redis_key = f"aigateway:cache:v2:{key}"
         raw = await self._redis_client.redis.get(redis_key)
         if raw is None:
             logger.debug("L2 缓存未命中: key=%s", key[:16])
@@ -213,17 +294,18 @@ class CacheManager:
             return None
 
     async def l2_set(self, key: str, value: str, ttl: Optional[int] = None) -> None:
-        """写入 L2 Redis 缓存，带大对象过滤。
+        """写入 L2 Redis 缓存,带大对象过滤。
 
         DB_SCHEMA §3:
-        - Key 格式: aigateway:cache:v1:{cache_key_hash}
-        - TTL 默认 3600 秒，由 prompt_cache.config.ttl 决定
+        - Key 格式: aigateway:cache:v2:{cache_key_hash}
+          (v1 已废弃,详见 generate_cache_key 文档)
+        - TTL 默认 3600 秒,由 prompt_cache.config.ttl 决定
         - 压缩: LZ4
 
         Args:
-            key: 缓存键（SHA-256 哈希）。
+            key: 缓存键(SHA-256 哈希)。
             value: 完整 OpenAI 格式响应 JSON 字符串。
-            ttl: 生存时间（秒），默认为 l2_default_ttl。
+            ttl: 生存时间(秒),默认为 l2_default_ttl。
         """
         if self._redis_client is None:
             logger.warning("L2 缓存: Redis 客户端未初始化")
@@ -235,7 +317,7 @@ class CacheManager:
             return
 
         ttl = ttl or self.l2_default_ttl
-        redis_key = f"aigateway:cache:v1:{key}"
+        redis_key = f"aigateway:cache:v2:{key}"
 
         compressed = self._compress(value)
 
@@ -480,34 +562,76 @@ class CacheManager:
     def generate_cache_key(
         normalized_prompt: str,
         model: str,
+        pipeline_kind: str = "understanding",
+        cache_scope: str = "shared",
+        user_id: str = "",
+        tenant_id: str = "",
         **params: Any,
     ) -> str:
-        """生成缓存键（SHA-256）。
+        """生成缓存键 v2(SHA-256)。
 
-        DB_SCHEMA §3:
-        L1 Key = SHA-256(normalized_messages_json + model_name + temperature +
-                           max_tokens + top_p + user_id)
-        L2 Key = aigateway:cache:v1:{SHA-256 相同规则}
+        v2 分层设计(vs v1):
+        - normalized_prompt: 调用方传入前已通过 `_normalize_prompt` 归一化;
+          且推荐只包含 "system + 最后 N 轮对话",而非整个 messages 数组
+          (让多轮对话末尾一致的请求也能命中,由 dispatcher 负责裁剪)。
+        - model: 内部转 model_family(去掉尾部日期 snapshot)。用户如需强制
+          精确匹配某个 snapshot,应在 dispatcher 层判断并把完整 model_id
+          原样传入,不走此函数默认路径。
+        - temperature/max_tokens: 分桶合并 SDK 默认值细微偏差。
+        - top_p: 忽略(实践中几乎全是 1.0,即使不是也归 family+temp 桶已够)。
+        - pipeline_kind: understanding / generation 强制隔离,防止跨管道
+          结果污染(生成管道图片描述被理解管道文本命中就是灾难)。
+        - cache_scope=shared(默认): 不带 user_id,同租户共享(命中率主要
+          提升来源)。scope=private: 带 user_id,严格隔离(比如带 PII 的
+          请求)。
+        - tenant_id: 组织级隔离,与 user_id 独立。
 
         Args:
-            normalized_prompt: 归一化后的 prompt 文本。
-            model: 模型名称。
-            **params: 其他参数 (temperature, max_tokens, top_p, user_id 等)。
+            normalized_prompt: 归一化后的 prompt 文本(建议 dispatcher 已用
+                `_normalize_prompt(system + tail N 轮)` 处理过)。
+            model: 模型名称,内部转 family。
+            pipeline_kind: "understanding" | "generation",默认 understanding。
+            cache_scope: "shared" | "private",默认 shared。
+            user_id: 用户 ID,仅 scope=private 时纳入 key。
+            tenant_id: 租户/组织 ID,默认空字符串(单租户部署)。
+            **params: 支持 temperature / max_tokens / top_p 三个采样参数;
+                其他 kwargs 会按 key 排序纳入(向前兼容测试)。
 
         Returns:
-            64 位 hex SHA-256 哈希字符串。
+            64 位 hex SHA-256 哈希字符串。前缀由 l2_set/l2_get 拼
+            `aigateway:cache:v2:`。
         """
-        # 按固定顺序拼接参数以确保键的一致性
+        # 采样参数分桶
+        temperature = params.pop("temperature", None)
+        max_tokens = params.pop("max_tokens", None)
+        # top_p 明确忽略(实践命中率贡献极小,反而拉高 MISS 率)
+        params.pop("top_p", None)
+
+        temp_bucket = _bucket_temperature(temperature)
+        mt_bucket = _bucket_max_tokens(max_tokens)
+
+        # model → family(auto 特殊值保留原样)
+        family = "auto" if model == "auto" else _model_family(model)
+
+        # 组装 key 段:固定顺序,避免同参数不同顺序 hash 不同
         parts: List[str] = [
-            normalized_prompt,
-            model,
+            "v2",  # schema 版本,方便未来 v3 平滑升级
+            (tenant_id or ""),
+            pipeline_kind or "understanding",
+            family,
+            temp_bucket,
+            mt_bucket,
         ]
-        # 对参数按 key 排序以确保确定性
-        for param_key in sorted(params.keys()):
-            param_val = params[param_key]
-            if param_val is not None:
-                parts.append(str(param_key))
-                parts.append(str(param_val))
+        # scope=private 时才拼 user_id;shared 时不拼,同租户共享
+        if cache_scope == "private" and user_id:
+            parts.append(f"u={user_id}")
+        # 未来扩展保留:其他额外 kwargs 按 key 排序纳入(兼容旧测试)
+        for k in sorted(params.keys()):
+            v = params[k]
+            if v is not None:
+                parts.append(f"{k}={v}")
+        # normalized_prompt 放最后(通常最长)
+        parts.append(normalized_prompt or "")
 
         key_string = "|".join(parts)
         return hashlib.sha256(key_string.encode("utf-8")).hexdigest()

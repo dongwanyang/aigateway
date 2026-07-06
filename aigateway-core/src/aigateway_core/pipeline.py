@@ -505,16 +505,28 @@ class PromptCachePlugin:
         if cm is None:
             return ctx
 
-        # 生成缓存键
+        # 生成缓存键 v2:与 dispatcher.py 保持一致(同 tenant/scope 生成
+        # 相同 hash,避免 engine 路径复活时和 dispatcher 计算出不同 key)。
+        # 注:dispatcher 走的是内联缓存,这段 engine 路径实际被 _skip_names
+        # 跳过,不参与生产流量。保留同步是为了未来复活时不踩雷。
         messages = ctx.request.get("messages", [])
-        normalized = json.dumps(messages, sort_keys=True, ensure_ascii=False)
+        # 只保留 system + 末尾 3 轮,与 dispatcher._extract_cacheable_context 语义一致
+        system_msgs = [m for m in messages if m.get("role") == "system"]
+        non_system = [m for m in messages if m.get("role") != "system"]
+        tail_msgs = non_system[-3:] if len(non_system) > 3 else non_system
+        cacheable_msgs = system_msgs + tail_msgs
+        normalized = json.dumps(cacheable_msgs, sort_keys=True, ensure_ascii=False)
+
+        cache_scope = (ctx.extra.get("cache_scope") or "shared") if isinstance(ctx.extra, dict) else "shared"
         cache_key = cm.generate_cache_key(
             normalized_prompt=normalized,
             model=ctx.request.get("model", ""),
-            temperature=ctx.request.get("temperature", 1.0),
-            max_tokens=ctx.request.get("max_tokens") or 0,
-            top_p=ctx.request.get("top_p", 1.0),
+            pipeline_kind=ctx.pipeline_kind or "understanding",
+            cache_scope=cache_scope,
             user_id=ctx.user_id or "",
+            temperature=ctx.request.get("temperature", 1.0),
+            max_tokens=ctx.request.get("max_tokens"),
+            top_p=ctx.request.get("top_p"),
         )
 
         ctx.cache_key = cache_key

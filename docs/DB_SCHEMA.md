@@ -101,8 +101,34 @@
 #### L2 缓存（Redis KV）
 **用途**：F03 — 分布式 KV 缓存，精确匹配缓存。
 
-**Key 格式**：`aigateway:cache:v1:{cache_key_hash}`
-- `cache_key_hash`：L1 相同规则的 SHA-256 哈希（64 位 hex）
+**Key 格式**：`aigateway:cache:v2:{cache_key_hash}`
+- `cache_key_hash`：64 位 hex SHA-256
+
+**v2 vs v1 (2026-07-06 起)**：`v1:` 前缀已废弃(TTL 自然到期后消亡,不清理),新数据全部写 `v2:`。v2 分层设计如下,由 `CacheManager.generate_cache_key()` 统一生成:
+
+**v2 cache_key_hash 生成规则**:
+```
+SHA-256("v2" | tenant_id | pipeline_kind | model_family | temp_bucket | mt_bucket
+        [ | u=user_id if scope=private ] | normalized_prompt)
+```
+
+| 段 | 说明 |
+|---|---|
+| `v2` | Schema 版本前缀,方便未来 v3 平滑升级 |
+| `tenant_id` | 组织级隔离,单租户部署空字符串 |
+| `pipeline_kind` | `understanding` \| `generation`,强制隔离两条管道,防止跨管道结果污染 |
+| `model_family` | 从 `model` 抽取,去掉尾部日期 snapshot(如 `gpt-4o-2024-08-06` → `gpt-4o`),同 family 不同 snapshot 共享缓存;`model=='auto'` 保留原样 |
+| `temp_bucket` | temperature 分桶:`exact_zero`(<=0.05) / `det`(<=0.3) / `bal`(<=0.9) / `cre`(>0.9) |
+| `mt_bucket` | max_tokens 分桶:`any`(None/0) / `le_256` / `le_512` / `le_1024` / `le_2048` / `le_4096` / `le_8192` / `le_16384` / `gt_16384` |
+| `u=user_id` | 仅当 `cache_scope=private` 时纳入,`shared`(默认)不带,同租户共享 |
+| `normalized_prompt` | dispatcher 已用 `_extract_cacheable_context(messages, tail=3)` 只保留 system + 末尾 3 轮对话,并经 `_normalize_prompt`(NFKC + 空白折叠)处理 |
+
+**⚠️ 明确忽略的字段**:`top_p`(实践中几乎全 1.0,分桶收益极小,反而拉高 MISS 率)。
+
+**cache_scope 决策优先级**(见 dispatcher `_resolve_cache_scope`):
+1. 显式请求头 `X-Cache-Scope: shared|private`
+2. PII 检测命中 → 强制 `private`
+3. 默认 `shared`
 
 **存储类型**：String（压缩后的 JSON 字节）
 

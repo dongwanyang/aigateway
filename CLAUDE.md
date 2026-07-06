@@ -195,6 +195,18 @@ Runs before LLM calls when multimodal content is detected:
   - Backfill strategy: L2 hit → backfill L1; L3 hit → backfill L1 only (not L2, since L3 is approximate); MISS → backfill L1+L2 + async L3 (if token_count ≥ 100)
   - Periodic cleanup scheduler (default 60min) removes expired auto-mode entries
 
+### Cache key v2(2026-07-06)
+- L2 前缀 `aigateway:cache:v2:*`,v1 已废弃(TTL 自然消亡,不清理)。
+- key 生成:`SHA-256("v2" | tenant_id | pipeline_kind | model_family | temp_bucket | mt_bucket [ | u=user_id if scope=private ] | normalized_prompt)`。
+- **model_family**:去掉日期 snapshot(如 `gpt-4o-2024-08-06` → `gpt-4o`),同 family 共享缓存,厂商发新 snapshot 不清空缓存。`auto` 保留原样。
+- **temp_bucket**:`exact_zero`(<=0.05) / `det`(<=0.3) / `bal`(<=0.9) / `cre`(>0.9)。`temperature=0` 保留精确桶。
+- **mt_bucket**:max_tokens 就近向上取 `le_256/512/1024/2048/4096/8192/16384`,`None`/0 → `any`。
+- **top_p 被完全忽略**(实践中几乎全 1.0,分桶收益小)。
+- **pipeline_kind**:understanding/generation 强制隔离,防止跨管道污染。
+- **cache_scope**:`shared`(默认)不带 user_id,同租户共享;`private` 带 user_id,严格隔离。决策优先级:请求头 `X-Cache-Scope` > PII 命中强制 `private` > 默认 `shared`。见 `dispatcher._resolve_cache_scope`。
+- **normalized_prompt**:dispatcher 用 `_extract_cacheable_context(messages, tail=3)` 只保留 system + 末尾 3 轮,并经 `_normalize_prompt`(NFKC + 空白折叠)处理。多轮对话末尾提问一致即可命中。
+- **观测**:命中打 `gateway_cache_hits_total{tier="L1|L2|L3"}`,MISS 打 `gateway_cache_misses_total`(v2 之前 miss 计数点缺失,导致命中率完全不可观测)。
+
 ## Security & Quotas
 
 `KeyStore` stores API keys as Redis hashes with per-key limits:
@@ -346,6 +358,8 @@ Tests live in `/tests/` (25 files). No conftest.py or pytest.ini — tests run d
 11. **Embedding model caching** — L3 semantic cache uses module-level `_l3_model_cache` in `openai_compat.py` to avoid reloading the ~600MB Qwen3-Embedding-0.6B model per request.
 
 ## Architecture Decisions & Known States
+
+- **Cache key v2(2026-07-06)** — L2 前缀 `aigateway:cache:v1:` → `v2:`,v1 数据 TTL 自然消亡不清理。key 从"整个 messages JSON + 精确 model + 精确 temperature/max_tokens/top_p + 强制 user_id"改为"分层 key":`SHA-256("v2" | tenant_id | pipeline_kind | model_family | temp_bucket | mt_bucket [ | u=user_id if scope=private ] | normalized_prompt)`。model_family 去掉日期 snapshot(`gpt-4o-2024-08-06` → `gpt-4o`,`auto` 保留),temperature/max_tokens 分桶,top_p 完全忽略,pipeline_kind(understanding/generation)强制隔离,cache_scope 默认 shared(同租户共享),PII 命中或 `X-Cache-Scope: private` 请求头升 private。normalized_prompt 只哈希 system + 末尾 3 轮(`dispatcher._extract_cacheable_context`)且经 NFKC + 空白折叠归一化(`caching._normalize_prompt`)。**同时补齐了 `gateway_cache_hits_total{tier}` / `gateway_cache_misses_total` 计数点**(v2 之前 dispatcher 完全没打这两个指标,导致命中率不可观测)。pipeline.py 里 `PromptCachePlugin` 死代码路径也同步 v2 语义,避免未来复活时和 dispatcher 计算出不同 key。34 个单元测试见 `tests/test_cache_key_v2.py`。相关文件:`aigateway-core/src/aigateway_core/caching.py`(`_bucket_temperature/_bucket_max_tokens/_model_family/_normalize_prompt/generate_cache_key/l2_get/l2_set`)、`aigateway-api/src/aigateway_api/dispatcher.py`(`_extract_cacheable_context/_resolve_cache_scope`,缓存查找块)、`docs/DB_SCHEMA.md` §3。⚠️ **已知遗留**:L3 语义缓存的 scope 隔离目前只依赖 `user_id` payload filter,同 prompt 不同 scope 会通过 L3 向量相似度串命中(实测请求 shared 命中后,`X-Cache-Scope: private` 的同 prompt 请求也会 L3 命中,tier="L3")。若严格隔离敏感数据,follow-up 需把 `cache_scope` 也写进 L3 payload 并加 filter 条件。
 
 - **Debug 开关体系(2026-07-05, PR2)** — `debug_mode` 总开关替换为 `config.yaml` 的 `debug:` 段。`DebugConfig`(`aigateway-core/src/aigateway_core/debug_config.py`)含 **6 字段**:`frontend/entry/cache/bridge`(4 大区)+ `plugins_enabled`(插件总开关)+ `per_plugin`(dict,11 插件),AND 逻辑(插件层需 plugins_enabled AND 单插件都开才发 kind=debug)。+ `DebugConfigWatcher` 走 `ConfigManager.on_reload()` 回调(签名 `Callable[[Dict], None]`,接收整个新 config dict),atomic swap 无锁读;`init_debug_config_watcher()` 进程级单例,main.py lifespan 启动。`TraceCollector.emit_debug(stage, name, duration, status, dimension, payload)` 查对应维度开关,关则静默,开则发 `kind=debug` 事件 + payload;dimension ∈ entry|cache|bridge|plugin(plugin 用 `is_plugin_debug` AND)。dispatcher `_emit_stage` 镜像 entry 维度;pipeline engine 成功路径镜像 plugin 维度(payload=input_summary 截断 500);CacheManager.get 各命中/MISS 路径发 cache 维度(key_hash+tier_hit);litellm_bridge.completion 正常返回路径发 bridge 维度(model+stream)。admin 接口:`POST /admin/plugins/{name}/debug`(fcntl.flock 写 per_plugin)、`GET /admin/config/debug`、`/admin/plugins-config` 响应每插件加 `debug` 字段(prompt_compress 返回 null,前端隐藏其 Debug 按钮)、`/admin/global-config` GET/PUT 读写整个 `debug` 段。`debug_mode` 字段在 config.py 仍保留(production 安全网),但语义已废弃;5xx detail 固定回显不再受其控制(PR1 已做)。开关总数:4 大区 + 1 插件总开关 + 11 插件 = 16。
 - **控制台 UI 改造(2026-07-05, PR3;调试开关卡片 2026-07-06 迁移)** — `control-panel/src/pages/Plugins.tsx`: 双级分组渲染(外圈 pipeline_kind: understanding/generation, 内圈 getCategory: 缓存/安全/性能/路由/其他);每插件卡片新增 Debug 按钮(Bug icon),`debug===null`(prompt_compress)时隐藏;**"调试开关"卡片(5 维度 toggle: frontend/entry/cache/bridge/plugins_enabled)现位于此页"全局配置"区内**(2026-07-06 从 Config.tsx 迁入,Config.tsx 已移除该卡片及 debug 相关 import/state)。`Logs.tsx`: trace detail modal 用 `events` 瀑布流(含 kind=stage/plugin/debug 三类事件,带颜色节点 + payload 折叠),替代旧 plugin_trace 列表 + 耗时分布条。`client.ts`: 新增 `DebugConfig`/`TraceEvent` 接口 + `getDebugConfig`/`setPluginDebug`/`updateDebugSection` API 函数。

@@ -30,6 +30,60 @@ from aigateway_core.context import PipelineContext
 logger = logging.getLogger(__name__)
 
 
+# ------------------------------------------------------------------
+# Cache key v2 辅助函数
+# ------------------------------------------------------------------
+
+def _extract_cacheable_context(messages: list, tail: int = 3) -> list:
+    """从完整 messages 数组中提取用于计算 cache_key 的最小上下文。
+
+    多轮对话每加一条 assistant 回复,如果把整个 messages 都 hash,
+    cache_key 会永远变,导致命中率天然为 0。这里只保留:
+    - 所有 system 消息(通常只有 1 条,决定"人设/工具集")
+    - 末尾 tail 轮 user/assistant 对话
+
+    这样"末尾提问一致"的多轮对话可以共享 cache_key。tail=3 意味着
+    最近 3 轮 exchange 的上下文才影响 key,更早的历史不影响。
+
+    Args:
+        messages: OpenAI 格式的完整 messages 数组。
+        tail: 保留末尾多少条(不含 system)。默认 3。
+
+    Returns:
+        裁剪后的 messages 列表(仍保持顺序)。
+    """
+    if not messages:
+        return []
+    system_msgs = [m for m in messages if m.get("role") == "system"]
+    non_system = [m for m in messages if m.get("role") != "system"]
+    tail_msgs = non_system[-tail:] if len(non_system) > tail else non_system
+    return system_msgs + tail_msgs
+
+
+def _resolve_cache_scope(request: Request, pii_meta: Optional[dict]) -> str:
+    """决定本次请求的 cache_scope。
+
+    优先级:
+    1. 显式请求头 X-Cache-Scope=private|shared
+    2. PII 检测命中 → 强制 private(避免脱敏后 prompt 泄露到共享缓存)
+    3. 默认 shared
+
+    Args:
+        request: FastAPI Request 对象。
+        pii_meta: PII 检测结果(包含 detected_categories)。
+
+    Returns:
+        "shared" 或 "private"。
+    """
+    hdr = (request.headers.get("X-Cache-Scope") or "").strip().lower()
+    if hdr in ("private", "shared"):
+        return hdr
+    # PII 命中自动升 private
+    if pii_meta and pii_meta.get("detected_categories"):
+        return "private"
+    return "shared"
+
+
 def _emit_stage(trace_id: str, stage: str, name: str, duration_ms: float,
                 status: str = "ok", payload: dict | None = None) -> None:
     """发一条 kind=stage 的 TraceEvent(若无 collector 则静默).
@@ -337,14 +391,21 @@ class RequestDispatcher:
 
         # ===== 缓存查找（engine 之前，避免 RAG 等插件浪费 token）=====
         cache_manager = self.cache_manager
-        normalized_messages = json.dumps(body.messages, sort_keys=True, ensure_ascii=False)
+        # v2 key:只哈希 system + 末尾 3 轮对话,而非全量 messages。多轮对话
+        # 末尾提问一致的请求可共享 cache_key(见 _extract_cacheable_context)。
+        cacheable_msgs = _extract_cacheable_context(body.messages, tail=3)
+        normalized_messages = json.dumps(cacheable_msgs, sort_keys=True, ensure_ascii=False)
+        # cache_scope:X-Cache-Scope 请求头显式指定 or PII 命中自动升 private。
+        cache_scope = _resolve_cache_scope(request, pii_meta)
         cache_key = cache_manager.generate_cache_key(
             normalized_prompt=normalized_messages,
             model=body.model,
-            temperature=body.temperature or 1.0,
-            max_tokens=body.max_tokens or 0,
-            top_p=body.top_p or 1.0,
+            pipeline_kind="understanding",
+            cache_scope=cache_scope,
             user_id=user_id or "",
+            temperature=body.temperature if body.temperature is not None else 1.0,
+            max_tokens=body.max_tokens,
+            top_p=body.top_p,
         )
 
         cache_start = time.time()
@@ -365,6 +426,16 @@ class RequestDispatcher:
                              "status": "success"})
         _emit_stage(request.state.trace_id, "cache", f"{cache_plugin_name}.lookup", _cache_ms, "ok",
                     payload={"hit_tier": hit_tier} if hit_tier else None)
+
+        # 缓存指标:命中按 tier 分标签,未命中单独计数。/metrics 输出:
+        # gateway_cache_hits_total{tier="L1|L2|L3"} 与 gateway_cache_misses_total
+        # (v2 改造前 misses 计数点缺失,导致命中率完全不可观测。)
+        metrics_collector = self.metrics_collector
+        if metrics_collector:
+            if cache_hit:
+                metrics_collector.inc_cache_hits(tier=hit_tier)
+            else:
+                metrics_collector.inc_cache_misses()
 
         # 缓存命中短路
         if cache_hit:
