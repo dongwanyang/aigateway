@@ -571,6 +571,8 @@ claude plugin marketplace update claude-plugins-official
 
 文件类型覆盖：`.ts/.tsx/.js/.jsx/.mts/.cts/.mjs/.cjs`（typescript-lsp）、`.py/.pyi`（pyright-lsp）、`.go`（gopls-lsp）。LSP 不适用时（搜字符串/正则、查注释/配置/文档）退回 grep/glob。
 
+使用LSP梳理前后端架构。
+
 ---
 
 ## 许可证

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Puzzle, Key, Save, X, RefreshCw, Bug } from 'lucide-react'
+import { Puzzle, Key, Save, X, RefreshCw, Bug, Globe, Eye, Database, Network } from 'lucide-react'
 import Card from '@/components/Card'
 import {
   getPluginsConfig,
@@ -9,14 +9,18 @@ import {
   setPluginDebug,
   saveApiKey,
   getSavedApiKey,
+  getDebugConfig,
+  updateDebugSection,
 } from '@/api/client'
-import type { PluginConfigItem } from '@/api/client'
+import type { PluginConfigItem, DebugConfig } from '@/api/client'
 
 export default function Plugins() {
   const [plugins, setPlugins] = useState<PluginConfigItem[]>([])
   const [loading, setLoading] = useState(true)
-  const [globalConfig, setGlobalConfig] = useState({ hot_reload: false, debug_mode: false })
+  const [globalConfig, setGlobalConfig] = useState({ hot_reload: false })
   const [globalLoading, setGlobalLoading] = useState(true)
+  const [debugCfg, setDebugCfg] = useState<DebugConfig | null>(null)
+  const [debugLoading, setDebugLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   // --- API Key 管理 ---
@@ -50,7 +54,7 @@ export default function Plugins() {
         getGlobalConfig(),
       ])
       setPlugins(pluginsRes.data.plugins)
-      setGlobalConfig(globalRes.data)
+      setGlobalConfig({ hot_reload: globalRes.data.hot_reload })
     } catch {
       if (savedKey) {
         setError('API Key 无效或服务不可用，请重新输入')
@@ -63,8 +67,21 @@ export default function Plugins() {
     }
   }
 
+  async function loadDebug() {
+    setDebugLoading(true)
+    try {
+      const cfg = await getDebugConfig()
+      setDebugCfg(cfg)
+    } catch {
+      // non-fatal: debug config is optional
+    } finally {
+      setDebugLoading(false)
+    }
+  }
+
   useEffect(() => {
     loadData()
+    loadDebug()
   }, [])
 
   const toggle = async (name: string, currentEnabled: boolean) => {
@@ -88,16 +105,28 @@ export default function Plugins() {
     }
   }
 
-  const toggleGlobal = async (key: 'hot_reload' | 'debug_mode', currentValue: boolean) => {
+  const toggleGlobal = async (key: 'hot_reload', currentValue: boolean) => {
     const newValue = !currentValue
     setGlobalConfig(prev => ({ ...prev, [key]: newValue }))
     try {
       await updateGlobalConfig({
-        hot_reload: key === 'hot_reload' ? newValue : globalConfig.hot_reload,
-        debug_mode: key === 'debug_mode' ? newValue : globalConfig.debug_mode,
+        hot_reload: newValue,
+        debug_mode: globalConfig.hot_reload,
       })
     } catch {
       setGlobalConfig(prev => ({ ...prev, [key]: currentValue }))
+    }
+  }
+
+  async function toggleDebugDimension(dim: keyof Pick<DebugConfig, 'frontend' | 'entry' | 'cache' | 'bridge' | 'plugins_enabled'>) {
+    if (!debugCfg) return
+    const newVal = !debugCfg[dim]
+    setDebugCfg(prev => prev ? { ...prev, [dim]: newVal } : prev)
+    try {
+      await updateDebugSection({ [dim]: newVal })
+      await loadDebug()
+    } catch {
+      await loadDebug()
     }
   }
 
@@ -398,38 +427,64 @@ export default function Plugins() {
       )}
 
       <Card title="全局配置">
-        <div className="space-y-4">
-          <div className="flex items-center justify-between">
-            <div>
-              <div className="text-sm font-medium">热重载</div>
-              <div className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>修改 config.yaml 后自动生效</div>
-            </div>
-            <label className="toggle cursor-pointer">
-              <input
-                type="checkbox"
-                checked={globalConfig.hot_reload}
-                onChange={() => toggleGlobal('hot_reload', globalConfig.hot_reload)}
-                disabled={globalLoading}
-              />
-              <span className="toggle-slider" />
-            </label>
+        {debugLoading ? (
+          <div className="space-y-3">
+            {[1, 2, 3, 4, 5].map(i => <div key={i} className="h-4 skeleton rounded" />)}
           </div>
-          <div className="flex items-center justify-between">
-            <div>
-              <div className="text-sm font-medium">调试模式</div>
-              <div className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>记录详细插件执行日志</div>
+        ) : (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-sm font-medium">热重载</div>
+                <div className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>修改 config.yaml 后自动生效</div>
+              </div>
+              <label className="toggle cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={globalConfig.hot_reload}
+                  onChange={() => toggleGlobal('hot_reload', globalConfig.hot_reload)}
+                  disabled={globalLoading}
+                />
+                <span className="toggle-slider" />
+              </label>
             </div>
-            <label className="toggle cursor-pointer">
-              <input
-                type="checkbox"
-                checked={globalConfig.debug_mode}
-                onChange={() => toggleGlobal('debug_mode', globalConfig.debug_mode)}
-                disabled={globalLoading}
-              />
-              <span className="toggle-slider" />
-            </label>
+            <hr style={{ borderColor: 'var(--color-border)' }} />
+            <div className="text-sm font-medium mb-1" style={{ color: 'var(--color-text-secondary)' }}>
+              分维度调试开关
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {([
+                { key: 'frontend' as const, label: '前端', desc: 'ASGI 中间件层请求日志', icon: Globe },
+                { key: 'entry' as const, label: '入口层', desc: '鉴权 + 分流 + 配额 + prompt_compress', icon: Eye },
+                { key: 'cache' as const, label: '缓存', desc: 'L1/L2/L3 缓存读写', icon: Database },
+                { key: 'bridge' as const, label: 'Bridge', desc: 'LiteLLM 模型调用出口', icon: Network },
+                { key: 'plugins_enabled' as const, label: '插件总开关', desc: '所有插件 debug 日志', icon: Bug },
+              ]).map(({ key, label, desc, icon: Icon }) => (
+                <div
+                  key={key}
+                  className="flex items-center justify-between p-3 rounded-lg"
+                  style={{ backgroundColor: 'var(--color-bg-overlay)' }}
+                >
+                  <div className="flex items-center gap-3">
+                    <Icon size={18} style={{ color: debugCfg?.[key] ? 'var(--color-primary)' : 'var(--color-text-tertiary)' }} />
+                    <div>
+                      <div className="text-sm font-medium">{label}</div>
+                      <div className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>{desc}</div>
+                    </div>
+                  </div>
+                  <label className="toggle cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={!!debugCfg?.[key]}
+                      onChange={() => toggleDebugDimension(key)}
+                    />
+                    <span className="toggle-slider" />
+                  </label>
+                </div>
+              ))}
+            </div>
           </div>
-        </div>
+        )}
       </Card>
     </div>
   )

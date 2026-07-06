@@ -1,8 +1,7 @@
 import { useEffect, useState } from 'react'
-import { Save, RefreshCw, AlertTriangle, Bug, Eye, Database, Globe, Network } from 'lucide-react'
+import { Save, RefreshCw, AlertTriangle } from 'lucide-react'
 import Card from '@/components/Card'
-import { getFullConfig, updateFullConfig, getDebugConfig, updateDebugSection } from '@/api/client'
-import type { DebugConfig } from '@/api/client'
+import { getFullConfig, updateFullConfig } from '@/api/client'
 
 export default function Config() {
   const [config, setConfig] = useState<Record<string, unknown> | null>(null)
@@ -12,40 +11,6 @@ export default function Config() {
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
   const [hasChanges, setHasChanges] = useState(false)
-
-  // --- Debug 开关 ---
-  const [debugCfg, setDebugCfg] = useState<DebugConfig | null>(null)
-  const [debugLoading, setDebugLoading] = useState(true)
-
-  useEffect(() => {
-    loadConfig()
-    loadDebug()
-  }, [])
-
-  async function loadDebug() {
-    setDebugLoading(true)
-    try {
-      const cfg = await getDebugConfig()
-      setDebugCfg(cfg)
-    } catch {
-      // non-fatal: debug config is optional
-    } finally {
-      setDebugLoading(false)
-    }
-  }
-
-  async function toggleDimension(dim: keyof Pick<DebugConfig, 'frontend' | 'entry' | 'cache' | 'bridge' | 'plugins_enabled'>) {
-    if (!debugCfg) return
-    const newVal = !debugCfg[dim]
-    // Optimistic update
-    setDebugCfg(prev => prev ? { ...prev, [dim]: newVal } : prev)
-    try {
-      await updateDebugSection({ [dim]: newVal })
-      await loadDebug() // reload to confirm
-    } catch {
-      await loadDebug() // rollback
-    }
-  }
 
   useEffect(() => {
     loadConfig()
@@ -166,51 +131,6 @@ export default function Config() {
           ✅ {success}
         </div>
       )}
-
-      {/* 调试开关 */}
-      <Card title="调试开关">
-        {debugLoading ? (
-          <div className="space-y-3">
-            {[1, 2, 3, 4, 5].map(i => <div key={i} className="h-4 skeleton rounded" />)}
-          </div>
-        ) : debugCfg ? (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {([
-              { key: 'frontend' as const, label: '前端', desc: 'ASGI 中间件层请求日志', icon: Globe },
-              { key: 'entry' as const, label: '入口层', desc: '鉴权 + 分流 + 配额 + prompt_compress', icon: Eye },
-              { key: 'cache' as const, label: '缓存', desc: 'L1/L2/L3 缓存读写', icon: Database },
-              { key: 'bridge' as const, label: 'Bridge', desc: 'LiteLLM 模型调用出口', icon: Network },
-              { key: 'plugins_enabled' as const, label: '插件总开关', desc: '所有插件 debug 日志', icon: Bug },
-            ]).map(({ key, label, desc, icon: Icon }) => (
-              <div
-                key={key}
-                className="flex items-center justify-between p-3 rounded-lg"
-                style={{ backgroundColor: 'var(--color-bg-overlay)' }}
-              >
-                <div className="flex items-center gap-3">
-                  <Icon size={18} style={{ color: debugCfg[key] ? 'var(--color-primary)' : 'var(--color-text-tertiary)' }} />
-                  <div>
-                    <div className="text-sm font-medium">{label}</div>
-                    <div className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>{desc}</div>
-                  </div>
-                </div>
-                <label className="toggle cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={!!debugCfg[key]}
-                    onChange={() => toggleDimension(key)}
-                  />
-                  <span className="toggle-slider" />
-                </label>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <div className="text-center py-4" style={{ color: 'var(--color-text-tertiary)' }}>
-            无法加载调试配置
-          </div>
-        )}
-      </Card>
 
       {/* 配置编辑器 */}
       <Card>
