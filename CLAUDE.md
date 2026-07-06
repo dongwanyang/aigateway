@@ -180,7 +180,9 @@ Runs before LLM calls when multimodal content is detected:
 - **理解管道**(`PipelineEngine[pipeline_kind="understanding"]`,8 插件):rag/conv(其余 pii/cache/semantic/model_router/compress/media 已由共用前置或本管道后续步骤处理,engine 跑前用 `_skip_names` 过滤)→ 缓存查找 → 配额 → prompt_compress → LiteLLM 出口 → 回填
 - **生成管道**(`PipelineEngine[pipeline_kind="generation"]`,6 插件):ai_director → intent_evaluator → token_compressor → draft_generator → gen_model_router → cost_tracker → 配额 → LiteLLM 出口(不查理解缓存)
 
-**总(LiteLLM 统一出口 + auto 末端解析)**:`LiteLLMBridge.completion()`/`completion_stream()` 是两条管道的共同出口,带 fallback 链 + CircuitBreaker。`model=='auto'` 时 bridge 用注入的 `ModelRouterStrategy`(`set_auto_resolver`)按 pipeline_kind 选候选池(understanding→llm/mllm,generation→generative),complexity 评分选最优,结果写 `_meta.model_router`。「选哪个模型」的决策在管道末端,不在入口。
+**总(LiteLLM 统一出口 + auto 末端解析)**:`LiteLLMBridge.completion()`/`completion_stream()` 是两条管道的共同出口,带 fallback 链(`fallback_chain` 列表)。`model=='auto'` 时 bridge 用注入的 `ModelRouterStrategy`(`set_auto_resolver`)按 pipeline_kind 选候选池(understanding→llm/mllm,generation→generative),complexity 评分选最优,结果写 `_meta.model_router`。「选哪个模型」的决策在管道末端,不在入口。
+
+> ⚠️ **CircuitBreaker 未接入 LLM 调用路径**(2026-07-06 核实) — `litellm_bridge.py` 中无任何 `circuit_breaker` 引用,`.protect()`/`allow_request`/`record_*` 全仓零调用。`CircuitBreakerFactory` 的唯一消费者是 `routes.py`/`admin_routes.py` 读 `_breakers` 状态暴露给 `/metrics`/`/health`/admin。即 CircuitBreaker 当前是**纯观测基础设施,OPEN 状态不会真正熔断请求**。fallback 仅靠 `fallback_chain` 顺序重试。如需真正熔断,需在 `LiteLLMBridge.completion`/`_do_completion` 内调 `cb_factory.get(provider).protect(...)` 并在成功/失败时 record。
 
 流式路径已对齐非流式行为:扣配额(`key_store.increment_usage`)、回填缓存(L1/L2/L3)、cost 用真实值。生成管道不查 prompt_cache(生成结果缓存语义复杂)。
 
@@ -232,7 +234,7 @@ Prometheus histogram for request duration, counters for cache hits/misses/tokens
 | `aigateway-core/src/aigateway_core/context.py` | PipelineContext — 共享请求状态。**改请求级上下文字段去这里**。 |
 | `aigateway-core/src/aigateway_core/caching.py` | CacheManager: L1→L2→L3 + reranker。**改缓存命中/回填策略去这里**。 |
 | `aigateway-core/src/aigateway_core/security.py` | KeyStore(配额/rate-limit) + PIIDetector(20+ 模式)。**改鉴权/配额/PII 脱敏去这里**。 |
-| `aigateway-core/src/aigateway_core/litellm_bridge.py` | LiteLLM Router 多 provider + fallback + CircuitBreaker。**改模型调用/fallback/auto 解析去这里**。 |
+| `aigateway-core/src/aigateway_core/litellm_bridge.py` | LiteLLM Router 多 provider + fallback(`fallback_chain`)。**改模型调用/fallback/auto 解析去这里**。注意:CircuitBreaker 未接入此文件(见 Known States)。 |
 | `aigateway-core/src/aigateway_core/generation_optimization/` | 6 插件 8 策略的生成优化层。**改 ai_director/token_compressor/draft_generator 等去这里**。 |
 | `aigateway-core/src/aigateway_core/media/` | Media Optimization Layer V2。**改图片/视频/音频/文档处理去这里**。 |
 | `control-panel/src/pages/` | 9 个页面组件。**改控制台某页面 UI 去对应 .tsx**。 |
@@ -351,7 +353,7 @@ Tests live in `/tests/` (25 files). No conftest.py or pytest.ini — tests run d
 - **总分总架构(2026-07)** — 所有 `/v1/chat/completions` 请求经 `RequestDispatcher`(dispatcher.py):共用前置(media+PII)→ 分流(只看模态/意图)→ 两条管道各由 `PipelineEngine` 驱动插件链 → LiteLLM 统一出口。`PipelineEngine`/`PluginRegistry`/`Plugin`/`PipelineContext` 四类加了 `pipeline_kind` 维度。`openai_compat.py` 的手工串行链已删除,辅助函数(`_apply_*`/`_record_request_log` 等)保留供 dispatcher 复用。
 - **auto 模型解析下沉到 bridge(2026-07-04)** — `model=='auto'` 不再在 dispatcher 入口解析。`classify_request` 只看模态/意图,auto 请求按模态分流后原封传给 `LiteLLMBridge`。bridge 通过 `set_auto_resolver(ModelRouterStrategy)` 注入解析器,在管道末端按 `pipeline_kind` 选候选池(understanding→llm/mllm,generation→generative),complexity 评分选最优,结果写 `_meta.model_router`。理由:让「选哪个模型」的决策发生在管道链末端(可拿到 PII/压缩/RAG 信号),而非入口越权决定。
 - **共用前置(C.3 决策 1,2026-07-04)** — media_optimization + PII 在 `dispatch()` 里、`classify_request` 之前跑,两管道共享。生成管道也过 PII(用户 prompt 里粘的邮箱/API key 会被脱敏)。auto 解析不在共用前置(属路由决策,见上一条)。
-- **ModelRouterPlugin 是空壳** — 真路由由 bridge 的 auto 解析(注入 ModelRouterStrategy)承担,`classify_request` 只做模态分流。空壳保留注册是为了不破坏 `prompt_compress` 的 depends_on,运行时由 dispatcher 的 `_skip_names` 跳过。
+- **model_router 空壳已彻底删除**(2026-07-06 核实) — `ModelRouterPlugin` 类与注册均已从 `pipeline.py` 移除,理解管道 `_skip_names` 里也不再含它(根本没注册)。真路由由 bridge 的 auto 解析(注入 ModelRouterStrategy)承担,`classify_request` 只做模态分流。上方 Path 1 列表里的 "model_router" 条目为遗留描述,实际不存在。
 - **GenerationPipeline(media/generation.py)deprecated** — 孤儿代码 0 生产引用,生成管道由 generation_optimization 6 插件链承担。
 - **AIDirectorStrategy 延迟绑定 litellm_bridge** — `register_generation_optimization_plugins` 在 bridge 建好前跑,main.py 在 bridge 初始化后从 registry 取 strategy 单例注入 `_litellm_bridge`。
 - **热重载完整闭环** — admin PUT(global-config/plugins-config)写文件后调 `atomic_swap` → `_notify_reload` → main.py 的 `_on_config_reload` 回调同步 plugins.enabled 并重建两条管道 Engine。
@@ -364,6 +366,11 @@ Tests live in `/tests/` (25 files). No conftest.py or pytest.ini — tests run d
 - **Media Optimization Layer** handles OCR, video keyframes, audio transcription, document parsing — configurable per-media-type in `config.yaml`.
 - **Single worker architecture** — `workers: 1` controlled by Dockerfile CMD. The `workers` config parameter in config.yaml is deprecated (removed by recent commit).
 - **Per-model `base_url` override** — providers like Agnes route text/image/video generation through different API endpoints. Each model entry in `providers.<name>.model_grouper[].models[]` may set an optional `base_url`; if omitted or empty, it inherits the provider-level `base_url`. Fallback models always use the provider-level URL (never inherit a primary model's custom URL). Implemented in `_build_model_list()` at init time — LiteLLM Router treats each `model_list` entry independently, so no runtime/call-path changes are needed.
+- **理解管道 engine 实际只跑 2 插件**(2026-07-06 核实) — 注册 7 个(pii/cache/semantic/compress/media/rag/conv),但 dispatcher `_skip_names`(dispatcher.py:339)过滤掉前 5 个(已被共用前置或后续步骤处理),engine 实际执行只剩 **rag_retriever + conv_compressor**。生成管道相反,`_dispatch_generation` 不设 skip,6 个 gen-opt 插件全跑(dispatcher.py:531)。CLAUDE.md "8 插件"指注册数,非执行数。
+- **prompt_compress / PIIDetectorPlugin 双实例化** — registry 内一份(理解管道被 `_skip_names` 跳过)+ `app.state` 单独构造一份(`main.py:399/440`,实际执行)。Inline 集成模式副产品,非 bug。
+- **前端 useAuth / usePoll 是死代码**(2026-07-06 核实) — `control-panel/src/hooks/useAuth.ts` 和 `usePoll.ts` 零外部引用。实际鉴权在 `Plugins.tsx` 内联实现(直接调 `saveApiKey/getSavedApiKey`),轮询由 Overview/Costs/Cache 各自 `setInterval` 自管。清理这两个 hook 或抽成 Auth 组件 + 启用 usePoll 是改进点。
+- **6 个前端 API 函数零调用方** — `client.ts` 的 `createChatCompletion`/`createChatCompletionStream`/`listModels`/`createEmbeddings`/`getQuota`/`getMetricsJson` 无页面调用,预留给入口 B(chat agent,spec `docs/superpowers/specs/2026-07-05-control-panel-chat-agent-design.md`)。`getMetricsJson` 与 `getMetricsText`+`parseMetrics` 客户端解析路径功能重叠且闲置。
+- **前端鉴权隐式非集中** — 无登录页/路由守卫/全局 Auth Provider。`ensureAuthHeaders()`(`client.ts:31`)默默从 localStorage 读 key 注入。401 时除 `Plugins.tsx`(有重试 UI)外,其他页面静默 catch 显示空数据。未配 key 时除 Plugins/Overview(health 无鉴权)外页面"空白无提示"。
 
 ## Workflow Rules (post-task actions)
 

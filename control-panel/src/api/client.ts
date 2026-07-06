@@ -674,20 +674,9 @@ export async function setPluginDebug(pluginName: string, enabled: boolean): Prom
  * 传 Partial<DebugConfig>,只覆盖给出的字段;后端用 yaml.dump 整段写回。
  */
 export async function updateDebugSection(debug: Partial<DebugConfig>): Promise<void> {
-  // 复用 /admin/global-config PUT(Task 13 已支持 debug 字段整段覆盖)
-  await fetchJson<{ hot_reload: boolean; debug_mode: boolean; debug: unknown }>(
-    '/admin/global-config',
-    {
-      method: 'PUT',
-      body: JSON.stringify({
-        // 后端期望完整 body:hot_reload + debug_mode 必填(否则被覆盖为 false),
-        // 这里读不到当前值,改用专用语义 —— 后端 raw.get('debug') 仅在非 None 时覆盖,
-        // 故只传 debug 字段时其他字段不会被改。但 hot_reload/debug_mode 后端会读 raw.get(...,False)
-        // 因此必须传当前值。为避免误覆盖,这里先 GET 再 PUT。
-      }),
-    },
-  )
-  // 上面的实现有缺陷(会丢失 hot_reload/debug_mode 当前值),改为先读后写:
+  // 复用 /admin/global-config PUT(Task 13 已支持 debug 字段整段覆盖)。
+  // 后端期望完整 body:hot_reload + debug_mode 必填(raw.get(...,False) 否则被覆盖为 False),
+  // 这里读不到当前值,故先 GET 再 PUT,避免误覆盖 hot_reload/debug_mode。
   const cur = await fetchJson<{ hot_reload: boolean; debug_mode: boolean; debug: unknown }>(
     '/admin/global-config',
   )
@@ -698,7 +687,7 @@ export async function updateDebugSection(debug: Partial<DebugConfig>): Promise<v
       body: JSON.stringify({
         hot_reload: cur.data.hot_reload,
         debug_mode: cur.data.debug_mode,
-        debug: { ...(cur.data.debug as object ?? {}), ...debug },
+        debug: { ...((cur.data.debug as object) ?? {}), ...debug },
       }),
     },
   )
