@@ -472,6 +472,105 @@ class MyPlugin:
 
 在 `config.yaml` 的 `plugins` 列表中添加即可，PipelineEngine 自动拓扑排序。
 
+### 配置 Claude Code 的 LSP 代码智能（可选，推荐）
+
+如果你用 Claude Code 开发本项目，配置 LSP 后 Claude 能精准查找定义/引用/符号/类型，比 grep 扫描更快更准、消耗上下文更少。本项目以 TypeScript（`control-panel/`）和 Python（`aigateway-api/`、`aigateway-core/`）为主，建议同时装 `typescript-lsp` 和 `pyright-lsp`。
+
+#### 1. 安装 LSP server 二进制（全局）
+
+```bash
+# Python：pyright
+npm install -g pyright          # 或 pip install pyright / pipx install pyright
+
+# TypeScript / JavaScript：typescript-language-server + typescript
+npm install -g typescript-language-server typescript
+
+# （可选）Go：gopls
+go install golang.org/x/tools/gopls@latest
+```
+
+验证：
+
+```bash
+pyright --version                       # 应输出 1.1.x
+typescript-language-server --version    # 应输出 5.x
+tsc --version                           # 应输出 6.x
+```
+
+> 注意：这些二进制必须在 Claude Code 启动时所在的 PATH 中。若用 nvm/包管理器装的，确认 `which pyright` 能找到。
+
+#### 2. 在 Claude Code 里安装 LSP 插件
+
+```bash
+claude plugin install pyright-lsp@claude-plugins-official
+claude plugin install typescript-lsp@claude-plugins-official
+claude plugin install gopls-lsp@claude-plugins-official      # 可选
+```
+
+在 `~/.claude/settings.json` 中启用并打开 LSP 工具：
+
+```json
+{
+  "env": {
+    "ENABLE_LSP_TOOL": "1"
+  },
+  "enabledPlugins": {
+    "pyright-lsp@claude-plugins-official": true,
+    "typescript-lsp@claude-plugins-official": true,
+    "gopls-lsp@claude-plugins-official": true
+  }
+}
+```
+
+#### 3. 验证插件被正确识别
+
+> 这一步很关键：LSP 插件**不通过** `.claude-plugin/plugin.json` 的 hooks/agents 注册，用的是 LSP 专用机制。所以插件缓存目录里只有 `LICENSE` + `README`、没有 `plugin.json` 是**正常的**，不要误判为损坏。真正的检查方式是用 `claude plugin details`：
+
+```bash
+claude plugin details pyright-lsp@claude-plugins-official
+claude plugin details typescript-lsp@claude-plugins-official
+```
+
+正确输出应包含一行：
+
+```
+LSP servers (1)  pyright  (out-of-process tooling; no model context cost)
+LSP servers (1)  typescript  (out-of-process tooling; no model context cost)
+```
+
+如果 `details` 报 `Plugin not found`，说明缓存损坏，重装即可：
+
+```bash
+claude plugin uninstall typescript-lsp@claude-plugins-official
+claude plugin install  typescript-lsp@claude-plugins-official
+```
+
+marketplace 看起来陈旧时刷新源：
+
+```bash
+claude plugin marketplace update claude-plugins-official
+```
+
+#### 4. 重启会话生效
+
+`env` 变量和 LSP 注册表**只在 Claude Code 进程启动时加载一次**。装完插件、改完 settings.json 后，必须**完全退出当前会话、新开一个会话**——运行中的会话不会热加载，LSP 工具会一直返回 `No LSP server available for file type: .ts`。
+
+新会话里第一次调用 LSP 可能会慢几秒（server 首次握手 + 索引），属正常现象。
+
+#### 5. 可用能力
+
+| 操作 | 适用场景 |
+|------|---------|
+| `goToDefinition` | 跳转符号定义 |
+| `findReferences` | 查找所有调用方 |
+| `hover` | 查看类型/文档 |
+| `documentSymbol` | 列出文件内所有符号（替代通读整文件） |
+| `workspaceSymbol` | 跨工作区按名搜符号 |
+| `goToImplementation` | 查找接口实现 |
+| `prepareCallHierarchy` + `incomingCalls` / `outgoingCalls` | 调用层级分析 |
+
+文件类型覆盖：`.ts/.tsx/.js/.jsx/.mts/.cts/.mjs/.cjs`（typescript-lsp）、`.py/.pyi`（pyright-lsp）、`.go`（gopls-lsp）。LSP 不适用时（搜字符串/正则、查注释/配置/文档）退回 grep/glob。
+
 ---
 
 ## 许可证
