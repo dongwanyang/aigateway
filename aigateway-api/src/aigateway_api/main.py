@@ -36,7 +36,6 @@ if _core_src not in sys.path:
     sys.path.insert(0, _core_src)
 
 from aigateway_core.caching import CacheManager
-from aigateway_core.circuit_breaker import CircuitBreakerFactory
 from aigateway_core.config import ConfigManager
 from aigateway_core.logger import setup_logging
 from aigateway_core.metrics import get_metrics_collector
@@ -243,8 +242,7 @@ async def lifespan(app: "FastAPI"):
     2. 初始化 ConfigManager
     3. 初始化 Redis / Qdrant 连接
     4. 初始化 KeyStore, CacheManager, PluginRegistry
-    5. 初始化 CircuitBreakerFactory
-    6. 注册默认插件
+    5. 注册默认插件
 
     关闭时:
     1. 关闭 Redis 和 Qdrant 连接
@@ -354,15 +352,6 @@ async def lifespan(app: "FastAPI"):
     plugin_registry = PluginRegistry()
     _register_default_plugins(plugin_registry, config_manager)
     logger.info("PluginRegistry 初始化完成: %d 个插件已注册", len(plugin_registry.get_all()))
-
-    # 初始化 CircuitBreakerFactory
-    cb_cfg = config_manager.get("circuit_breaker", {})
-    cb_factory = CircuitBreakerFactory(
-        failure_threshold=int(cb_cfg.get("failure_threshold", 5)) if cb_cfg else 5,
-        recovery_timeout=int(cb_cfg.get("recovery_timeout", 60)) if cb_cfg else 60,
-        long_open_alert_seconds=int(cb_cfg.get("long_open_alert_seconds", 300)) if cb_cfg else 300,
-    )
-    logger.info("CircuitBreakerFactory 初始化完成")
 
     # 初始化 Media Optimization Layer (V2)
     media_optimization_layer = None
@@ -513,7 +502,6 @@ async def lifespan(app: "FastAPI"):
 
     app.state.cache_manager = cache_manager
     app.state.plugin_registry = plugin_registry
-    app.state.circuit_breaker_factory = cb_factory
     app.state.l3_cleanup_scheduler = l3_scheduler
 
     app.state.metrics_collector = get_metrics_collector()
