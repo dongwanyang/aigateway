@@ -17,15 +17,6 @@
 #   影响: 纯 CPU 机器上 GPU 版会自动退化, 功能完全一致, 仅多占 ~12GB 磁盘。
 #   修复路径: 把 torch.whl 下载到宿主机后 COPY 进镜像, 或在 pip.conf 指定
 #             --cert 指向系统 CA bundle。
-#
-# ⚠️ 已移除的依赖(代码中有 passthrough fallback, 不装不影响功能):
-#   - llama-index / llama-index-vector-stores-qdrant / llama-index-embeddings-huggingface
-#       → RAGRetrieverPlugin 进入 passthrough 模式(不做检索, 直接透传)
-#   - langchain-classic / langchain-openai
-#       → ConvCompressorPlugin 进入 passthrough 模式(不压缩对话历史)
-#   - faster-whisper
-#       → 音频 pipeline 转录用 openai-whisper 或跳过
-#   如需启用这些插件的真实功能, 在本文件加回对应依赖即可。
 # ============================================================
 
 # --- Web 框架与服务 ---
@@ -48,6 +39,7 @@ Pillow
 # --- 多模态处理 ---
 pytesseract
 opencv-python-headless
+faster-whisper
 pymupdf
 python-docx
 beautifulsoup4
@@ -59,8 +51,15 @@ sentence-transformers
 # --- Prompt 压缩 ---
 llmlingua>=0.2.0
 
-# --- Qdrant 客户端(RAG 存储) ---
+# --- RAG 检索 ---
+llama-index>=0.10.0
+llama-index-vector-stores-qdrant>=0.2.0
+llama-index-embeddings-huggingface>=0.2.0
 qdrant-client
+
+# --- 对话历史压缩(langchain 1.x 把 Legacy Memory 移到 langchain-classic)---
+langchain-classic
+langchain-openai
 
 # --- 配置加载:.env 文件支持 ---
 python-dotenv
