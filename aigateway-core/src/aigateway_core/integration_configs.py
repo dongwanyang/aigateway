@@ -98,6 +98,14 @@ class RAGRetrieverConfig:
     embedding_model: str = "Qwen/Qwen3-Embedding-0.6B"
     embedding_api_base: Optional[str] = None
     embedding_api_key: Optional[str] = None
+    # ---- Code RAG(检索侧) ----
+    # 打开后并行查询所有 rag_code_* 集合;调用图跳数决定 callers/callees 展开深度。
+    # 检索侧策略是"tolerant on retrieval": 单一集合或图谱不可用时降级为
+    # 只走文本检索,不影响主链路。
+    code_rag_enabled: bool = False
+    code_rag_graph_hops: int = 2
+    code_rag_top_k: int = 5
+    code_graph_db_dir: str = "/data/code_graphs"
 
 
 @dataclass

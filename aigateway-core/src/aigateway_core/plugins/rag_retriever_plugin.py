@@ -13,13 +13,57 @@ RAGRetrieverPlugin — LlamaIndex + Qdrant RAG 检索插件
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 from typing import Any, Dict, List, Optional
 
 from ..context import NS_RAG_RETRIEVER, PipelineContext
 from ..integration_configs import RAGRetrieverConfig
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Code RAG helpers (module-level, unit-tested)
+# ---------------------------------------------------------------------------
+
+
+def _filter_code_collections(names: List[str]) -> List[str]:
+    """从 Qdrant 集合列表挑出 rag_code_* 代码集合。"""
+    return [name for name in names if isinstance(name, str) and name.startswith("rag_code_")]
+
+
+def _dedupe_hits_by_identity(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """按 (document_id, file_path/filename, chunk_index) 去重,保留首次出现。"""
+    seen: set[tuple[str, str, int]] = set()
+    result: List[Dict[str, Any]] = []
+    for item in items:
+        try:
+            chunk_index = int(item.get("chunk_index", 0) or 0)
+        except (TypeError, ValueError):
+            chunk_index = 0
+        key = (
+            str(item.get("document_id", "")),
+            str(item.get("file_path", item.get("filename", ""))),
+            chunk_index,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result
+
+
+def _expand_code_hit_metadata(
+    hit: Dict[str, Any], graph_metadata: Dict[str, Any]
+) -> Dict[str, Any]:
+    """把图谱查回的 callers/callees/imports 并入 hit payload."""
+    merged = dict(hit)
+    merged["callers"] = list(graph_metadata.get("callers", []) or [])
+    merged["callees"] = list(graph_metadata.get("callees", []) or [])
+    merged["imports"] = list(graph_metadata.get("imports", []) or [])
+    return merged
 
 
 class RAGRetrieverPlugin:
@@ -228,13 +272,38 @@ class RAGRetrieverPlugin:
             ctx.extra[NS_RAG_RETRIEVER]["top_k"] = self._config.top_k
             ctx.extra[NS_RAG_RETRIEVER]["num_results"] = len(retrieved_chunks)
 
-            # 注入为 system message 前缀
-            if retrieved_chunks:
-                self._inject_system_message(ctx, retrieved_chunks)
+            # --- Code RAG: 并行查询 rag_code_* 代码集合并做图谱跳数展开 ---
+            # 该分支彻底 "tolerant on retrieval" —— 任何异常都只记 warning,
+            # 不影响文本检索主链路。
+            code_hits: List[Dict[str, Any]] = []
+            if getattr(self._config, "code_rag_enabled", False):
+                try:
+                    code_hits = await self._retrieve_code_hits(user_query)
+                    code_hits = await self._expand_code_hits_with_graph(code_hits)
+                    code_hits = _dedupe_hits_by_identity(code_hits)
+                    ctx.extra[NS_RAG_RETRIEVER]["code_hits"] = code_hits
+                except Exception as code_exc:
+                    logger.warning(
+                        "Code RAG 检索异常,降级为无代码上下文: %s, request_id=%s",
+                        code_exc,
+                        ctx.request_id,
+                    )
+                    ctx.extra[NS_RAG_RETRIEVER]["code_hits"] = []
+
+            # 注入为 system message 前缀(文本 + 代码)
+            merged_chunks = list(retrieved_chunks)
+            for hit in code_hits:
+                snippet = self._format_code_hit(hit)
+                if snippet:
+                    merged_chunks.append(snippet)
+
+            if merged_chunks:
+                self._inject_system_message(ctx, merged_chunks)
                 logger.debug(
-                    "RAG 检索完成: query=%s, num_results=%d, request_id=%s",
+                    "RAG 检索完成: query=%s, num_text=%d, num_code=%d, request_id=%s",
                     user_query[:50],
                     len(retrieved_chunks),
+                    len(code_hits),
                     ctx.request_id,
                 )
 
@@ -250,6 +319,173 @@ class RAGRetrieverPlugin:
             ctx.extra[NS_RAG_RETRIEVER].setdefault("retrieved_chunks", [])
 
         return ctx
+
+    # ------------------------------------------------------------------
+    # Code RAG retrieval helpers
+    # ------------------------------------------------------------------
+
+    def _qdrant_url(self) -> str:
+        return (
+            os.environ.get("AI_GATEWAY_QDRANT_URL")
+            or os.environ.get("QDRANT_URL")
+            or "http://localhost:6333"
+        )
+
+    async def _list_code_collections(self) -> List[str]:
+        """从 Qdrant 拉集合列表并挑 rag_code_* 前缀."""
+        try:
+            import httpx  # 已在 requirements.txt 里
+        except Exception:
+            return []
+
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(f"{self._qdrant_url()}/collections/")
+                resp.raise_for_status()
+                data = resp.json()
+        except Exception as exc:
+            logger.warning("列出 Qdrant 集合失败,跳过代码检索: %s", exc)
+            return []
+
+        names = [
+            c.get("name")
+            for c in (data.get("result", {}) or {}).get("collections", []) or []
+            if c.get("name")
+        ]
+        return _filter_code_collections(names)
+
+    def _encode_query(self, query: str) -> Optional[List[float]]:
+        """按插件配置的 embedding_backend 编码一次查询向量.
+
+        当前仅实现 local 分支(sentence-transformers),这是仓库主用路径。
+        其他 backend 未实现时返回 None,导致代码检索被跳过(tolerant)。
+        """
+        backend = getattr(self._config, "embedding_backend", "local")
+        model_name = getattr(self._config, "embedding_model", "Qwen/Qwen3-Embedding-0.6B")
+        if backend != "local":
+            logger.debug("code_rag: embedding_backend=%s 未实现查询编码,跳过", backend)
+            return None
+        try:
+            from aigateway_core.code_rag.embedding_router import encode_texts
+
+            vectors = encode_texts(model_name, [query])
+            return list(vectors[0]) if vectors else None
+        except Exception as exc:
+            logger.warning("code_rag: 查询编码失败,跳过: %s", exc)
+            return None
+
+    async def _retrieve_code_hits(self, query: str) -> List[Dict[str, Any]]:
+        """并行查询所有 rag_code_* 集合并归并成 payload dict 列表."""
+        collections = await self._list_code_collections()
+        if not collections:
+            return []
+
+        vector = await asyncio.get_running_loop().run_in_executor(
+            None, lambda: self._encode_query(query)
+        )
+        if not vector:
+            return []
+
+        top_k = int(getattr(self._config, "code_rag_top_k", 5) or 5)
+        threshold = float(getattr(self._config, "similarity_threshold", 0.7) or 0.7)
+
+        async def _search_one(coll: str) -> List[Dict[str, Any]]:
+            try:
+                import httpx
+
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.post(
+                        f"{self._qdrant_url()}/collections/{coll}/points/search",
+                        json={
+                            "vector": vector,
+                            "limit": top_k,
+                            "with_payload": True,
+                            "score_threshold": threshold,
+                        },
+                    )
+                    if resp.status_code == 404:
+                        return []
+                    resp.raise_for_status()
+                    payload = resp.json()
+            except Exception as exc:
+                logger.warning("code_rag: 查询集合 %s 失败,跳过: %s", coll, exc)
+                return []
+
+            out: List[Dict[str, Any]] = []
+            for item in payload.get("result", []) or []:
+                p = item.get("payload") or {}
+                if p:
+                    p["_collection"] = coll
+                    p["_score"] = item.get("score")
+                    out.append(p)
+            return out
+
+        results = await asyncio.gather(*(_search_one(c) for c in collections))
+        flat: List[Dict[str, Any]] = []
+        for lst in results:
+            flat.extend(lst)
+        # 每个集合 top_k → 全局按 score 截 code_rag_top_k
+        flat.sort(key=lambda p: (p.get("_score") or 0), reverse=True)
+        return flat[:top_k]
+
+    async def _expand_code_hits_with_graph(
+        self, hits: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """按 hit.document_id 定位图谱库,把 callers/callees/imports 并入 payload."""
+        if not hits:
+            return hits
+
+        graph_dir = getattr(self._config, "code_graph_db_dir", "/data/code_graphs")
+        try:
+            from aigateway_core.code_rag.graph_query import lookup_symbol_metadata
+        except Exception as exc:
+            logger.warning("code_rag: 无法加载 graph_query,跳过图谱展开: %s", exc)
+            return hits
+
+        expanded: List[Dict[str, Any]] = []
+        for hit in hits:
+            doc_id = str(hit.get("document_id", ""))
+            graph_db_path = os.path.join(graph_dir, f"{doc_id}.db")
+            symbol = hit.get("function_name") or hit.get("class_name")
+            try:
+                meta = lookup_symbol_metadata(
+                    graph_db_path,
+                    str(hit.get("file_path", "")),
+                    symbol if symbol else None,
+                    str(hit.get("chunk_text", "")),
+                )
+                expanded.append(_expand_code_hit_metadata(hit, meta))
+            except Exception as exc:
+                logger.warning(
+                    "code_rag: 图谱查询失败 doc=%s symbol=%s: %s", doc_id, symbol, exc
+                )
+                expanded.append(hit)
+        return expanded
+
+    def _format_code_hit(self, hit: Dict[str, Any]) -> str:
+        """把代码 hit 组装成一段可读的检索上下文."""
+        file_path = hit.get("file_path") or hit.get("filename") or "<unknown>"
+        start = hit.get("start_line")
+        end = hit.get("end_line")
+        header = f"[代码片段] {file_path}"
+        if start is not None and end is not None:
+            header += f" (L{start}-L{end})"
+        symbol = hit.get("function_name") or hit.get("class_name")
+        if symbol:
+            header += f" :: {symbol}"
+        neighbors: List[str] = []
+        if hit.get("callers"):
+            neighbors.append("callers=" + ", ".join(hit["callers"][:5]))
+        if hit.get("callees"):
+            neighbors.append("callees=" + ", ".join(hit["callees"][:5]))
+        body = str(hit.get("chunk_text", "") or "").strip()
+        if not body:
+            return ""
+        lines = [header]
+        if neighbors:
+            lines.append("(" + " ; ".join(neighbors) + ")")
+        lines.append(body)
+        return "\n".join(lines)
 
     async def _rerank(self, query: str, nodes: List[Any]) -> List[Any]:
         """对检索结果进行重排序以提高精度。
