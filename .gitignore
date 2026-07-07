@@ -37,6 +37,8 @@ docs/qa-evidence-*
 
 # Local tooling / generated artifacts
 .claude/
+.superpowers/
+AST.txt
 .repomixignore
 repomix-output.md
 .kiro/
