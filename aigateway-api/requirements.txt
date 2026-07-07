@@ -2,7 +2,30 @@
 # AI Gateway — Python 依赖清单(合并自原 Dockerfile 的 6 个 pip 层)
 # ============================================================
 # 新增/升级依赖请改本文件,而非 Dockerfile。
-# torch 单独在 Dockerfile 中安装(CPU 版,从前置层稳定缓存)。
+# torch 单独在 Dockerfile 中安装(见 Dockerfile Step 4, 不在此处声明)。
+# ============================================================
+#
+# ⚠️ 已知限制 — torch 安装方式(详见 Dockerfile):
+#   理想方案: pip install torch --index-url https://download.pytorch.org/whl/cpu
+#             → 纯 CPU 版, 镜像 ~6GB
+#   实际方案: pip install torch (默认 PyPI)
+#             → GPU 版带 CUDA 运行时, 镜像 ~18GB
+#   原因: download-r2.pytorch.org (CloudFlare R2 CDN) 在容器内 SSL
+#         握手失败(SSLV3_ALERT_HANDSHAKE_FAILURE), --trusted-host 和
+#         ca-certificates 均无法修复。宿主机 curl 正常, 仅容器内 OpenSSL
+#         与 CF 证书链不兼容。
+#   影响: 纯 CPU 机器上 GPU 版会自动退化, 功能完全一致, 仅多占 ~12GB 磁盘。
+#   修复路径: 把 torch.whl 下载到宿主机后 COPY 进镜像, 或在 pip.conf 指定
+#             --cert 指向系统 CA bundle。
+#
+# ⚠️ 已移除的依赖(代码中有 passthrough fallback, 不装不影响功能):
+#   - llama-index / llama-index-vector-stores-qdrant / llama-index-embeddings-huggingface
+#       → RAGRetrieverPlugin 进入 passthrough 模式(不做检索, 直接透传)
+#   - langchain-classic / langchain-openai
+#       → ConvCompressorPlugin 进入 passthrough 模式(不压缩对话历史)
+#   - faster-whisper
+#       → 音频 pipeline 转录用 openai-whisper 或跳过
+#   如需启用这些插件的真实功能, 在本文件加回对应依赖即可。
 # ============================================================
 
 # --- Web 框架与服务 ---
