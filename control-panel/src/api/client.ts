@@ -555,6 +555,96 @@ export async function deleteRagDocument(docId: string): Promise<ApiResponse<{ de
 
 
 // ------------------------------------------------------------------
+// Admin: Code RAG (Task 3-6, 代码知识库)
+// ------------------------------------------------------------------
+
+export type CodeImportSourceType = 'folder' | 'server_path' | 'git' | 'zip'
+
+export type CodeImportTaskStatus =
+  | 'pending'
+  | 'scanning'
+  | 'splitting'
+  | 'building_graph'
+  | 'embedding'
+  | 'completed'
+  | 'failed'
+
+export interface CodeImportTask {
+  task_id: string
+  status: CodeImportTaskStatus
+  current_file: string | null
+  done: number
+  total: number
+  error: string | null
+}
+
+export interface CodeRepositoryImport {
+  document_id: string
+  source_type: CodeImportSourceType
+  source_label: string
+  file_count: number
+  language_summary: string[]
+  function_count: number
+  class_count: number
+  chunk_count: number
+  embedding_model: string
+  import_time: string
+}
+
+export type CodeImportJsonPayload =
+  | { source_type: 'server_path'; server_path: string; embedding_model: string }
+  | { source_type: 'git'; git_url: string; git_branch?: string; embedding_model: string }
+
+export async function importCodeRepository(
+  payload: FormData | CodeImportJsonPayload,
+): Promise<{ task_id: string; status: 'pending' }> {
+  const headers = await ensureAuthHeaders()
+  const init: RequestInit =
+    payload instanceof FormData
+      ? { method: 'POST', headers, body: payload }
+      : {
+          method: 'POST',
+          headers: { ...headers, 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        }
+  const res = await fetch(`${API_BASE}/admin/rag/code/import`, init)
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }))
+    throw new Error(
+      typeof body?.detail === 'string' ? body.detail : `Code import failed: ${res.status}`,
+    )
+  }
+  return await res.json()
+}
+
+export async function getCodeImportTask(taskId: string): Promise<CodeImportTask> {
+  const headers = await ensureAuthHeaders()
+  const res = await fetch(
+    `${API_BASE}/admin/rag/code/tasks/${encodeURIComponent(taskId)}`,
+    { headers },
+  )
+  if (!res.ok) throw new Error(`Failed to fetch code import task: ${res.status}`)
+  return await res.json()
+}
+
+export async function listCodeRepositories(): Promise<CodeRepositoryImport[]> {
+  const headers = await ensureAuthHeaders()
+  const res = await fetch(`${API_BASE}/admin/rag/code/repositories`, { headers })
+  if (!res.ok) throw new Error(`Failed to list code repositories: ${res.status}`)
+  return await res.json()
+}
+
+export async function deleteCodeRepository(documentId: string): Promise<void> {
+  const headers = await ensureAuthHeaders()
+  const res = await fetch(
+    `${API_BASE}/admin/rag/code/repositories/${encodeURIComponent(documentId)}`,
+    { method: 'DELETE', headers },
+  )
+  if (!res.ok) throw new Error(`Failed to delete code repository: ${res.status}`)
+}
+
+
+// ------------------------------------------------------------------
 // Admin: L3 Cache Lifecycle Management (Design §9b)
 // ------------------------------------------------------------------
 
