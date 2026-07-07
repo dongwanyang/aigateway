@@ -92,3 +92,68 @@ def test_requirements_declare_code_rag_deps() -> None:
     text = (REPO_ROOT / "aigateway-api" / "requirements.txt").read_text(encoding="utf-8")
     for pkg in ("langchain-community", "langchain-text-splitters", "gitpython", "codegraph"):
         assert pkg in text, f"missing dep '{pkg}' in aigateway-api/requirements.txt"
+
+
+# ---------------------------------------------------------------------------
+# Task 2: helper modules
+# ---------------------------------------------------------------------------
+
+from aigateway_core.code_rag.embedding_router import (  # noqa: E402
+    materialize_model_slug,
+    resolve_collection_name,
+)
+from aigateway_core.code_rag.splitter import (  # noqa: E402
+    compute_line_span,
+    is_path_allowed,
+)
+
+
+def test_materialize_model_slug_normalizes_model_name() -> None:
+    assert materialize_model_slug("Qwen/Qwen3-Embedding-0.6B") == "qwen_qwen3_embedding_0_6b"
+
+
+def test_materialize_model_slug_strips_edges_and_collapses_runs() -> None:
+    assert materialize_model_slug("  //text-embedding-3-large//  ") == "text_embedding_3_large"
+
+
+def test_resolve_collection_name_prefixes_code_collection() -> None:
+    assert resolve_collection_name("text-embedding-3-large") == "rag_code_text_embedding_3_large"
+
+
+def test_is_path_allowed_accepts_allowlisted_path(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    project = root / "repo"
+    project.mkdir(parents=True)
+    assert is_path_allowed(str(project), [str(root)]) is True
+
+
+def test_is_path_allowed_rejects_outside_path(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    assert is_path_allowed(str(outside), [str(root)]) is False
+
+
+def test_is_path_allowed_rejects_symlink_escape(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = root / "escape"
+    link.symlink_to(outside)
+    assert is_path_allowed(str(link), [str(root)]) is False
+
+
+def test_compute_line_span_returns_exact_span() -> None:
+    source = "a\nfoo()\nbar()\n"
+    chunk = "foo()\nbar()"
+    assert compute_line_span(source, chunk) == (2, 3)
+
+
+def test_compute_line_span_falls_back_when_chunk_missing() -> None:
+    source = "line1\nline2\nline3\n"
+    chunk = "not present"
+    start, end = compute_line_span(source, chunk)
+    assert start == 1
+    assert end >= start
