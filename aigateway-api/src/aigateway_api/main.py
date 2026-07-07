@@ -655,13 +655,14 @@ def _configure_cors(app: "FastAPI", config_manager: "ConfigManager") -> None:
 
 def _mount_routes(app: "FastAPI") -> None:
     """挂载所有路由到 FastAPI 应用。"""
-    from . import admin_routes, openai_compat, routes, template_routes
+    from . import admin_routes, code_rag_routes, openai_compat, routes, template_routes
 
     # /v1/* — OpenAI 兼容接口（需要鉴权）
     app.include_router(openai_compat.router, prefix="/v1", tags=["OpenAI 兼容接口"])
 
     # /admin/* — 管理接口（需要管理员鉴权）
     app.include_router(admin_routes.router, prefix="/admin", tags=["管理接口"])
+    app.include_router(code_rag_routes.router, prefix="/admin", tags=["Code RAG"])
 
     # Generation Optimization — 模板管理等端点
     app.include_router(template_routes.router, tags=["generation-optimization"])
