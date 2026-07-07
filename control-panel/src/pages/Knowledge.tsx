@@ -1,10 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
-import { BookOpen, Plus, Trash2, Globe, Upload, Settings, X } from 'lucide-react'
+import { BookOpen, Plus, Trash2, Globe, Upload, Settings, X, FileText, Code2 } from 'lucide-react'
 import Card from '@/components/Card'
 import { listRagDocuments, importRagDocument, deleteRagDocument } from '@/api/client'
 import type { RagDocument } from '@/api/client'
+import KnowledgeCodeTab from './KnowledgeCodeTab'
+
+type KnowledgeTab = 'text' | 'code'
 
 export default function Knowledge() {
+  const [knowledgeTab, setKnowledgeTab] = useState<KnowledgeTab>('text')
   const [documents, setDocuments] = useState<RagDocument[]>([])
   const [loading, setLoading] = useState(true)
   const [showImport, setShowImport] = useState(false)
@@ -118,11 +122,35 @@ export default function Knowledge() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h2 className="text-2xl font-bold">知识库</h2>
-        <button className="btn btn-primary" onClick={() => { setShowImport(true); setImportResult(null); setImportError(null) }}>
-          <Plus size={16} /> 导入文档
+        {knowledgeTab === 'text' && (
+          <button className="btn btn-primary" onClick={() => { setShowImport(true); setImportResult(null); setImportError(null) }}>
+            <Plus size={16} /> 导入文档
+          </button>
+        )}
+      </div>
+
+      {/* Text / Code Tab 切换 */}
+      <div className="flex gap-2">
+        <button
+          className={`btn ${knowledgeTab === 'text' ? 'btn-primary' : 'btn-secondary'}`}
+          style={{ padding: '6px 16px', fontSize: '13px' }}
+          onClick={() => setKnowledgeTab('text')}
+        >
+          <FileText size={14} /> 文本知识库
+        </button>
+        <button
+          className={`btn ${knowledgeTab === 'code' ? 'btn-primary' : 'btn-secondary'}`}
+          style={{ padding: '6px 16px', fontSize: '13px' }}
+          onClick={() => setKnowledgeTab('code')}
+        >
+          <Code2 size={14} /> 代码知识库
         </button>
       </div>
 
+      {knowledgeTab === 'code' ? (
+        <KnowledgeCodeTab />
+      ) : (
+        <>
       {/* 导入面板 */}
       {showImport && (
         <Card>
@@ -335,6 +363,8 @@ export default function Knowledge() {
           </table>
         </div>
       </Card>
+        </>
+      )}
     </div>
   )
 }
