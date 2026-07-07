@@ -17,6 +17,15 @@
 #   影响: 纯 CPU 机器上 GPU 版会自动退化, 功能完全一致, 仅多占 ~12GB 磁盘。
 #   修复路径: 把 torch.whl 下载到宿主机后 COPY 进镜像, 或在 pip.conf 指定
 #             --cert 指向系统 CA bundle。
+#
+# ℹ️ 未声明但代码中 try/except 可选 import 的包(主路径已有替代, 缺失会降级不报错):
+#   - PyPDF2            → PDF 解析 fallback, 主路径用 pymupdf
+#   - paddleocr         → OCR fallback, 主路径用 tesseract
+#   - unstructured      → 文档解析 fallback, 主路径用 pymupdf/python-docx
+#   - openai-whisper    → 音频转录 fallback, 主路径用 faster-whisper
+#   - opentelemetry-sdk → 分布式追踪, 缺失则 tracing.py 降级为 no-op
+#   - starlette         → fastapi 自动带入的间接依赖
+#   - rich              → structlog 间接依赖, 代码无直接 import
 # ============================================================
 
 # --- Web 框架与服务 ---
@@ -47,6 +56,10 @@ beautifulsoup4
 # --- Embedding / 语义缓存(transformers,torch 在 Dockerfile 单独装)---
 transformers>=4.51.0
 sentence-transformers
+
+# --- 数值计算(显式声明: torch/transformers/cv2 的强制间接依赖,
+#     上游若松绑会缺包, video/image pipeline 直接 import numpy)---
+numpy
 
 # --- Prompt 压缩 ---
 llmlingua>=0.2.0
