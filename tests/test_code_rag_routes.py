@@ -242,3 +242,179 @@ def test_delete_code_repository_removes_redis_metadata(
     # Redis 元数据已删
     remaining = _run(fake_redis.lrange("aigateway:rag:code:documents", 0, -1))
     assert all("code_del_me" not in item for item in remaining)
+
+
+# ---------------------------------------------------------------------------
+# Task GC protection (Review finding 4):
+#   asyncio.create_task 返回值必须被 strong-ref,否则 GC 可能在导入未跑完时
+#   把 Task 收掉("Task was destroyed but it is pending")。_spawn_import_task
+#   把每个 Task 放进 app.state.code_rag_active_tasks,done 后自动移除。
+# ---------------------------------------------------------------------------
+
+
+def test_spawn_import_task_tracks_task_in_app_state() -> None:
+    import asyncio as _asyncio
+    from types import SimpleNamespace
+
+    from aigateway_api.code_rag_routes import _spawn_import_task
+
+    app_state = SimpleNamespace()
+
+    finished = _asyncio.Event()
+
+    async def _payload() -> None:
+        await _asyncio.sleep(0)
+        finished.set()
+
+    async def _drive() -> tuple[set, "_asyncio.Task[None]"]:
+        task = _spawn_import_task(app_state, _payload(), task_id="t-abc")
+        # spawn 后立刻应该在 active set 里
+        assert task in app_state.code_rag_active_tasks
+        await task
+        return app_state.code_rag_active_tasks, task
+
+    active, task = _asyncio.new_event_loop().run_until_complete(_drive())
+    assert task.done()
+    assert finished.is_set()
+    # done_callback 应该已经把 task 从 set 里摘掉
+    assert task not in active
+
+
+def test_spawn_import_task_logs_uncaught_exception(caplog) -> None:
+    import asyncio as _asyncio
+    import logging
+    from types import SimpleNamespace
+
+    from aigateway_api.code_rag_routes import _spawn_import_task
+
+    app_state = SimpleNamespace()
+
+    async def _boom() -> None:
+        raise RuntimeError("kaboom")
+
+    async def _drive() -> None:
+        task = _spawn_import_task(app_state, _boom(), task_id="t-fail")
+        try:
+            await task
+        except RuntimeError:
+            pass
+
+    with caplog.at_level(logging.ERROR, logger="aigateway_api.code_rag_routes"):
+        _asyncio.new_event_loop().run_until_complete(_drive())
+    assert any(
+        "code rag import task t-fail raised uncaught exception" in r.getMessage()
+        for r in caplog.records
+    ), f"缺少未捕获异常的兜底日志: {[r.getMessage() for r in caplog.records]}"
+
+
+def test_run_code_import_task_passes_real_symbol_name_to_graph_lookup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """回归 Review 发现 1:_run_code_import_task 里 symbol_name 只取
+    chunk["function_name"] / chunk["class_name"]。这些字段必须被
+    splitter 真的填上,否则 lookup_symbol_metadata_strict 拿到 None 短路,
+    整条 graph 增强链路是死的。
+
+    这里 stub 掉重资产依赖,验证 strict lookup 被至少调用一次并且
+    收到了非空的 symbol_name。
+    """
+    import asyncio as _asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from aigateway_api import code_rag_routes as routes_mod
+
+    # ---- 桩:splitter 产出的 chunk 携带 function_name ----
+    def _fake_split(source_dir: str, ignore_patterns: list[str]) -> list[dict]:
+        return [
+            {
+                "file_path": "auth.py",
+                "filename": "auth.py",
+                "language": "python",
+                "chunk_index": 0,
+                "chunk_text": "def login(user):\n    return user\n",
+                "start_line": 1,
+                "end_line": 2,
+                "function_name": "login",
+                "class_name": None,
+            }
+        ]
+
+    monkeypatch.setattr(
+        "aigateway_core.code_rag.splitter.split_code_directory", _fake_split
+    )
+    monkeypatch.setattr(
+        "aigateway_core.code_rag.graph_builder.build_code_graph",
+        lambda src, dst: dst,
+    )
+    monkeypatch.setattr(
+        "aigateway_core.code_rag.embedding_router.probe_embedding_dimension",
+        lambda model: 4,
+    )
+    monkeypatch.setattr(
+        "aigateway_core.code_rag.embedding_router.encode_texts",
+        lambda model, texts: [[0.1, 0.2, 0.3, 0.4] for _ in texts],
+    )
+
+    strict_lookup_calls: list[tuple] = []
+
+    def _fake_strict(graph_db_path, file_path, symbol_name, chunk_text):
+        strict_lookup_calls.append((file_path, symbol_name))
+        return {
+            "callers": ["register"],
+            "callees": [],
+            "imports": [],
+            "chunk_type": "function",
+            "function_name": symbol_name,
+            "class_name": None,
+        }
+
+    monkeypatch.setattr(
+        "aigateway_core.code_rag.graph_query.lookup_symbol_metadata_strict",
+        _fake_strict,
+    )
+
+    # ---- 桩:app.state ----
+    app_state = SimpleNamespace()
+    app_state.redis_manager = _FakeRedisManager()
+    qdrant_mgr = _FakeQdrantManager()
+    put_resp = MagicMock()
+    put_resp.raise_for_status = MagicMock()
+    qdrant_mgr._http.put = AsyncMock(return_value=put_resp)
+    app_state.qdrant_manager = qdrant_mgr
+
+    async def _drive() -> None:
+        await routes_mod._run_code_import_task(
+            app_state=app_state,
+            task_id="t-sym",
+            document_id="code_sym",
+            source_dir=str(tmp_path),
+            source_type="server_path",
+            source_label="server_path:///tmp/x",
+            embedding_model="Qwen/Qwen3-Embedding-0.6B",
+            ignore_patterns=[],
+            graph_db_dir=str(tmp_path),
+            cleanup_dirs=[],
+        )
+
+    _asyncio.new_event_loop().run_until_complete(_drive())
+
+    assert strict_lookup_calls, "strict lookup 完全没被调用,链路断了"
+    # 关键断言:传给 strict lookup 的 symbol_name 不能是 None
+    file_paths, symbol_names = zip(*strict_lookup_calls)
+    assert "login" in symbol_names, (
+        f"symbol_name 期望包含真实符号 'login',实际收到: {symbol_names}. "
+        "如果全是 None,说明 splitter 没写 function_name/class_name,"
+        "graph 增强永远不会触发。"
+    )
+
+    # upsert 的 payload 里 callers 也必须落盘,证明 graph_meta 真被合并了
+    upsert_call = qdrant_mgr._http.put.await_args
+    body = upsert_call.kwargs["json"] if "json" in upsert_call.kwargs else upsert_call.args[1]
+    if not isinstance(body, dict):
+        body = {"points": []}
+    written_points = body.get("points", [])
+    assert written_points, "没有点被写入 Qdrant"
+    payload = written_points[0]["payload"]
+    assert payload["function_name"] == "login"
+    assert payload["callers"] == ["register"]

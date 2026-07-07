@@ -20,8 +20,11 @@ import subprocess
 from pathlib import Path
 
 
-def _run_codegraph(args: list[str], *, cwd: str) -> None:
-    """调用官方 codegraph CLI；失败时抛 RuntimeError（导入链路 strict）。"""
+def _run_codegraph(args: list[str], *, cwd: str, timeout: float = 1800.0) -> None:
+    """调用官方 codegraph CLI；失败或超时时抛 RuntimeError（导入链路 strict）。
+
+    默认 30 分钟超时(config: code_rag.codegraph_timeout_seconds 可覆盖)。
+    """
     try:
         proc = subprocess.run(
             args,
@@ -30,10 +33,15 @@ def _run_codegraph(args: list[str], *, cwd: str) -> None:
             stderr=subprocess.STDOUT,
             text=True,
             check=False,
+            timeout=timeout,
         )
     except FileNotFoundError as exc:
         raise RuntimeError(
             "codegraph CLI 未安装；请在 gateway 镜像中安装 @colbymchenry/codegraph"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"codegraph command timed out after {timeout}s: {' '.join(args)}"
         ) from exc
 
     if proc.returncode != 0:
@@ -43,7 +51,12 @@ def _run_codegraph(args: list[str], *, cwd: str) -> None:
         )
 
 
-def build_code_graph(source_dir: str, graph_db_path: str) -> str:
+def build_code_graph(
+    source_dir: str,
+    graph_db_path: str,
+    *,
+    timeout: float = 1800.0,
+) -> str:
     """为 source_dir 构建官方 CodeGraph SQLite 图谱，并复制到 graph_db_path。
 
     返回值：graph_db_path（最终 SQLite 文件绝对路径）
@@ -55,8 +68,12 @@ def build_code_graph(source_dir: str, graph_db_path: str) -> str:
     target.parent.mkdir(parents=True, exist_ok=True)
 
     # 官方 CLI 工作流: 在项目目录执行 init + index。
-    _run_codegraph(["codegraph", "init"], cwd=str(source_root))
-    _run_codegraph(["codegraph", "index", str(source_root)], cwd=str(source_root))
+    _run_codegraph(["codegraph", "init"], cwd=str(source_root), timeout=timeout)
+    _run_codegraph(
+        ["codegraph", "index", str(source_root)],
+        cwd=str(source_root),
+        timeout=timeout,
+    )
 
     default_db = source_root / ".codegraph" / "codegraph.db"
     if not default_db.exists():

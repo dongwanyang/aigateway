@@ -134,7 +134,7 @@ providers:
     retry_after: 1000
     timeout: 120
   glm5.2:
-    api_key: sk-cb-tWzVVMJwDSA4GnIXfJ9mlkLZWp1AIcxg
+    api_key: ${GLM52_API_KEY:-}
     base_url: https://buddy.relaypool.cam/codebuddy/v1
     model_grouper:
     - models:

@@ -150,6 +150,41 @@ def _shape_task_response(task_id: str, state: Optional[Dict[str, Any]]) -> Dict[
 # ----------------------------------------------------------------------
 
 
+def _spawn_import_task(app_state: Any, coro: Any, *, task_id: str) -> Any:
+    """把后台导入任务塞进 app.state.code_rag_active_tasks,避免 GC 掉。
+
+    直接 asyncio.create_task 会让 loop 只持弱引用,长任务在低负载下可能被回收,
+    弹出 "Task was destroyed but it is pending" 且中断真实导入。我们:
+    - 把 Task 放进一个 set,strong-ref 直到完成
+    - 挂 done_callback: 移出 set + 打印未捕获异常(finally 里 _mark(failed)
+      走 Redis 是主路径,这里只做兜底日志)
+    """
+    active: set = getattr(app_state, "code_rag_active_tasks", None)  # type: ignore[assignment]
+    if active is None:
+        active = set()
+        app_state.code_rag_active_tasks = active
+
+    task = asyncio.create_task(coro, name=f"code_rag_import:{task_id}")
+    active.add(task)
+
+    def _done(t: Any) -> None:
+        active.discard(t)
+        try:
+            exc = t.exception()
+        except asyncio.CancelledError:
+            logger.warning("code rag import task %s cancelled", task_id)
+            return
+        except Exception:
+            return
+        if exc is not None:
+            logger.error(
+                "code rag import task %s raised uncaught exception: %r", task_id, exc
+            )
+
+    task.add_done_callback(_done)
+    return task
+
+
 async def _append_repository(redis_mgr: Any, repo_meta: Dict[str, Any]) -> None:
     if redis_mgr is None or redis_mgr.redis is None:
         return
@@ -219,16 +254,56 @@ def _validate_git_url(git_url: str) -> str:
     return git_url
 
 
-def _materialize_git_repo(git_url: str, git_branch: Optional[str]) -> str:
-    """浅克隆到临时目录,返回临时目录路径."""
+def _materialize_git_repo(
+    git_url: str,
+    git_branch: Optional[str],
+    *,
+    timeout: float = 300.0,
+) -> str:
+    """浅克隆到临时目录,返回临时目录路径。
+
+    通过 GIT_HTTP_LOW_SPEED_LIMIT/TIME + 外部 wall-clock 阻断长时间挂住的克隆,
+    避免 "silently stuck" 出现在 gateway 侧。
+    """
     from git import Repo  # lazy: gitpython 只在生产镜像里装
 
     tmp_dir = tempfile.mkdtemp(prefix="code_rag_git_")
     try:
-        clone_kwargs: Dict[str, Any] = {"depth": 1}
+        clone_kwargs: Dict[str, Any] = {
+            "depth": 1,
+            "env": {
+                # 60s 内低于 1KB/s 判为超慢连接,直接中止
+                "GIT_HTTP_LOW_SPEED_LIMIT": "1000",
+                "GIT_HTTP_LOW_SPEED_TIME": "60",
+                # 关闭密码提示,避免私仓卡在 stdin 等待
+                "GIT_TERMINAL_PROMPT": "0",
+            },
+        }
         if git_branch:
             clone_kwargs["branch"] = git_branch
-        Repo.clone_from(git_url, tmp_dir, **clone_kwargs)
+
+        def _clone() -> None:
+            Repo.clone_from(git_url, tmp_dir, **clone_kwargs)
+
+        import threading
+
+        error: List[BaseException] = []
+
+        def _target() -> None:
+            try:
+                _clone()
+            except BaseException as exc:  # noqa: BLE001
+                error.append(exc)
+
+        thread = threading.Thread(target=_target, daemon=True)
+        thread.start()
+        thread.join(timeout=timeout)
+        if thread.is_alive():
+            # 后台线程留在原地慢慢死;主流程按超时报错并清理
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise RuntimeError(f"git clone timed out after {timeout}s: {git_url}")
+        if error:
+            raise error[0]
     except Exception:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise
@@ -342,6 +417,38 @@ async def _materialize_folder_upload(
 # ----------------------------------------------------------------------
 # Background import task
 # ----------------------------------------------------------------------
+
+
+async def _run_code_import_task_with_deadline(
+    *,
+    deadline_seconds: int,
+    app_state: Any,
+    task_id: str,
+    **kwargs: Any,
+) -> None:
+    """给整个导入任务加 wall-clock 上限,避免 "silently stuck"。"""
+    redis_mgr = getattr(app_state, "redis_manager", None)
+    try:
+        await asyncio.wait_for(
+            _run_code_import_task(
+                app_state=app_state, task_id=task_id, **kwargs
+            ),
+            timeout=max(60, int(deadline_seconds)),
+        )
+    except asyncio.TimeoutError:
+        logger.error(
+            "code rag import task %s exceeded wall-clock deadline (%ss)",
+            task_id,
+            deadline_seconds,
+        )
+        await _write_task_state(
+            redis_mgr,
+            task_id,
+            {
+                "status": "failed",
+                "error": f"import task exceeded {deadline_seconds}s deadline",
+            },
+        )
 
 
 async def _run_code_import_task(
@@ -633,8 +740,10 @@ async def import_code_repository(
         },
     )
 
-    asyncio.create_task(
-        _run_code_import_task(
+    _spawn_import_task(
+        app_state,
+        _run_code_import_task_with_deadline(
+            deadline_seconds=int(code_cfg.get("import_timeout_seconds") or 3600),
             app_state=app_state,
             task_id=task_id,
             document_id=document_id,
@@ -645,7 +754,8 @@ async def import_code_repository(
             ignore_patterns=ignore_patterns,
             graph_db_dir=graph_db_dir,
             cleanup_dirs=cleanup_dirs,
-        )
+        ),
+        task_id=task_id,
     )
 
     return {"task_id": task_id, "status": "pending"}

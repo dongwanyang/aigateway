@@ -333,3 +333,96 @@ def test_rag_retriever_source_mentions_real_graph_hops() -> None:
     assert "lookup_related_symbols" in src
     assert 'code_rag_graph_hops' in src
     assert 'related_chunks = await self._fetch_related_code_chunks(' in src
+
+
+# ---------------------------------------------------------------------------
+# Splitter symbol extraction (Review finding 1):
+#   split_code_directory 必须在每个 chunk 里写 function_name / class_name,
+#   否则下游 lookup_symbol_metadata_strict 收到 symbol_name=None 直接短路,
+#   callers/callees/imports 永远是空,graph_hops 也永远不触发。
+# ---------------------------------------------------------------------------
+
+
+def test_extract_top_symbol_finds_python_def() -> None:
+    from aigateway_core.code_rag.splitter import extract_top_symbol
+
+    result = extract_top_symbol("def login(user):\n    return user\n")
+    assert result == ("function", "login")
+
+
+def test_extract_top_symbol_finds_python_async_def() -> None:
+    from aigateway_core.code_rag.splitter import extract_top_symbol
+
+    result = extract_top_symbol("async def fetch(url):\n    pass\n")
+    assert result == ("function", "fetch")
+
+
+def test_extract_top_symbol_finds_python_class() -> None:
+    from aigateway_core.code_rag.splitter import extract_top_symbol
+
+    result = extract_top_symbol("class UserService:\n    pass\n")
+    assert result == ("class", "UserService")
+
+
+def test_extract_top_symbol_finds_js_function() -> None:
+    from aigateway_core.code_rag.splitter import extract_top_symbol
+
+    result = extract_top_symbol("export async function login(user) {\n  return user;\n}\n")
+    assert result == ("function", "login")
+
+
+def test_extract_top_symbol_finds_go_func() -> None:
+    from aigateway_core.code_rag.splitter import extract_top_symbol
+
+    result = extract_top_symbol("func (s *Server) Handle(req Request) error {\n  return nil\n}\n")
+    assert result == ("function", "Handle")
+
+
+def test_extract_top_symbol_finds_rust_fn() -> None:
+    from aigateway_core.code_rag.splitter import extract_top_symbol
+
+    result = extract_top_symbol("pub async fn login(user: String) -> Result<()> {\n}\n")
+    assert result == ("function", "login")
+
+
+def test_extract_top_symbol_returns_none_for_module_scope() -> None:
+    from aigateway_core.code_rag.splitter import extract_top_symbol
+
+    assert extract_top_symbol("# just a comment\nx = 1\n") is None
+    assert extract_top_symbol("") is None
+
+
+def test_split_code_directory_writes_symbol_names(tmp_path) -> None:
+    """回归:切完的 chunk 字典必须携带 function_name/class_name,
+    否则 code_rag_routes 侧的 strict-lookup 拿到 symbol=None 直接短路。
+    """
+    from aigateway_core.code_rag.splitter import split_code_directory
+
+    src = tmp_path / "auth.py"
+    src.write_text(
+        "def login(user):\n"
+        "    return user\n"
+        "\n"
+        "class UserService:\n"
+        "    def register(self):\n"
+        "        pass\n",
+        encoding="utf-8",
+    )
+
+    chunks = split_code_directory(str(tmp_path), ignore_patterns=[])
+    assert chunks, "splitter 应该至少切出一个 chunk"
+    # 每个 chunk 都必须有这两个字段(即使为 None,payload 组装侧才敢直接读)
+    for c in chunks:
+        assert "function_name" in c, f"chunk 缺少 function_name: {c}"
+        assert "class_name" in c, f"chunk 缺少 class_name: {c}"
+    # 至少一个 chunk 提取到符号(证明抽取真的跑通,不是全 None)
+    non_empty = [
+        c for c in chunks if c["function_name"] or c["class_name"]
+    ]
+    assert non_empty, (
+        f"split_code_directory 一个符号都没抽到,graph 展开必然失效: {chunks}"
+    )
+    names = {c["function_name"] for c in chunks} | {c["class_name"] for c in chunks}
+    assert names & {"login", "UserService", "register"}, (
+        f"未能抽到 login/UserService/register 中的任何一个: names={names}"
+    )

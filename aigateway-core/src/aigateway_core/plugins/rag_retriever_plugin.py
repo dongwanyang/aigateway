@@ -35,6 +35,29 @@ def _filter_code_collections(names: List[str]) -> List[str]:
     return [name for name in names if isinstance(name, str) and name.startswith("rag_code_")]
 
 
+def _select_code_collections_for_model(
+    names: List[str], embedding_model: str
+) -> List[str]:
+    """从 rag_code_* 集合列表里挑出与当前 embedding_model 匹配的那一份。
+
+    Code RAG 按 embedding_model 分独立集合(维度不同)——检索时若把同一个查询
+    向量投到所有集合上,维度不匹配的集合会被 Qdrant 拒 4xx,然后被上层 tolerant
+    分支静默吞掉,导致其他嵌入模型的仓库"消失"。这里做前置过滤,只查匹配集合。
+
+    - 空 embedding_model → 返回原列表(避免误伤,交给调用方处理)
+    - 找到精确匹配 → 只返回它
+    - 找不到任何匹配 → 返回空列表(比全部盲扫更安全)
+    """
+    # lazy 引用,避免 aigateway_core 顶层 import 时强制拉 sentence-transformers
+    from aigateway_core.code_rag.embedding_router import resolve_collection_name
+
+    code_collections = _filter_code_collections(names)
+    if not embedding_model:
+        return code_collections
+    target = resolve_collection_name(embedding_model)
+    return [name for name in code_collections if name == target]
+
+
 def _dedupe_hits_by_identity(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """按 (document_id, file_path/filename, chunk_index) 去重,保留首次出现。"""
     seen: set[tuple[str, str, int]] = set()
@@ -365,7 +388,11 @@ class RAGRetrieverPlugin:
             for c in (data.get("result", {}) or {}).get("collections", []) or []
             if c.get("name")
         ]
-        return _filter_code_collections(names)
+        # 只选与本插件配置的 embedding_model 匹配的集合;不同维度模型会导致
+        # Qdrant 搜索直接 4xx,tolerant 分支会把它们静默吞掉。见
+        # _select_code_collections_for_model docstring。
+        embedding_model = getattr(self._config, "embedding_model", "") or ""
+        return _select_code_collections_for_model(names, embedding_model)
 
     def _encode_query(self, query: str) -> Optional[List[float]]:
         """按插件配置的 embedding_backend 编码一次查询向量.

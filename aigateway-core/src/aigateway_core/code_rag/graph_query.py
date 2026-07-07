@@ -8,22 +8,16 @@
 我们只依赖稳定的几个字段：
 - `edges.kind='calls'` 表示调用边
 - `edges.kind='contains'` 连接 file node / symbol node / import node
-- `nodes.kind` 可能是 file / function / class / import / ...
+- `nodes.kind` 可能是 file / function / class / import / method / ...
 
-查询策略：
-1. 优先按 `(file_path, symbol_name)` 在 nodes 表定位 symbol node
-2. callers: `calls` 边的 source 侧名字
-3. callees: `calls` 边的 target 侧名字
-4. imports: 该文件 `contains` 的所有 import 节点名
-5. 若 symbol_name 为空或找不到，退化为 module 级 chunk + 空关系
-
-与系统总策略一致：
-- import 阶段：构图失败是 hard failure（由 graph_builder 抛）
-- retrieval 阶段：图谱查询失败时只返回空关系（由上层 tolerant 处理）
+对外暴露两类接口：
+- strict import-time API：任何 graph query 问题都抛异常，导入整体 failed
+- tolerant retrieval-time API：任何 graph query 问题都返回空结果，不打断主链路
 """
 from __future__ import annotations
 
 import sqlite3
+from collections import deque
 from pathlib import Path
 from typing import Any, Optional
 
@@ -45,12 +39,11 @@ def _open_db(graph_db_path: str) -> sqlite3.Connection:
     return conn
 
 
-def _find_symbol_node_id(
+def _find_symbol_node(
     conn: sqlite3.Connection,
     file_path: str,
     symbol_name: str,
 ) -> Optional[sqlite3.Row]:
-    """按文件 + 名字定位符号节点(优先 function/class，其次任意同名节点)."""
     row = conn.execute(
         """
         SELECT id, kind, name, qualified_name, file_path, language, start_line, end_line
@@ -66,13 +59,11 @@ def _find_symbol_node_id(
     ).fetchone()
     if row is not None:
         return row
-
     return conn.execute(
         """
         SELECT id, kind, name, qualified_name, file_path, language, start_line, end_line
         FROM nodes
-        WHERE file_path = ?
-          AND name = ?
+        WHERE file_path = ? AND name = ?
         ORDER BY start_line ASC
         LIMIT 1
         """,
@@ -133,55 +124,134 @@ def _get_imports_for_file(conn: sqlite3.Connection, file_path: str) -> list[str]
     return [str(r[0]) for r in rows]
 
 
+def _classify_chunk_type(kind: str, symbol_name: str | None, chunk_text: str) -> str:
+    if kind in ('function', 'method'):
+        return 'function'
+    if kind == 'class':
+        return 'class'
+    if chunk_text.lstrip().startswith('class '):
+        return 'class'
+    if symbol_name:
+        return 'function'
+    return 'module'
+
+
+def lookup_symbol_metadata_strict(
+    graph_db_path: str,
+    file_path: str,
+    symbol_name: str | None,
+    chunk_text: str,
+) -> dict[str, Any]:
+    """严格版：用于 import 阶段。任何 query/schema/IO 问题都抛异常。"""
+    if not symbol_name:
+        return dict(_EMPTY_METADATA)
+
+    with _open_db(graph_db_path) as conn:
+        node = _find_symbol_node(conn, file_path, symbol_name)
+        imports = _get_imports_for_file(conn, file_path)
+        if node is None:
+            result = dict(_EMPTY_METADATA)
+            result['imports'] = imports
+            return result
+
+        node_id = str(node['id'])
+        kind = str(node['kind'] or 'module')
+        callers = _get_calls_from(conn, target_id=node_id)
+        callees = _get_calls_from(conn, source_id=node_id)
+        chunk_type = _classify_chunk_type(kind, symbol_name, chunk_text)
+        return {
+            'callers': callers,
+            'callees': callees,
+            'imports': imports,
+            'chunk_type': chunk_type,
+            'function_name': symbol_name if chunk_type == 'function' else None,
+            'class_name': symbol_name if chunk_type == 'class' else None,
+        }
+
+
 def lookup_symbol_metadata(
     graph_db_path: str,
     file_path: str,
     symbol_name: str | None,
     chunk_text: str,
 ) -> dict[str, Any]:
-    """返回 chunk 关联的调用图元数据.
-
-    返回字段对齐 spec / Qdrant payload:
-    - callers / callees / imports
-    - chunk_type
-    - function_name / class_name
-    """
-    if not symbol_name:
-        result = dict(_EMPTY_METADATA)
-        return result
-
+    """宽松版：用于 retrieval 阶段。任何问题都降级为空 metadata。"""
     try:
-        with _open_db(graph_db_path) as conn:
-            node = _find_symbol_node_id(conn, file_path, symbol_name)
-            imports = _get_imports_for_file(conn, file_path)
-            if node is None:
-                result = dict(_EMPTY_METADATA)
-                result['imports'] = imports
-                return result
-
-            node_id = str(node['id'])
-            kind = str(node['kind'] or 'module')
-            callers = _get_calls_from(conn, target_id=node_id)
-            callees = _get_calls_from(conn, source_id=node_id)
-
-            chunk_type = 'module'
-            if kind in ('function', 'method'):
-                chunk_type = 'function'
-            elif kind == 'class':
-                chunk_type = 'class'
-            elif chunk_text.lstrip().startswith('class '):
-                chunk_type = 'class'
-            elif symbol_name:
-                chunk_type = 'function'
-
-            return {
-                'callers': callers,
-                'callees': callees,
-                'imports': imports,
-                'chunk_type': chunk_type,
-                'function_name': symbol_name if chunk_type == 'function' else None,
-                'class_name': symbol_name if chunk_type == 'class' else None,
-            }
+        return lookup_symbol_metadata_strict(graph_db_path, file_path, symbol_name, chunk_text)
     except Exception:
-        # retrieval 层容忍,import 层若需要严格则会在 build 阶段就失败。
         return dict(_EMPTY_METADATA)
+
+
+def lookup_related_symbols_strict(
+    graph_db_path: str,
+    file_path: str,
+    symbol_name: str,
+    *,
+    hops: int = 1,
+) -> list[dict[str, Any]]:
+    """严格版：按 calls 图做有限跳 BFS，返回邻接符号。
+
+    返回项：{file_path, symbol_name, kind, start_line, end_line}
+    - hops=1：直接 callers/callees
+    - hops=2：邻居的邻居
+    """
+    if hops <= 0:
+        return []
+
+    with _open_db(graph_db_path) as conn:
+        root = _find_symbol_node(conn, file_path, symbol_name)
+        if root is None:
+            return []
+
+        visited = {str(root['id'])}
+        queue = deque([(str(root['id']), 0)])
+        related: list[dict[str, Any]] = []
+
+        while queue:
+            node_id, depth = queue.popleft()
+            if depth >= hops:
+                continue
+            rows = conn.execute(
+                """
+                SELECT DISTINCT n.id, n.kind, n.name, n.file_path, n.start_line, n.end_line
+                FROM (
+                  SELECT target AS neighbor_id FROM edges WHERE kind = 'calls' AND source = ?
+                  UNION
+                  SELECT source AS neighbor_id FROM edges WHERE kind = 'calls' AND target = ?
+                ) q
+                JOIN nodes n ON n.id = q.neighbor_id
+                WHERE n.name IS NOT NULL AND n.name != ''
+                """,
+                (node_id, node_id),
+            ).fetchall()
+            for row in rows:
+                rid = str(row['id'])
+                if rid in visited:
+                    continue
+                visited.add(rid)
+                queue.append((rid, depth + 1))
+                related.append(
+                    {
+                        'file_path': str(row['file_path']),
+                        'symbol_name': str(row['name']),
+                        'kind': str(row['kind']),
+                        'start_line': int(row['start_line'] or 1),
+                        'end_line': int(row['end_line'] or 1),
+                    }
+                )
+        return related
+
+
+def lookup_related_symbols(
+    graph_db_path: str,
+    file_path: str,
+    symbol_name: str,
+    *,
+    hops: int = 1,
+) -> list[dict[str, Any]]:
+    try:
+        return lookup_related_symbols_strict(
+            graph_db_path, file_path, symbol_name, hops=hops
+        )
+    except Exception:
+        return []

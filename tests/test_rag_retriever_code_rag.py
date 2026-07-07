@@ -148,3 +148,89 @@ def test_format_code_hit_renders_header_body() -> None:
 def test_format_code_hit_returns_empty_when_no_body() -> None:
     plugin = _make_plugin_without_init()
     assert plugin._format_code_hit({"file_path": "x.py", "chunk_text": "   "}) == ""
+
+
+# ---------------------------------------------------------------------------
+# Cross-model retrieval safety (Review finding 3):
+#   同一个查询向量不能盲扫所有 rag_code_* 集合——维度不匹配的集合会被
+#   Qdrant 4xx,tolerant 分支会把它们静默吞掉。这里锁死:
+#     1) 有匹配集合时,只保留匹配那份
+#     2) 无匹配集合时,返回空列表(比全部盲扫更安全)
+#     3) 空 embedding_model 时退化为原全集(不误伤,交给调用方处理)
+# ---------------------------------------------------------------------------
+
+
+def test_select_code_collections_picks_only_matching_model() -> None:
+    from aigateway_core.plugins.rag_retriever_plugin import (
+        _select_code_collections_for_model,
+    )
+
+    names = [
+        "rag_documents",
+        "rag_code_qwen_qwen3_embedding_0_6b",
+        "rag_code_text_embedding_3_large",
+        "rag_code_bge_small",
+    ]
+    picked = _select_code_collections_for_model(names, "Qwen/Qwen3-Embedding-0.6B")
+    assert picked == ["rag_code_qwen_qwen3_embedding_0_6b"]
+
+
+def test_select_code_collections_returns_empty_when_no_match() -> None:
+    from aigateway_core.plugins.rag_retriever_plugin import (
+        _select_code_collections_for_model,
+    )
+
+    names = ["rag_code_qwen_qwen3_embedding_0_6b", "rag_code_bge_small"]
+    picked = _select_code_collections_for_model(names, "text-embedding-3-large")
+    assert picked == []
+
+
+def test_select_code_collections_falls_back_when_model_missing() -> None:
+    from aigateway_core.plugins.rag_retriever_plugin import (
+        _select_code_collections_for_model,
+    )
+
+    names = ["rag_code_qwen_qwen3_embedding_0_6b", "rag_documents"]
+    picked = _select_code_collections_for_model(names, "")
+    # 空 model → 保留所有 rag_code_* 前缀(过滤掉非代码集合),交给上层处理
+    assert picked == ["rag_code_qwen_qwen3_embedding_0_6b"]
+
+
+def test_list_code_collections_filters_by_configured_embedding_model() -> None:
+    """回归:_list_code_collections 拉到的集合会按 self._config.embedding_model
+    再过滤一层,避免向不同维度的集合投送同一个查询向量。
+    """
+    plugin = _make_plugin_without_init(embedding_model="Qwen/Qwen3-Embedding-0.6B")
+
+    fake_resp = MagicMock()
+    fake_resp.raise_for_status = MagicMock()
+    fake_resp.json = MagicMock(
+        return_value={
+            "result": {
+                "collections": [
+                    {"name": "rag_documents"},
+                    {"name": "rag_code_qwen_qwen3_embedding_0_6b"},
+                    {"name": "rag_code_text_embedding_3_large"},
+                ]
+            }
+        }
+    )
+
+    class _FakeClient:
+        def __init__(self, *_a, **_kw) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc) -> None:
+            return None
+
+        async def get(self, _url):
+            return fake_resp
+
+    with patch("httpx.AsyncClient", _FakeClient):
+        picked = asyncio.new_event_loop().run_until_complete(
+            plugin._list_code_collections()
+        )
+    assert picked == ["rag_code_qwen_qwen3_embedding_0_6b"]
