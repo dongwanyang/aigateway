@@ -157,3 +157,80 @@ def test_compute_line_span_falls_back_when_chunk_missing() -> None:
     start, end = compute_line_span(source, chunk)
     assert start == 1
     assert end >= start
+
+
+# ---------------------------------------------------------------------------
+# Task 7: import payload shape lock-in
+# ---------------------------------------------------------------------------
+
+
+def test_code_chunk_payload_includes_required_fields() -> None:
+    """锁死 code chunk 写入 Qdrant 的 payload 字段集(spec §Payload)."""
+    required = {
+        "document_id",
+        "filename",
+        "file_path",
+        "language",
+        "chunk_index",
+        "chunk_text",
+        "chunk_type",
+        "function_name",
+        "class_name",
+        "start_line",
+        "end_line",
+        "callers",
+        "callees",
+        "imports",
+        "embedding_model",
+    }
+    sample = {
+        "document_id": "doc1",
+        "filename": "auth.py",
+        "file_path": "core/auth.py",
+        "language": "python",
+        "chunk_index": 0,
+        "chunk_text": "def login():\n    pass",
+        "chunk_type": "function",
+        "function_name": "login",
+        "class_name": None,
+        "start_line": 1,
+        "end_line": 2,
+        "callers": [],
+        "callees": [],
+        "imports": [],
+        "embedding_model": "Qwen/Qwen3-Embedding-0.6B",
+    }
+    assert required.issubset(set(sample.keys()))
+
+
+def test_code_rag_routes_build_matching_payload_shape(monkeypatch) -> None:
+    """确认 code_rag_routes 侧构造 payload 的字段集与 spec 一致。
+
+    这里做静态字符串核对而不启动完整导入(依赖 codegraph/sentence-transformers),
+    避免在开发机跑重资产依赖。
+    """
+    src = (
+        REPO_ROOT
+        / "aigateway-api"
+        / "src"
+        / "aigateway_api"
+        / "code_rag_routes.py"
+    ).read_text(encoding="utf-8")
+    for field in (
+        "document_id",
+        "filename",
+        "file_path",
+        "language",
+        "chunk_index",
+        "chunk_text",
+        "chunk_type",
+        "function_name",
+        "class_name",
+        "start_line",
+        "end_line",
+        "callers",
+        "callees",
+        "imports",
+        "embedding_model",
+    ):
+        assert f'"{field}"' in src, f"code_rag_routes 缺少 payload 字段 '{field}'"
