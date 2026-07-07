@@ -294,3 +294,42 @@ def test_code_rag_routes_batches_embedding_work() -> None:
     assert "batch_size = 64" in src
     assert "for batch_start in range(0, len(chunks), batch_size):" in src
     assert "await _mark(done=processed, current_file=current_file)" in src
+
+
+def test_code_rag_routes_use_strict_graph_lookup_during_import() -> None:
+    src = (
+        REPO_ROOT
+        / "aigateway-api"
+        / "src"
+        / "aigateway_api"
+        / "code_rag_routes.py"
+    ).read_text(encoding="utf-8")
+    assert "lookup_symbol_metadata_strict" in src
+    assert "graph_meta = lookup_symbol_metadata_strict(" in src
+
+
+def test_folder_source_label_prefers_root_folder_name() -> None:
+    from aigateway_api.code_rag_routes import _folder_source_label
+
+    class DummyUpload:
+        def __init__(self, filename: str | None) -> None:
+            self.filename = filename
+
+    files = [DummyUpload("main.py")]
+    assert _folder_source_label(files, ["repo/src/main.py"]) == "folder://repo"
+    assert _folder_source_label(files, []) == "folder://main.py"
+    assert _folder_source_label([DummyUpload(None)], []) == "folder://upload"
+
+
+def test_rag_retriever_source_mentions_real_graph_hops() -> None:
+    src = (
+        REPO_ROOT
+        / "aigateway-core"
+        / "src"
+        / "aigateway_core"
+        / "plugins"
+        / "rag_retriever_plugin.py"
+    ).read_text(encoding="utf-8")
+    assert "lookup_related_symbols" in src
+    assert 'code_rag_graph_hops' in src
+    assert 'related_chunks = await self._fetch_related_code_chunks(' in src

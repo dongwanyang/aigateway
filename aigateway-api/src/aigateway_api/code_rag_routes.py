@@ -281,6 +281,21 @@ def _sanitize_relative_path(raw: str) -> str:
     return "/".join(parts)
 
 
+def _folder_source_label(files: List[UploadFile], relative_paths: List[str]) -> str:
+    """优先使用上传目录根名作为 folder source_label,避免退化成首个文件名."""
+    for raw in relative_paths:
+        rel = _sanitize_relative_path(raw)
+        if not rel:
+            continue
+        root = rel.split("/", 1)[0]
+        if root:
+            return f"folder://{root}"
+    for upload in files:
+        if upload.filename:
+            return f"folder://{upload.filename}"
+    return "folder://upload"
+
+
 async def _materialize_folder_upload(
     files: List[UploadFile],
     relative_paths: List[str],
@@ -348,7 +363,7 @@ async def _run_code_import_task(
         resolve_collection_name,
     )
     from aigateway_core.code_rag.graph_builder import build_code_graph
-    from aigateway_core.code_rag.graph_query import lookup_symbol_metadata
+    from aigateway_core.code_rag.graph_query import lookup_symbol_metadata_strict
     from aigateway_core.code_rag.splitter import split_code_directory
 
     redis_mgr = getattr(app_state, "redis_manager", None)
@@ -413,7 +428,7 @@ async def _run_code_import_task(
                     or chunk.get("class_name")
                     or None
                 )
-                graph_meta = lookup_symbol_metadata(
+                graph_meta = lookup_symbol_metadata_strict(
                     graph_db_path,
                     chunk.get("file_path") or "",
                     symbol_name,
@@ -565,7 +580,7 @@ async def import_code_repository(
                 max_total_size_mb,
                 max_file_count,
             )
-            source_label = f"folder://{files[0].filename or 'upload'}"
+            source_label = _folder_source_label(files, relative_paths)
         elif source_type == "zip":
             upload = form.get("file")
             if not isinstance(upload, UploadFile):

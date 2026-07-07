@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
 from ..context import NS_RAG_RETRIEVER, PipelineContext
@@ -64,6 +65,18 @@ def _expand_code_hit_metadata(
     merged["callees"] = list(graph_metadata.get("callees", []) or [])
     merged["imports"] = list(graph_metadata.get("imports", []) or [])
     return merged
+
+
+def _code_hit_identity(hit: Dict[str, Any]) -> tuple[str, str, int]:
+    try:
+        chunk_index = int(hit.get("chunk_index", 0) or 0)
+    except (TypeError, ValueError):
+        chunk_index = 0
+    return (
+        str(hit.get("document_id", "")),
+        str(hit.get("file_path", hit.get("filename", ""))),
+        chunk_index,
+    )
 
 
 class RAGRetrieverPlugin:
@@ -428,21 +441,93 @@ class RAGRetrieverPlugin:
         flat.sort(key=lambda p: (p.get("_score") or 0), reverse=True)
         return flat[:top_k]
 
+    async def _fetch_related_code_chunks(
+        self,
+        collection_name: str,
+        related_symbols: List[Dict[str, Any]],
+        base_hit: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        if not related_symbols:
+            return []
+
+        try:
+            import httpx
+        except Exception:
+            return []
+
+        file_to_symbols: Dict[str, set[str]] = defaultdict(set)
+        for item in related_symbols:
+            file_path = str(item.get("file_path", "") or "")
+            symbol_name = str(item.get("symbol_name", "") or "")
+            if file_path and symbol_name:
+                file_to_symbols[file_path].add(symbol_name)
+        if not file_to_symbols:
+            return []
+
+        out: List[Dict[str, Any]] = []
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            for file_path, symbols in file_to_symbols.items():
+                try:
+                    resp = await client.post(
+                        f"{self._qdrant_url()}/collections/{collection_name}/points/scroll",
+                        json={
+                            "limit": 200,
+                            "with_payload": True,
+                            "filter": {
+                                "must": [
+                                    {
+                                        "key": "document_id",
+                                        "match": {"value": base_hit.get("document_id")},
+                                    },
+                                    {"key": "file_path", "match": {"value": file_path}},
+                                ]
+                            },
+                        },
+                    )
+                    if resp.status_code == 404:
+                        continue
+                    resp.raise_for_status()
+                    payload = resp.json()
+                except Exception as exc:
+                    logger.warning(
+                        "code_rag: scroll related chunks 失败 coll=%s file=%s: %s",
+                        collection_name,
+                        file_path,
+                        exc,
+                    )
+                    continue
+
+                for item in payload.get("result", {}).get("points", []) or []:
+                    chunk = dict(item.get("payload") or {})
+                    symbol = chunk.get("function_name") or chunk.get("class_name")
+                    if symbol not in symbols:
+                        continue
+                    chunk["_collection"] = collection_name
+                    chunk["_score"] = base_hit.get("_score")
+                    chunk["_graph_related"] = True
+                    out.append(chunk)
+        return out
+
     async def _expand_code_hits_with_graph(
         self, hits: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
-        """按 hit.document_id 定位图谱库,把 callers/callees/imports 并入 payload."""
+        """导入 metadata，并按 code_rag_graph_hops 抓取 related symbol chunks."""
         if not hits:
             return hits
 
         graph_dir = getattr(self._config, "code_graph_db_dir", "/data/code_graphs")
+        hops = int(getattr(self._config, "code_rag_graph_hops", 1) or 1)
         try:
-            from aigateway_core.code_rag.graph_query import lookup_symbol_metadata
+            from aigateway_core.code_rag.graph_query import (
+                lookup_related_symbols,
+                lookup_symbol_metadata,
+            )
         except Exception as exc:
             logger.warning("code_rag: 无法加载 graph_query,跳过图谱展开: %s", exc)
             return hits
 
         expanded: List[Dict[str, Any]] = []
+        seen = {_code_hit_identity(hit) for hit in hits}
         for hit in hits:
             doc_id = str(hit.get("document_id", ""))
             graph_db_path = os.path.join(graph_dir, f"{doc_id}.db")
@@ -454,7 +539,28 @@ class RAGRetrieverPlugin:
                     symbol if symbol else None,
                     str(hit.get("chunk_text", "")),
                 )
-                expanded.append(_expand_code_hit_metadata(hit, meta))
+                enriched = _expand_code_hit_metadata(hit, meta)
+                expanded.append(enriched)
+
+                if not symbol or hops <= 0:
+                    continue
+                related_symbols = lookup_related_symbols(
+                    graph_db_path,
+                    str(hit.get("file_path", "")),
+                    str(symbol),
+                    hops=hops,
+                )
+                related_chunks = await self._fetch_related_code_chunks(
+                    str(hit.get("_collection", "")),
+                    related_symbols,
+                    enriched,
+                )
+                for chunk in related_chunks:
+                    ident = _code_hit_identity(chunk)
+                    if ident in seen:
+                        continue
+                    seen.add(ident)
+                    expanded.append(chunk)
             except Exception as exc:
                 logger.warning(
                     "code_rag: 图谱查询失败 doc=%s symbol=%s: %s", doc_id, symbol, exc
