@@ -106,6 +106,10 @@ plugins:
       chunk_size: 512        # 文档分块大小（token）
       chunk_overlap: 64      # 分块重叠
       collection_name: rag_documents  # Qdrant 集合名称
+      # Code RAG 检索增强（配合下方 code_rag 顶级块使用）
+      code_rag_enabled: true       # 是否在检索时并行查询 rag_code_* 代码集合
+      code_rag_graph_hops: 2       # CodeGraph 调用图跳数（callers/callees 展开深度）
+      code_rag_top_k: 5            # 代码集合检索 top-K
 
   - name: conv_compressor    # 对话历史压缩（长会话摘要）
     enabled: false           # 默认关闭，需安装 langchain
@@ -254,6 +258,27 @@ rate_limiter:
 streaming:
   cache_chunk_delay_ms: 20   # 缓存命中时模拟流式的 chunk 间延迟（毫秒）
   cache_chunk_count: 20      # 将缓存内容分成多少个 chunk 发送
+
+# ==========================
+# 代码知识库配置 (Code RAG)
+# ==========================
+# 代码专用 RAG 子系统:文件夹/服务器路径/Git URL/ZIP 四种导入源
+# 独立的 Qdrant 集合(rag_code_<model_slug>) + 每个仓库一份 CodeGraph SQLite 图谱
+code_rag:
+  enabled: true                # 是否启用 Code RAG 导入路由（前端 Code 标签需依赖它）
+  allowed_server_paths:        # 允许通过 server_path 方式导入的根目录白名单
+    - /home/ubuntu             # realpath 展开后必须落在这些目录内，否则拒绝
+    - /workspace
+  max_file_size_mb: 5          # 单文件最大 MB
+  max_total_size_mb: 200       # 一次导入总体积最大 MB
+  max_file_count: 5000         # 单次导入最大文件数
+  ignore_patterns:             # 忽略的目录 / 文件片段（子串匹配）
+    - node_modules
+    - .git
+    - __pycache__
+    - dist
+    - build
+  graph_db_dir: /data/code_graphs  # CodeGraph SQLite 图谱库存放目录（每个仓库一份）
 
 # ==========================
 # 热重载与调试

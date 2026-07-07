@@ -72,6 +72,9 @@ plugins:
     collection_name: rag_documents
     embedding_backend: local
     embedding_model: Qwen/Qwen3-Embedding-0.6B
+    code_rag_enabled: true
+    code_rag_graph_hops: 2
+    code_rag_top_k: 5
 - name: conv_compressor
   enabled: true
   depends_on:
@@ -114,23 +117,6 @@ providers:
     num_retries: 3
     retry_after: 1000
     timeout: 3600
-  test-broken:
-    api_key: dummy-not-used
-    base_url: http://127.0.0.1:59999
-    model_grouper:
-    - models:
-      - name: test-broken-model
-        modality:
-        - llm
-      fallback_models:
-      - agnes-2.0-flash
-      pricing:
-        test-broken-model:
-          prompt: 0
-          completion: 0
-    num_retries: 1
-    retry_after: 100
-    timeout: 5
   deepseek:
     api_key: ${DEEPSEEK_API_KEY:-}
     base_url: https://api.deepseek.com/v1
@@ -144,6 +130,34 @@ providers:
         deepseek-v4-flash:
           prompt: 0.02
           completion: 1
+    num_retries: 3
+    retry_after: 1000
+    timeout: 120
+  glm5.2:
+    api_key: sk-cb-tWzVVMJwDSA4GnIXfJ9mlkLZWp1AIcxg
+    base_url: https://buddy.relaypool.cam/codebuddy/v1
+    model_grouper:
+    - models:
+      - name: glm-5.2
+        modality:
+        - llm
+      - name: deepseek-v4-pro
+        modality:
+        - llm
+      - name: kimi-k2.7-code
+        modality:
+        - llm
+      fallback_models: []
+      pricing:
+        glm-5.2:
+          prompt: 0
+          completion: 0
+        deepseek-v4-pro:
+          prompt: 0
+          completion: 0
+        kimi-k2.7-code:
+          prompt: 0
+          completion: 0
     num_retries: 3
     retry_after: 1000
     timeout: 120
@@ -203,16 +217,29 @@ rate_limiter:
 streaming:
   cache_chunk_delay_ms: 20
   cache_chunk_count: 20
+code_rag:
+  enabled: true
+  allowed_server_paths:
+  - /home/ubuntu
+  - /workspace
+  max_file_size_mb: 5
+  max_total_size_mb: 200
+  max_file_count: 5000
+  ignore_patterns:
+  - node_modules
+  - .git
+  - __pycache__
+  - dist
+  - build
+  graph_db_dir: /data/code_graphs
 hot_reload: true
-# 5 维度 Debug 开关(替换旧 debug_mode 单开关,PR2 落地 2026-07-05)。
-# 每档独立开关,插件层用 AND 逻辑(总开关+单个开都开才发 kind=debug 事件+payload)。
 debug:
-  frontend: false          # 前端 control-panel 浏览器日志
-  entry: false             # auth + dispatcher + 共用前置(PII/media) + quota + prompt_compress 内联
-  cache: false             # L1/L2/L3 CacheManager 全路径
-  bridge: false            # LiteLLMBridge + circuit breaker + auto 解析
+  frontend: false
+  entry: false
+  cache: false
+  bridge: false
   plugins:
-    enabled: false         # 插件层总开关(AND:总开 + 单个开才生效)
+    enabled: false
     per_plugin:
       pii_detector: false
       prompt_cache: false

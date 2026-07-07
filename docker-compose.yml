@@ -23,6 +23,7 @@ services:
       - AI_GATEWAY_QDRANT_URL=http://qdrant:6333
     volumes:
       - ./config.yaml:/app/config.yaml
+      - code_graphs_data:/data/code_graphs
     depends_on:
       redis:
         condition: service_healthy
@@ -127,3 +128,4 @@ volumes:
   qdrant-data:
   grafana-data:
   prometheus-data:
+  code_graphs_data:            # Code RAG: 每仓库一份 CodeGraph SQLite 图谱库
