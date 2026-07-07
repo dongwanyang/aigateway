@@ -311,10 +311,15 @@ def _materialize_git_repo(
 
 
 def _materialize_zip_upload(zip_bytes: bytes, max_total_mb: int) -> str:
-    """安全解压 ZIP(zip-slip + 总大小上限)."""
+    """安全解压 ZIP(zip-slip + 总大小上限 + 解压控制).
+
+    不再依赖 zf.extractall() 自带 sanitizer（Python <3.12 不可靠）。
+    改为逐成员校验 + 显式写入，同时限制每个文件的解压体积。
+    """
     import io
 
     tmp_dir = tempfile.mkdtemp(prefix="code_rag_zip_")
+    max_file_mb = 50  # 单文件最大解压体积
     try:
         with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
             root = Path(tmp_dir).resolve()
@@ -324,11 +329,29 @@ def _materialize_zip_upload(zip_bytes: bytes, max_total_mb: int) -> str:
                     continue
                 dest = (root / info.filename).resolve()
                 if root not in dest.parents and dest != root:
-                    raise HTTPException(status_code=400, detail=f"ZIP zip-slip 拦截: {info.filename}")
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"ZIP zip-slip 拦截: {info.filename}",
+                    )
                 total_bytes += info.file_size
                 if total_bytes > max_total_mb * 1024 * 1024:
-                    raise HTTPException(status_code=400, detail="ZIP 解压后总体积超过上限")
-            zf.extractall(tmp_dir)
+                    raise HTTPException(
+                        status_code=400,
+                        detail="ZIP 解压后总体积超过上限",
+                    )
+                # 单文件解压上限（防 zip bomb 膨胀）
+                if info.file_size > max_file_mb * 1024 * 1024:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"ZIP 单文件过大: {info.filename}",
+                    )
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(info) as src, open(dest, "wb") as dst:
+                    while True:
+                        chunk = src.read(65536)
+                        if not chunk:
+                            break
+                        dst.write(chunk)
     except HTTPException:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise
