@@ -1,11 +1,15 @@
 FROM python:3.12-slim
 
 # ============================================================
-# 系统依赖: OCR + 视频 + curl(healthcheck)
+# 系统依赖: OCR + 视频 + curl(healthcheck) + git(Code RAG Git 源浅克隆需要 git CLI)
+# + nodejs/npm(CodeGraph 官方 CLI 通过 npm 安装)
 # 几乎不变，放最前确保永久缓存
 # ============================================================
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    git \
+    nodejs \
+    npm \
     tesseract-ocr \
     tesseract-ocr-chi-sim \
     tesseract-ocr-eng \
@@ -30,6 +34,14 @@ RUN pip install torch
 # ============================================================
 COPY aigateway-api/requirements.txt /tmp/requirements.txt
 RUN pip install -r /tmp/requirements.txt
+
+# ============================================================
+# CodeGraph 官方 CLI（多语言,SQLite: .codegraph/codegraph.db）
+# 走 npm 全局安装,统一使用 README 文档里的 codegraph 命令入口。
+# 注意: 这里安装的是 GitHub 项目 @colbymchenry/codegraph,不是同名 Python 包 API。
+# --force: legacy builder 复用层时 /usr/local/bin/codegraph 可能已存在,直接覆盖。
+# ============================================================
+RUN npm install -g --force @colbymchenry/codegraph
 
 # ============================================================
 # 预下载 Qwen3-Embedding-0.6B 模型权重（~600MB，独立层）

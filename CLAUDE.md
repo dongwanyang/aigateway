@@ -207,6 +207,7 @@ python3 -m pytest tests/ --cov=aigateway_core --cov=aigateway_api
 
 ## Known States & Gotchas
 
+- **Code RAG is now a separate subsystem** — Control Panel Knowledge page has a Code tab with async imports (folder/server_path/git/zip), dedicated `/admin/rag/code/*` routes, per-model `rag_code_*` Qdrant collections, and per-repo CodeGraph SQLite files under `/data/code_graphs`. Graph build uses the official `@colbymchenry/codegraph` CLI (`codegraph init` / `codegraph index`), not a Python `codegraph` API.
 - **Understanding pipeline runs only 2 plugins in engine** — 7 registered, `dispatcher._skip_names` filters out 5 (pii/cache/semantic/compress/media, all already run in the shared prefix); engine executes `rag_retriever + conv_compressor` only. Generation pipeline sets no skip → all 6 gen-opt plugins run.
 - **model_router plugin is fully removed** — real routing lives in `LiteLLMBridge` auto resolver. `classify_request` only handles modality. Don't confuse with `gen_model_router` (different plugin, generation pipeline).
 - **`PIIDetector` / `PromptCompressPlugin` double-instantiated** — one in registry (skipped for understanding) + one on `app.state` (actually runs). Inline-integration artifact, not a bug.

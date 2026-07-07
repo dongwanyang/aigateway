@@ -388,71 +388,84 @@ async def _run_code_import_task(
             name=collection_name, size=int(vector_dim), distance="COSINE"
         )
 
-        # 4) encode + enrich + upsert
-        texts = [c["chunk_text"] for c in chunks]
-        vectors = await loop.run_in_executor(
-            None, lambda: encode_texts(embedding_model, texts)
-        )
-
+        # 4) encode + enrich + upsert（分批,避免 1000+ chunks 一次性 encode 卡死）
+        # 大仓库（例如 click / 本仓库）切出来的 chunk 数可能轻松上千；若一次性
+        # 调 sentence-transformers.encode(texts) 会出现：
+        #   - 长时间无进度更新，看起来像任务“卡在 embedding”
+        #   - 内存峰值偏高
+        # 因此改为固定批次编码 + 固定批次 upsert；每批后刷新 done/current_file。
+        batch_size = 64
         payloads: List[Dict[str, Any]] = []
-        points: List[Dict[str, Any]] = []
-        for idx, chunk in enumerate(chunks):
-            symbol_name = (
-                chunk.get("function_name")
-                or chunk.get("class_name")
-                or None
-            )
-            graph_meta = lookup_symbol_metadata(
-                graph_db_path,
-                chunk.get("file_path") or "",
-                symbol_name,
-                chunk.get("chunk_text") or "",
-            )
-            payload = {
-                "document_id": document_id,
-                "filename": chunk.get("filename", ""),
-                "file_path": chunk.get("file_path", ""),
-                "language": chunk.get("language", ""),
-                "chunk_index": int(chunk.get("chunk_index", idx)),
-                "chunk_text": chunk.get("chunk_text", ""),
-                "chunk_type": graph_meta.get("chunk_type", "module"),
-                "function_name": graph_meta.get("function_name"),
-                "class_name": graph_meta.get("class_name"),
-                "start_line": int(chunk.get("start_line", 1)),
-                "end_line": int(chunk.get("end_line", 1)),
-                "callers": graph_meta.get("callers", []),
-                "callees": graph_meta.get("callees", []),
-                "imports": graph_meta.get("imports", []),
-                "embedding_model": embedding_model,
-            }
-            payloads.append(payload)
-            points.append(
-                {
-                    "id": str(uuid.uuid5(
-                        uuid.NAMESPACE_URL,
-                        f"{document_id}:{payload['file_path']}:{payload['chunk_index']}",
-                    )),
-                    "vector": vectors[idx],
-                    "payload": payload,
-                }
-            )
-            if idx % 20 == 0:
-                await _mark(done=idx, current_file=payload["file_path"])
+        processed = 0
 
-        # 5) upsert to Qdrant in one batch (rollback on failure)
-        try:
-            resp = await qdrant_mgr._http.put(
-                f"/collections/{collection_name}/points",
-                json={"points": points},
+        for batch_start in range(0, len(chunks), batch_size):
+            batch_chunks = chunks[batch_start : batch_start + batch_size]
+            batch_texts = [c["chunk_text"] for c in batch_chunks]
+            batch_vectors = await loop.run_in_executor(
+                None, lambda: encode_texts(embedding_model, batch_texts)
             )
-            resp.raise_for_status()
-            written_points = True
-        except Exception:
-            await qdrant_mgr.delete_by_filter(
-                collection_name,
-                {"must": [{"key": "document_id", "match": {"value": document_id}}]},
-            )
-            raise
+
+            batch_points: List[Dict[str, Any]] = []
+            for offset, chunk in enumerate(batch_chunks):
+                global_idx = batch_start + offset
+                symbol_name = (
+                    chunk.get("function_name")
+                    or chunk.get("class_name")
+                    or None
+                )
+                graph_meta = lookup_symbol_metadata(
+                    graph_db_path,
+                    chunk.get("file_path") or "",
+                    symbol_name,
+                    chunk.get("chunk_text") or "",
+                )
+                payload = {
+                    "document_id": document_id,
+                    "filename": chunk.get("filename", ""),
+                    "file_path": chunk.get("file_path", ""),
+                    "language": chunk.get("language", ""),
+                    "chunk_index": int(chunk.get("chunk_index", global_idx)),
+                    "chunk_text": chunk.get("chunk_text", ""),
+                    "chunk_type": graph_meta.get("chunk_type", "module"),
+                    "function_name": graph_meta.get("function_name"),
+                    "class_name": graph_meta.get("class_name"),
+                    "start_line": int(chunk.get("start_line", 1)),
+                    "end_line": int(chunk.get("end_line", 1)),
+                    "callers": graph_meta.get("callers", []),
+                    "callees": graph_meta.get("callees", []),
+                    "imports": graph_meta.get("imports", []),
+                    "embedding_model": embedding_model,
+                }
+                payloads.append(payload)
+                batch_points.append(
+                    {
+                        "id": str(uuid.uuid5(
+                            uuid.NAMESPACE_URL,
+                            f"{document_id}:{payload['file_path']}:{payload['chunk_index']}",
+                        )),
+                        "vector": batch_vectors[offset],
+                        "payload": payload,
+                    }
+                )
+
+            # 每一批单独 upsert；任一批失败都按 document_id 回滚整份导入。
+            try:
+                resp = await qdrant_mgr._http.put(
+                    f"/collections/{collection_name}/points",
+                    json={"points": batch_points},
+                )
+                resp.raise_for_status()
+                written_points = True
+            except Exception:
+                await qdrant_mgr.delete_by_filter(
+                    collection_name,
+                    {"must": [{"key": "document_id", "match": {"value": document_id}}]},
+                )
+                raise
+
+            processed += len(batch_chunks)
+            current_file = batch_chunks[-1].get("file_path") if batch_chunks else None
+            await _mark(done=processed, current_file=current_file)
 
         await _mark(done=len(chunks))
 

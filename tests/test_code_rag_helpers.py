@@ -234,3 +234,63 @@ def test_code_rag_routes_build_matching_payload_shape(monkeypatch) -> None:
         "embedding_model",
     ):
         assert f'"{field}"' in src, f"code_rag_routes 缺少 payload 字段 '{field}'"
+
+
+def test_lookup_symbol_metadata_reads_codegraph_sqlite_schema(tmp_path: Path) -> None:
+    import sqlite3
+
+    from aigateway_core.code_rag.graph_query import lookup_symbol_metadata
+
+    db = tmp_path / "codegraph.db"
+    conn = sqlite3.connect(db)
+    cur = conn.cursor()
+    cur.execute(
+        "CREATE TABLE nodes (id TEXT PRIMARY KEY, kind TEXT, name TEXT, qualified_name TEXT, file_path TEXT, language TEXT, start_line INTEGER, end_line INTEGER)"
+    )
+    cur.execute(
+        "CREATE TABLE edges (id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT, target TEXT, kind TEXT, metadata TEXT, line INTEGER, col INTEGER, provenance TEXT)"
+    )
+    cur.executemany(
+        "INSERT INTO nodes (id, kind, name, qualified_name, file_path, language, start_line, end_line) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            ("file:auth.py", "file", "auth.py", "auth.py", "auth.py", "python", 1, 20),
+            ("import:jwt", "import", "jwt", "jwt", "auth.py", "python", 1, 1),
+            ("function:login", "function", "login", "login", "auth.py", "python", 5, 8),
+            ("function:register", "function", "register", "register", "auth.py", "python", 10, 12),
+            ("function:hash", "function", "hash_password", "hash_password", "auth.py", "python", 14, 16),
+        ],
+    )
+    cur.executemany(
+        "INSERT INTO edges (source, target, kind, metadata, line, col, provenance) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            ("file:auth.py", "import:jwt", "contains", None, None, None, None),
+            ("file:auth.py", "function:login", "contains", None, None, None, None),
+            ("file:auth.py", "function:register", "contains", None, None, None, None),
+            ("file:auth.py", "function:hash", "contains", None, None, None, None),
+            ("function:register", "function:login", "calls", '{"confidence": 0.9}', 11, 3, None),
+            ("function:login", "function:hash", "calls", '{"confidence": 0.9}', 6, 4, None),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    meta = lookup_symbol_metadata(str(db), "auth.py", "login", "def login():\n    return hash_password()")
+    assert meta["chunk_type"] == "function"
+    assert meta["function_name"] == "login"
+    assert meta["class_name"] is None
+    assert meta["callers"] == ["register"]
+    assert meta["callees"] == ["hash_password"]
+    assert meta["imports"] == ["jwt"]
+
+
+def test_code_rag_routes_batches_embedding_work() -> None:
+    src = (
+        REPO_ROOT
+        / "aigateway-api"
+        / "src"
+        / "aigateway_api"
+        / "code_rag_routes.py"
+    ).read_text(encoding="utf-8")
+    assert "batch_size = 64" in src
+    assert "for batch_start in range(0, len(chunks), batch_size):" in src
+    assert "await _mark(done=processed, current_file=current_file)" in src

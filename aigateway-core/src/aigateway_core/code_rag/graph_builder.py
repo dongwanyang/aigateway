@@ -1,28 +1,68 @@
-"""CodeGraph 图谱库构建 wrapper.
+"""CodeGraph 官方 CLI wrapper.
 
-一个仓库一份 SQLite 图谱: graph_db_dir/<document_id>.db
-构建失败会向上抛 —— import 是 strict 的,retrieval 才是 tolerant 的。
-codegraph 走 lazy import,便于开发机在不装该包时仍能加载本模块。
+重要：这里集成的是 GitHub 文档里的官方 CodeGraph CLI / npm 包
+`@colbymchenry/codegraph`，而不是我们之前误用的 Python 包 API 假设。
+
+集成路线：
+1. 在源码目录执行 `codegraph init`（会创建 `.codegraph/` 并建立索引）
+2. 再执行 `codegraph index [path]` 明确触发完整索引
+3. 将生成的 `.codegraph/codegraph.db` 复制到 `graph_db_path`
+
+文档要点（来自 upstream README）：
+- 支持 20+ languages
+- 本地 SQLite DB 默认位于 `.codegraph/codegraph.db`
+- `codegraph init` / `codegraph index [path]` 是标准 CLI 工作流
 """
 from __future__ import annotations
 
+import shutil
+import subprocess
 from pathlib import Path
-from typing import Any
+
+
+def _run_codegraph(args: list[str], *, cwd: str) -> None:
+    """调用官方 codegraph CLI；失败时抛 RuntimeError（导入链路 strict）。"""
+    try:
+        proc = subprocess.run(
+            args,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "codegraph CLI 未安装；请在 gateway 镜像中安装 @colbymchenry/codegraph"
+        ) from exc
+
+    if proc.returncode != 0:
+        output = proc.stdout.strip()
+        raise RuntimeError(
+            f"codegraph command failed ({' '.join(args)}): {output[:4000]}"
+        )
 
 
 def build_code_graph(source_dir: str, graph_db_path: str) -> str:
-    """在 source_dir 上跑 CodeGraph 预索引,把 SQLite 图谱写到 graph_db_path.
+    """为 source_dir 构建官方 CodeGraph SQLite 图谱，并复制到 graph_db_path。
 
-    返回真实落盘的 graph_db_path。父目录不存在会先建。
-    构建/落盘失败时向上抛异常,由调用方(_run_code_import_task)标记任务失败。
+    返回值：graph_db_path（最终 SQLite 文件绝对路径）
+
+    失败策略：任一步失败直接抛异常，由导入任务整体标记 failed。
     """
-    Path(graph_db_path).parent.mkdir(parents=True, exist_ok=True)
+    source_root = Path(source_dir).resolve()
+    target = Path(graph_db_path).resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
 
-    # codegraph 的 Python API 在 pypi 上有多个实现;此处按最常见的公开约定调用,
-    # 若实际安装版本 API 略有差异,由集成阶段做最小对齐(仍禁止手写 tree-sitter)。
-    from codegraph import CodeGraph  # type: ignore[import-not-found]
+    # 官方 CLI 工作流: 在项目目录执行 init + index。
+    _run_codegraph(["codegraph", "init"], cwd=str(source_root))
+    _run_codegraph(["codegraph", "index", str(source_root)], cwd=str(source_root))
 
-    graph: Any = CodeGraph(source_dir)
-    graph.build()
-    graph.save(graph_db_path)
-    return graph_db_path
+    default_db = source_root / ".codegraph" / "codegraph.db"
+    if not default_db.exists():
+        raise RuntimeError(
+            f"codegraph 索引后未生成 SQLite: expected {default_db}"
+        )
+
+    shutil.copy2(default_db, target)
+    return str(target)
