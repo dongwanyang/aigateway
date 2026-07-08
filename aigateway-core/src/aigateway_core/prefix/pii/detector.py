@@ -48,7 +48,7 @@ _PII_STANDALONE = [
     (r'https?://[^\s<>"{}|\\^`[\]]+', '[URL_REDACTED]'),
     # Specific patterns before generic ones, to avoid being swallowed by generalization
     (r'\b[1-9]\d{5}(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[\dXx]\b', '[CN_ID_REDACTED]'),  # 18-digit ID
-    (r'\b[1-9]\d{8}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}\b', '[CN_ID_OLD_REDACTED]'),  # 15-digit ID
+    (r'\b[1-9]\d{7}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}\b', '[CN_ID_OLD_REDACTED]'),  # 15-digit ID
     (r'\b[GpP]\d{8,9}\b', '[CN_PASSPORT_REDACTED]'),                             # China passport
     (r'\b[A-HJ-NPR-Z0-9]{17}\b', '[VIN_REDACTED]'),                              # VIN
     (r'\b[62][0-9]{14,18}\b', '[CN_BANK_CARD_REDACTED]'),                        # UnionPay
