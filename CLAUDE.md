@@ -127,6 +127,7 @@ Backfill: L2 hit → L1; L3 hit → L1 only (approximate); MISS → L1+L2 + asyn
 | `Dockerfile.frontend` | Node 20 build → Nginx serve. |
 | `.env.example` / `.env.docker` | Runtime env template / BuildKit switch. `.env` itself gitignored. |
 | `docs/DB_SCHEMA.md` | Redis keys, Qdrant collections, PipelineContext. |
+| `docs/RUNTIME_MAP.md` | Legacy path → 总分总 runtime layer (prefix/dispatch/pipelines/route/shared). |
 | `docs/ARCHITECTURE_DIAGRAM.md` | Full 总分总 / dual-entry diagram. |
 | `dispatcher.py` | Request flow, classification, cache backfill. |
 | `openai_compat.py` | SSE streaming, response assembly, request logging. |
