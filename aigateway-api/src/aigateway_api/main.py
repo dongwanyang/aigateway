@@ -440,7 +440,7 @@ async def lifespan(app: "FastAPI"):
     # 初始化 LiteLLM Bridge
     litellm_bridge = None
     try:
-        from aigateway_core.litellm_bridge import LiteLLMBridge
+        from aigateway_core.route.bridge.litellm_bridge import LiteLLMBridge
         lb = LiteLLMBridge(config_manager.snapshot())
         providers_cfg = config_manager.get("providers", {})
         if providers_cfg:
