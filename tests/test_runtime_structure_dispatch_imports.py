@@ -34,3 +34,11 @@ def test_classify_request_prefers_generation_modalities():
         "messages": [{"role": "user", "content": "draw a cat"}],
     }
     assert classify_request(body, DummyConfig()) == "generation"
+
+
+from aigateway_core.dispatch.dispatcher import RequestDispatcher as CoreRequestDispatcher
+from aigateway_api.dispatcher import RequestDispatcher as ApiRequestDispatcher
+
+
+def test_api_dispatcher_aliases_core_dispatcher():
+    assert ApiRequestDispatcher is CoreRequestDispatcher

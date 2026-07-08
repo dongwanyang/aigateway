@@ -1,11 +1,11 @@
 """Dispatch layer (总 1 后半段).
 
-The full dispatcher/classifier still lives in ``aigateway_api.dispatcher``
-today; moving it into core is Phase 3 of the migration strategy in
-``docs/superpowers/specs/2026-07-07-runtime-structure-design.md``.
-This package currently exposes the shared ``PipelineContext`` under its
-runtime-layer home.
+Exposes the shared ``PipelineContext``, ``classify_request``, and the
+``RequestDispatcher`` entry orchestrator under their runtime-layer home.
+``aigateway_api.dispatcher`` is now a thin adapter that re-exports from here.
 """
+from aigateway_core.dispatch.classifier import classify_request  # noqa: F401
 from aigateway_core.dispatch.context import PipelineContext  # noqa: F401
+from aigateway_core.dispatch.pipeline_engine import PipelineEngine  # noqa: F401
 
-__all__ = ["PipelineContext"]
+__all__ = ["PipelineContext", "PipelineEngine", "classify_request"]
