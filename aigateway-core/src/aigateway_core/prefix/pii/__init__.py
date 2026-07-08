@@ -1,14 +1,30 @@
-"""PII detection / sanitize / reject — part of the shared prefix layer.
+"""PII detection / sanitize / reject — part of the shared prefix layer (总 1).
 
-Authoritative implementations live in ``aigateway_core.security`` and
-``aigateway_core.pipeline.PIIDetectorPlugin``.
+Authoritative implementation:
+- ``aigateway_core.prefix.pii.detector`` — PIIDetector + pattern lists
+- ``aigateway_core.pipeline.PIIDetectorPlugin`` — pipeline plugin (lazy)
+
+``PIIDetector`` is imported eagerly (lightweight, no circular risk).
+``PIIDetectorPlugin`` is exposed lazily via ``__getattr__`` because importing
+``aigateway_core.pipeline`` during package init triggers a circular import
+(pipeline → security shim → prefix.pii.detector → this package).
 """
-from aigateway_core import security as _security
-from aigateway_core.pipeline import PIIDetectorPlugin
+from __future__ import annotations
 
-_public = [name for name in dir(_security) if not name.startswith("_")]
-for _name in _public:
-    globals()[_name] = getattr(_security, _name)
+import importlib as _importlib
 
-__all__ = _public + ["PIIDetectorPlugin"]
-del _security, _public, _name
+from aigateway_core.prefix.pii.detector import PIIDetector  # noqa: F401
+
+_LAZY = {"PIIDetectorPlugin": "aigateway_core.pipeline"}
+
+
+def __getattr__(name: str):
+    if name in _LAZY:
+        mod = _importlib.import_module(_LAZY[name])
+        value = getattr(mod, name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+__all__ = ["PIIDetector", "PIIDetectorPlugin"]

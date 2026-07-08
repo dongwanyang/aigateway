@@ -5,9 +5,12 @@ import importlib
 def _assert_identical(new_mod, sources):
     for src_path in sources:
         src_mod = importlib.import_module(src_path)
-        for name in dir(src_mod):
-            if name.startswith("_"):
-                continue
+        # Respect __all__ when defined (real-split modules declare their public
+        # surface explicitly); otherwise fall back to all non-underscore names.
+        names = getattr(src_mod, "__all__", None)
+        if names is None:
+            names = [n for n in dir(src_mod) if not n.startswith("_")]
+        for name in names:
             assert hasattr(new_mod, name), (
                 f"{new_mod.__name__} missing {name!r} from {src_path}"
             )
@@ -21,7 +24,13 @@ def test_prefix_pii_reexports():
     from aigateway_core.pipeline import PIIDetectorPlugin as LegacyPIIPlugin
 
     assert prefix.pii.PIIDetectorPlugin is LegacyPIIPlugin
-    _assert_identical(prefix.pii, ["aigateway_core.security"])
+    # After the Task 3 real split, PIIDetector lives in prefix.pii.detector and
+    # KeyStore/exceptions moved to shared.auth/exceptions. prefix.pii owns only
+    # the PII surface; verify it re-exports the detector module's public names.
+    _assert_identical(prefix.pii, ["aigateway_core.prefix.pii.detector"])
+    # Backward-compat: the security.py shim still exposes PIIDetector identically.
+    from aigateway_core.security import PIIDetector as LegacyPII
+    assert prefix.pii.PIIDetector is LegacyPII
 
 
 def test_prefix_cache_reexports():
