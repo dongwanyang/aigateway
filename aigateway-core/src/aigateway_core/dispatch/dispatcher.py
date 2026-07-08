@@ -316,7 +316,7 @@ class RequestDispatcher:
         cache_start = time.time()
         cache_kwargs: Dict[str, Any] = {"user_id": user_id}
         if cache_manager._qdrant_client is not None:
-            from aigateway_api.openai_compat import _compute_l3_vector
+            from aigateway_core.prefix.cache.l3_semantic import _compute_l3_vector
             l3_vec = await _compute_l3_vector(normalized_messages)
             if l3_vec is not None:
                 cache_kwargs["vector"] = l3_vec
@@ -583,7 +583,8 @@ class RequestDispatcher:
         normalized_messages: 用于 L3 语义缓存回填（生成管道传 None,不做 L3 回填）。
         pipeline_kind: 传给 bridge,body.model=='auto' 时按此选候选池模态。
         """
-        from aigateway_api.openai_compat import _estimate_cost, _record_request_log
+        from aigateway_core.route.metrics.costing import _estimate_cost
+        from aigateway_api.openai_compat import _record_request_log
 
         metrics_collector = self.metrics_collector
         cache_manager = self.cache_manager
@@ -684,7 +685,7 @@ class RequestDispatcher:
                 # L3 异步回填（需要 normalized_messages 计算 embedding；缺则跳过）
                 if normalized_messages:
                     import asyncio
-                    from aigateway_api.openai_compat import _safe_l3_backfill
+                    from aigateway_core.prefix.cache.l3_semantic import _safe_l3_backfill
                     asyncio.create_task(_safe_l3_backfill(
                         cache_manager, cache_key, value_str,
                         normalized_messages, body.model, user_id or "", tt,
@@ -731,9 +732,8 @@ class RequestDispatcher:
         normalized_messages: 用于 L3 语义缓存回填（生成管道传 None）。
         pipeline_kind: 传给 bridge,body.model=='auto' 时按此选候选池模态。
         """
-        from aigateway_api.openai_compat import (
-            _estimate_cost, _record_request_log,
-        )
+        from aigateway_core.route.metrics.costing import _estimate_cost
+        from aigateway_api.openai_compat import _record_request_log
         from aigateway_api.streaming import create_sse_response
 
         metrics_collector = self.metrics_collector
@@ -791,7 +791,7 @@ class RequestDispatcher:
           回填内容 = 累积所有 chunk 的 delta.content 拼成完整 message，
           与非流式响应格式一致，供后续 simulate_stream_from_cache 回放。
         """
-        from aigateway_api.openai_compat import _estimate_cost
+        from aigateway_core.route.metrics.costing import _estimate_cost
 
         last_chunk = {}
         # 累积每个 choice 的 content / role / tool_calls，用于组装非流式格式
@@ -878,7 +878,7 @@ class RequestDispatcher:
                 # L3 异步回填（与非流式对齐；需要 normalized_messages 计算 embedding）
                 if normalized_messages:
                     import asyncio
-                    from aigateway_api.openai_compat import _safe_l3_backfill
+                    from aigateway_core.prefix.cache.l3_semantic import _safe_l3_backfill
                     asyncio.create_task(_safe_l3_backfill(
                         cache_manager, cache_key, value_str,
                         normalized_messages, model, user_id or "", tt,
@@ -896,7 +896,8 @@ class RequestDispatcher:
     ) -> JSONResponse:
         """缓存命中：非流式直接返回，流式走 simulate_stream_from_cache。"""
         from aigateway_api.openai_compat import _record_request_log
-        from aigateway_api.streaming import create_sse_response, simulate_stream_from_cache
+        from aigateway_core.route.streaming.cache_stream import simulate_stream_from_cache
+        from aigateway_api.streaming import create_sse_response
 
         metrics_collector = self.metrics_collector
         cache_duration_ms = round((time.time() - request_start_time) * 1000, 1)

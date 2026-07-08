@@ -2,10 +2,9 @@
 
 See ``docs/superpowers/specs/2026-07-07-runtime-structure-design.md``.
 This layer covers model resolution, LiteLLM bridge, provider fallback,
-streaming/response assembly, and quota/metrics closure. This refactor
-stakes the core-side location for model resolution and bridge only;
-migrating streaming/response/quota out of the API surface is a later
-phase.
+streaming/response assembly, and quota/metrics closure. Model
+resolution and bridge are already migrated; streaming and metrics
+helpers moved here from the API surface in Task 5.
 
 The subpackages ``model_resolution`` and ``bridge`` are imported lazily
 via ``__getattr__`` so that importing a leaf module (e.g.
@@ -13,10 +12,11 @@ via ``__getattr__`` so that importing a leaf module (e.g.
 of sibling subpackages — which previously triggered a circular import
 through ``model_resolution`` → ``generation_optimization.strategies``
 → ``context`` → ``dispatch`` → ``plugin_registry``.
+``streaming`` and ``metrics`` are also lazy-loaded for consistency.
 """
 import importlib
 
-__all__ = ["model_resolution", "bridge"]
+__all__ = ["model_resolution", "bridge", "streaming", "metrics"]
 
 
 def __getattr__(name):
