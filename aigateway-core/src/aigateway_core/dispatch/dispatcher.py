@@ -626,7 +626,7 @@ class RequestDispatcher:
 
         _llm_ok_ms = round((time.time() - request_start_time) * 1000, 2)
         plugin_trace.append({"plugin_name": "llm_completion",
-                             "duration_ms": _ll_ok_ms,
+                             "duration_ms": _llm_ok_ms,
                              "status": "success"})
         _emit_stage(request.state.trace_id, "bridge", "litellm_bridge.completion", _llm_ok_ms, "ok")
 
