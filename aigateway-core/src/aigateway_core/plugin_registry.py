@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional, Type
 
-from .context import PipelineContext
+from aigateway_core.dispatch.context import PipelineContext
 
 logger = logging.getLogger(__name__)
 

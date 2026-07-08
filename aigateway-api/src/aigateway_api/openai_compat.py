@@ -212,7 +212,7 @@ async def _apply_media_optimization(
         return result
 
     try:
-        from aigateway_core.context import PipelineContext
+        from aigateway_core.dispatch.context import PipelineContext
 
         ctx = PipelineContext(request={"messages": body.messages, "model": body.model},
                               trace_id=request.state.trace_id)
@@ -264,7 +264,7 @@ async def _apply_pii_detection(
         return result
 
     try:
-        from aigateway_core.context import PipelineContext
+        from aigateway_core.dispatch.context import PipelineContext
 
         ctx = PipelineContext(request={"messages": body.messages, "model": body.model},
                               trace_id=request.state.trace_id)
@@ -401,7 +401,7 @@ async def _apply_prompt_compression(
         return result
 
     try:
-        from aigateway_core.context import PipelineContext
+        from aigateway_core.dispatch.context import PipelineContext
 
         ctx = PipelineContext(request={"messages": body.messages, "model": body.model},
                               trace_id=request.state.trace_id)

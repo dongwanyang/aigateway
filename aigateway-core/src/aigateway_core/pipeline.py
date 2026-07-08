@@ -15,11 +15,10 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from aigateway_core.dispatch.pipeline_engine import PipelineEngine, Plugin  # noqa: F401
-
-from .caching import CacheManager
-from .context import PipelineContext
-from .plugin_registry import PluginRegistry
-from .security import PIIDetector
+from aigateway_core.dispatch.context import PipelineContext
+from aigateway_core.prefix.cache.cache_manager import CacheManager
+from aigateway_core.prefix.pii.detector import PIIDetector
+from aigateway_core.shared.plugin_registry import PluginRegistry
 
 logger = logging.getLogger(__name__)
 
