@@ -1,12 +1,11 @@
-"""LiteLLM bridge — part of the unified route layer.
+"""Unified route bridge package.
 
-Authoritative implementation: ``aigateway_core.litellm_bridge``.
+Re-exports the authoritative implementations from the submodules. The real
+classes live in ``.cooldown`` and ``.litellm_bridge``; the root
+``aigateway_core.litellm_bridge`` is now a thin compatibility shim that
+imports back from here.
 """
-from aigateway_core import litellm_bridge as _wrapped
+from aigateway_core.route.bridge.cooldown import ProviderCooldownTracker
+from aigateway_core.route.bridge.litellm_bridge import LiteLLMBridge
 
-_public = [name for name in dir(_wrapped) if not name.startswith("_")]
-for _name in _public:
-    globals()[_name] = getattr(_wrapped, _name)
-
-__all__ = _public
-del _wrapped, _public, _name
+__all__ = ["LiteLLMBridge", "ProviderCooldownTracker"]

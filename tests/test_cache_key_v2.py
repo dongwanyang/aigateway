@@ -11,13 +11,13 @@
 8. tenant_id 隔离
 9. auto 模型不做 family 抽取
 """
-from aigateway_core.caching import (
-    CacheManager,
-    _bucket_temperature,
+from aigateway_core.prefix.cache.cache_keys import (
     _bucket_max_tokens,
+    _bucket_temperature,
     _model_family,
     _normalize_prompt,
 )
+from aigateway_core.prefix.cache.cache_manager import CacheManager
 
 
 class TestModelFamily:

@@ -61,54 +61,22 @@ class EmbeddingRequest(BaseModel):
 # ------------------------------------------------------------------
 # 辅助函数
 # ------------------------------------------------------------------
+# Cost estimation, stream metrics wrapper, L3 vector computation, and L3
+# async backfill moved to core in Task 5 (runtime-structure refactor):
+#   - _estimate_cost              → aigateway_core.route.metrics.costing
+#   - _wrap_stream_for_metrics    → aigateway_core.route.streaming.metrics_wrapper
+#   - _compute_l3_vector          → aigateway_core.prefix.cache.l3_semantic
+#   - _safe_l3_backfill           → aigateway_core.prefix.cache.l3_semantic
+# Re-exported here so existing callers (including the core dispatcher's
+# lazy imports, which now point at the core modules directly) keep working.
 
-
-def _estimate_cost(model: str, total_tokens: int) -> float:
-    """根据模型和 token 数估算成本（美元）。
-
-    与 litellm_bridge._estimate_cost() 定价表保持一致。
-    """
-    pricing = {
-        "gpt-4o": 0.000005,
-        "gpt-4o-mini": 0.00000015,
-        "claude-3-5-sonnet": 0.000003,
-        "claude-3-haiku": 0.00000025,
-        "gemini-1.5-pro": 0.0000025,
-        "agnes-2.0-flash": 0.0000005,
-    }
-    base = model.split("/")[-1] if "/" in model else model
-    return round(total_tokens * pricing.get(base, 0.000001), 6)
-
-
-async def _wrap_stream_for_metrics(
-    completion_gen: Any,
-    metrics_collector: Any,
-    model: str,
-    user_id: str = "",
-) -> Any:
-    """包装流式生成器，从最后一个 chunk 提取 usage 并记录指标。"""
-    last_chunk: Dict[str, Any] = {}
-    async for chunk in completion_gen:
-        last_chunk = chunk
-        yield chunk
-
-    # 从最后一个 chunk 提取 usage 数据
-    usage = last_chunk.get("usage", {})
-    if not usage:
-        return
-
-    prompt_tokens = usage.get("prompt_tokens", 0)
-    completion_tokens = usage.get("completion_tokens", 0)
-    total_tokens = usage.get("total_tokens", 0)
-
-    if prompt_tokens > 0:
-        metrics_collector.record_tokens(prompt_tokens, "prompt")
-    if completion_tokens > 0:
-        metrics_collector.record_tokens(completion_tokens, "completion")
-    if total_tokens > 0:
-        cost = _estimate_cost(model, total_tokens)
-        if cost > 0:
-            metrics_collector.record_cost(cost, model=model, user_id=user_id)
+from aigateway_core.route.metrics.costing import _estimate_cost
+from aigateway_core.route.streaming.metrics_wrapper import _wrap_stream_for_metrics
+from aigateway_core.prefix.cache.l3_semantic import (
+    _compute_l3_vector,
+    _l3_model_cache,
+    _safe_l3_backfill,
+)
 
 
 def _get_app_state() -> Dict[str, Any]:
@@ -155,112 +123,8 @@ def _get_redis_client() -> Any:
         return None
 
 
-# ------------------------------------------------------------------
-# L3 向量计算 — Qwen/Qwen3-Embedding-0.6B (1024 维)
-# ------------------------------------------------------------------
-
-# 模块级模型缓存（避免每次请求加载 ~600MB 模型）
-_l3_model_cache: Dict[str, Any] = {}
-
-
-async def _compute_l3_vector(text: str) -> Optional[list]:
-    """使用 Qwen/Qwen3-Embedding-0.6B 计算 1024 维 embedding 向量。
-
-    使用 transformers + torch 直接加载（无需 sentence_transformers）。
-    模型在首次调用时加载并缓存到模块级变量。
-
-    Args:
-        text: 待嵌入的文本（通常是 normalized_messages）。
-
-    Returns:
-        1024 维归一化向量列表，失败返回 None。
-    """
-    try:
-        import torch
-        from transformers import AutoModel, AutoTokenizer
-
-        model_name = "Qwen/Qwen3-Embedding-0.6B"
-
-        # 从模块级缓存获取或加载模型
-        if "tokenizer" not in _l3_model_cache:
-            logger.info("Loading L3 embedding model: %s", model_name)
-            _l3_model_cache["tokenizer"] = AutoTokenizer.from_pretrained(
-                model_name, trust_remote_code=True
-            )
-            _l3_model_cache["model"] = AutoModel.from_pretrained(
-                model_name, trust_remote_code=True
-            ).eval()
-            logger.info("L3 embedding model loaded successfully")
-
-        tokenizer = _l3_model_cache["tokenizer"]
-        model = _l3_model_cache["model"]
-
-        # Tokenize（截断过长文本）
-        inputs = tokenizer(
-            text, return_tensors="pt", truncation=True, max_length=512, padding=True
-        )
-
-        # 推理
-        with torch.no_grad():
-            outputs = model(**inputs)
-
-        # 使用 last_hidden_state 的 mean pooling 作为 sentence embedding
-        attention_mask = inputs["attention_mask"]
-        token_embeddings = outputs.last_hidden_state  # (1, seq_len, 1024)
-        input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
-        embedding = torch.sum(token_embeddings * input_mask_expanded, 1) / torch.clamp(
-            input_mask_expanded.sum(1), min=1e-9
-        )
-
-        # L2 归一化
-        embedding = torch.nn.functional.normalize(embedding, p=2, dim=1)
-
-        return embedding[0].tolist()
-
-    except ImportError as exc:
-        logger.warning("L3 vector: transformers/torch not available: %s", exc)
-        return None
-    except Exception as exc:
-        logger.warning("L3 vector computation failed: %s", exc)
-        return None
-
-
-async def _safe_l3_backfill(
-    cache_manager: Any,
-    cache_key: str,
-    value_str: str,
-    normalized_messages: str,
-    model: str,
-    user_id: str,
-    token_count: int,
-) -> None:
-    """异步回填 L3 语义缓存（fire-and-forget）。
-
-    使用 Qwen/Qwen3-Embedding-0.6B (transformers) 计算 1024 维向量后存入 Qdrant。
-    失败时仅记录 WARNING，不影响主请求。
-    """
-    try:
-        if cache_manager._qdrant_client is None:
-            return
-
-        # 计算 embedding 向量
-        vector = await _compute_l3_vector(normalized_messages)
-        if vector is None:
-            return
-
-        # 存入 Qdrant
-        await cache_manager.l3_store(
-            prompt_hash=cache_key,
-            prompt_normalized=normalized_messages[:500],  # 截断避免 payload 过大
-            model=model,
-            response_json=value_str,
-            user_id=user_id,
-            token_count=token_count,
-            vector=vector,
-        )
-        logger.debug("L3 backfill success: key=%s", cache_key[:16])
-    except Exception as exc:
-        logger.warning("L3 backfill failed: %s", exc)
+# L3 向量计算 + 异步回填已移至 aigateway_core.prefix.cache.l3_semantic
+# (Task 5 runtime-structure refactor)，见本节顶部 import。
 
 
 async def _record_request_log(
@@ -348,7 +212,7 @@ async def _apply_media_optimization(
         return result
 
     try:
-        from aigateway_core.context import PipelineContext
+        from aigateway_core.dispatch.context import PipelineContext
 
         ctx = PipelineContext(request={"messages": body.messages, "model": body.model},
                               trace_id=request.state.trace_id)
@@ -400,7 +264,7 @@ async def _apply_pii_detection(
         return result
 
     try:
-        from aigateway_core.context import PipelineContext
+        from aigateway_core.dispatch.context import PipelineContext
 
         ctx = PipelineContext(request={"messages": body.messages, "model": body.model},
                               trace_id=request.state.trace_id)
@@ -537,7 +401,7 @@ async def _apply_prompt_compression(
         return result
 
     try:
-        from aigateway_core.context import PipelineContext
+        from aigateway_core.dispatch.context import PipelineContext
 
         ctx = PipelineContext(request={"messages": body.messages, "model": body.model},
                               trace_id=request.state.trace_id)
@@ -570,9 +434,12 @@ async def _apply_prompt_compression(
 # POST /v1/chat/completions
 # ------------------------------------------------------------------
 # 请求处理由 RequestDispatcher 承担（总分总架构：分流 → 管道插件链 → LiteLLM 出口）。
-# dispatcher 复用本模块的辅助函数：_apply_media_optimization / _apply_pii_detection /
-# _resolve_auto_model / _apply_prompt_compression / _record_request_log / _estimate_cost /
-# _compute_l3_vector / _safe_l3_backfill。详见 aigateway_api/dispatcher.py。
+# dispatcher 复用的辅助函数分布：
+#   - 仍在 API surface: _apply_media_optimization / _apply_pii_detection /
+#     _resolve_auto_model / _apply_prompt_compression / _record_request_log
+#   - 已移至 core (Task 5): _estimate_cost / _compute_l3_vector / _safe_l3_backfill
+#     (aigateway_core.route.metrics / aigateway_core.prefix.cache.l3_semantic)
+# 详见 aigateway_core.dispatch.dispatcher (core) + aigateway_api/dispatcher.py (shim)。
 
 
 # ------------------------------------------------------------------

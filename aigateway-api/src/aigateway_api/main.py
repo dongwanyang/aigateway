@@ -35,14 +35,14 @@ _core_src = os.path.join(_api_root, "..", "aigateway-core", "src")
 if _core_src not in sys.path:
     sys.path.insert(0, _core_src)
 
-from aigateway_core.caching import CacheManager
+from aigateway_core.prefix.cache.cache_manager import CacheManager
 from aigateway_core.config import ConfigManager
 from aigateway_core.logger import setup_logging
 from aigateway_core.metrics import get_metrics_collector
-from aigateway_core.plugin_registry import PluginRegistry
+from aigateway_core.shared.plugin_registry import PluginRegistry
 from aigateway_core.qdrant_client import QdrantClientManager
 from aigateway_core.redis_client import RedisClientManager
-from aigateway_core.security import KeyStore
+from aigateway_core.shared.auth.key_store import KeyStore
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +63,7 @@ def _register_exception_handlers(app_instance: "FastAPI") -> None:
     from fastapi import HTTPException
     import uuid
 
-    from aigateway_core.security import (
+    from aigateway_core.exceptions import (
         AuthError,
         GatewayError,
         QuotaExceededError,
@@ -343,7 +343,7 @@ async def lifespan(app: "FastAPI"):
     logger.info("CacheManager 初始化完成")
 
     # 启动 L3 清理调度器
-    from aigateway_core.caching import L3CleanupScheduler
+    from aigateway_core.prefix.cache.cache_manager import L3CleanupScheduler
     cleanup_interval = int(l3_cfg.get("cleanup_interval", 3600)) // 60 if l3_cfg else 60
     l3_scheduler = L3CleanupScheduler(cache_manager, interval_minutes=cleanup_interval)
     await l3_scheduler.start()
@@ -440,7 +440,7 @@ async def lifespan(app: "FastAPI"):
     # 初始化 LiteLLM Bridge
     litellm_bridge = None
     try:
-        from aigateway_core.litellm_bridge import LiteLLMBridge
+        from aigateway_core.route.bridge.litellm_bridge import LiteLLMBridge
         lb = LiteLLMBridge(config_manager.snapshot())
         providers_cfg = config_manager.get("providers", {})
         if providers_cfg:
@@ -520,7 +520,7 @@ async def lifespan(app: "FastAPI"):
     # 初始化两条管道的 PipelineEngine（总分总架构的「分」）
     # understanding: pii/cache/semantic/model_router/compress/rag/conv
     # generation: ai_director/.../cost_tracker
-    from aigateway_core.pipeline import PipelineEngine
+    from aigateway_core.dispatch.pipeline_engine import PipelineEngine
 
     understanding_engine = PipelineEngine(plugin_registry, pipeline_kind="understanding")
     understanding_engine.initialize()
@@ -570,7 +570,7 @@ async def lifespan(app: "FastAPI"):
                 if reg is not None and "enabled" in pcfg:
                     reg.enabled = bool(pcfg["enabled"])
             # 重建两个 Engine（重新装载按 enabled 过滤后的插件链）
-            from aigateway_core.pipeline import PipelineEngine
+            from aigateway_core.dispatch.pipeline_engine import PipelineEngine
             for kind, attr in (("understanding", "understanding_engine"),
                                ("generation", "generation_engine")):
                 eng = PipelineEngine(registry, pipeline_kind=kind)

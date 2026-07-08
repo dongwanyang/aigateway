@@ -29,4 +29,4 @@ def test_route_bridge_reexports():
 def test_route_all_lists_expected_subpackages():
     from aigateway_core import route
 
-    assert sorted(route.__all__) == ["bridge", "model_resolution"]
+    assert sorted(route.__all__) == ["bridge", "metrics", "model_resolution", "streaming"]

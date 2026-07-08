@@ -15,7 +15,7 @@ import logging
 import time
 from typing import Any, Dict, List, Optional
 
-from aigateway_core.context import PipelineContext
+from aigateway_core.dispatch.context import PipelineContext
 from aigateway_core.generation_optimization.config import GenerationOptimizationConfig
 from aigateway_core.generation_optimization.models import (
     DraftResult,
