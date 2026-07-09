@@ -23,8 +23,8 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 
-from aigateway_core.generation_optimization.config import AIDirectorConfig
-from aigateway_core.generation_optimization.strategies.prompt_confirmation import (
+from aigateway_core.pipelines.generation._common.config import AIDirectorConfig
+from aigateway_core.pipelines.generation.token.prompt_confirmation import (
     PromptConfirmationHandler,
 )
 

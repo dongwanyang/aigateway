@@ -1,6 +1,9 @@
-"""Draft-to-HiRes generation — part of the generation pipeline."""
-from aigateway_core.generation_optimization.strategies import draft_generator as _strategy
-from aigateway_core.generation_optimization.plugins import draft_generator_plugin as _plugin
+"""Draft-to-HiRes generation - part of the generation pipeline.
+
+Re-exports the strategy + plugin modules that live in this package.
+"""
+from . import draft_generator as _strategy
+from . import draft_generator_plugin as _plugin
 
 _sources = (_strategy, _plugin)
 _names: list[str] = []

@@ -25,10 +25,10 @@ from httpx import ASGITransport, AsyncClient
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-api", "src"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 
-from aigateway_core.generation_optimization.config import PromptTemplateConfig
-from aigateway_core.generation_optimization.exceptions import TemplateValidationError
-from aigateway_core.generation_optimization.models import PromptTemplate
-from aigateway_core.generation_optimization.strategies.prompt_template_manager import (
+from aigateway_core.pipelines.generation._common.config import PromptTemplateConfig
+from aigateway_core.pipelines.generation._common.exceptions import TemplateValidationError
+from aigateway_core.pipelines.generation._common.models import PromptTemplate
+from aigateway_core.pipelines.generation.token.prompt_template_manager import (
     PromptTemplateManager,
 )
 

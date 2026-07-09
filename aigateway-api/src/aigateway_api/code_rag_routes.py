@@ -229,7 +229,7 @@ _ZIP_SIZE_HARD_CAP_MB = 200
 def _is_server_path_allowed(candidate: str, allowed_roots: List[str]) -> bool:
     """走 realpath 展开的白名单检查,拒绝符号链接逃逸."""
     # lazy import 避免 admin 路由启动阶段拉整个 code_rag 包
-    from aigateway_core.code_rag.splitter import is_path_allowed
+    from aigateway_core.pipelines.understanding.code_rag.splitter import is_path_allowed
 
     return is_path_allowed(candidate, allowed_roots)
 
@@ -487,14 +487,14 @@ async def _run_code_import_task(
     cleanup_dirs: List[str],
 ) -> None:
     """异步导入任务主体(见 spec: Async task flow)."""
-    from aigateway_core.code_rag.embedding_router import (
+    from aigateway_core.pipelines.understanding.code_rag.embedding_router import (
         encode_texts,
         probe_embedding_dimension,
         resolve_collection_name,
     )
-    from aigateway_core.code_rag.graph_builder import build_code_graph
-    from aigateway_core.code_rag.graph_query import lookup_symbol_metadata_strict
-    from aigateway_core.code_rag.splitter import split_code_directory
+    from aigateway_core.pipelines.understanding.code_rag.graph_builder import build_code_graph
+    from aigateway_core.pipelines.understanding.code_rag.graph_query import lookup_symbol_metadata_strict
+    from aigateway_core.pipelines.understanding.code_rag.splitter import split_code_directory
 
     redis_mgr = getattr(app_state, "redis_manager", None)
     qdrant_mgr = getattr(app_state, "qdrant_manager", None)

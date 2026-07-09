@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from aigateway_core.plugins.rag_retriever_plugin import (
+from aigateway_core.pipelines.understanding.rag.rag_retriever_plugin import (
     RAGRetrieverPlugin,
     _dedupe_hits_by_identity,
     _expand_code_hit_metadata,
@@ -116,7 +116,7 @@ def test_expand_code_hits_with_graph_merges_lookup_result() -> None:
         {"document_id": "doc1", "file_path": "auth.py", "function_name": "login", "chunk_text": "def login(): pass"},
     ]
     fake_meta = {"callers": ["register"], "callees": [], "imports": ["jwt"], "chunk_type": "function"}
-    with patch("aigateway_core.code_rag.graph_query.lookup_symbol_metadata", return_value=fake_meta):
+    with patch("aigateway_core.pipelines.understanding.code_rag.graph_query.lookup_symbol_metadata", return_value=fake_meta):
         expanded = asyncio.new_event_loop().run_until_complete(
             plugin._expand_code_hits_with_graph(hits)
         )
@@ -161,7 +161,7 @@ def test_format_code_hit_returns_empty_when_no_body() -> None:
 
 
 def test_select_code_collections_picks_only_matching_model() -> None:
-    from aigateway_core.plugins.rag_retriever_plugin import (
+    from aigateway_core.pipelines.understanding.rag.rag_retriever_plugin import (
         _select_code_collections_for_model,
     )
 
@@ -176,7 +176,7 @@ def test_select_code_collections_picks_only_matching_model() -> None:
 
 
 def test_select_code_collections_returns_empty_when_no_match() -> None:
-    from aigateway_core.plugins.rag_retriever_plugin import (
+    from aigateway_core.pipelines.understanding.rag.rag_retriever_plugin import (
         _select_code_collections_for_model,
     )
 
@@ -186,7 +186,7 @@ def test_select_code_collections_returns_empty_when_no_match() -> None:
 
 
 def test_select_code_collections_falls_back_when_model_missing() -> None:
-    from aigateway_core.plugins.rag_retriever_plugin import (
+    from aigateway_core.pipelines.understanding.rag.rag_retriever_plugin import (
         _select_code_collections_for_model,
     )
 

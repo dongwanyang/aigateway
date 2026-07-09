@@ -1,7 +1,7 @@
-"""Prompt token compression (LLMLingua-2) — part of the understanding pipeline.
+"""Prompt token compression (LLMLingua-2) - part of the understanding pipeline.
 
-Authoritative implementation: ``aigateway_core.prefix.plugins.classic_plugins.PromptCompressPlugin``.
+Authoritative implementation: ``aigateway_core.pipelines.understanding.compression.plugin``.
 """
-from aigateway_core.prefix.plugins.classic_plugins import PromptCompressPlugin
+from aigateway_core.pipelines.understanding.compression.plugin import PromptCompressPlugin
 
 __all__ = ["PromptCompressPlugin"]

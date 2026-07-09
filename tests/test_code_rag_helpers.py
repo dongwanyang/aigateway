@@ -98,11 +98,11 @@ def test_requirements_declare_code_rag_deps() -> None:
 # Task 2: helper modules
 # ---------------------------------------------------------------------------
 
-from aigateway_core.code_rag.embedding_router import (  # noqa: E402
+from aigateway_core.pipelines.understanding.code_rag.embedding_router import (  # noqa: E402
     materialize_model_slug,
     resolve_collection_name,
 )
-from aigateway_core.code_rag.splitter import (  # noqa: E402
+from aigateway_core.pipelines.understanding.code_rag.splitter import (  # noqa: E402
     compute_line_span,
     is_path_allowed,
 )
@@ -239,7 +239,7 @@ def test_code_rag_routes_build_matching_payload_shape(monkeypatch) -> None:
 def test_lookup_symbol_metadata_reads_codegraph_sqlite_schema(tmp_path: Path) -> None:
     import sqlite3
 
-    from aigateway_core.code_rag.graph_query import lookup_symbol_metadata
+    from aigateway_core.pipelines.understanding.code_rag.graph_query import lookup_symbol_metadata
 
     db = tmp_path / "codegraph.db"
     conn = sqlite3.connect(db)
@@ -344,49 +344,49 @@ def test_rag_retriever_source_mentions_real_graph_hops() -> None:
 
 
 def test_extract_top_symbol_finds_python_def() -> None:
-    from aigateway_core.code_rag.splitter import extract_top_symbol
+    from aigateway_core.pipelines.understanding.code_rag.splitter import extract_top_symbol
 
     result = extract_top_symbol("def login(user):\n    return user\n")
     assert result == ("function", "login")
 
 
 def test_extract_top_symbol_finds_python_async_def() -> None:
-    from aigateway_core.code_rag.splitter import extract_top_symbol
+    from aigateway_core.pipelines.understanding.code_rag.splitter import extract_top_symbol
 
     result = extract_top_symbol("async def fetch(url):\n    pass\n")
     assert result == ("function", "fetch")
 
 
 def test_extract_top_symbol_finds_python_class() -> None:
-    from aigateway_core.code_rag.splitter import extract_top_symbol
+    from aigateway_core.pipelines.understanding.code_rag.splitter import extract_top_symbol
 
     result = extract_top_symbol("class UserService:\n    pass\n")
     assert result == ("class", "UserService")
 
 
 def test_extract_top_symbol_finds_js_function() -> None:
-    from aigateway_core.code_rag.splitter import extract_top_symbol
+    from aigateway_core.pipelines.understanding.code_rag.splitter import extract_top_symbol
 
     result = extract_top_symbol("export async function login(user) {\n  return user;\n}\n")
     assert result == ("function", "login")
 
 
 def test_extract_top_symbol_finds_go_func() -> None:
-    from aigateway_core.code_rag.splitter import extract_top_symbol
+    from aigateway_core.pipelines.understanding.code_rag.splitter import extract_top_symbol
 
     result = extract_top_symbol("func (s *Server) Handle(req Request) error {\n  return nil\n}\n")
     assert result == ("function", "Handle")
 
 
 def test_extract_top_symbol_finds_rust_fn() -> None:
-    from aigateway_core.code_rag.splitter import extract_top_symbol
+    from aigateway_core.pipelines.understanding.code_rag.splitter import extract_top_symbol
 
     result = extract_top_symbol("pub async fn login(user: String) -> Result<()> {\n}\n")
     assert result == ("function", "login")
 
 
 def test_extract_top_symbol_returns_none_for_module_scope() -> None:
-    from aigateway_core.code_rag.splitter import extract_top_symbol
+    from aigateway_core.pipelines.understanding.code_rag.splitter import extract_top_symbol
 
     assert extract_top_symbol("# just a comment\nx = 1\n") is None
     assert extract_top_symbol("") is None
@@ -396,7 +396,7 @@ def test_split_code_directory_writes_symbol_names(tmp_path) -> None:
     """回归:切完的 chunk 字典必须携带 function_name/class_name,
     否则 code_rag_routes 侧的 strict-lookup 拿到 symbol=None 直接短路。
     """
-    from aigateway_core.code_rag.splitter import split_code_directory
+    from aigateway_core.pipelines.understanding.code_rag.splitter import split_code_directory
 
     src = tmp_path / "auth.py"
     src.write_text(

@@ -26,11 +26,11 @@ class TestIngestDocumentsUnavailable:
     """Test ingest_documents when llama_index is not available."""
 
     @patch(
-        "aigateway_core.plugins.rag_retriever_plugin.RAGRetrieverPlugin._initialize_index"
+        "aigateway_core.pipelines.understanding.rag.rag_retriever_plugin.RAGRetrieverPlugin._initialize_index"
     )
     def test_returns_unavailable_when_not_installed(self, mock_init):
         """When _is_available is False, ingest should return unavailable status."""
-        from aigateway_core.plugins.rag_retriever_plugin import RAGRetrieverPlugin
+        from aigateway_core.pipelines.understanding.rag.rag_retriever_plugin import RAGRetrieverPlugin
 
         plugin = RAGRetrieverPlugin.__new__(RAGRetrieverPlugin)
         plugin._config = RAGRetrieverConfig()
@@ -48,11 +48,11 @@ class TestIngestDocumentsWithMocks:
     """Test ingest_documents with mocked LlamaIndex dependencies."""
 
     @patch(
-        "aigateway_core.plugins.rag_retriever_plugin.RAGRetrieverPlugin._initialize_index"
+        "aigateway_core.pipelines.understanding.rag.rag_retriever_plugin.RAGRetrieverPlugin._initialize_index"
     )
     def test_ingest_string_documents(self, mock_init):
         """String documents should be converted to Document objects and ingested."""
-        from aigateway_core.plugins.rag_retriever_plugin import RAGRetrieverPlugin
+        from aigateway_core.pipelines.understanding.rag.rag_retriever_plugin import RAGRetrieverPlugin
 
         plugin = RAGRetrieverPlugin.__new__(RAGRetrieverPlugin)
         plugin._config = RAGRetrieverConfig(chunk_size=512, chunk_overlap=64)
@@ -82,7 +82,7 @@ class TestIngestDocumentsWithMocks:
         ):
             # Need to reimport to pick up mocked modules
             import importlib
-            import aigateway_core.plugins.rag_retriever_plugin as mod
+            import aigateway_core.pipelines.understanding.rag.rag_retriever_plugin as mod
 
             importlib.reload(mod)
 
@@ -110,11 +110,11 @@ class TestIngestDocumentsWithMocks:
             plugin_reloaded._index.insert_nodes.assert_called_once()
 
     @patch(
-        "aigateway_core.plugins.rag_retriever_plugin.RAGRetrieverPlugin._initialize_index"
+        "aigateway_core.pipelines.understanding.rag.rag_retriever_plugin.RAGRetrieverPlugin._initialize_index"
     )
     def test_ingest_returns_error_on_exception(self, mock_init):
         """When an exception occurs during ingest, should return error status."""
-        from aigateway_core.plugins.rag_retriever_plugin import RAGRetrieverPlugin
+        from aigateway_core.pipelines.understanding.rag.rag_retriever_plugin import RAGRetrieverPlugin
 
         plugin = RAGRetrieverPlugin.__new__(RAGRetrieverPlugin)
         plugin._config = RAGRetrieverConfig()
@@ -139,7 +139,7 @@ class TestIngestDocumentsWithMocks:
             },
         ):
             import importlib
-            import aigateway_core.plugins.rag_retriever_plugin as mod
+            import aigateway_core.pipelines.understanding.rag.rag_retriever_plugin as mod
 
             importlib.reload(mod)
 
@@ -159,11 +159,11 @@ class TestIngestDocumentsWithMocks:
             assert "Qdrant connection failed" in result["reason"]
 
     @patch(
-        "aigateway_core.plugins.rag_retriever_plugin.RAGRetrieverPlugin._initialize_index"
+        "aigateway_core.pipelines.understanding.rag.rag_retriever_plugin.RAGRetrieverPlugin._initialize_index"
     )
     def test_ingest_empty_documents_list(self, mock_init):
         """Ingesting empty list should return success with zero counts."""
-        from aigateway_core.plugins.rag_retriever_plugin import RAGRetrieverPlugin
+        from aigateway_core.pipelines.understanding.rag.rag_retriever_plugin import RAGRetrieverPlugin
 
         plugin = RAGRetrieverPlugin.__new__(RAGRetrieverPlugin)
         plugin._config = RAGRetrieverConfig()
@@ -187,7 +187,7 @@ class TestIngestDocumentsWithMocks:
             },
         ):
             import importlib
-            import aigateway_core.plugins.rag_retriever_plugin as mod
+            import aigateway_core.pipelines.understanding.rag.rag_retriever_plugin as mod
 
             importlib.reload(mod)
 

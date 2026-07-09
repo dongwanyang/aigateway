@@ -22,17 +22,17 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 
 from aigateway_core.dispatch.context import PipelineContext
-from aigateway_core.generation_optimization.config import (
+from aigateway_core.pipelines.generation._common.config import (
     GenerationOptimizationConfig,
     ModelRouterConfig,
 )
-from aigateway_core.generation_optimization.models import ComplexityEvaluation
-from aigateway_core.generation_optimization.plugins.intent_evaluator_plugin import (
+from aigateway_core.pipelines.generation._common.models import ComplexityEvaluation
+from aigateway_core.pipelines.generation.intent.intent_evaluator_plugin import (
     DEFAULT_COMPLEXITY_SCORE,
     IntentEvaluatorPlugin,
     NS_GENERATION_OPTIMIZATION,
 )
-from aigateway_core.generation_optimization.strategies.intent_evaluator import (
+from aigateway_core.pipelines.generation.intent.intent_evaluator import (
     IntentEvaluatorStrategy,
 )
 

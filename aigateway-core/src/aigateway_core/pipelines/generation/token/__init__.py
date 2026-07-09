@@ -1,14 +1,16 @@
-"""Token / feature compression + template + preview — part of generation pipeline."""
-from aigateway_core.generation_optimization.strategies import (
-    token_compressor as _s_token,
+"""Token / feature compression + template + preview - part of generation pipeline.
+
+Re-exports the strategy modules and the token-compressor plugin that live in
+this package.
+"""
+from . import (
     feature_cache as _s_fcache,
     prompt_confirmation as _s_confirm,
     prompt_template_manager as _s_tmpl,
+    token_compressor as _s_token,
     video_preview as _s_video,
 )
-from aigateway_core.generation_optimization.plugins import (
-    token_compressor_plugin as _p_token,
-)
+from . import token_compressor_plugin as _p_token
 
 _sources = (_s_token, _s_fcache, _s_confirm, _s_tmpl, _s_video, _p_token)
 _names: list[str] = []

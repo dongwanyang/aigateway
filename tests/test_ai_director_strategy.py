@@ -24,14 +24,14 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 
 from aigateway_core.dispatch.context import PipelineContext
-from aigateway_core.generation_optimization.config import AIDirectorConfig
-from aigateway_core.generation_optimization.models import PromptOptimizationResult
-from aigateway_core.generation_optimization.strategies.ai_director import (
+from aigateway_core.pipelines.generation._common.config import AIDirectorConfig
+from aigateway_core.pipelines.generation._common.models import PromptOptimizationResult
+from aigateway_core.pipelines.generation.director.ai_director import (
     AIDirectorStrategy,
     _EXPAND_SYSTEM_PROMPT,
     _REWRITE_SYSTEM_PROMPT,
 )
-from aigateway_core.media.types import MediaContent, MediaType
+from aigateway_core.prefix.media.types import MediaContent, MediaType
 
 
 @pytest.fixture

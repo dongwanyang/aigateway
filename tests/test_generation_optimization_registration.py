@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core
 import pytest
 
 from aigateway_core.shared.plugin_registry import PluginRegistry
-from aigateway_core.generation_optimization.plugins import (
+from aigateway_core.pipelines.generation.registration import (
     AIDirectorPlugin,
     CostTrackerPlugin,
     DraftGeneratorPlugin,

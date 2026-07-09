@@ -24,17 +24,17 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 
 from aigateway_core.dispatch.context import PipelineContext
-from aigateway_core.generation_optimization.config import (
+from aigateway_core.pipelines.generation._common.config import (
     GenerationOptimizationConfig,
     ModelRouterConfig,
 )
-from aigateway_core.generation_optimization.exceptions import ModelRoutingError
-from aigateway_core.generation_optimization.models import RoutingDecision
-from aigateway_core.generation_optimization.plugins.gen_model_router_plugin import (
+from aigateway_core.pipelines.generation._common.exceptions import ModelRoutingError
+from aigateway_core.pipelines.generation._common.models import RoutingDecision
+from aigateway_core.pipelines.generation.routing_signals.gen_model_router_plugin import (
     GenModelRouterPlugin,
     NS_GENERATION_OPTIMIZATION,
 )
-from aigateway_core.generation_optimization.strategies.model_router import (
+from aigateway_core.route.model_resolution.model_router import (
     ModelRouterStrategy,
 )
 

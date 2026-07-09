@@ -43,7 +43,7 @@ def test_prefix_cache_exports():
 
 def test_prefix_media_reexports():
     from aigateway_core import prefix
-    from aigateway_core.media.plugin import MediaOptimizationPlugin
+    from aigateway_core.prefix.media.plugin import MediaOptimizationPlugin
 
     assert prefix.media.plugin.MediaOptimizationPlugin is MediaOptimizationPlugin
-    _assert_identical(prefix.media, ["aigateway_core.media"])
+    _assert_identical(prefix.media, ["aigateway_core.prefix.media"])

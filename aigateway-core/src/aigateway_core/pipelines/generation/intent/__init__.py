@@ -1,6 +1,9 @@
-"""Intent / complexity evaluation — part of the generation pipeline."""
-from aigateway_core.generation_optimization.strategies import intent_evaluator as _strategy
-from aigateway_core.generation_optimization.plugins import intent_evaluator_plugin as _plugin
+"""Intent / complexity evaluation - part of the generation pipeline.
+
+Re-exports the strategy + plugin modules that live in this package.
+"""
+from . import intent_evaluator as _strategy
+from . import intent_evaluator_plugin as _plugin
 
 _sources = (_strategy, _plugin)
 _names: list[str] = []

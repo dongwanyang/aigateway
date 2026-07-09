@@ -359,8 +359,8 @@ async def lifespan(app: "FastAPI"):
     try:
         mol_cfg = config_manager.get("media_optimization", {}) or {}
         if mol_cfg.get("enabled", False):
-            from aigateway_core.media import MediaCacheManager
-            from aigateway_core.media.plugin import MediaOptimizationPlugin
+            from aigateway_core.prefix.media import MediaCacheManager
+            from aigateway_core.prefix.media.plugin import MediaOptimizationPlugin
 
             if redis_mgr is not None:
                 media_cache = MediaCacheManager(redis_client=redis_mgr)
@@ -377,7 +377,7 @@ async def lifespan(app: "FastAPI"):
     # ---- PII Detector Plugin (always enabled) ----
     pii_detector_plugin = None
     try:
-        from aigateway_core.prefix.plugins.classic_plugins import PIIDetectorPlugin
+        from aigateway_core.prefix.pii.plugin import PIIDetectorPlugin
 
         pii_cfg = {"strategy": "sanitize"}
         for pcfg in config_manager.get("plugins", []) or []:
@@ -393,8 +393,8 @@ async def lifespan(app: "FastAPI"):
     # ---- Model Router Resolver (for "auto" model resolution) ----
     model_router_resolver = None
     try:
-        from aigateway_core.generation_optimization.config import ModelRouterConfig
-        from aigateway_core.generation_optimization.strategies.model_router import ModelRouterStrategy
+        from aigateway_core.pipelines.generation._common.config import ModelRouterConfig
+        from aigateway_core.route.model_resolution.model_router import ModelRouterStrategy
 
         gen_opt_cfg = config_manager.get("generation_optimization", {}) or {}
         mr_cfg_data = gen_opt_cfg.get("model_router", {}) or {}
@@ -418,7 +418,7 @@ async def lifespan(app: "FastAPI"):
     # ---- Prompt Compress Plugin ----
     prompt_compress_plugin = None
     try:
-        from aigateway_core.prefix.plugins.classic_plugins import PromptCompressPlugin
+        from aigateway_core.pipelines.understanding.compression.plugin import PromptCompressPlugin
 
         pc_cfg = {}
         for pcfg in config_manager.get("plugins", []) or []:
@@ -472,8 +472,8 @@ async def lifespan(app: "FastAPI"):
     # 初始化 PromptTemplateManager
     prompt_template_manager = None
     try:
-        from aigateway_core.generation_optimization.config import PromptTemplateConfig
-        from aigateway_core.generation_optimization.strategies.prompt_template_manager import PromptTemplateManager
+        from aigateway_core.pipelines.generation._common.config import PromptTemplateConfig
+        from aigateway_core.pipelines.generation.token.prompt_template_manager import PromptTemplateManager
 
         pt_cfg_raw = config_manager.get("generation_optimization", {})
         pt_cfg_section = pt_cfg_raw.get("prompt_templates", {}) if isinstance(pt_cfg_raw, dict) else {}
@@ -681,7 +681,7 @@ def _register_default_plugins(registry: "PluginRegistry", config_manager: "Confi
 
     使用 pipeline._register_builtin_plugins 统一管理。
     """
-    from aigateway_core.prefix.plugins.registration import _register_builtin_plugins
+    from aigateway_core.prefix.registration import _register_builtin_plugins
 
     _register_builtin_plugins(registry, config_manager)
 

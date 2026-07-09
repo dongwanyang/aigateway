@@ -341,18 +341,18 @@ def test_run_code_import_task_passes_real_symbol_name_to_graph_lookup(
         ]
 
     monkeypatch.setattr(
-        "aigateway_core.code_rag.splitter.split_code_directory", _fake_split
+        "aigateway_core.pipelines.understanding.code_rag.splitter.split_code_directory", _fake_split
     )
     monkeypatch.setattr(
-        "aigateway_core.code_rag.graph_builder.build_code_graph",
+        "aigateway_core.pipelines.understanding.code_rag.graph_builder.build_code_graph",
         lambda src, dst: dst,
     )
     monkeypatch.setattr(
-        "aigateway_core.code_rag.embedding_router.probe_embedding_dimension",
+        "aigateway_core.pipelines.understanding.code_rag.embedding_router.probe_embedding_dimension",
         lambda model: 4,
     )
     monkeypatch.setattr(
-        "aigateway_core.code_rag.embedding_router.encode_texts",
+        "aigateway_core.pipelines.understanding.code_rag.embedding_router.encode_texts",
         lambda model, texts: [[0.1, 0.2, 0.3, 0.4] for _ in texts],
     )
 
@@ -370,7 +370,7 @@ def test_run_code_import_task_passes_real_symbol_name_to_graph_lookup(
         }
 
     monkeypatch.setattr(
-        "aigateway_core.code_rag.graph_query.lookup_symbol_metadata_strict",
+        "aigateway_core.pipelines.understanding.code_rag.graph_query.lookup_symbol_metadata_strict",
         _fake_strict,
     )
 

@@ -26,18 +26,18 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 
-from aigateway_core.generation_optimization.config import (
+from aigateway_core.pipelines.generation._common.config import (
     FeatureCacheConfig,
     TokenCompressorConfig,
 )
-from aigateway_core.generation_optimization.models import CompressionResult
-from aigateway_core.generation_optimization.strategies.feature_cache import (
+from aigateway_core.pipelines.generation._common.models import CompressionResult
+from aigateway_core.pipelines.generation.token.feature_cache import (
     FeatureCacheManager,
 )
-from aigateway_core.generation_optimization.strategies.token_compressor import (
+from aigateway_core.pipelines.generation.token.token_compressor import (
     TokenCompressorStrategy,
 )
-from aigateway_core.media.types import MediaContent, MediaType
+from aigateway_core.prefix.media.types import MediaContent, MediaType
 
 
 # ==================================================================

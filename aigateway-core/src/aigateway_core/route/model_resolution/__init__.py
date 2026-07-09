@@ -1,15 +1,17 @@
-"""Auto model resolution — part of the unified route layer.
+"""Auto model resolution - part of the unified route layer.
 
 Authoritative implementation:
-``aigateway_core.generation_optimization.strategies.model_router``.
+``aigateway_core.route.model_resolution.model_router``.
 """
-from aigateway_core.generation_optimization.strategies import (
-    model_router as _wrapped,
-)
+from . import model_router as _wrapped
 
-_public = [name for name in dir(_wrapped) if not name.startswith("_")]
-for _name in _public:
-    globals()[_name] = getattr(_wrapped, _name)
+_names: list[str] = []
+for _name in dir(_wrapped):
+    if _name.startswith("_"):
+        continue
+    if _name not in globals():
+        globals()[_name] = getattr(_wrapped, _name)
+        _names.append(_name)
 
-__all__ = _public
-del _wrapped, _public, _name
+__all__ = _names
+del _wrapped, _names, _name

@@ -1,8 +1,11 @@
-"""AI Director prompt shaping — part of the generation pipeline."""
-from aigateway_core.generation_optimization.strategies import ai_director as _strategy
-from aigateway_core.generation_optimization.plugins import ai_director_plugin as _plugin
+"""AI Director prompt shaping - part of the generation pipeline.
 
-_sources = (_strategy, _plugin)  # strategy first — its names win on collision
+Re-exports the strategy + plugin modules that live in this package.
+"""
+from . import ai_director as _strategy
+from . import ai_director_plugin as _plugin
+
+_sources = (_strategy, _plugin)
 _names: list[str] = []
 for _src in _sources:
     for _name in dir(_src):

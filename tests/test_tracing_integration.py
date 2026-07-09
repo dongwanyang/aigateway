@@ -23,26 +23,26 @@ import sys
 sys.path.insert(0, "aigateway-core/src")
 
 from aigateway_core.dispatch.context import PipelineContext
-from aigateway_core.generation_optimization.config import (
+from aigateway_core.pipelines.generation._common.config import (
     AIDirectorConfig,
     GenerationOptimizationConfig,
 )
-from aigateway_core.generation_optimization.plugins.ai_director_plugin import (
+from aigateway_core.pipelines.generation.director.ai_director_plugin import (
     AIDirectorPlugin,
 )
-from aigateway_core.generation_optimization.plugins.intent_evaluator_plugin import (
+from aigateway_core.pipelines.generation.intent.intent_evaluator_plugin import (
     IntentEvaluatorPlugin,
 )
-from aigateway_core.generation_optimization.plugins.token_compressor_plugin import (
+from aigateway_core.pipelines.generation.token.token_compressor_plugin import (
     TokenCompressorPlugin,
 )
-from aigateway_core.generation_optimization.plugins.draft_generator_plugin import (
+from aigateway_core.pipelines.generation.draft.draft_generator_plugin import (
     DraftGeneratorPlugin,
 )
-from aigateway_core.generation_optimization.plugins.gen_model_router_plugin import (
+from aigateway_core.pipelines.generation.routing_signals.gen_model_router_plugin import (
     GenModelRouterPlugin,
 )
-from aigateway_core.generation_optimization.plugins.cost_tracker_plugin import (
+from aigateway_core.pipelines.generation.cost.cost_tracker_plugin import (
     CostTrackerPlugin,
 )
 from aigateway_core.shared.trace_event import TraceCollector
@@ -274,7 +274,7 @@ class TestInjectTraceContext:
     @pytest.mark.asyncio
     async def test_ai_director_strategy_injects_trace_context(self):
         """AI Director strategy injects trace context headers into LLM calls."""
-        from aigateway_core.generation_optimization.strategies.ai_director import (
+        from aigateway_core.pipelines.generation.director.ai_director import (
             AIDirectorStrategy,
         )
 

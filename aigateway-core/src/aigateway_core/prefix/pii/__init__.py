@@ -2,7 +2,7 @@
 
 Authoritative implementation:
 - ``aigateway_core.prefix.pii.detector`` — PIIDetector + pattern lists
-- ``aigateway_core.prefix.plugins.classic_plugins`` — pipeline plugins
+- ``aigateway_core.prefix.pii.plugin`` — PIIDetectorPlugin (prefix-stage)
 """
 from __future__ import annotations
 

@@ -15,16 +15,16 @@ def _assert_identical(new_mod, src_path):
 
 def test_understanding_rag_reexports():
     from aigateway_core.pipelines.understanding import rag
-    _assert_identical(rag, "aigateway_core.plugins.rag_retriever_plugin")
+    _assert_identical(rag, "aigateway_core.pipelines.understanding.rag.rag_retriever_plugin")
 
 
 def test_understanding_conversation_reexports():
     from aigateway_core.pipelines.understanding import conversation
-    _assert_identical(conversation, "aigateway_core.plugins.conv_compressor_plugin")
+    _assert_identical(conversation, "aigateway_core.pipelines.understanding.conversation.conv_compressor_plugin")
 
 
 def test_understanding_compression_reexports():
     from aigateway_core.pipelines.understanding import compression
-    from aigateway_core.prefix.plugins.classic_plugins import PromptCompressPlugin
+    from aigateway_core.pipelines.understanding.compression.plugin import PromptCompressPlugin
 
     assert compression.PromptCompressPlugin is PromptCompressPlugin

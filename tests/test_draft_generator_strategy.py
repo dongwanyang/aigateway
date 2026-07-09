@@ -23,16 +23,16 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 
-from aigateway_core.generation_optimization.config import DraftWorkflowConfig
-from aigateway_core.generation_optimization.exceptions import DraftWorkflowError
-from aigateway_core.generation_optimization.models import (
+from aigateway_core.pipelines.generation._common.config import DraftWorkflowConfig
+from aigateway_core.pipelines.generation._common.exceptions import DraftWorkflowError
+from aigateway_core.pipelines.generation._common.models import (
     DRAFT_STATUS_CONFIRMED,
     DRAFT_STATUS_PENDING,
     DraftResult,
     GenerationRequest,
     UpscaleResult,
 )
-from aigateway_core.generation_optimization.strategies.draft_generator import (
+from aigateway_core.pipelines.generation.draft.draft_generator import (
     DraftGeneratorStrategy,
 )
 

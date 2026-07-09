@@ -20,9 +20,9 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 
-from aigateway_core.generation_optimization.config import DraftWorkflowConfig
-from aigateway_core.generation_optimization.exceptions import DraftWorkflowError
-from aigateway_core.generation_optimization.strategies.video_preview import (
+from aigateway_core.pipelines.generation._common.config import DraftWorkflowConfig
+from aigateway_core.pipelines.generation._common.exceptions import DraftWorkflowError
+from aigateway_core.pipelines.generation.token.video_preview import (
     VideoPreviewGenerator,
 )
 

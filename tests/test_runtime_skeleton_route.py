@@ -17,7 +17,7 @@ def test_route_model_resolution_reexports():
     from aigateway_core.route import model_resolution
     _assert_identical(
         model_resolution,
-        "aigateway_core.generation_optimization.strategies.model_router",
+        "aigateway_core.route.model_resolution.model_router",
     )
 
 

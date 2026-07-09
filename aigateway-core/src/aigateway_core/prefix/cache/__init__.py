@@ -3,7 +3,7 @@
 Authoritative implementations:
 - ``aigateway_core.prefix.cache.cache_keys`` — key/normalize helpers (lightweight)
 - ``aigateway_core.prefix.cache.cache_manager`` — CacheManager, scheduler, rerankers
-- ``aigateway_core.prefix.plugins.classic_plugins`` — PromptCachePlugin, SemanticCachePlugin
+- ``aigateway_core.prefix.cache.plugin`` — PromptCachePlugin, SemanticCachePlugin
 """
 from __future__ import annotations
 

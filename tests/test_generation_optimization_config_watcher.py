@@ -28,11 +28,11 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 
 from aigateway_core.shared.config import ConfigManager
-from aigateway_core.generation_optimization.config import (
+from aigateway_core.pipelines.generation._common.config import (
     GenerationOptimizationConfig,
     GenerationOptimizationConfigWatcher,
 )
-from aigateway_core.generation_optimization.exceptions import (
+from aigateway_core.pipelines.generation._common.exceptions import (
     ConfigValidationError,
     DraftWorkflowError,
     FeatureCacheError,
