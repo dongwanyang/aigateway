@@ -143,6 +143,51 @@ def _compute_hash_embeddings(texts: List[str]) -> List[List[float]]:
 router = APIRouter()
 
 
+# 生成管道插件 → generation_optimization 段内对应的配置键路径（末位为 "enabled"）。
+# 这 6 个插件不在 config.yaml 的 plugins 列表里，而是由 generation_optimization 段控制：
+#   注册时 enabled = generation_optimization.enabled and <sub>.enabled
+# 用于 PUT /admin/plugins-config 切换生成插件时定位要写的键。
+# 映射来源：pipelines/generation/registration.py 的 plugin_definitions。
+_GENERATION_PLUGIN_CONFIG_PATH: dict[str, list[str]] = {
+    "ai_director": ["ai_director", "enabled"],
+    # intent_evaluator 与 gen_model_router 共享 model_router.enabled
+    "intent_evaluator": ["model_router", "enabled"],
+    "gen_model_router": ["model_router", "enabled"],
+    "token_compressor": ["token_compressor", "enabled"],
+    "draft_generator": ["draft_workflow", "enabled"],
+    "cost_tracker": ["cost_tracking", "enabled"],
+}
+
+
+def _atomic_write_yaml(config_path: str, file_config: Dict[str, Any]) -> None:
+    """原子写 YAML:先写临时文件再 os.replace,保证 Watchdog 热重载永不读到半截文件。
+
+    旧实现 open(path,'w') + yaml.dump 会先 truncate 再写,期间 Watchdog 的
+    load()(无 fcntl 锁)可能读到不完整 YAML → safe_load 返回缺 debug 段的 dict
+    → atomic_swap 把脏内存盖回 DebugConfigWatcher,造成 debug 开关偶发失效。
+    临时文件 + os.replace 在同一文件系统上是原子的,消除该竞态。
+    """
+    import os
+    import tempfile
+    import yaml
+
+    config_dir = os.path.dirname(os.path.abspath(config_path)) or "."
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=".config.yaml.", suffix=".tmp", dir=config_dir
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            yaml.dump(file_config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+        os.replace(tmp_path, config_path)
+    except Exception:
+        # 写失败也要清理临时文件,避免残留
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 # ------------------------------------------------------------------
 # 请求模型
 # ------------------------------------------------------------------
@@ -705,30 +750,51 @@ async def update_plugins_config(
         with open(config_path, "r", encoding="utf-8") as f:
             file_config = yaml.safe_load(f) or {}
 
+        # 1) 理解管道插件：在 config.yaml 的 plugins 列表里。
         plugins_cfg = file_config.get("plugins", [])
         updated = False
         for p in plugins_cfg:
             if isinstance(p, dict) and p.get("name") == name:
                 p["enabled"] = enabled
                 updated = True
+                file_config["plugins"] = plugins_cfg
                 break
+
+        # 2) 生成管道插件：不在 plugins 列表，由 generation_optimization 段控制。
+        #    注册时 enabled = generation_optimization.enabled and <sub>.enabled，
+        #    因此切换时写 <sub>.enabled，并保持全局 enabled=true（否则子项全被门控关闭）。
+        gen_config_path = _GENERATION_PLUGIN_CONFIG_PATH.get(name)
+        if not updated and gen_config_path:
+            gen_opt = file_config.setdefault("generation_optimization", {})
+            gen_opt["enabled"] = True  # 全局门控：必须开，否则子插件 enabled 无意义
+            sub_cfg = gen_opt
+            for key in gen_config_path[:-1]:
+                sub_cfg = sub_cfg.setdefault(key, {})
+            sub_cfg[gen_config_path[-1]] = enabled
+            updated = True
 
         if not updated:
             raise HTTPException(status_code=404, detail={"error": {"code": "not_found", "message": f"Plugin '{name}' not found"}})
 
-        # 写回文件（只写 plugins 节）
-        file_config["plugins"] = plugins_cfg
-        writable_keys = {"server", "auth", "plugins", "providers", "embedding", "observability"}
-        clean_config = {k: v for k, v in file_config.items() if k in writable_keys}
-        with open(config_path, "w", encoding="utf-8") as f:
-            yaml.dump(clean_config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+        # 写回文件：保留全部 section（不再用 writable_keys 白名单——那会丢弃
+        # debug / cache / media_optimization / rate_limiter 等段，导致配置损坏级联）。
+        # 原子写(临时文件+os.replace),避免 Watchdog 读到半截 YAML。
+        _atomic_write_yaml(config_path, file_config)
 
         # 原子交换内存配置并触发热重载回调（重建插件实例等）。
         # 直接 _set_nested 只改内存不通知，导致插件 enabled 改动不生效——
         # 改用 atomic_swap 走标准的 swap + _notify_reload 流程。
         import copy
         new_config = copy.deepcopy(config_manager._config)
-        config_manager._set_nested(new_config, "plugins", plugins_cfg)
+        if gen_config_path:
+            config_manager._set_nested(
+                new_config,
+                "generation_optimization." + ".".join(gen_config_path),
+                enabled,
+            )
+            config_manager._set_nested(new_config, "generation_optimization.enabled", True)
+        else:
+            config_manager._set_nested(new_config, "plugins", plugins_cfg)
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         lock_fd.close()
@@ -892,9 +958,7 @@ async def set_plugin_debug(
             plugins_section["per_plugin"] = per_plugin
             debug_section["plugins"] = plugins_section
             raw["debug"] = debug_section
-            f.seek(0)
-            f.truncate()
-            yaml.dump(raw, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+            _atomic_write_yaml(config_path, raw)
         finally:
             fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
@@ -994,6 +1058,26 @@ async def update_global_config(
     debug_mode = bool(raw.get("debug_mode", cur_debug_mode))
     debug_section = raw.get("debug")  # None 表示不改;dict 表示整段覆盖
 
+    # 归一化 debug 段:扁平 plugins_enabled 与嵌套 plugins.enabled 双向同步。
+    # DebugConfig.from_dict 优先读嵌套 plugins.enabled;若只写扁平 plugins_enabled,
+    # 会被既有嵌套 false 覆盖(控制面板 toggleDebugDimension 与测试都踩此坑)。
+    # 此处保证两者一致,无论调用方传哪种形态。
+    if isinstance(debug_section, dict):
+        plugins_section = debug_section.get("plugins")
+        if not isinstance(plugins_section, dict):
+            plugins_section = {}
+        flat_enabled = debug_section.get("plugins_enabled")
+        if flat_enabled is not None:
+            plugins_section["enabled"] = bool(flat_enabled)
+        elif "enabled" in plugins_section:
+            debug_section["plugins_enabled"] = bool(plugins_section["enabled"])
+        else:
+            # 都没给:以扁平值兜底(False),保持两者一致
+            plugins_section["enabled"] = bool(flat_enabled) if flat_enabled is not None else False
+            debug_section["plugins_enabled"] = plugins_section["enabled"]
+        debug_section["plugins"] = plugins_section
+        debug_section["plugins_enabled"] = plugins_section["enabled"]
+
     # 更新内存缓存
     config_manager.set("hot_reload", hot_reload)
     config_manager.set("debug_mode", debug_mode)
@@ -1012,8 +1096,7 @@ async def update_global_config(
             file_config["debug_mode"] = debug_mode
             if isinstance(debug_section, dict):
                 file_config["debug"] = debug_section
-            with open(config_path, "w", encoding="utf-8") as f:
-                yaml.dump(file_config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+            _atomic_write_yaml(config_path, file_config)
 
     # 触发热重载回调（重建插件实例等）。config_manager.set 已改内存，
     # 但 set 不通知回调；这里显式 atomic_swap 走 _notify_reload。
