@@ -120,3 +120,106 @@ GLOBAL_DIMENSIONS = ["frontend", "entry", "cache", "bridge", "plugins_enabled"]
 
 # Plugins that DON'T have per_plugin debug (prompt_compress maps to entry only)
 NO_PER_PLUGIN_DEBUG = {"prompt_compress"}
+
+
+# ------------------------------------------------------------------
+# Helpers: admin API calls & debug event inspection
+# ------------------------------------------------------------------
+
+def enable_plugin(client: TestClient, name: str) -> None:
+    """Enable a plugin via PUT /admin/plugins-config."""
+    resp = client.put(
+        "/admin/plugins-config",
+        json={"name": name, "enabled": True},
+        headers=HEADERS,
+    )
+    assert resp.status_code == 200, f"Failed to enable {name}: {resp.text}"
+
+
+def disable_plugin(client: TestClient, name: str) -> None:
+    """Disable a plugin via PUT /admin/plugins-config."""
+    resp = client.put(
+        "/admin/plugins-config",
+        json={"name": name, "enabled": False},
+        headers=HEADERS,
+    )
+    assert resp.status_code == 200, f"Failed to disable {name}: {resp.text}"
+
+
+def enable_plugin_debug(client: TestClient, name: str) -> None:
+    """Enable per-plugin debug via POST /admin/plugins/{name}/debug."""
+    if name in NO_PER_PLUGIN_DEBUG:
+        return  # Skip — not supported
+    resp = client.post(
+        f"/admin/plugins/{name}/debug",
+        json={"enabled": True},
+        headers=HEADERS,
+    )
+    assert resp.status_code == 200, f"Failed to enable debug for {name}: {resp.text}"
+
+
+def disable_plugin_debug(client: TestClient, name: str) -> None:
+    """Disable per-plugin debug via POST /admin/plugins/{name}/debug."""
+    if name in NO_PER_PLUGIN_DEBUG:
+        return
+    resp = client.post(
+        f"/admin/plugins/{name}/debug",
+        json={"enabled": False},
+        headers=HEADERS,
+    )
+    assert resp.status_code == 200, f"Failed to disable debug for {name}: {resp.text}"
+
+
+def enable_global_dim(client: TestClient, dim: str) -> None:
+    """Enable a global debug dimension via PUT /admin/global-config."""
+    resp = client.put(
+        "/admin/global-config",
+        json={"hot_reload": True, "debug_mode": True, "debug": {dim: True}},
+        headers=HEADERS,
+    )
+    assert resp.status_code == 200, f"Failed to enable global dim {dim}: {resp.text}"
+
+
+def disable_global_dim(client: TestClient, dim: str) -> None:
+    """Disable a global debug dimension via PUT /admin/global-config."""
+    resp = client.put(
+        "/admin/global-config",
+        json={"hot_reload": True, "debug_mode": True, "debug": {dim: False}},
+        headers=HEADERS,
+    )
+    assert resp.status_code == 200, f"Failed to disable global dim {dim}: {resp.text}"
+
+
+def get_debug_config(client: TestClient) -> Dict[str, Any]:
+    """GET /admin/config/debug → parsed response."""
+    resp = client.get("/admin/config/debug", headers=HEADERS)
+    assert resp.status_code == 200, f"Failed to get debug config: {resp.text}"
+    return resp.json()["data"]
+
+
+def trigger_chat(client: TestClient, request_body: Optional[Dict] = None) -> Dict[str, Any]:
+    """POST /v1/chat/completions, return response JSON."""
+    body = request_body or CHAT_REQUEST.copy()
+    resp = client.post(
+        "/v1/chat/completions",
+        json=body,
+        headers=HEADERS,
+    )
+    return resp.json()
+
+
+def find_debug_events(collector_events: list, dimension: Optional[str] = None, plugin_name: Optional[str] = None) -> list:
+    """Filter TraceCollector events for kind='debug' matching criteria."""
+    from aigateway_core.shared.trace_event import TraceEvent
+    result = []
+    for ev in collector_events:
+        if not isinstance(ev, TraceEvent):
+            continue
+        if ev.kind != "debug":
+            continue
+        if dimension and ev.stage != dimension:
+            continue
+        if plugin_name and plugin_name not in ev.name and plugin_name not in ev.stage:
+            continue
+        result.append(ev)
+    return result
