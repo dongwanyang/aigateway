@@ -443,3 +443,136 @@ def test_phase2_global_dimensions(test_client: TestClient) -> None:
         disable_global_dim(test_client, dim)
 
     _append_report(results)
+
+
+# ------------------------------------------------------------------
+# Phase 3: Incremental Plugin + Debug Accumulation
+# ------------------------------------------------------------------
+
+def test_phase3_incremental_plugins(test_client: TestClient) -> None:
+    """Accumulate plugins 2→13, with all 5 global dims always on."""
+    from aigateway_core.shared.trace_event import TraceCollector
+
+    results: List[Dict[str, Any]] = []
+
+    # First, enable all 5 global dimensions
+    for dim in GLOBAL_DIMENSIONS:
+        enable_global_dim(test_client, dim)
+
+    # Iterations: 2, 3, ..., 13
+    for n in range(2, len(ALL_PLUGIN_NAMES) + 1):
+        # Enable plugins 0..n-1
+        for i in range(n):
+            pname = ALL_PLUGIN_NAMES[i]
+            enable_plugin(test_client, pname)
+            enable_plugin_debug(test_client, pname)
+
+        # Trigger request
+        try:
+            trigger_chat(test_client)
+        except Exception:
+            pass
+
+        # Collect debug events
+        collector_events_after = []
+        try:
+            c = TraceCollector.current()
+            if c:
+                collector_events_after = list(c.events)
+        except Exception:
+            pass
+
+        # Count distinct plugin debug events
+        plugin_debug_events = [ev for ev in collector_events_after if ev.kind == "debug" and ev.stage not in GLOBAL_DIMENSIONS]
+        distinct_stages = set(ev.stage for ev in plugin_debug_events)
+        debug_found = len(distinct_stages) >= n - 1  # prompt_compress has no per_plugin debug
+
+        results.append({
+            "phase": "Phase 3",
+            "iteration": n,
+            "plugins_enabled": n,
+            "distinct_debug_stages": len(distinct_stages),
+            "debug_event_found": debug_found,
+            "status": "PASS" if debug_found else "FAIL",
+        })
+
+        # Disable all for next iteration
+        for i in range(n):
+            pname = ALL_PLUGIN_NAMES[i]
+            disable_plugin(test_client, pname)
+            disable_plugin_debug(test_client, pname)
+
+    _append_report(results)
+
+
+# ------------------------------------------------------------------
+# Phase 4: Incremental Global Dimension Accumulation
+# ------------------------------------------------------------------
+
+def test_phase4_incremental_dimensions(test_client: TestClient) -> None:
+    """Accumulate global dimensions 1→5, with all 13 plugins enabled."""
+    from aigateway_core.shared.trace_event import TraceCollector
+
+    results: List[Dict[str, Any]] = []
+
+    # Enable all plugins first
+    for pname in ALL_PLUGIN_NAMES:
+        enable_plugin(test_client, pname)
+        enable_plugin_debug(test_client, pname)
+
+    # Iterations: 1, 2, 3, 4, 5
+    for n in range(1, len(GLOBAL_DIMENSIONS) + 1):
+        # Enable first n dimensions
+        for i in range(n):
+            enable_global_dim(test_client, GLOBAL_DIMENSIONS[i])
+
+        # Trigger request
+        try:
+            trigger_chat(test_client)
+        except Exception:
+            pass
+
+        # Collect debug events
+        collector_events_after = []
+        try:
+            c = TraceCollector.current()
+            if c:
+                collector_events_after = list(c.events)
+        except Exception:
+            pass
+
+        # Verify: enabled dims have events, disabled dims don't
+        enabled_dims = GLOBAL_DIMENSIONS[:n]
+        disabled_dims = GLOBAL_DIMENSIONS[n:]
+
+        enabled_has_events = True
+        for dim in enabled_dims:
+            events = find_debug_events(collector_events_after, dimension=dim)
+            if not events:
+                enabled_has_events = False
+                break
+
+        disabled_no_events = True
+        for dim in disabled_dims:
+            events = find_debug_events(collector_events_after, dimension=dim)
+            if events:
+                disabled_no_events = False
+                break
+
+        debug_found = enabled_has_events and disabled_no_events
+
+        results.append({
+            "phase": "Phase 4",
+            "iteration": n,
+            "dimensions_enabled": n,
+            "enabled_dims_have_events": enabled_has_events,
+            "disabled_dims_no_events": disabled_no_events,
+            "debug_event_found": debug_found,
+            "status": "PASS" if debug_found else "FAIL",
+        })
+
+        # Disable all dimensions for next iteration
+        for i in range(n):
+            disable_global_dim(test_client, GLOBAL_DIMENSIONS[i])
+
+    _append_report(results)
