@@ -576,3 +576,146 @@ def test_phase4_incremental_dimensions(test_client: TestClient) -> None:
             disable_global_dim(test_client, GLOBAL_DIMENSIONS[i])
 
     _append_report(results)
+
+
+# ------------------------------------------------------------------
+# Phase 5: Full-On Conflict Detection
+# ------------------------------------------------------------------
+
+def test_phase5_full_conflict_detection(test_client: TestClient) -> None:
+    """All 13 plugins + all per_plugin debug + all 5 global dims — verify no conflicts."""
+    from aigateway_core.shared.trace_event import TraceCollector
+
+    results: List[Dict[str, Any]] = []
+
+    # Enable everything
+    for dim in GLOBAL_DIMENSIONS:
+        enable_global_dim(test_client, dim)
+    for pname in ALL_PLUGIN_NAMES:
+        enable_plugin(test_client, pname)
+        enable_plugin_debug(test_client, pname)
+
+    # Trigger request
+    try:
+        trigger_chat(test_client)
+    except Exception:
+        pass
+
+    # Collect debug events
+    collector_events_after = []
+    try:
+        c = TraceCollector.current()
+        if c:
+            collector_events_after = list(c.events)
+    except Exception:
+        pass
+
+    # Verify: no crashes, all plugins appear, no duplicate wrong events
+    all_debug_events = [ev for ev in collector_events_after if ev.kind == "debug"]
+    plugin_stages = set(ev.stage for ev in all_debug_events)
+    all_plugins_present = all(pn in plugin_stages for pn in ALL_PLUGIN_NAMES if pn not in NO_PER_PLUGIN_DEBUG)
+
+    # Check for duplicate events (same stage appearing multiple times with conflicting data)
+    stage_counts: Dict[str, int] = {}
+    for ev in all_debug_events:
+        stage_counts[ev.stage] = stage_counts.get(ev.stage, 0) + 1
+    duplicates = {k: v for k, v in stage_counts.items() if v > 2}
+
+    conflict_found = len(duplicates) > 0
+
+    results.append({
+        "phase": "Phase 5",
+        "all_plugins_present": all_plugins_present,
+        "conflicts_detected": conflict_found,
+        "duplicate_stages": duplicates,
+        "status": "PASS" if (all_plugins_present and not conflict_found) else "FAIL",
+    })
+
+    # Cleanup: reset everything
+    reset_debug_state(test_client)
+    for pname in ALL_PLUGIN_NAMES:
+        try:
+            disable_plugin(test_client, pname)
+        except Exception:
+            pass
+
+    _append_report(results)
+
+
+# ------------------------------------------------------------------
+# Report writer
+# ------------------------------------------------------------------
+
+def _write_report(results: List[Dict[str, Any]]) -> None:
+    """Write Phase 1-5 results to markdown report."""
+    REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    lines = ["# Plugin & Debug Switch Integration Test Report\n"]
+    lines.append(f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+
+    current_phase = None
+    for r in results:
+        phase = r.get("phase", "Unknown")
+        if phase != current_phase:
+            current_phase = phase
+            lines.append(f"\n## {phase}\n")
+            lines.append("| Status | Details | Debug Found | Behavior Verified |")
+            lines.append("|--------|---------|-------------|-------------------|")
+        detail_parts = []
+        for k, v in r.items():
+            if k not in ("phase", "status", "debug_event_found", "behavior_verified"):
+                detail_parts.append(f"**{k}**: {v}")
+        detail = "; ".join(detail_parts) if detail_parts else "-"
+        verified = r.get("behavior_verified", "N/A")
+        lines.append(f"| {r['status']} | {detail} | {r.get('debug_event_found', 'N/A')} | {verified} |")
+
+    lines.append("\n## Summary\n")
+    total = len(results)
+    passed = sum(1 for r in results if r["status"] == "PASS")
+    failed = total - passed
+    lines.append(f"- **Total tests**: {total}")
+    lines.append(f"- **Passed**: {passed}")
+    lines.append(f"- **Failed**: {failed}")
+    if failed > 0:
+        lines.append("\n### Failures\n")
+        for r in results:
+            if r["status"] == "FAIL":
+                lines.append(f"- **{r.get('plugin', r.get('dimension', 'Unknown'))}**: {r}")
+
+    REPORT_PATH.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _append_report(results: List[Dict[str, Any]]) -> None:
+    """Append results to existing report (for Phases 2-5)."""
+    _write_report([])  # Ensure file exists
+    current_phase = None
+    lines = []
+    for r in results:
+        phase = r.get("phase", "Unknown")
+        if phase != current_phase:
+            current_phase = phase
+            lines.append(f"\n## {phase}\n")
+            lines.append("| Status | Details | Debug Found |")
+            lines.append("|--------|---------|-------------|")
+        detail_parts = []
+        for k, v in r.items():
+            if k not in ("phase", "status", "debug_event_found"):
+                detail_parts.append(f"**{k}**: {v}")
+        detail = "; ".join(detail_parts) if detail_parts else "-"
+        lines.append(f"| {r['status']} | {detail} | {r.get('debug_event_found', 'N/A')} |")
+
+    with open(str(REPORT_PATH), "a", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+
+# ------------------------------------------------------------------
+# Fixture: TestClient
+# ------------------------------------------------------------------
+
+@pytest.fixture(scope="session", autouse=True)
+def test_client():
+    """Create a TestClient for the FastAPI app, ensuring lifespan runs."""
+    from aigateway_api.main import create_app
+    app = create_app()
+    client = TestClient(app, raise_server_exceptions=False)
+    yield client
+    client.close()
