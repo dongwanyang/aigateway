@@ -43,3 +43,4 @@ AST.txt
 repomix-output.md
 .kiro/
 .playwright-cli/
+.test-venv/
