@@ -40,3 +40,45 @@ CHAT_REQUEST = {
     "temperature": 0.7,
     "max_tokens": 50,
 }
+
+# ------------------------------------------------------------------
+# Fixtures: config backup & restore
+# ------------------------------------------------------------------
+
+@pytest.fixture(scope="session", autouse=True)
+def config_backup():
+    """Backup config.yaml before all tests, restore after."""
+    # Backup
+    if CONFIG_PATH.exists():
+        shutil.copy2(str(CONFIG_PATH), str(BACKUP_PATH))
+    yield
+    # Restore
+    if BACKUP_PATH.exists():
+        shutil.copy2(str(BACKUP_PATH), str(CONFIG_PATH))
+        try:
+            BACKUP_PATH.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def reset_debug_state(client: TestClient) -> None:
+    """Reset all debug switches to off via admin API."""
+    # Reset global debug dimensions
+    client.put(
+        "/admin/global-config",
+        json={"hot_reload": True, "debug_mode": True, "debug": {
+            "frontend": False, "entry": False, "cache": False,
+            "bridge": False, "plugins_enabled": False,
+        }},
+        headers=HEADERS,
+    )
+    # Reset all per_plugin debug to false
+    for plugin_name in ALL_PLUGIN_NAMES:
+        try:
+            client.post(
+                f"/admin/plugins/{plugin_name}/debug",
+                json={"enabled": False},
+                headers=HEADERS,
+            )
+        except Exception:
+            pass  # Some plugins don't support per_plugin debug
