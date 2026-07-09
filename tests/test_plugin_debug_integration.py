@@ -391,3 +391,55 @@ def _verify_plugin_behavior(plugin_name: str, resp: Dict, debug_events: list) ->
     if plugin_name == "media_optimizer":
         return any(ev.payload and ("media" in str(ev.payload).lower() or "optimize" in str(ev.payload).lower()) for ev in debug_events)
     return len(debug_events) > 0  # Default: at least a debug event appeared
+
+
+# ------------------------------------------------------------------
+# Phase 2: Global Debug Dimension Tests
+# ------------------------------------------------------------------
+
+def test_phase2_global_dimensions(test_client: TestClient) -> None:
+    """For each global dimension: enable it alone, verify debug events appear."""
+    from aigateway_core.shared.trace_event import TraceCollector
+
+    results: List[Dict[str, Any]] = []
+
+    for dim in GLOBAL_DIMENSIONS:
+        # Ensure all plugins are disabled for clean isolation
+        for pname in ALL_PLUGIN_NAMES:
+            try:
+                disable_plugin(test_client, pname)
+            except Exception:
+                pass
+
+        # Enable only this global dimension
+        enable_global_dim(test_client, dim)
+
+        # Trigger request
+        try:
+            trigger_chat(test_client)
+        except Exception:
+            pass
+
+        # Verify debug event exists for this dimension
+        collector_events_after = []
+        try:
+            c = TraceCollector.current()
+            if c:
+                collector_events_after = list(c.events)
+        except Exception:
+            pass
+
+        debug_events = find_debug_events(collector_events_after, dimension=dim)
+        debug_found = len(debug_events) > 0
+
+        results.append({
+            "phase": "Phase 2",
+            "dimension": dim,
+            "debug_event_found": debug_found,
+            "status": "PASS" if debug_found else "FAIL",
+        })
+
+        # Cleanup
+        disable_global_dim(test_client, dim)
+
+    _append_report(results)
