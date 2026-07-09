@@ -33,6 +33,26 @@ logger = logging.getLogger(__name__)
 # 模块级模型缓存（避免每次请求加载 ~600MB 模型）
 _l3_model_cache: Dict[str, Any] = {}
 
+# L3 向量计算设备：cpu | cuda | auto（默认 auto——有 CUDA 用 CUDA，否则 CPU）。
+# late-bind：由 main.py 启动时按 config embedding.device 调用 set_l3_device() 注入，
+# 避免在本 core 层反向依赖 shared.config（参照 LiteLLMBridge.set_auto_resolver 模式）。
+_l3_device: str = "auto"
+
+
+def set_l3_device(device: str) -> None:
+    """注入 L3 embedding 推理设备（main.py 启动时调用一次）。
+
+    必须在首次 _compute_l3_vector 调用前设置；模型一旦加载，device 即固化。
+    无效值回落 auto。
+    """
+    global _l3_device
+    dev = (device or "auto").strip().lower()
+    if dev not in ("cpu", "cuda", "auto"):
+        logger.warning("set_l3_device(%r) 不识别，回落 auto", device)
+        dev = "auto"
+    _l3_device = dev
+    logger.info("L3 embedding device 设为: %s", dev)
+
 
 async def _compute_l3_vector(text: str) -> Optional[list]:
     """使用 Qwen/Qwen3-Embedding-0.6B 计算 1024 维 embedding 向量。
@@ -58,18 +78,27 @@ async def _compute_l3_vector(text: str) -> Optional[list]:
             _l3_model_cache["tokenizer"] = AutoTokenizer.from_pretrained(
                 model_name, trust_remote_code=True
             )
+            # 解析最终 device：auto = 有 CUDA 用 CUDA，否则 CPU
+            device = _l3_device
+            if device == "cuda" and not torch.cuda.is_available():
+                logger.warning("L3 device=cuda 但 CUDA 不可用，回落 cpu")
+                device = "cpu"
+            if device == "auto":
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+            _l3_model_cache["device"] = device
             _l3_model_cache["model"] = AutoModel.from_pretrained(
                 model_name, trust_remote_code=True
-            ).eval()
-            logger.info("L3 embedding model loaded successfully")
+            ).to(device).eval()
+            logger.info("L3 embedding model loaded on device=%s", device)
 
         tokenizer = _l3_model_cache["tokenizer"]
         model = _l3_model_cache["model"]
+        device = _l3_model_cache["device"]
 
-        # Tokenize（截断过长文本）
+        # Tokenize（截断过长文本）→ 送入对应 device
         inputs = tokenizer(
             text, return_tensors="pt", truncation=True, max_length=512, padding=True
-        )
+        ).to(device)
 
         # 推理
         with torch.no_grad():
@@ -86,7 +115,8 @@ async def _compute_l3_vector(text: str) -> Optional[list]:
         # L2 归一化
         embedding = torch.nn.functional.normalize(embedding, p=2, dim=1)
 
-        return embedding[0].tolist()
+        # .cpu() 保证 tolist 不跨 device
+        return embedding[0].cpu().tolist()
 
     except ImportError as exc:
         logger.warning("L3 vector: transformers/torch not available: %s", exc)

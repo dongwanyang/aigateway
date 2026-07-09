@@ -28,6 +28,15 @@ services:
       redis:
         condition: service_healthy
     restart: unless-stopped
+    # GPU 透传（需宿主装 NVIDIA 驱动 + nvidia-container-toolkit）：
+    # 让容器内 torch.cuda 可见 Tesla T4，用于 L3 向量计算 / prompt_compress。
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     networks:
       - gateway-net
 

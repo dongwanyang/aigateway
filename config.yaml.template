@@ -94,7 +94,7 @@ plugins:
       compression_ratio: 0.5 # 目标压缩比（0.5 = 压缩到 50%）
       model_name: "microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbank"
       target_token: -1       # 目标 token 数，-1 表示按 compression_ratio 自动
-      device: cpu            # 运行设备：cpu | cuda
+      device: cuda            # 运行设备：cpu | cuda | auto（auto=有CUDA用CUDA）
 
   - name: rag_retriever      # RAG 检索增强（知识库检索）
     enabled: false           # 默认关闭，需配合 Qdrant 知识库
@@ -179,6 +179,7 @@ embedding:
   model: Qwen/Qwen3-Embedding-0.6B  # 嵌入模型名称
   vector_dim: 1024           # 向量维度（必须与模型输出维度一致）
   openai_model: text-embedding-3-small  # OpenAI 后端回退时使用的模型
+  device: auto               # L3 向量计算设备：cpu | cuda | auto（auto=有CUDA用CUDA）
 
 # ==========================
 # 可观测性配置

@@ -433,6 +433,16 @@ async def lifespan(app: "FastAPI"):
     except Exception as exc:
         logger.warning("PromptCompressPlugin 初始化失败（prompt 压缩将不可用）: %s", exc)
 
+    # 注入 L3 embedding 推理设备（late-bind，参照 LiteLLMBridge.set_auto_resolver）。
+    # config embedding.device: cpu | cuda | auto（默认 auto——有 CUDA 用 CUDA）。
+    # 必须在首次 L3 backfill 前调用；l3_semantic._compute_l3_vector 首次调用才加载模型。
+    try:
+        from aigateway_core.prefix.cache.l3_semantic import set_l3_device
+        l3_dev = config_manager.get("embedding.device", "auto")
+        set_l3_device(l3_dev)
+    except Exception as exc:
+        logger.warning("L3 device 注入失败（默认 auto）: %s", exc)
+
     # 持久化到 app.state（唯一数据源）
     import time
     app.state._start_time = int(time.time())
