@@ -26,14 +26,14 @@ WORKDIR /app
 # 在这个环境中 SSL 握手失败(CloudFlare CA 不兼容), 回退到默认 PyPI。
 # 默认 PyPI 会装 GPU 版(~1.2GB, 含 CUDA 运行时), 在纯 CPU 机器上自动退化。
 # 如果能解决 SSL 问题, 换回 --index-url 镜像可缩小到 ~900MB。
-RUN pip install torch
+RUN pip install --no-cache-dir torch
 
 # ============================================================
 # Python 依赖（从 requirements.txt）
 # requirements.txt 先于源码 COPY，改业务代码不会触发重装
 # ============================================================
 COPY aigateway-api/requirements.txt /tmp/requirements.txt
-RUN pip install -r /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 # ============================================================
 # CodeGraph 官方 CLI（多语言,SQLite: .codegraph/codegraph.db）
