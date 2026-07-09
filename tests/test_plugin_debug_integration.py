@@ -82,3 +82,41 @@ def reset_debug_state(client: TestClient) -> None:
             )
         except Exception:
             pass  # Some plugins don't support per_plugin debug
+
+
+# ------------------------------------------------------------------
+# Plugin inventory
+# ------------------------------------------------------------------
+
+ALL_PLUGIN_NAMES = [
+    "pii_detector", "prompt_cache", "semantic_cache", "prompt_compress",
+    "rag_retriever", "conv_compressor",
+    "ai_director", "intent_evaluator", "token_compressor",
+    "draft_generator", "gen_model_router", "cost_tracker",
+    "media_optimizer",
+]
+
+# Maps plugin → which global debug dimension controls its per_plugin debug
+PLUGIN_GLOBAL_DIM_MAP: Dict[str, str] = {
+    # entry dimension covers auth/dispatcher/prompt_compress/media
+    "pii_detector": "entry",
+    "prompt_compress": "entry",
+    "media_optimizer": "entry",
+    # cache dimension covers cache plugins
+    "prompt_cache": "cache",
+    "semantic_cache": "cache",
+    # plugins_enabled covers all other plugins
+    "rag_retriever": "plugins_enabled",
+    "conv_compressor": "plugins_enabled",
+    "ai_director": "plugins_enabled",
+    "intent_evaluator": "plugins_enabled",
+    "token_compressor": "plugins_enabled",
+    "draft_generator": "plugins_enabled",
+    "gen_model_router": "plugins_enabled",
+    "cost_tracker": "plugins_enabled",
+}
+
+GLOBAL_DIMENSIONS = ["frontend", "entry", "cache", "bridge", "plugins_enabled"]
+
+# Plugins that DON'T have per_plugin debug (prompt_compress maps to entry only)
+NO_PER_PLUGIN_DEBUG = {"prompt_compress"}
