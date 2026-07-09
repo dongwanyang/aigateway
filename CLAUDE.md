@@ -217,6 +217,9 @@ python3 -m pytest tests/ --cov=aigateway_core --cov=aigateway_api
 - **AIDirectorStrategy late-binds bridge** — registration runs before bridge exists; `main.py` injects `_litellm_bridge` post-init.
 - **Dead frontend code** — `hooks/useAuth.ts`, `hooks/usePoll.ts` have 0 imports. Six API client fns (`createChatCompletion*`, `listModels`, `createEmbeddings`, `getQuota`, `getMetricsJson`) are reserved for Entry B.
 - **Implicit frontend auth** — no login page or Auth provider. `ensureAuthHeaders()` pulls key from localStorage silently; unset key → blank pages (except Plugins/Overview which handle it).
+- **Config writes must be atomic** — admin endpoints (`update_plugins_config`, `set_plugin_debug`, `update_global_config`) write `config.yaml` via `_atomic_write_yaml` (tempfile + `os.replace`). The Watchdog `load()` reads the file *without* `fcntl.flock`, so the old `open(w)+yaml.dump` (truncate-then-write) let it read a half-written file → `DebugConfigWatcher`/`PluginRegistry` got stale state. Never revert to non-atomic writes here.
+- **`plugins_enabled` flat ↔ nested** — `DebugConfig.from_dict` prefers nested `debug.plugins.enabled` over flat `debug.plugins_enabled`. `update_global_config` normalizes both forms before persisting so the control panel's flat `toggleDebugDimension('plugins_enabled')` takes effect. New debug writers must set both (or go through `update_global_config`).
+- **Generation plugins toggled via `generation_optimization.<sub>.enabled`** — the 6 gen-opt plugins aren't in `config.yaml`'s `plugins:` list; `update_plugins_config` maps them via `_GENERATION_PLUGIN_CONFIG_PATH` and forces `generation_optimization.enabled=true`.
 
 ## Workflow Rules
 
