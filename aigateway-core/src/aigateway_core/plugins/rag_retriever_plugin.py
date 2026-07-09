@@ -20,7 +20,7 @@ from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
 from ..context import NS_RAG_RETRIEVER, PipelineContext
-from ..integration_configs import RAGRetrieverConfig
+from ..shared.integration_configs import RAGRetrieverConfig
 
 logger = logging.getLogger(__name__)
 

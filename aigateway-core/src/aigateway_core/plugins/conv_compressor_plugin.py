@@ -50,7 +50,7 @@ class ConvCompressorPlugin:
         Args:
             config: ConvCompressorConfig 实例。若为 None 则使用默认配置。
         """
-        from ..integration_configs import ConvCompressorConfig
+        from ..shared.integration_configs import ConvCompressorConfig
 
         if config is not None:
             self._config = config
