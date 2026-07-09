@@ -3,7 +3,7 @@
 Cross-reference between legacy module paths and the 总分总 runtime layers
 introduced by `docs/superpowers/specs/2026-07-07-runtime-structure-design.md`.
 
-Legacy paths keep working. New paths are canonical for new code.
+Migration complete (2026-07-09): legacy root paths are REMOVED, not shims. The new paths below are canonical.
 
 ## `shared/` -- cross-layer utilities
 
@@ -38,8 +38,8 @@ Legacy paths keep working. New paths are canonical for new code.
 |--------------------------------|---------------------------------------|
 | `aigateway_core.context`       | `aigateway_core.dispatch.context`     |
 
-The full dispatcher/classifier still lives at `aigateway_api.dispatcher`.
-Migrating it into core is a later phase.
+`RequestDispatcher` and `classify_request` now live in `aigateway_core.dispatch`.
+`aigateway_api.dispatcher` is a thin adapter.
 
 ## `pipelines/understanding/` -- understanding pipeline (分)
 
@@ -78,11 +78,8 @@ Migrating it into core is a later phase.
 | `aigateway_core.generation_optimization.strategies.model_router`     | `aigateway_core.route.model_resolution` |
 | `aigateway_core.litellm_bridge`                                      | `aigateway_core.route.bridge`         |
 
-Streaming, response assembly, quota, and metrics closure remain in the API
-surface for now. Moving them into `route/` is a later phase.
+Streaming (`route/streaming/`) and costing (`route/metrics/`) have moved into `route/`. Quota accounting and final response assembly still live in the API surface.
 
-## Out of scope
+## Other locations
 
-`aigateway_core.code_rag.*`, `aigateway_core.pipeline.PipelineEngine`, and
-the surface packages (`aigateway_api`, `aigateway_cli`, `control-panel`)
-are not remapped by this refactor.
+`PipelineEngine` now lives in `aigateway_core.dispatch.pipeline_engine`. `code_rag` moved to `aigateway_core.pipelines.understanding.code_rag`. The surface packages (`aigateway_api`, `aigateway_cli`, `control-panel`) remain separate.

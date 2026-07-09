@@ -38,32 +38,30 @@ Client → aigateway-api (FastAPI :8000)
 ## Package Layout
 
 ```
-aigateway-api/src/aigateway_api/    FastAPI app
+aigateway-api/src/aigateway_api/    FastAPI app (protocol surface only)
   main.py               App factory, lifespan (init state, build both PipelineEngines)
-  dispatcher.py         RequestDispatcher — the entry orchestrator
+  dispatcher.py         Thin adapter; real RequestDispatcher in core dispatch/dispatcher.py
   openai_compat.py      /v1/chat/completions handler + helpers (_apply_*/_record_request_log)
   admin_routes.py       API key CRUD, quotas, plugin config, logs, RAG, L3 cache mgmt
-  streaming.py          SSE generator (also simulates streams from cache)
+  streaming.py          SSE adapter (create_sse_response); real SSEGenerator in core route/streaming/
   routes.py             /health, /metrics
   auth_middleware.py    Bearer/x-api-key validation
   rate_limiter.py       IP rate limit
-  trace_middleware.py   Generates/propagates trace_id → request.state
-  draft_routes.py, template_routes.py
+  trace_middleware.py   Generates/propagates trace_id -> request.state
+  draft_routes.py, template_routes.py, code_rag_routes.py
 
-aigateway-core/src/aigateway_core/  Shared library
-  pipeline.py           PipelineEngine (kind-aware) + classic plugins (pii/cache/semantic/compress/rag/conv/media)
-  plugin_registry.py    Registration, topological sort, lifecycle
-  context.py            PipelineContext (trace_id is required)
-  caching.py            CacheManager L1→L2→L3, cache-key v2, rerankers
-  security.py           KeyStore + PIIDetector (20+ patterns, 3-pass)
-  litellm_bridge.py     LiteLLM Router wrapper + fallback + cooldown tracker + auto resolver
-  config.py             YAML loader + env override + hot-reload (Watchdog)
-  debug_config.py       DebugConfig + hot-reload watcher (16 switches)
-  trace_event.py        TraceEvent / TraceCollector (contextvar)
-  logger.py, metrics.py, tracing.py, redis_client.py, qdrant_client.py, exceptions.py
-  generation_optimization/  6 plugins + 8 strategies (ai_director/intent_evaluator/
-                            token_compressor/draft_generator/gen_model_router/cost_tracker)
-  media/                Media Optimization V2: plugin, mol, cache, pipelines/{Image,Video,Audio,Document}
+aigateway-core/src/aigateway_core/  Shared library - runtime skeleton (prefix/dispatch/pipelines/route/shared)
+  prefix/               Shared pre-routing layer
+    pii/                PIIDetector (detector.py) + PIIDetectorPlugin (plugin.py)
+    cache/              CacheManager L1->L2->L3, cache-key v2 (cache_keys/cache_manager/l3_semantic) + PromptCache/SemanticCache plugins
+    media/              Media Optimization V2: plugin, mol, cache, pipelines/{image,video,audio,document}
+    registration.py     _register_builtin_plugins (classic + rag/conv/media + gen-opt)
+  dispatch/             RequestDispatcher, PipelineEngine, PipelineContext, classify_request
+  pipelines/
+    understanding/      rag/ (RAGRetriever), conversation/ (ConvCompressor), compression/ (PromptCompress LLMLingua-2), code_rag/
+    generation/         director/intent/token/draft/cost/routing_signals/ (6 plugins + strategies) + _common/ (config/models/metrics/exceptions/api_key_groups) + registration.py
+  route/                bridge/ (LiteLLMBridge + cooldown), streaming/ (SSE + cache_stream + metrics_wrapper), metrics/ (costing), model_resolution/ (ModelRouterStrategy auto resolver)
+  shared/               config, tracing, trace_event, exceptions, plugin_registry, logger, metrics, debug_config, redis_client, qdrant_client, integration_configs, auth/key_store
 
 aigateway-cli/src/aigateway_cli/    __main__, chat, run, session
 control-panel/src/                  App.tsx (routes), api/client.ts, pages/ (9), components/, hooks/
@@ -83,7 +81,7 @@ key = SHA-256("v2" | tenant_id | pipeline_kind | model_family | temp_bucket | mt
 - **mt_bucket**: rounded up to `le_256/512/1024/2048/4096/8192/16384`; `None/0` → `any`.
 - **top_p**: ignored (nearly always 1.0 in practice).
 - **cache_scope**: header `X-Cache-Scope` > PII-forced `private` > default `shared` (see `dispatcher._resolve_cache_scope`).
-- **normalized_prompt**: system + last 3 turns only (`dispatcher._extract_cacheable_context`), NFKC + whitespace collapse (`caching._normalize_prompt`).
+- **normalized_prompt**: system + last 3 turns only (`dispatcher._extract_cacheable_context`), NFKC + whitespace collapse (`prefix.cache.cache_keys._normalize_prompt`).
 - **metrics**: `gateway_cache_hits_total{tier}` / `gateway_cache_misses_total` counted at dispatcher (fixed a v1 blind spot).
 - Tests: `tests/test_cache_key_v2.py`.
 
@@ -129,16 +127,16 @@ Backfill: L2 hit → L1; L3 hit → L1 only (approximate); MISS → L1+L2 + asyn
 | `docs/DB_SCHEMA.md` | Redis keys, Qdrant collections, PipelineContext. |
 | `docs/RUNTIME_MAP.md` | Legacy path → 总分总 runtime layer (prefix/dispatch/pipelines/route/shared). |
 | `docs/ARCHITECTURE_DIAGRAM.md` | Full 总分总 / dual-entry diagram. |
-| `dispatcher.py` | Request flow, classification, cache backfill. |
+| `dispatcher.py` (api) | Thin adapter; real flow in `aigateway_core/dispatch/dispatcher.py`. |
 | `openai_compat.py` | SSE streaming, response assembly, request logging. |
 | `admin_routes.py` | Admin endpoints (keys/quotas/plugins/logs/RAG/L3). |
 | `main.py` | App factory, lifespan init, both PipelineEngine instances. |
-| `pipeline.py` | PipelineEngine + classic plugins. |
-| `caching.py` | Cache-key gen, L1/L2/L3, rerankers, backfill. |
-| `security.py` | KeyStore, PIIDetector. |
-| `litellm_bridge.py` | Multi-provider calls, fallback, cooldown, auto resolver. Cooldown reads `circuit_breaker:` section. |
-| `generation_optimization/` | 6 gen plugins + 8 strategies. |
-| `media/` | Media Optimization V2. |
+| `dispatch/dispatcher.py` | Request flow, classification, cache backfill (core). |
+| `prefix/cache/` | Cache-key gen, L1/L2/L3, rerankers, backfill. |
+| `prefix/pii/` + `shared/auth/` | PIIDetector, KeyStore. |
+| `route/bridge/litellm_bridge.py` | Multi-provider calls, fallback, cooldown, auto resolver. Cooldown reads `circuit_breaker:` section. |
+| `pipelines/generation/` | 6 gen plugins + strategies (+ `_common/`, `registration.py`). |
+| `prefix/media/` | Media Optimization V2. |
 | `control-panel/src/pages/` | 9 page components. |
 | `control-panel/src/api/client.ts` | Fetch calls + `parseMetrics()` (client-side Prometheus text parse). |
 
@@ -215,7 +213,7 @@ python3 -m pytest tests/ --cov=aigateway_core --cov=aigateway_api
 - **prompt_compress** — real LLMLingua-2 impl. `device: cpu|cuda`, `compression_ratio`, `target_token` in config.
 - **rag_retriever / conv_compressor** — default-enabled with local fallback (Qdrant needed only for full retrieval).
 - **TokenCompressorStrategy** — deterministic hash-vector placeholder; real CLIP/ViT segmentation is a TODO.
-- **`GenerationPipeline` (`media/generation.py`) is orphaned** — 0 prod references. Gen path is the 6-plugin chain.
+- **`GenerationPipeline` (`prefix/media/generation.py`) is orphaned** — 0 prod references. Gen path is the 6-plugin chain.
 - **AIDirectorStrategy late-binds bridge** — registration runs before bridge exists; `main.py` injects `_litellm_bridge` post-init.
 - **Dead frontend code** — `hooks/useAuth.ts`, `hooks/usePoll.ts` have 0 imports. Six API client fns (`createChatCompletion*`, `listModels`, `createEmbeddings`, `getQuota`, `getMetricsJson`) are reserved for Entry B.
 - **Implicit frontend auth** — no login page or Auth provider. `ensureAuthHeaders()` pulls key from localStorage silently; unset key → blank pages (except Plugins/Overview which handle it).
