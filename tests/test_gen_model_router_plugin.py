@@ -337,7 +337,7 @@ class TestGenModelRouterPluginTracing:
         self, default_config, mock_strategy, ctx_with_intent_result
     ):
         """Plugin emits a kind='plugin' TraceEvent on success."""
-        from aigateway_core.trace_event import TraceCollector
+        from aigateway_core.shared.trace_event import TraceCollector
 
         plugin = GenModelRouterPlugin(strategy=mock_strategy, config=default_config)
         ctx_with_intent_result.trace_id = "routertrace789"
@@ -355,7 +355,7 @@ class TestGenModelRouterPluginTracing:
         self, default_config, mock_strategy, ctx_with_intent_result
     ):
         """Plugin writes model, provider, reason, score to ctx.extra (replaces span attrs)."""
-        from aigateway_core.trace_event import TraceCollector
+        from aigateway_core.shared.trace_event import TraceCollector
 
         plugin = GenModelRouterPlugin(strategy=mock_strategy, config=default_config)
         ctx_with_intent_result.trace_id = "traceXYZ"

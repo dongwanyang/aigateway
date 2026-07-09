@@ -47,7 +47,7 @@ def _emit_cache_debug(key: str, tier_hit: str, start_monotonic: float,
     Called at each hit/MISS path in CacheManager.get; key is hashed and
     truncated to avoid leaking prompt content.
     """
-    from aigateway_core.trace_event import TraceCollector
+    from aigateway_core.shared.trace_event import TraceCollector
     import time as _time
     collector = TraceCollector.current()
     if collector is None:

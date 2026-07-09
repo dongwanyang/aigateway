@@ -24,7 +24,7 @@ import uuid
 # 将项目根目录加入 PYTHONPATH
 sys.path.insert(0, "/home/ubuntu/gateway2/aigateway-core/src")
 
-from aigateway_core.redis_client import RedisClientManager
+from aigateway_core.shared.redis_client import RedisClientManager
 
 logging.basicConfig(
     level=logging.INFO,

@@ -6,8 +6,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-api"
 from unittest.mock import patch
 from starlette.testclient import TestClient
 
-import aigateway_core.debug_config as dc
-from aigateway_core.debug_config import DebugConfig
+import aigateway_core.shared.debug_config as dc
+from aigateway_core.shared.debug_config import DebugConfig
 
 
 def test_get_debug_config_endpoint_returns_all_dims(monkeypatch):

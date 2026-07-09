@@ -160,7 +160,7 @@ def _register_builtin_plugins(registry: PluginRegistry, config_manager: Any = No
         if gen_opt_config.get("enabled", True):
             redis_client = None
             try:
-                from aigateway_core.redis_client import RedisClientManager
+                from aigateway_core.shared.redis_client import RedisClientManager
 
                 redis_client = RedisClientManager.get_client()
             except Exception:

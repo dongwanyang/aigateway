@@ -2,7 +2,7 @@
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 
-from aigateway_core.debug_config import DebugConfig, DebugConfigWatcher
+from aigateway_core.shared.debug_config import DebugConfig, DebugConfigWatcher
 
 
 def test_default_all_off():

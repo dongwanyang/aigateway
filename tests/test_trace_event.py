@@ -2,7 +2,7 @@
 import sys, os, time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 
-from aigateway_core.trace_event import TraceEvent, TraceCollector
+from aigateway_core.shared.trace_event import TraceEvent, TraceCollector
 
 
 def test_trace_event_fields():

@@ -20,7 +20,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from aigateway_core.exceptions import AuthError
+from aigateway_core.shared.exceptions import AuthError
 
 logger = logging.getLogger(__name__)
 

@@ -20,7 +20,7 @@ import sys
 # 将项目根目录加入 PYTHONPATH
 sys.path.insert(0, "/home/ubuntu/gateway2/aigateway-core/src")
 
-from aigateway_core.qdrant_client import QdrantClientManager
+from aigateway_core.shared.qdrant_client import QdrantClientManager
 
 logging.basicConfig(
     level=logging.INFO,

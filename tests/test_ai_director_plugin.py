@@ -271,7 +271,7 @@ class TestAIDirectorPluginTracing:
     @pytest.mark.asyncio
     async def test_emits_plugin_trace_event(self, default_config, mock_strategy):
         """Plugin emits a kind='plugin' TraceEvent on success."""
-        from aigateway_core.trace_event import TraceCollector
+        from aigateway_core.shared.trace_event import TraceCollector
 
         plugin = AIDirectorPlugin(strategy=mock_strategy, config=default_config)
         ctx = PipelineContext(

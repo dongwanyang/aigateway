@@ -11,7 +11,7 @@ from typing import Any
 
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from aigateway_core.trace_event import TraceCollector
+from aigateway_core.shared.trace_event import TraceCollector
 
 
 class TraceMiddleware:

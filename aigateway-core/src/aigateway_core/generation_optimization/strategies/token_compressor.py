@@ -31,7 +31,7 @@ from typing import Any, List, Optional
 from aigateway_core.generation_optimization.config import TokenCompressorConfig
 from aigateway_core.generation_optimization.exceptions import TokenCompressionError
 from aigateway_core.generation_optimization.models import CompressionResult
-from aigateway_core.integration_configs import CLIPConfig
+from aigateway_core.shared.integration_configs import CLIPConfig
 from aigateway_core.media.types import MediaContent
 
 logger = logging.getLogger(__name__)

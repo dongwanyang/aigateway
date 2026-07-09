@@ -307,7 +307,7 @@ class PromptCompressPlugin:
         *,
         compression_ratio: float = 0.5,
     ) -> None:
-        from aigateway_core.integration_configs import PromptCompressConfig
+        from aigateway_core.shared.integration_configs import PromptCompressConfig
 
         if config is not None:
             self._config = config

@@ -234,7 +234,7 @@ class AIDirectorStrategy:
         ]
 
         # Inject trace context into downstream LLM call headers for propagation
-        from aigateway_core.tracing import TracingManager
+        from aigateway_core.shared.tracing import TracingManager
 
         extra_headers: Dict[str, str] = {}
         TracingManager.inject_trace_context(

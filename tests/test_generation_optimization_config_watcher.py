@@ -27,7 +27,7 @@ import yaml
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 
-from aigateway_core.config import ConfigManager
+from aigateway_core.shared.config import ConfigManager
 from aigateway_core.generation_optimization.config import (
     GenerationOptimizationConfig,
     GenerationOptimizationConfigWatcher,

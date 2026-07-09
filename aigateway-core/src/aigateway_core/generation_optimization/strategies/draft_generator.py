@@ -33,7 +33,7 @@ from aigateway_core.generation_optimization.models import (
     GenerationRequest,
     UpscaleResult,
 )
-from aigateway_core.integration_configs import ComfyUIConfig
+from aigateway_core.shared.integration_configs import ComfyUIConfig
 
 logger = logging.getLogger(__name__)
 

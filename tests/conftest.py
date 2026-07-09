@@ -60,13 +60,13 @@ def _reset_trace_collector():
     e2e 测试通过 HTTP 调 gateway,不需要该 fixture 但保持全局 autouse 无副作用)。
     """
     try:
-        from aigateway_core.trace_event import TraceCollector
+        from aigateway_core.shared.trace_event import TraceCollector
         TraceCollector._current.set(None)
     except ImportError:
         pass
     yield
     try:
-        from aigateway_core.trace_event import TraceCollector
+        from aigateway_core.shared.trace_event import TraceCollector
         TraceCollector._current.set(None)
     except ImportError:
         pass

@@ -572,7 +572,7 @@ async def get_plugins_config(
             reg_map[name] = reg
 
     # 读当前 DebugConfig(per_plugin)用于回填每个插件的 debug 字段
-    from aigateway_core.debug_config import get_debug_config
+    from aigateway_core.shared.debug_config import get_debug_config
     _debug_cfg = get_debug_config()
 
     def _build_plugin_entry(p: dict) -> dict:
@@ -911,7 +911,7 @@ async def get_debug_config_endpoint(
     _auth: Dict[str, Any] = Depends(authenticate_admin),
 ):
     """返回当前 DebugConfig(5 维度 + plugins.enabled + per_plugin)。"""
-    from aigateway_core.debug_config import get_debug_config
+    from aigateway_core.shared.debug_config import get_debug_config
     cfg = get_debug_config()
     return {
         "data": {
@@ -1028,13 +1028,13 @@ async def update_global_config(
 
     # 根据 debug_mode 调整日志级别（双向：开启时切 DEBUG，关闭时恢复原级别）
     if debug_mode:
-        from aigateway_core.logger import setup_logging
+        from aigateway_core.shared.logger import setup_logging
         setup_logging(log_level="DEBUG")
     else:
         # 关闭调试模式时，恢复为 observability.log_level 配置的级别（默认 INFO）
         _obs = config_manager.get("observability") or {}
         _restore_level = (_obs.get("log_level", "info") if isinstance(_obs, dict) else "info")
-        from aigateway_core.logger import setup_logging
+        from aigateway_core.shared.logger import setup_logging
         setup_logging(log_level=_restore_level.upper())
 
     return {

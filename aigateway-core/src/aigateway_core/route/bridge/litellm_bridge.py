@@ -27,7 +27,7 @@ def _emit_bridge_debug(start_monotonic: float, status: str,
                        payload: Optional[Dict[str, Any]] = None) -> None:
     """若 bridge 维度 debug 开关开启,发一条 kind=debug TraceEvent."""
     import time as _time
-    from aigateway_core.trace_event import TraceCollector
+    from aigateway_core.shared.trace_event import TraceCollector
     collector = TraceCollector.current()
     if collector is None:
         return

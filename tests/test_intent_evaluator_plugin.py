@@ -281,7 +281,7 @@ class TestIntentEvaluatorPluginTracing:
     @pytest.mark.asyncio
     async def test_emits_plugin_trace_event(self, default_config, mock_strategy):
         """Plugin emits a kind='plugin' TraceEvent on success."""
-        from aigateway_core.trace_event import TraceCollector
+        from aigateway_core.shared.trace_event import TraceCollector
 
         plugin = IntentEvaluatorPlugin(strategy=mock_strategy, config=default_config)
         ctx = PipelineContext(
@@ -300,7 +300,7 @@ class TestIntentEvaluatorPluginTracing:
     @pytest.mark.asyncio
     async def test_writes_complexity_score_to_context(self, default_config, mock_strategy):
         """Plugin records complexity_score in ctx.extra (replaces span attrs)."""
-        from aigateway_core.trace_event import TraceCollector
+        from aigateway_core.shared.trace_event import TraceCollector
 
         plugin = IntentEvaluatorPlugin(strategy=mock_strategy, config=default_config)
         ctx = PipelineContext(

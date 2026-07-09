@@ -16,11 +16,11 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 
-from aigateway_core.config import (
+from aigateway_core.shared.config import (
     IntegrationConfigs,
     parse_integration_configs,
 )
-from aigateway_core.integration_configs import (
+from aigateway_core.shared.integration_configs import (
     CLIPConfig,
     ComfyUIConfig,
     ConvCompressorConfig,

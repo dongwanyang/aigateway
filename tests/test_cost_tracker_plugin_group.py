@@ -42,7 +42,7 @@ def mock_tracing():
     TraceCollector.current(). Starting a collector here keeps that path exercised
     (and the old get_tracing_manager patch path is gone).
     """
-    from aigateway_core.trace_event import TraceCollector
+    from aigateway_core.shared.trace_event import TraceCollector
 
     collector = TraceCollector.start("test-trace-cost-tracker")
     yield collector

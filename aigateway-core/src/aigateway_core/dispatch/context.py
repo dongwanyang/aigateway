@@ -282,7 +282,7 @@ class PipelineContext:
         self.extra["_plugin_trace"] = trace
 
         try:
-            from aigateway_core.trace_event import TraceCollector, TraceEvent
+            from aigateway_core.shared.trace_event import TraceCollector, TraceEvent
             import time as _time
             collector = TraceCollector.current()
             if collector:

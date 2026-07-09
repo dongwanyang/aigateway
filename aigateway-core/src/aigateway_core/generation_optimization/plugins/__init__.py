@@ -67,7 +67,7 @@ def emit_plugin_event(
     """
     import time as _time
 
-    from aigateway_core.trace_event import TraceCollector, TraceEvent
+    from aigateway_core.shared.trace_event import TraceCollector, TraceEvent
 
     collector = TraceCollector.current()
     if collector is None:
@@ -161,7 +161,7 @@ def register_generation_optimization_plugins(
     intent_evaluator_strategy = IntentEvaluatorStrategy(config=config.model_router)
 
     # 加载 CLIP 配置（从 generation_optimization.token_compressor.clip）
-    from aigateway_core.integration_configs import CLIPConfig, ComfyUIConfig
+    from aigateway_core.shared.integration_configs import CLIPConfig, ComfyUIConfig
     clip_dict = gen_opt_dict.get("token_compressor", {}).get("clip", {})
     clip_config = CLIPConfig(
         model_name=clip_dict.get("model_name", CLIPConfig.model_name),

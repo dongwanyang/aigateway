@@ -98,7 +98,7 @@ def _emit_stage(trace_id: str, stage: str, name: str, duration_ms: float,
 
     若 entry 维度 debug 开关开启,同时镜像一条 kind=debug 事件(payload 填充)。
     """
-    from aigateway_core.trace_event import TraceCollector, TraceEvent
+    from aigateway_core.shared.trace_event import TraceCollector, TraceEvent
     collector = TraceCollector.current()
     if collector:
         collector.emit(TraceEvent(
@@ -118,7 +118,7 @@ def _emit_stage(trace_id: str, stage: str, name: str, duration_ms: float,
 def _emit_plugin(trace_id: str, plugin_name: str, duration_ms: float,
                  status: str = "ok") -> None:
     """发一条 kind=plugin 的 TraceEvent(_run_engine_filtered 用)."""
-    from aigateway_core.trace_event import TraceCollector, TraceEvent
+    from aigateway_core.shared.trace_event import TraceCollector, TraceEvent
     collector = TraceCollector.current()
     if collector:
         collector.emit(TraceEvent(

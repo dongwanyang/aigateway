@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Protocol
 
 from .context import PipelineContext
 from aigateway_core.shared.plugin_registry import PluginRegistry
-from aigateway_core.trace_event import TraceCollector, TraceEvent
+from aigateway_core.shared.trace_event import TraceCollector, TraceEvent
 
 logger = logging.getLogger(__name__)
 

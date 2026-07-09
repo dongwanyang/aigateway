@@ -45,7 +45,7 @@ from aigateway_core.generation_optimization.plugins.gen_model_router_plugin impo
 from aigateway_core.generation_optimization.plugins.cost_tracker_plugin import (
     CostTrackerPlugin,
 )
-from aigateway_core.trace_event import TraceCollector
+from aigateway_core.shared.trace_event import TraceCollector
 
 
 # ---------------------------------------------------------------------------
@@ -312,7 +312,7 @@ class TestInjectTraceContext:
 
     def test_inject_trace_context_format(self):
         """inject_trace_context produces correct W3C traceparent format."""
-        from aigateway_core.tracing import TracingManager
+        from aigateway_core.shared.tracing import TracingManager
 
         headers: Dict[str, str] = {}
         TracingManager.inject_trace_context(

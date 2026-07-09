@@ -36,12 +36,12 @@ if _core_src not in sys.path:
     sys.path.insert(0, _core_src)
 
 from aigateway_core.prefix.cache.cache_manager import CacheManager
-from aigateway_core.config import ConfigManager
-from aigateway_core.logger import setup_logging
-from aigateway_core.metrics import get_metrics_collector
+from aigateway_core.shared.config import ConfigManager
+from aigateway_core.shared.logger import setup_logging
+from aigateway_core.shared.metrics import get_metrics_collector
 from aigateway_core.shared.plugin_registry import PluginRegistry
-from aigateway_core.qdrant_client import QdrantClientManager
-from aigateway_core.redis_client import RedisClientManager
+from aigateway_core.shared.qdrant_client import QdrantClientManager
+from aigateway_core.shared.redis_client import RedisClientManager
 from aigateway_core.shared.auth.key_store import KeyStore
 
 logger = logging.getLogger(__name__)
@@ -63,7 +63,7 @@ def _register_exception_handlers(app_instance: "FastAPI") -> None:
     from fastapi import HTTPException
     import uuid
 
-    from aigateway_core.exceptions import (
+    from aigateway_core.shared.exceptions import (
         AuthError,
         GatewayError,
         QuotaExceededError,
@@ -496,7 +496,7 @@ async def lifespan(app: "FastAPI"):
 
     # 初始化 5 维度 Debug 开关(PR2 2026-07-05)。attach 到 ConfigManager.on_reload
     # 后,后续 config.yaml 变更自动 atomic swap;首次加载在 attach 内完成。
-    from aigateway_core.debug_config import init_debug_config_watcher
+    from aigateway_core.shared.debug_config import init_debug_config_watcher
     app.state.debug_config_watcher = init_debug_config_watcher(config_manager)
     logger.info("DebugConfigWatcher 已初始化并挂 ConfigManager.on_reload")
 

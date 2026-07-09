@@ -3,8 +3,8 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 
 import time
-import aigateway_core.debug_config as dc
-from aigateway_core.trace_event import TraceCollector, TraceEvent
+import aigateway_core.shared.debug_config as dc
+from aigateway_core.shared.trace_event import TraceCollector, TraceEvent
 
 
 class _FakeWatcher:

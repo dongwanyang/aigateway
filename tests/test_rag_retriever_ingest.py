@@ -19,7 +19,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 
-from aigateway_core.integration_configs import RAGRetrieverConfig
+from aigateway_core.shared.integration_configs import RAGRetrieverConfig
 
 
 class TestIngestDocumentsUnavailable:
