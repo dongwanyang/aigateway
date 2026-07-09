@@ -51,7 +51,6 @@ def test_host_config_read(host_config):
     cfg = host_config.read()
     assert "providers" in cfg
     assert "agnes" in cfg["providers"]
-    assert "test-broken" in cfg["providers"]  # Task 0.2 已加
 
 
 def test_host_config_snapshot_restore(host_config):

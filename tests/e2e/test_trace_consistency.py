@@ -19,14 +19,15 @@ def test_c1_understanding_chain(user_client, trace_helpers):
         "/v1/chat/completions",
         json={
             "model": AGNES_TEXT_MODEL,
-            "messages": [{"role": "user", "content": "understanding chain"}],
+            "messages": [{"role": "user", "content": f"trace chain test {uuid.uuid4().hex}"}],
         },
         headers={"X-Trace-Id": tid},
         timeout=60,
     )
     evs = trace_helpers.wait(tid)
     names = [e.get("name") for e in evs]
-    # 至少有三类锚点:一个 stage_start-like、pii_detector、bridge-related
+    # uuid prompt 保证 cache miss -> bridge 必被调用; 至少三类锚点:
+    # 一个 stage/dispatch/media 事件、pii_detector、bridge-related
     assert any(n and ("dispatch" in n or "start" in str(n).lower() or "media" in n) for n in names), \
         f"no dispatch/start/media anchor in {names}"
     assert any("pii" in str(n) for n in names if n), f"no pii event: {names}"
@@ -61,18 +62,19 @@ def test_c3_three_kinds_present_when_debug_on(admin_client, user_client, trace_h
     time.sleep(1)
     try:
         tid = _tid()
+        # 使用长提示避免缓存命中
         user_client.post(
             "/v1/chat/completions",
             json={
                 "model": AGNES_TEXT_MODEL,
-                "messages": [{"role": "user", "content": "3-kind check"}],
+                "messages": [{"role": "user", "content": f"3-kind check {uuid.uuid4().hex} " + "hello world " * 20}],
             },
             headers={"X-Trace-Id": tid},
             timeout=60,
         )
         evs = trace_helpers.wait(tid)
         kinds = {e.get("kind") for e in evs}
-        # 至少有 stage + plugin
+        # uuid+长 prompt 保证 cache miss -> plugin 事件必现(stage + plugin 两 kind)
         assert "stage" in kinds, f"missing stage kind: {kinds}"
         assert "plugin" in kinds, f"missing plugin kind: {kinds}"
         # 必填字段

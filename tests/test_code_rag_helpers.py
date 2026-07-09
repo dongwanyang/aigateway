@@ -5,6 +5,7 @@ fail loudly instead of silently drifting.
 """
 from pathlib import Path
 
+import pytest
 import yaml
 
 
@@ -327,7 +328,9 @@ def test_rag_retriever_source_mentions_real_graph_hops() -> None:
         / "aigateway-core"
         / "src"
         / "aigateway_core"
-        / "plugins"
+        / "pipelines"
+        / "understanding"
+        / "rag"
         / "rag_retriever_plugin.py"
     ).read_text(encoding="utf-8")
     assert "lookup_related_symbols" in src
@@ -396,6 +399,10 @@ def test_split_code_directory_writes_symbol_names(tmp_path) -> None:
     """回归:切完的 chunk 字典必须携带 function_name/class_name,
     否则 code_rag_routes 侧的 strict-lookup 拿到 symbol=None 直接短路。
     """
+    try:
+        import langchain_community  # noqa: F401
+    except ImportError:
+        pytest.skip("langchain_community not installed")
     from aigateway_core.pipelines.understanding.code_rag.splitter import split_code_directory
 
     src = tmp_path / "auth.py"

@@ -80,11 +80,12 @@ class TestIngestDocumentsWithMocks:
                 ),
             },
         ):
-            # Need to reimport to pick up mocked modules
-            import importlib
+            # llama_index is imported lazily inside ingest_documents(), so
+            # patch.dict(sys.modules) alone routes the in-method imports to
+            # the mocks -- no importlib.reload() needed (reload would create a
+            # new RAGRetrieverPlugin class object and break `is` identity checks
+            # in sibling skeleton tests).
             import aigateway_core.pipelines.understanding.rag.rag_retriever_plugin as mod
-
-            importlib.reload(mod)
 
             plugin_reloaded = mod.RAGRetrieverPlugin.__new__(mod.RAGRetrieverPlugin)
             plugin_reloaded._config = RAGRetrieverConfig(
@@ -138,10 +139,7 @@ class TestIngestDocumentsWithMocks:
                 ),
             },
         ):
-            import importlib
             import aigateway_core.pipelines.understanding.rag.rag_retriever_plugin as mod
-
-            importlib.reload(mod)
 
             plugin_reloaded = mod.RAGRetrieverPlugin.__new__(mod.RAGRetrieverPlugin)
             plugin_reloaded._config = RAGRetrieverConfig()
@@ -186,10 +184,7 @@ class TestIngestDocumentsWithMocks:
                 ),
             },
         ):
-            import importlib
             import aigateway_core.pipelines.understanding.rag.rag_retriever_plugin as mod
-
-            importlib.reload(mod)
 
             plugin_reloaded = mod.RAGRetrieverPlugin.__new__(mod.RAGRetrieverPlugin)
             plugin_reloaded._config = RAGRetrieverConfig()

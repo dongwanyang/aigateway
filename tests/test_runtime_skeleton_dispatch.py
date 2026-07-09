@@ -3,13 +3,11 @@ import importlib
 
 
 def test_dispatch_context_reexports():
+    """dispatch.context is the canonical home for PipelineContext."""
     dispatch_ctx = importlib.import_module("aigateway_core.dispatch.context")
-    legacy_ctx = importlib.import_module("aigateway_core.context")
-    for name in dir(legacy_ctx):
-        if name.startswith("_"):
-            continue
-        assert hasattr(dispatch_ctx, name)
-        assert getattr(dispatch_ctx, name) is getattr(legacy_ctx, name)
+    # Verify it exports the expected public names
+    assert hasattr(dispatch_ctx, "PipelineContext")
+    assert hasattr(dispatch_ctx, "NS_RAG_RETRIEVER")
 
 
 def test_dispatch_top_level_pipeline_context():

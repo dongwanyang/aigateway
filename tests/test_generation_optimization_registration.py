@@ -105,7 +105,7 @@ class TestPluginRegistration:
         summary = registry.summary()
         plugins = summary["plugins"]
 
-        assert plugins["ai_director"]["depends_on"] == ["prompt_cache"]
+        assert plugins["ai_director"]["depends_on"] == []  # 生成管道不依赖理解管道的 prompt_cache
         assert plugins["intent_evaluator"]["depends_on"] == ["ai_director"]
         assert plugins["token_compressor"]["depends_on"] == ["intent_evaluator"]
         assert plugins["draft_generator"]["depends_on"] == ["token_compressor"]

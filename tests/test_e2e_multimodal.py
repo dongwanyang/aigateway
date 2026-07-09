@@ -15,12 +15,16 @@ End-to-End 多模态 Gateway 测试
 import base64
 import io
 import os
-import sys
+import sys as _sys
 
 import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-api", "src"))
+# Save original sys.path before importing aigateway modules
+_ORIGINAL_SYS_PATH = _sys.path.copy()
+
+# Temporarily add paths for imports used in this test file
+_sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
+_sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-api", "src"))
 
 # 指向测试配置
 os.environ["AI_GATEWAY_CONFIG_PATH"] = os.path.join(
@@ -28,10 +32,46 @@ os.environ["AI_GATEWAY_CONFIG_PATH"] = os.path.join(
 )
 
 
+def _restore_sys_path():
+    """Restore sys.path to original state."""
+    _sys.path[:] = _ORIGINAL_SYS_PATH
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_sys_path():
+    """Ensure sys.path is restored after each test to avoid polluting others."""
+    yield
+    _restore_sys_path()
+    # Purge aigateway_api modules from sys.modules so subsequent tests get a
+    # fresh import instead of a cached module loaded with the polluted sys.path.
+    for key in list(_sys.modules):
+        if key.startswith("aigateway_api.") or key == "aigateway_api":
+            del _sys.modules[key]
+
+
 def _make_png_bytes(width: int = 800, height: int = 600) -> bytes:
     """生成一张真实 PNG 图片。"""
-    from PIL import Image, ImageDraw
-
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        # Pillow 未安装时生成最小合法 PNG (1x1 red pixel)
+        import struct, zlib
+        sig = b'\x89PNG\r\n\x1a\n'
+        # IHDR
+        ihdr_data = struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0)
+        ihdr_crc = zlib.crc32(b'IHDR' + ihdr_data) & 0xffffffff
+        ihdr = struct.pack('>I', 13) + b'IHDR' + ihdr_data + struct.pack('>I', ihdr_crc)
+        # IDAT
+        raw = b''
+        for _ in range(height):
+            raw += b'\x00' + b'\xff\x00\x00' * width
+        compressed = zlib.compress(raw)
+        idat_crc = zlib.crc32(b'IDAT' + compressed) & 0xffffffff
+        idat = struct.pack('>I', len(compressed)) + b'IDAT' + compressed + struct.pack('>I', idat_crc)
+        # IEND
+        iend_crc = zlib.crc32(b'IEND') & 0xffffffff
+        iend = struct.pack('>I', 0) + b'IEND' + struct.pack('>I', iend_crc)
+        return sig + ihdr + idat + iend
     img = Image.new("RGB", (width, height), color=(73, 109, 137))
     draw = ImageDraw.Draw(img)
     draw.rectangle([50, 50, width - 50, height - 50], fill=(200, 200, 200))

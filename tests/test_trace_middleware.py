@@ -15,7 +15,9 @@ from aigateway_api.trace_middleware import TraceMiddleware
 def _make_app(redis_mock=None):
     app = FastAPI()
     if redis_mock is not None:
-        app.state.redis = redis_mock
+        # 中间件从 scope["app"].state.redis_manager.redis 读取 Redis 客户端
+        app.state.redis_manager = AsyncMock()
+        app.state.redis_manager.redis = redis_mock
     app.add_middleware(TraceMiddleware)
 
     @app.get("/ping")
@@ -26,7 +28,7 @@ def _make_app(redis_mock=None):
 
 
 def test_middleware_generates_trace_id_when_absent():
-    app = _make_app(redis_mock=AsyncMock())
+    app = _make_app()
     client = TestClient(app)
     resp = client.get("/ping")
     assert resp.status_code == 200
@@ -37,7 +39,7 @@ def test_middleware_generates_trace_id_when_absent():
 
 
 def test_middleware_uses_incoming_x_trace_id():
-    app = _make_app(redis_mock=AsyncMock())
+    app = _make_app()
     client = TestClient(app)
     resp = client.get("/ping", headers={"x-trace-id": "incoming-id-123"})
     assert resp.json()["trace_id"] == "incoming-id-123"

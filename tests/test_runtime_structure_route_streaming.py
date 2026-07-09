@@ -13,11 +13,11 @@ def test_route_bridge_objects_resolve_from_new_paths():
 
 
 def test_root_shim_reexports_same_objects():
-    """The root compatibility shim must hand back the same class objects."""
-    from aigateway_core import litellm_bridge as root
+    """The route.bridge subpackage re-exports the same class objects."""
+    from aigateway_core.route import bridge
 
-    assert root.LiteLLMBridge is LiteLLMBridge
-    assert root.ProviderCooldownTracker is ProviderCooldownTracker
+    assert bridge.LiteLLMBridge is LiteLLMBridge
+    assert bridge.ProviderCooldownTracker is ProviderCooldownTracker
 
 
 # ---------------------------------------------------------------------------
