@@ -1,32 +1,24 @@
-"""
-PipelineEngine / Plugin — compatibility shim.
+"""Classic built-in plugins: PII detection, caching, semantic cache, prompt compression.
 
-The engine and plugin protocol now live in
-``aigateway_core.dispatch.pipeline_engine``. This module re-exports them and
-keeps the classic built-in plugin implementations (PII/cache/semantic/compress)
-and ``_register_builtin_plugins`` in their original home for backward
-compatibility.
+These plugins run in the shared prefix stage before pipeline dispatch.
+Moved from root ``pipeline.py`` as part of the 总分总 runtime split.
 """
-
 from __future__ import annotations
 
 import json
 import logging
 from typing import Any, Dict, List, Optional
 
-from aigateway_core.dispatch.pipeline_engine import PipelineEngine, Plugin  # noqa: F401
 from aigateway_core.dispatch.context import PipelineContext
-from aigateway_core.prefix.cache.cache_manager import CacheManager
+from aigateway_core.dispatch.pipeline_engine import Plugin  # noqa: F401
 from aigateway_core.prefix.pii.detector import PIIDetector
-from aigateway_core.shared.plugin_registry import PluginRegistry
 
 logger = logging.getLogger(__name__)
 
 
 # ------------------------------------------------------------------
-# 内置插件实现
+# PIIDetectorPlugin
 # ------------------------------------------------------------------
-
 
 class PIIDetectorPlugin:
     """PII 检测插件 — 在请求到达 LLM 前扫描并脱敏敏感信息。
@@ -49,26 +41,17 @@ class PIIDetectorPlugin:
         self.detector = PIIDetector(strategy=strategy)
 
     async def execute(self, ctx: PipelineContext) -> PipelineContext:
-        """执行 PII 检测。
-
-        Args:
-            ctx: 管线上下文。
-
-        Returns:
-            更新后的上下文。
-        """
+        """执行 PII 检测。"""
         messages = ctx.request.get("messages", [])
         if not messages:
             return ctx
 
-        # 拼接所有消息内容为待扫描文本
         texts: list[str] = []
         for msg in messages:
             content = msg.get("content", "")
             if isinstance(content, str):
                 texts.append(content)
             elif isinstance(content, list):
-                # OpenAI 多模态消息：只扫描 text 类型部分
                 for block in content:
                     if isinstance(block, dict) and block.get("type") == "text":
                         texts.append(block.get("text", ""))
@@ -81,7 +64,6 @@ class PIIDetectorPlugin:
         try:
             sanitized = self.detector.process(full_text)
         except ValueError as exc:
-            # reject 策略：检测到 PII 时抛出异常
             ctx.mark_stopped(reason=f"PII rejected: {exc}")
             ctx.pii_detector = {
                 "error": str(exc),
@@ -98,8 +80,6 @@ class PIIDetectorPlugin:
         ctx.detected_categories = list(self.detector.detected_categories)
         ctx.sanitized_prompt = sanitized
 
-        # Update ctx.request["messages"] with sanitized text so callers
-        # reading back from context get the modified messages
         if sanitized != full_text:
             messages = ctx.request.get("messages", [])
             if messages:
@@ -132,6 +112,10 @@ class PIIDetectorPlugin:
         return ctx
 
 
+# ------------------------------------------------------------------
+# PromptCachePlugin
+# ------------------------------------------------------------------
+
 class PromptCachePlugin:
     """Prompt 缓存插件 — 在管线中实现 L1/L2/L3 缓存查找与回填。
 
@@ -143,25 +127,16 @@ class PromptCachePlugin:
     enabled: bool = True
     depends_on: list = []
 
-    def __init__(self, cache_manager: Optional[CacheManager] = None) -> None:
+    def __init__(self, cache_manager: Optional["CacheManager"] = None) -> None:
         self.cache_manager = cache_manager
 
     async def execute(self, ctx: PipelineContext) -> PipelineContext:
-        """执行缓存查找。
-
-        如果缓存命中，设置 ctx.response 并标记 should_stop。
-        如果未命中，不修改上下文，让后续插件/LiteLLM 处理。
-        """
+        """执行缓存查找。"""
         cm = self.cache_manager
         if cm is None:
             return ctx
 
-        # 生成缓存键 v2:与 dispatcher.py 保持一致(同 tenant/scope 生成
-        # 相同 hash,避免 engine 路径复活时和 dispatcher 计算出不同 key)。
-        # 注:dispatcher 走的是内联缓存,这段 engine 路径实际被 _skip_names
-        # 跳过,不参与生产流量。保留同步是为了未来复活时不踩雷。
         messages = ctx.request.get("messages", [])
-        # 只保留 system + 末尾 3 轮,与 dispatcher._extract_cacheable_context 语义一致
         system_msgs = [m for m in messages if m.get("role") == "system"]
         non_system = [m for m in messages if m.get("role") != "system"]
         tail_msgs = non_system[-3:] if len(non_system) > 3 else non_system
@@ -182,7 +157,6 @@ class PromptCachePlugin:
 
         ctx.cache_key = cache_key
 
-        # 多级缓存查询
         cached = await cm.get(
             cache_key,
             value_fn=None,
@@ -196,7 +170,6 @@ class PromptCachePlugin:
             ctx.cache_hit = True
             ctx.mark_stopped(reason=f"cache_hit={hit_tier}")
 
-            # 记录缓存命中信息
             ctx.prompt_cache = {
                 "cache_key": cache_key,
                 "cache_hit": True,
@@ -212,6 +185,10 @@ class PromptCachePlugin:
         return ctx
 
 
+# ------------------------------------------------------------------
+# SemanticCachePlugin
+# ------------------------------------------------------------------
+
 class SemanticCachePlugin:
     """语义缓存插件 — 使用 L3 Qdrant 向量相似度查找相似请求。
 
@@ -224,11 +201,11 @@ class SemanticCachePlugin:
 
     name: str = "semantic_cache"
     enabled: bool = True
-    depends_on: list = ["prompt_cache"]  # 在 prompt_cache 之后执行
+    depends_on: list = ["prompt_cache"]
 
     def __init__(
         self,
-        cache_manager: Optional[CacheManager] = None,
+        cache_manager: Optional["CacheManager"] = None,
         embedding_model: str = "Qwen/Qwen3-Embedding-0.6B",
         **kwargs: Any,
     ) -> None:
@@ -241,11 +218,9 @@ class SemanticCachePlugin:
         if cm is None or cm._qdrant_client is None:
             return ctx
 
-        # 仅在 prompt_cache 未命中时执行语义缓存
         if ctx.cache_hit:
             return ctx
 
-        # 提取待嵌入文本
         messages = ctx.request.get("messages", [])
         texts: list[str] = []
         for msg in messages:
@@ -256,12 +231,10 @@ class SemanticCachePlugin:
         if not texts:
             return ctx
 
-        # 计算嵌入向量
         vector = await self._compute_embedding("\n".join(texts))
         if vector is None:
             return ctx
 
-        # 查询 L3
         result = await cm.l3_query(
             vector=vector,
             threshold=0.95,
@@ -293,7 +266,6 @@ class SemanticCachePlugin:
         """使用 sentence-transformers 计算文本嵌入向量。"""
         try:
             from sentence_transformers import SentenceTransformer
-            # 模块级缓存，避免每请求加载模型
             if not hasattr(SemanticCachePlugin, "_model_cache"):
                 SemanticCachePlugin._model_cache: Dict[str, Any] = {}
             model = SemanticCachePlugin._model_cache.get(self.embedding_model)
@@ -311,6 +283,10 @@ class SemanticCachePlugin:
             logger.error("嵌入计算失败: %s", exc)
             return None
 
+
+# ------------------------------------------------------------------
+# PromptCompressPlugin
+# ------------------------------------------------------------------
 
 class PromptCompressPlugin:
     """Prompt 压缩插件 — LLMLingua-2 Token 级压缩。
@@ -331,7 +307,7 @@ class PromptCompressPlugin:
         *,
         compression_ratio: float = 0.5,
     ) -> None:
-        from .integration_configs import PromptCompressConfig
+        from aigateway_core.integration_configs import PromptCompressConfig
 
         if config is not None:
             self._config = config
@@ -350,17 +326,10 @@ class PromptCompressPlugin:
         self._init_compressor()
 
     def _init_compressor(self) -> None:
-        """延迟初始化 LLMLingua-2 压缩器。ImportError 时标记 passthrough。
-
-        运行设备由 PromptCompressConfig.device 控制（默认 "cpu"，可在 config.yaml
-        的 plugins[prompt_compress].config.device 中改为 "cuda" 或 "auto"），
-        非法值会回落到 "cpu"。
-        """
+        """延迟初始化 LLMLingua-2 压缩器。ImportError 时标记 passthrough。"""
         try:
             from llmlingua import PromptCompressor
 
-            # LLMLingua PromptCompressor 参数名是 device_map；默认值 "cuda" 在 CPU-only
-            # 环境下会抛 "Torch not compiled with CUDA enabled"，因此显式透传配置。
             device_map = (self._config.device or "cpu").strip().lower()
             if device_map not in ("cpu", "cuda", "auto"):
                 logger.warning(
@@ -392,17 +361,7 @@ class PromptCompressPlugin:
             )
 
     def _build_prompt_text(self, messages: list) -> str:
-        """将 messages 列表拼接为单一文本块用于压缩。
-
-        包含所有消息类型：system、assistant（历史）、user、RAG 注入的内容。
-        每条消息以 "[role]: content" 格式拼接，用换行分隔。
-
-        Args:
-            messages: OpenAI 格式的消息列表。
-
-        Returns:
-            拼接后的完整文本。
-        """
+        """将 messages 列表拼接为单一文本块用于压缩。"""
         parts: list = []
         for msg in messages:
             role = msg.get("role", "user")
@@ -414,59 +373,35 @@ class PromptCompressPlugin:
     def _rebuild_messages(
         self, compressed: str, original_messages: list
     ) -> list:
-        """将压缩后的文本重建为 messages 格式。
-
-        策略：保留原始消息结构，将压缩后的文本作为单个 user 消息内容，
-        保留第一条 system 消息（如有），其余替换为压缩后的内容。
-
-        Args:
-            compressed: 压缩后的文本。
-            original_messages: 原始消息列表。
-
-        Returns:
-            重建后的 messages 列表。
-        """
+        """将压缩后的文本重建为 messages 格式。"""
         if not original_messages:
             return []
 
         rebuilt: list = []
 
-        # 保留 system 消息（如有）
         for msg in original_messages:
             if msg.get("role") == "system":
                 rebuilt.append(msg)
                 break
 
-        # 压缩后的内容作为 user 消息
         rebuilt.append({"role": "user", "content": compressed})
         return rebuilt
 
     async def execute(self, ctx: PipelineContext) -> PipelineContext:
-        """执行 prompt 压缩。
-
-        1. 从 ctx.request["messages"] 提取完整 prompt
-        2. 拼接为单一文本块
-        3. 调用 LLMLingua-2 压缩（若可用）
-        4. 将压缩后文本写回 ctx.request["messages"]
-        5. 记录 original_tokens / compressed_tokens / ratio 到 ctx.prompt_compress
-        """
+        """执行 prompt 压缩。"""
         messages = ctx.request.get("messages", [])
         if not messages:
             return ctx
 
-        # Lazy load LLMLingua-2 on first request (avoids blocking startup)
         self._ensure_compressor_loaded()
 
-        # 若 LLMLingua 不可用，passthrough
         if not self._is_available:
             return ctx
 
-        # 构建完整 prompt 文本
         prompt_text = self._build_prompt_text(messages)
         if not prompt_text.strip():
             return ctx
 
-        # 估算原始 token 数（简化：按空格+标点分词近似）
         original_tokens = len(prompt_text.split())
 
         logger.debug(
@@ -486,7 +421,6 @@ class PromptCompressPlugin:
             compressed_text = result["compressed_prompt"]
             compressed_tokens = len(compressed_text.split())
 
-            # 如果压缩结果为空或比原文长，透传原文
             if not compressed_text.strip() or compressed_tokens >= original_tokens:
                 ctx.prompt_compress["original_tokens"] = original_tokens
                 ctx.prompt_compress["compressed_tokens"] = original_tokens
@@ -501,11 +435,9 @@ class PromptCompressPlugin:
                 )
                 return ctx
 
-            # 重建 messages
             compressed_messages = self._rebuild_messages(compressed_text, messages)
             ctx.request["messages"] = compressed_messages
 
-            # 记录指标
             ratio = compressed_tokens / original_tokens if original_tokens > 0 else 1.0
             ctx.prompt_compress["original_tokens"] = original_tokens
             ctx.prompt_compress["compressed_tokens"] = compressed_tokens
@@ -519,7 +451,6 @@ class PromptCompressPlugin:
             )
 
         except Exception as exc:
-            # 运行时异常：透传原始 prompt
             logger.warning(
                 "LLMLingua-2 压缩运行时异常，透传原始 prompt: %s", exc
             )
@@ -528,173 +459,3 @@ class PromptCompressPlugin:
             ctx.prompt_compress["compression_ratio"] = 1.0
 
         return ctx
-
-
-# ------------------------------------------------------------------
-# 辅助模块
-# ------------------------------------------------------------------
-
-
-def _register_builtin_plugins(registry: PluginRegistry, config_manager: Any = None) -> None:
-    """注册所有内置插件到注册表。
-
-    Args:
-        registry: PluginRegistry 实例。
-        config_manager: 可选的配置管理器，用于读取插件配置。
-    """
-    import json
-
-    plugins_config = []
-    if config_manager is not None:
-        plugins_config = config_manager.get("plugins", []) or []
-
-    # 获取集成配置（用于 PromptCompressPlugin 等）
-    prompt_compress_kwargs: Dict[str, Any] = {}
-    if config_manager is not None:
-        try:
-            integration_cfgs = config_manager.integration_configs
-            prompt_compress_kwargs = {"config": integration_cfgs.prompt_compress}
-        except Exception:
-            pass  # 回退到默认配置
-
-    plugin_map = {
-        "pii_detector": (PIIDetectorPlugin, {"strategy": "sanitize"}),
-        "prompt_cache": (PromptCachePlugin, {}),
-        "semantic_cache": (SemanticCachePlugin, {}),
-        "prompt_compress": (PromptCompressPlugin, prompt_compress_kwargs),
-    }
-
-    # 注册 RAGRetrieverPlugin（可选依赖）
-    try:
-        from aigateway_core.plugins.rag_retriever_plugin import RAGRetrieverPlugin
-
-        rag_config = None
-        if config_manager is not None:
-            try:
-                integration_cfgs = config_manager.integration_configs
-                rag_config = integration_cfgs.rag_retriever
-            except Exception:
-                pass
-
-        rag_kwargs: Dict[str, Any] = {}
-        if rag_config is not None:
-            rag_kwargs["config"] = rag_config
-
-        # Check if enabled via plugins config
-        rag_enabled = True
-        for pcfg in plugins_config:
-            if isinstance(pcfg, dict) and pcfg.get("name") == "rag_retriever":
-                rag_enabled = pcfg.get("enabled", True)
-                break
-
-        if rag_enabled:
-            plugin_map["rag_retriever"] = (RAGRetrieverPlugin, rag_kwargs)
-    except ImportError:
-        logger.debug("RAGRetrieverPlugin 不可用（导入失败）")
-
-    # 注册 ConvCompressorPlugin（可选依赖）
-    try:
-        from aigateway_core.plugins.conv_compressor_plugin import ConvCompressorPlugin
-
-        conv_config = None
-        if config_manager is not None:
-            try:
-                integration_cfgs = config_manager.integration_configs
-                conv_config = integration_cfgs.conv_compressor
-            except Exception:
-                pass
-
-        conv_kwargs: Dict[str, Any] = {}
-        if conv_config is not None:
-            conv_kwargs["config"] = conv_config
-
-        # Check if enabled via plugins config
-        conv_enabled = True
-        for pcfg in plugins_config:
-            if isinstance(pcfg, dict) and pcfg.get("name") == "conv_compressor":
-                conv_enabled = pcfg.get("enabled", True)
-                break
-
-        if conv_enabled:
-            plugin_map["conv_compressor"] = (ConvCompressorPlugin, conv_kwargs)
-    except ImportError:
-        logger.debug("ConvCompressorPlugin 不可用（导入失败）")
-
-    # 注册 Media Optimization Plugin（V2）
-    try:
-        from aigateway_core.media.plugin import MediaOptimizationPlugin
-
-        mol_config = {}
-        if config_manager is not None:
-            mol_config = config_manager.get("media_optimization", {}) or {}
-
-        if mol_config.get("enabled", False):
-            plugin_map["media_optimizer"] = (MediaOptimizationPlugin, {"config": mol_config})
-    except ImportError:
-        logger.debug("Media Optimization Plugin 不可用（导入失败）")
-
-    for name, (plugin_cls, default_config) in plugin_map.items():
-        # 查找配置
-        cfg = None
-        for pcfg in plugins_config:
-            if isinstance(pcfg, dict) and pcfg.get("name") == name:
-                cfg = pcfg
-                break
-
-        enabled = True
-        priority = 0
-        # 使用类级别 depends_on 作为默认值
-        depends_on: list[str] = getattr(plugin_cls, "depends_on", [])
-        plugin_config: dict = {}
-
-        if cfg:
-            enabled = cfg.get("enabled", True)
-            priority = cfg.get("priority", 0)
-            depends_on = cfg.get("depends_on", depends_on)
-            plugin_config = cfg.get("config", {})
-
-        # 如果 default_config 中已有 "config" 键（使用专用配置对象），
-        # 不再用 YAML plugin_config 合并覆盖，仅用 default_config
-        if "config" in default_config:
-            merged_config = default_config
-        else:
-            merged_config = {**default_config, **plugin_config}
-
-        registry.register(
-            name=name,
-            plugin_class=plugin_cls,
-            enabled=enabled,
-            depends_on=depends_on,
-            priority=priority,
-            config=merged_config,
-        )
-
-    # 注册 Generation Optimization Plugins（6 个优化插件）
-    try:
-        from aigateway_core.generation_optimization.plugins import (
-            register_generation_optimization_plugins,
-        )
-
-        gen_opt_config = {}
-        if config_manager is not None:
-            gen_opt_config = config_manager.get("generation_optimization", {}) or {}
-
-        if gen_opt_config.get("enabled", True):
-            # 获取 Redis 客户端（若可用）
-            redis_client = None
-            try:
-                from aigateway_core.redis_client import RedisClientManager
-
-                redis_client = RedisClientManager.get_client()
-            except Exception:
-                logger.debug("Redis client 不可用，Generation Optimization 插件将使用内存后备")
-
-            register_generation_optimization_plugins(
-                registry=registry,
-                config_manager=config_manager,
-                redis_client=redis_client,
-            )
-        else:
-            logger.info("Generation Optimization Layer 已禁用 (generation_optimization.enabled=false)")
-    except ImportError as exc:
-        logger.debug("Generation Optimization Plugins 不可用（导入失败）: %s", exc)

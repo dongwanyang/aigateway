@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core
 
 import pytest
 
-from aigateway_core.plugin_registry import PluginRegistry
+from aigateway_core.shared.plugin_registry import PluginRegistry
 from aigateway_core.generation_optimization.plugins import (
     AIDirectorPlugin,
     CostTrackerPlugin,
@@ -295,7 +295,7 @@ class TestDisabledPluginPassthrough:
         ai_director = plugin_map["ai_director"]
 
         # Create a mock PipelineContext
-        from aigateway_core.context import PipelineContext
+        from aigateway_core.dispatch.context import PipelineContext
 
         ctx = PipelineContext(request={"messages": [{"role": "user", "content": "hello"}]}, trace_id="test-trace")
         original_extra = dict(ctx.extra)
@@ -326,7 +326,7 @@ class TestDisabledPluginPassthrough:
         plugin_map = {p.name: p for p in all_plugins}
         token_compressor = plugin_map["token_compressor"]
 
-        from aigateway_core.context import PipelineContext
+        from aigateway_core.dispatch.context import PipelineContext
 
         ctx = PipelineContext(request={"messages": [{"role": "user", "content": "hello"}]}, trace_id="test-trace")
 

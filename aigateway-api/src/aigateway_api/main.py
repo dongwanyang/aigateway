@@ -377,7 +377,7 @@ async def lifespan(app: "FastAPI"):
     # ---- PII Detector Plugin (always enabled) ----
     pii_detector_plugin = None
     try:
-        from aigateway_core.pipeline import PIIDetectorPlugin
+        from aigateway_core.prefix.plugins.classic_plugins import PIIDetectorPlugin
 
         pii_cfg = {"strategy": "sanitize"}
         for pcfg in config_manager.get("plugins", []) or []:
@@ -418,7 +418,7 @@ async def lifespan(app: "FastAPI"):
     # ---- Prompt Compress Plugin ----
     prompt_compress_plugin = None
     try:
-        from aigateway_core.pipeline import PromptCompressPlugin
+        from aigateway_core.prefix.plugins.classic_plugins import PromptCompressPlugin
 
         pc_cfg = {}
         for pcfg in config_manager.get("plugins", []) or []:
@@ -681,7 +681,7 @@ def _register_default_plugins(registry: "PluginRegistry", config_manager: "Confi
 
     使用 pipeline._register_builtin_plugins 统一管理。
     """
-    from aigateway_core.pipeline import _register_builtin_plugins
+    from aigateway_core.prefix.plugins.registration import _register_builtin_plugins
 
     _register_builtin_plugins(registry, config_manager)
 

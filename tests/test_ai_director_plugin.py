@@ -22,7 +22,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 
-from aigateway_core.context import PipelineContext
+from aigateway_core.dispatch.context import PipelineContext
 from aigateway_core.generation_optimization.config import (
     AIDirectorConfig,
     GenerationOptimizationConfig,

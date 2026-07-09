@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-api", "src"))
 
-from aigateway_core.litellm_bridge import LiteLLMBridge
+from aigateway_core.route.bridge.litellm_bridge import LiteLLMBridge
 
 
 # ==================================================================

@@ -35,7 +35,7 @@ from aigateway_core.media.config import (
 )
 from aigateway_core.media.mol import MediaOptimizationLayer
 from aigateway_core.media.generation import PromptEnhancer, GenerationPipeline
-from aigateway_core.context import PipelineContext
+from aigateway_core.dispatch.context import PipelineContext
 
 
 # ==================================================================

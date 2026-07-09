@@ -6,7 +6,7 @@
 
 import time
 
-from aigateway_core.litellm_bridge import ProviderCooldownTracker
+from aigateway_core.route.bridge.cooldown import ProviderCooldownTracker
 
 
 def test_closed_by_default():

@@ -103,7 +103,7 @@ def client_and_bridge():
         # key_store 设为 None 时 auth override 已生效，配额检查会跳过
         app.state.key_store = None
         # 使用全新的 L1-only CacheManager 隔离缓存（避免 Redis L2 跨测试污染）
-        from aigateway_core.caching import CacheManager
+        from aigateway_core.prefix.cache.cache_manager import CacheManager
         app.state.cache_manager = CacheManager(l1_maxsize=100, l2_default_ttl=60)
         yield client, mock_bridge, app
 

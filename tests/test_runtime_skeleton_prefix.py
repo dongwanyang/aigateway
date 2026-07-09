@@ -1,12 +1,10 @@
-"""Verify aigateway_core.prefix re-exports match legacy paths."""
+"""Verify prefix package exports match their authoritative implementations."""
 import importlib
 
 
 def _assert_identical(new_mod, sources):
     for src_path in sources:
         src_mod = importlib.import_module(src_path)
-        # Respect __all__ when defined (real-split modules declare their public
-        # surface explicitly); otherwise fall back to all non-underscore names.
         names = getattr(src_mod, "__all__", None)
         if names is None:
             names = [n for n in dir(src_mod) if not n.startswith("_")]
@@ -19,27 +17,28 @@ def _assert_identical(new_mod, sources):
             )
 
 
-def test_prefix_pii_reexports():
-    from aigateway_core import prefix
-    from aigateway_core.pipeline import PIIDetectorPlugin as LegacyPIIPlugin
+def test_prefix_pii_exports():
+    from aigateway_core.prefix import pii
+    from aigateway_core.prefix.pii.detector import PIIDetector
 
-    assert prefix.pii.PIIDetectorPlugin is LegacyPIIPlugin
-    # After the Task 3 real split, PIIDetector lives in prefix.pii.detector and
-    # KeyStore/exceptions moved to shared.auth/exceptions. prefix.pii owns only
-    # the PII surface; verify it re-exports the detector module's public names.
-    _assert_identical(prefix.pii, ["aigateway_core.prefix.pii.detector"])
-    # Backward-compat: the security.py shim still exposes PIIDetector identically.
-    from aigateway_core.security import PIIDetector as LegacyPII
-    assert prefix.pii.PIIDetector is LegacyPII
+    assert pii.PIIDetector is PIIDetector
+    _assert_identical(pii, ["aigateway_core.prefix.pii.detector"])
 
 
-def test_prefix_cache_reexports():
-    from aigateway_core import prefix
-    from aigateway_core.pipeline import PromptCachePlugin, SemanticCachePlugin
+def test_prefix_cache_exports():
+    from aigateway_core.prefix import cache
+    from aigateway_core.prefix.cache.cache_keys import (
+        _normalize_prompt,
+        _bucket_temperature,
+        _bucket_max_tokens,
+        _model_family,
+    )
 
-    assert prefix.cache.PromptCachePlugin is PromptCachePlugin
-    assert prefix.cache.SemanticCachePlugin is SemanticCachePlugin
-    _assert_identical(prefix.cache, ["aigateway_core.caching"])
+    assert cache._normalize_prompt is _normalize_prompt
+    assert cache._bucket_temperature is _bucket_temperature
+    assert cache._bucket_max_tokens is _bucket_max_tokens
+    assert cache._model_family is _model_family
+    _assert_identical(cache, ["aigateway_core.prefix.cache.cache_keys"])
 
 
 def test_prefix_media_reexports():

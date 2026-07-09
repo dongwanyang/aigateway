@@ -14,6 +14,6 @@ def test_dispatch_context_reexports():
 
 def test_dispatch_top_level_pipeline_context():
     from aigateway_core import dispatch
-    from aigateway_core.context import PipelineContext
+    from aigateway_core.dispatch.context import PipelineContext
 
     assert dispatch.PipelineContext is PipelineContext
