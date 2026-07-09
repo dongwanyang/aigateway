@@ -289,7 +289,17 @@ class ConfigManager:
 
         try:
             with open(filepath, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f)
+                # 共享锁:与 admin 端 _flocked_inplace_write 的排它锁互斥,
+                # 避免 Watchdog 在 admin 原地写中途读到半截 YAML。
+                try:
+                    import fcntl
+                    fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+                    try:
+                        data = yaml.safe_load(f)
+                    finally:
+                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                except ImportError:
+                    data = yaml.safe_load(f)
             if not isinstance(data, dict):
                 logger.error("配置文件格式错误: 顶层必须为 YAML 对象")
                 return {}

@@ -160,13 +160,18 @@ _GENERATION_PLUGIN_CONFIG_PATH: dict[str, list[str]] = {
 
 
 def _atomic_write_yaml(config_path: str, file_config: Dict[str, Any]) -> None:
-    """原子写 YAML:先写临时文件再 os.replace,保证 Watchdog 热重载永不读到半截文件。
+    """原子写 YAML,保证 Watchdog 热重载永不读到半截文件。
 
     旧实现 open(path,'w') + yaml.dump 会先 truncate 再写,期间 Watchdog 的
     load()(无 fcntl 锁)可能读到不完整 YAML → safe_load 返回缺 debug 段的 dict
     → atomic_swap 把脏内存盖回 DebugConfigWatcher,造成 debug 开关偶发失效。
-    临时文件 + os.replace 在同一文件系统上是原子的,消除该竞态。
+
+    首选 tempfile + os.replace(同文件系统上原子)。但 Docker 部署里 config.yaml
+    是 bind-mount,os.replace 跨挂载点会报 EBUSY/EXDEV —— 此时回退到 flocked
+    原地写(truncate+write),配合 Watchdog 的 _load_yaml 共享锁同样消除竞态。
     """
+    import errno
+    import fcntl
     import os
     import tempfile
     import yaml
@@ -178,14 +183,42 @@ def _atomic_write_yaml(config_path: str, file_config: Dict[str, Any]) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             yaml.dump(file_config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
-        os.replace(tmp_path, config_path)
+        try:
+            os.replace(tmp_path, config_path)
+            return
+        except OSError as exc:
+            # EBUSY(bind-mount 目标)、EXDEV(跨文件系统)、ENOTSUP → 回退原地写
+            if exc.errno not in (errno.EBUSY, errno.EXDEV, errno.ENOTSUP, errno.EPERM):
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+            # 回退:原地 flocked 写(与 _load_yaml 的共享锁互斥)
+            _flocked_inplace_write(config_path, file_config)
     except Exception:
-        # 写失败也要清理临时文件,避免残留
         try:
             os.unlink(tmp_path)
         except OSError:
             pass
         raise
+
+
+def _flocked_inplace_write(config_path: str, file_config: Dict[str, Any]) -> None:
+    """flocked 原地写回退(用于 os.replace 不可用的 bind-mount 场景)。
+
+    排它锁保证 Watchdog 的 _load_yaml(共享锁)不会读到半截 YAML。
+    """
+    import fcntl
+    import yaml
+
+    with open(config_path, "w", encoding="utf-8") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            yaml.dump(file_config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+            f.flush()
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
 # ------------------------------------------------------------------
@@ -927,10 +960,9 @@ async def set_plugin_debug(
 ):
     """开关单个插件的 debug 日志 —— 写 config.yaml 的 debug.plugins.per_plugin[name]。
 
-    使用 fcntl.flock 防止并发写冲突(参照现有 admin 写配置模式)。
+    使用 _atomic_write_yaml 防止 Watchdog 热重载读到半截文件(参照兄弟写端点)。
     写完后触发 atomic_swap → _notify_reload → DebugConfigWatcher 更新。
     """
-    import fcntl
     import os
     import yaml
     from aigateway_api.main import app
@@ -946,21 +978,22 @@ async def set_plugin_debug(
     if not config_path or not os.path.isfile(config_path):
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "config.yaml not found"}})
 
-    # 文件锁读改写:只更新 debug.plugins.per_plugin[plugin_name],不动其他 section
-    with open(config_path, "r+", encoding="utf-8") as f:
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-        try:
-            raw = yaml.safe_load(f) or {}
-            debug_section = raw.get("debug") or {}
-            plugins_section = debug_section.get("plugins") or {}
-            per_plugin = plugins_section.get("per_plugin") or {}
-            per_plugin[plugin_name] = enabled
-            plugins_section["per_plugin"] = per_plugin
-            debug_section["plugins"] = plugins_section
-            raw["debug"] = debug_section
-            _atomic_write_yaml(config_path, raw)
-        finally:
-            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    # 读改写:只更新 debug.plugins.per_plugin[plugin_name],不动其他 section。
+    # 不在此处再套一层 fcntl.flock —— _atomic_write_yaml 已保证原子写(临时文件
+    # +os.replace,或在 bind-mount 上回退到 _flocked_inplace_write 自带的 LOCK_EX)。
+    # 这里若再持一把 LOCK_EX,bind-mount 回退路径会尝试在同一文件上二次加锁 → 死锁。
+    # 与 update_plugins_config / update_global_config 两个兄弟写端点保持一致(均无外层锁)。
+    import yaml
+    with open(config_path, "r", encoding="utf-8") as f:
+        raw = yaml.safe_load(f) or {}
+    debug_section = raw.get("debug") or {}
+    plugins_section = debug_section.get("plugins") or {}
+    per_plugin = plugins_section.get("per_plugin") or {}
+    per_plugin[plugin_name] = enabled
+    plugins_section["per_plugin"] = per_plugin
+    debug_section["plugins"] = plugins_section
+    raw["debug"] = debug_section
+    _atomic_write_yaml(config_path, raw)
 
     # 内存更新 + 触发热重载(DebugConfigWatcher 在 on_reload 回调里 atomic swap)
     config_manager.set("debug", raw.get("debug", {}))
