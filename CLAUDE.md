@@ -61,7 +61,7 @@ aigateway-core/src/aigateway_core/  Shared library - runtime skeleton (prefix/di
     understanding/      rag/ (RAGRetriever), conversation/ (ConvCompressor), compression/ (PromptCompress LLMLingua-2), code_rag/
     generation/         director/intent/token/draft/cost/routing_signals/ (6 plugins + strategies) + _common/ (config/models/metrics/exceptions/api_key_groups) + registration.py
   route/                bridge/ (LiteLLMBridge + cooldown), streaming/ (SSE + cache_stream + metrics_wrapper), metrics/ (costing), model_resolution/ (ModelRouterStrategy auto resolver)
-  shared/               config, tracing, trace_event, exceptions, plugin_registry, logger, metrics, debug_config, redis_client, qdrant_client, integration_configs, auth/key_store
+  shared/               config, tracing, trace_event, exceptions, plugin_registry, logger, metrics, debug_config, redis_client, qdrant_client, integration_configs, auth/key_store, auth/group_store
 
 aigateway-cli/src/aigateway_cli/    __main__, chat, run, session
 control-panel/src/                  App.tsx (routes), api/client.ts, pages/ (9), components/, hooks/
@@ -72,17 +72,19 @@ control-panel/src/                  App.tsx (routes), api/client.ts, pages/ (9),
 L2 prefix `aigateway:cache:v2:*`. v1 keys expire naturally, not purged.
 
 ```
-key = SHA-256("v2" | tenant_id | pipeline_kind | model_family | temp_bucket | mt_bucket
-              [ | u=user_id if scope=private ] | normalized_prompt)
+key = SHA-256("v2" | pipeline_kind | model_family | temp_bucket | mt_bucket
+              [ | u=user_id if scope=private ]
+              [ | g=group_id if scope=group ] | normalized_prompt)
 ```
 
 - **model_family**: strips date snapshot (`gpt-4o-2024-08-06` → `gpt-4o`); `auto` kept literal. New snapshots don't bust cache.
 - **temp_bucket**: `exact_zero` (≤0.05) / `det` (≤0.3) / `bal` (≤0.9) / `cre` (>0.9).
 - **mt_bucket**: rounded up to `le_256/512/1024/2048/4096/8192/16384`; `None/0` → `any`.
 - **top_p**: ignored (nearly always 1.0 in practice).
-- **cache_scope**: header `X-Cache-Scope` > PII-forced `private` > default `shared` (see `dispatcher._resolve_cache_scope`).
+- **cache_scope**: three tiers — `private` (user-isolated, PII-forced), `group` (shared among group members, default), `public` (globally shared). Decision: header `X-Cache-Scope` > PII-forced `private` > default `group` (see `dispatcher._resolve_cache_scope`).
 - **normalized_prompt**: system + last 3 turns only (`dispatcher._extract_cacheable_context`), NFKC + whitespace collapse (`prefix.cache.cache_keys._normalize_prompt`).
 - **metrics**: `gateway_cache_hits_total{tier}` / `gateway_cache_misses_total` counted at dispatcher (fixed a v1 blind spot).
+- **tenant_id**: removed (unused — `group_id` replaces it for multi-tenant isolation).
 - Tests: `tests/test_cache_key_v2.py`.
 
 ## Three-Tier Cache
@@ -98,6 +100,8 @@ Backfill: L2 hit → L1; L3 hit → L1 only (approximate); MISS → L1+L2 + asyn
 ## Security & Quotas
 
 `KeyStore` — Redis hash per key. Per-key: daily tokens (default 1M), monthly cost ($50), RPM (60), TPM (100K). Pub/Sub sync across instances. Auto-reseeds from `config.yaml` if Redis empty.
+
+`GroupStore` — Redis hash per group (`aigateway:group:{group_id}`). Group-level quotas (daily tokens, monthly cost, RPM, TPM) shared pool for all member keys. Per-key personal quotas are sub-limits within the group. Quota check: group first, then personal. Error codes prefixed `Group ` for group-level rejection. Group members stored as Redis Set (`aigateway:group:{gid}:members`). Group events broadcast via `aigateway:groups:sync` Pub/Sub channel.
 
 `PIIDetector` — 3-pass (exclusion → named fields → standalone). 20+ patterns (email, phone, credit card, Chinese ID, passwords, API keys, connection strings). Strategies: sanitize / reject / hash.
 
@@ -193,7 +197,7 @@ python3 -m pytest tests/ --cov=aigateway_core --cov=aigateway_api
 
 1. **App state via lifespan** — all shared components on `app.state`, read by `_get_app_state()`.
 2. **sys.path shim** — `main.py` prepends `aigateway-core/src`; Dockerfile places packages differently.
-3. **Prometheus lazy init** — metrics created on first `_ensure_initialized()` call. Duration histogram buckets: `[0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0]`.
+3. **Prometheus lazy init** — metrics created on first `_ensure_initialized()` call. Duration histogram buckets: `[0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0]`. New: `gateway_cost_by_group{group_id}` counter tracks per-group cost.
 4. **Frontend parses Prom text** client-side via `parseMetrics()`. No structured metrics endpoint.
 5. **Deps live in `requirements.txt`** — not the Dockerfile. Editable installs work because packages are plain `src/` dirs. torch installed separately as a pre-layer.
 6. **Layered plugin registration** — `_register_builtin_plugins()` (classic) and `register_generation_optimization_plugins()` (gen-opt) both feed the same `PluginRegistry`.

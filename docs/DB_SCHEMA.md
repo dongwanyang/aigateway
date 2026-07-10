@@ -29,6 +29,8 @@
 | `key_id` | string | NOT NULL | API Key 内部 ID（如 `key_abc123`） |
 | `key_prefix` | string | NOT NULL | Key 前 8 字符，用于展示和识别 |
 | `user_id` | string | NOT NULL | 关联的用户 ID |
+| `group_id` | string | NOT NULL | 所属用户组 ID（如 `grp-admin-team`），无组时为 `grp-default` |
+| `cache_scope` | string | NOT NULL, 枚举 | `"private"` \| `"group"` \| `"public"`，决定缓存共享范围 |
 | `status` | string | NOT NULL, 枚举 | `"active"` \| `"revoked"` \| `"suspended"` |
 | `created_at` | string | NOT NULL | ISO 8601 创建时间 |
 | `last_used_at` | string | NULL | ISO 8601 最后使用时间 |
@@ -56,7 +58,60 @@
 
 ---
 
-### 2. 配额计数
+### 1b. 用户组存储
+
+**用途**：F05 — 存储用户组及其组级配额、成员集合。组级配额是成员共享池，个人配额是组内子限额。
+
+**Key 格式**：`aigateway:group:{group_id}`
+- `group_id`：组 ID（如 `grp-admin-team`），由 `slugify(name)` 生成
+
+**存储类型**：Hash
+
+**字段定义**：
+
+| 字段名 | 类型 | 约束 | 说明 |
+|--------|------|------|------|
+| `name` | string | NOT NULL | 组名称 |
+| `status` | string | NOT NULL, 枚举 | `"active"` \| `"suspended"` |
+| `created_at` | string | NOT NULL | ISO 8601 创建时间 |
+| `updated_at` | string | NOT NULL | ISO 8601 更新时间 |
+| `daily_tokens_limit` | integer | NOT NULL | 组每日 token 上限 |
+| `daily_tokens_used` | integer | NOT NULL, 默认 0 | 组今日已用 token 数 |
+| `monthly_cost_limit` | float | NOT NULL | 组每月成本上限（美元） |
+| `monthly_cost_used` | float | NOT NULL, 默认 0.0 | 组本月已用成本（美元） |
+| `rate_limit_rpm` | integer | NOT NULL | 组 RPM 上限 |
+| `rate_limit_tpm` | integer | NOT NULL | 组 TPM 上限 |
+| `rpm_window_start` | integer | NOT NULL | RPM 窗口起始 Unix 时间戳 |
+| `rpm_window_count` | integer | NOT NULL, 默认 0 | 当前 RPM 窗口内的请求数 |
+| `tpm_window_start` | integer | NOT NULL | TPM 窗口起始 Unix 时间戳 |
+| `tpm_window_count` | integer | NOT NULL, 默认 0 | 当前 TPM 窗口内的 token 数 |
+
+**TTL**：永不过期
+
+**Key 格式**：`aigateway:group_lookup:{name}`
+**存储类型**：String
+**值**：`group_id`
+**TTL**：与对应组一致
+
+**Key 格式**：`aigateway:group:{group_id}:members`
+**存储类型**：Set
+**值**：`key_hash` 集合（组成员的 Key Hash）
+**TTL**：与对应组一致
+
+**Key 格式**：`aigateway:groups:index`
+**存储类型**：Set
+**值**：所有 `group_id`
+**TTL**：永不过期
+
+**Pub/Sub 频道**：`aigateway:groups:sync`
+- 消息格式：`{"event_type": "group_created"|"group_updated"|"group_deleted", "group_id": "...", "name": "...", "timestamp": "..."}`
+
+**配额计数**：`aigateway:quota:{group_id}:daily:{YYYY-MM-DD}` 和 `aigateway:quota:{group_id}:monthly:{YYYY-MM}`
+- 与 API Key 配额结构相同（`tokens_in`, `tokens_out`, `cost_usd`, `request_count`, `model_usage`）
+
+---
+
+### 2. 配额计数（API Key 维度）
 
 **用途**：F05 — 按日/按月记录每个 API Key 的 token 消耗和成本，用于配额检查和软告警。
 
@@ -108,27 +163,33 @@
 
 **v2 cache_key_hash 生成规则**:
 ```
-SHA-256("v2" | tenant_id | pipeline_kind | model_family | temp_bucket | mt_bucket
-        [ | u=user_id if scope=private ] | normalized_prompt)
+SHA-256("v2" | pipeline_kind | model_family | temp_bucket | mt_bucket
+        [ | u=user_id if scope=private ]
+        [ | g=group_id if scope=group ] | normalized_prompt)
 ```
 
 | 段 | 说明 |
 |---|---|
 | `v2` | Schema 版本前缀,方便未来 v3 平滑升级 |
-| `tenant_id` | 组织级隔离,单租户部署空字符串 |
 | `pipeline_kind` | `understanding` \| `generation`,强制隔离两条管道,防止跨管道结果污染 |
 | `model_family` | 从 `model` 抽取,去掉尾部日期 snapshot(如 `gpt-4o-2024-08-06` → `gpt-4o`),同 family 不同 snapshot 共享缓存;`model=='auto'` 保留原样 |
 | `temp_bucket` | temperature 分桶:`exact_zero`(<=0.05) / `det`(<=0.3) / `bal`(<=0.9) / `cre`(>0.9) |
 | `mt_bucket` | max_tokens 分桶:`any`(None/0) / `le_256` / `le_512` / `le_1024` / `le_2048` / `le_4096` / `le_8192` / `le_16384` / `gt_16384` |
-| `u=user_id` | 仅当 `cache_scope=private` 时纳入,`shared`(默认)不带,同租户共享 |
+| `u=user_id` | 仅当 `cache_scope=private` 时纳入 |
+| `g=group_id` | 仅当 `cache_scope=group` 时纳入,组内成员共享缓存 |
 | `normalized_prompt` | dispatcher 已用 `_extract_cacheable_context(messages, tail=3)` 只保留 system + 末尾 3 轮对话,并经 `_normalize_prompt`(NFKC + 空白折叠)处理 |
 
 **⚠️ 明确忽略的字段**:`top_p`(实践中几乎全 1.0,分桶收益极小,反而拉高 MISS 率)。
 
+**cache_scope 三档**:
+- `private`：仅当前用户共享（PII 命中自动升 private，或显式 `X-Cache-Scope: private`）
+- `group`（默认）：同组内所有 key 共享（优先级：header `X-Cache-Scope: group|public` > 默认 group）
+- `public`：全局共享，无 user/group 标识
+
 **cache_scope 决策优先级**(见 dispatcher `_resolve_cache_scope`):
-1. 显式请求头 `X-Cache-Scope: shared|private`
+1. 显式请求头 `X-Cache-Scope: private|group|public`
 2. PII 检测命中 → 强制 `private`
-3. 默认 `shared`
+3. 默认 `group`
 
 **存储类型**：String（压缩后的 JSON 字节）
 
@@ -161,6 +222,7 @@ SHA-256("v2" | tenant_id | pipeline_kind | model_family | temp_bucket | mt_bucke
 | 频道名 | 类型 | 订阅者 | 消息格式 | 触发场景 |
 |--------|------|--------|---------|---------|
 | `aigateway:keys:sync` | String | 所有 Gateway 实例 | JSON | API Key 创建/撤销/更新 |
+| `aigateway:groups:sync` | String | 所有 Gateway 实例 | JSON | 用户组创建/更新/删除/成员变更 |
 | `aigateway:config:reload` | String | 所有 Gateway 实例 | JSON | 配置热加载通知 |
 
 **消息格式** (`aigateway:keys:sync`)：
@@ -389,7 +451,16 @@ SHA-256("v2" | tenant_id | pipeline_kind | model_family | temp_bucket | mt_bucke
 API Keys (Redis Hash)
   ├── 1:N Quota Records (Redis Hash, daily/monthly)
   ├── 1:N Rate Limit Windows (Redis SortedSet/String)
-  └── 1:N Cache Entries (Redis String + Qdrant Vector)
+  ├── 1:N Cache Entries (Redis String + Qdrant Vector)
+  └── N:1 User Group (via group_id → aigateway:group:{group_id})
+
+User Groups (Redis Hash + Set)
+  ├── aigateway:group:{group_id} — group hash (limits, used, rpm/tpm windows)
+  ├── aigateway:group_lookup:{name} — name → group_id
+  ├── aigateway:group:{group_id}:members — Set<key_hash>
+  ├── aigateway:groups:index — Set<group_id>
+  ├── 1:N Quota Records (Redis Hash, daily/monthly)
+  └── 1:N API Keys (via group_id foreign reference)
 
 Qdrant Collections
   ├── semantic_cache (vector + payload)
@@ -397,5 +468,6 @@ Qdrant Collections
 
 Pub/Sub Channels
   ├── aigateway:keys:sync (broadcast to all gateway instances)
+  ├── aigateway:groups:sync (broadcast to all gateway instances)
   └── aigateway:config:reload (broadcast to all gateway instances)
 ```
