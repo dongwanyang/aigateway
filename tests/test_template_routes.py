@@ -376,11 +376,11 @@ class TestCrossApiKeyAccess:
         """Two different API Keys can have templates with the same name (Req 8.7)."""
         # Key A creates template
         await template_manager.create(
-            api_key_id="key-a", name="shared-name", content="Key A content"
+            owner_id="key-a", name="shared-name", content="Key A content"
         )
         # Key B creates template with same name — should succeed
         tmpl_b = await template_manager.create(
-            api_key_id="key-b", name="shared-name", content="Key B content"
+            owner_id="key-b", name="shared-name", content="Key B content"
         )
         assert tmpl_b.api_key_id == "key-b"
         assert tmpl_b.content == "Key B content"
@@ -389,36 +389,36 @@ class TestCrossApiKeyAccess:
     async def test_cannot_get_other_keys_template(self, template_manager):
         """API Key B cannot see API Key A's template."""
         await template_manager.create(
-            api_key_id="key-a", name="private-tmpl", content="Private"
+            owner_id="key-a", name="private-tmpl", content="Private"
         )
         # Key B tries to get it
-        result = await template_manager.get(api_key_id="key-b", name="private-tmpl")
+        result = await template_manager.get(owner_id="key-b", name="private-tmpl")
         assert result is None
 
     @pytest.mark.asyncio
     async def test_cannot_update_other_keys_template(self, template_manager):
         """Updating another key's template raises error."""
         await template_manager.create(
-            api_key_id="key-a", name="owned-by-a", content="Original"
+            owner_id="key-a", name="owned-by-a", content="Original"
         )
         # Key B tries to update — template manager returns not found for key-b
         with pytest.raises(TemplateValidationError):
             await template_manager.update(
-                api_key_id="key-b", name="owned-by-a", content="Hacked"
+                owner_id="key-b", name="owned-by-a", content="Hacked"
             )
 
     @pytest.mark.asyncio
     async def test_cannot_delete_other_keys_template(self, template_manager):
         """Deleting another key's template returns False (not found)."""
         await template_manager.create(
-            api_key_id="key-a", name="owned-by-a", content="Original"
+            owner_id="key-a", name="owned-by-a", content="Original"
         )
         # Key B tries to delete — should return False
-        result = await template_manager.delete(api_key_id="key-b", name="owned-by-a")
+        result = await template_manager.delete(owner_id="key-b", name="owned-by-a")
         assert result is False
 
         # Verify original template still exists
-        original = await template_manager.get(api_key_id="key-a", name="owned-by-a")
+        original = await template_manager.get(owner_id="key-a", name="owned-by-a")
         assert original is not None
         assert original.content == "Original"
 

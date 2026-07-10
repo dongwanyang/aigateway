@@ -137,10 +137,18 @@ class TokenCompressorPlugin:
                 emit_plugin_event(ctx, self.name, duration_ms, "skip")
                 return ctx
 
-            # 提取请求中的 character_id 和 api_key_id
+            # 提取请求中的 character_id 和 owner_id
             character_id = self._extract_character_id(ctx)
-            api_key_id = self._extract_api_key_id(ctx)
             model_version = self._config.feature_cache.extraction_model_version
+
+            # owner: group_id (group scope) | user_id (private) | "" (public)
+            scope = (ctx.extra.get("cache_scope") or "group") if isinstance(ctx.extra, dict) else "group"
+            if scope == "private":
+                owner_id = ctx.user_id or ""
+            elif scope == "public":
+                owner_id = ""
+            else:
+                owner_id = ctx.extra.get("group_id") or ""  # type: ignore[union-attr]
 
             # 处理每张参考图
             per_image_results: List[Dict[str, Any]] = []
@@ -153,7 +161,7 @@ class TokenCompressorPlugin:
                 result = await self._process_single_image(
                     image=image,
                     character_id=character_id,
-                    api_key_id=api_key_id,
+                    owner_id=owner_id,
                     model_version=model_version,
                 )
 
@@ -238,7 +246,7 @@ class TokenCompressorPlugin:
         self,
         image: MediaContent,
         character_id: Optional[str],
-        api_key_id: str,
+        owner_id: str,
         model_version: str,
     ) -> Dict[str, Any]:
         """处理单张参考图: 缓存查找 → 压缩 → 缓存存储.
@@ -246,7 +254,7 @@ class TokenCompressorPlugin:
         Args:
             image: 待处理的参考图
             character_id: 角色 ID（有值时走缓存逻辑）
-            api_key_id: API Key 标识符
+            owner_id: 所有者标识 (''=public | group_id=group | user_id=private)
             model_version: 特征提取模型版本
 
         Returns:
@@ -262,7 +270,7 @@ class TokenCompressorPlugin:
         # 有 character_id 且缓存启用时，先查询缓存 (需求 5.2)
         if character_id and self._config.feature_cache.enabled:
             feature_vector = await self._try_cache_lookup(
-                api_key_id=api_key_id,
+                owner_id=owner_id,
                 character_id=character_id,
                 model_version=model_version,
             )
@@ -308,7 +316,7 @@ class TokenCompressorPlugin:
             and compression_result.feature_vector
         ):
             await self._try_cache_store(
-                api_key_id=api_key_id,
+                owner_id=owner_id,
                 character_id=character_id,
                 model_version=model_version,
                 vector=compression_result.feature_vector,
@@ -333,7 +341,7 @@ class TokenCompressorPlugin:
 
     async def _try_cache_lookup(
         self,
-        api_key_id: str,
+        owner_id: str,
         character_id: str,
         model_version: str,
     ) -> Optional[List[float]]:
@@ -342,7 +350,7 @@ class TokenCompressorPlugin:
         缓存查找失败时不抛异常，返回 None 由调用者决定降级策略。
 
         Args:
-            api_key_id: API Key 标识符
+            owner_id: 所有者标识 (''=public | group_id=group | user_id=private)
             character_id: 角色标识符
             model_version: 特征提取模型版本
 
@@ -351,7 +359,7 @@ class TokenCompressorPlugin:
         """
         try:
             vector = await self._cache.get_feature(
-                api_key_id=api_key_id,
+                owner_id=owner_id,
                 character_id=character_id,
                 model_version=model_version,
                 timeout_ms=self._config.feature_cache.lookup_timeout_ms,
@@ -362,7 +370,7 @@ class TokenCompressorPlugin:
                 "generation_optimization.token_compressor.cache_lookup_failed",
                 extra={
                     "reason": str(exc),
-                    "api_key_id": api_key_id,
+                    "owner_id": owner_id,
                     "character_id": character_id,
                     "fallback_action": "compress_from_original",
                 },
@@ -371,7 +379,7 @@ class TokenCompressorPlugin:
 
     async def _try_cache_store(
         self,
-        api_key_id: str,
+        owner_id: str,
         character_id: str,
         model_version: str,
         vector: List[float],
@@ -381,14 +389,14 @@ class TokenCompressorPlugin:
         存储失败时不抛异常，仅记录警告日志。
 
         Args:
-            api_key_id: API Key 标识符
+            owner_id: 所有者标识 (''=public | group_id=group | user_id=private)
             character_id: 角色标识符
             model_version: 特征提取模型版本
             vector: 待存储的特征向量
         """
         try:
             await self._cache.store_feature(
-                api_key_id=api_key_id,
+                owner_id=owner_id,
                 character_id=character_id,
                 model_version=model_version,
                 vector=vector,
@@ -399,7 +407,7 @@ class TokenCompressorPlugin:
                 "generation_optimization.token_compressor.cache_store_failed",
                 extra={
                     "reason": str(exc),
-                    "api_key_id": api_key_id,
+                    "owner_id": owner_id,
                     "character_id": character_id,
                 },
             )
@@ -490,29 +498,3 @@ class TokenCompressorPlugin:
             return str(character_id)
 
         return None
-
-    def _extract_api_key_id(self, ctx: PipelineContext) -> str:
-        """从上下文中提取 api_key_id.
-
-        查找顺序:
-        1. ctx.request["api_key_id"]
-        2. ctx.user_id (从 API Key 解析出的用户 ID)
-        3. 空字符串兜底
-
-        Args:
-            ctx: 管线上下文
-
-        Returns:
-            API Key 标识符字符串
-        """
-        # 从请求中查找
-        api_key_id = ctx.request.get("api_key_id")
-        if api_key_id:
-            return str(api_key_id)
-
-        # 使用 user_id 作为回退
-        user_id = getattr(ctx, "user_id", None)
-        if user_id:
-            return str(user_id)
-
-        return ""

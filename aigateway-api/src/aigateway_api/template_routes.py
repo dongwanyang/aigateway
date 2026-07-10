@@ -159,7 +159,7 @@ async def create_template(
 
     try:
         template = await manager.create(
-            api_key_id=api_key_id,
+            owner_id=api_key_id,
             name=body.name,
             content=body.content,
             description=body.description,
@@ -210,7 +210,7 @@ async def list_templates(
     api_key_id = _get_api_key_id(request)
 
     result = await manager.list(
-        api_key_id=api_key_id,
+        owner_id=api_key_id,
         page=page,
         page_size=page_size,
     )
@@ -248,7 +248,7 @@ async def get_template(
     manager = _get_template_manager(request)
     api_key_id = _get_api_key_id(request)
 
-    template = await manager.get(api_key_id=api_key_id, name=name)
+    template = await manager.get(owner_id=api_key_id, name=name)
     if template is None:
         raise HTTPException(
             status_code=404,
@@ -287,7 +287,7 @@ async def update_template(
     api_key_id = _get_api_key_id(request)
 
     # 先检查模板是否存在（在所有 API Key 中）
-    template = await manager.get(api_key_id=api_key_id, name=name)
+    template = await manager.get(owner_id=api_key_id, name=name)
     if template is None:
         # 模板在当前 Key 下不存在，但可能属于其他 Key
         # 这里统一返回 404，因为用户不应该知道其他 Key 的模板存在
@@ -315,7 +315,7 @@ async def update_template(
 
     try:
         updated = await manager.update(
-            api_key_id=api_key_id,
+            owner_id=api_key_id,
             name=name,
             content=body.content,
             description=body.description,
@@ -368,7 +368,7 @@ async def delete_template(
     api_key_id = _get_api_key_id(request)
 
     # 先检查模板是否存在
-    template = await manager.get(api_key_id=api_key_id, name=name)
+    template = await manager.get(owner_id=api_key_id, name=name)
     if template is None:
         raise HTTPException(
             status_code=404,
@@ -392,7 +392,7 @@ async def delete_template(
             },
         )
 
-    success = await manager.delete(api_key_id=api_key_id, name=name)
+    success = await manager.delete(owner_id=api_key_id, name=name)
     if not success:
         raise HTTPException(
             status_code=404,
@@ -429,7 +429,7 @@ async def render_template(
     api_key_id = _get_api_key_id(request)
 
     # 获取模板
-    template = await manager.get(api_key_id=api_key_id, name=name)
+    template = await manager.get(owner_id=api_key_id, name=name)
     if template is None:
         raise HTTPException(
             status_code=404,

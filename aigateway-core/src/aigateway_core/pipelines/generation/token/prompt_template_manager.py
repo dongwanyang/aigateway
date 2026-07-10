@@ -5,8 +5,10 @@ PromptTemplateManager — 提示词模板 CRUD 管理器
 提供 Prompt_Template 资源的完整 CRUD 操作和模板渲染功能。
 
 Redis Key 格式:
-    模板数据: aigateway:prompt_template:{api_key_id}:{template_name}
-    名称索引: aigateway:prompt_template_index:{api_key_id} (Redis SET)
+    模板数据: aigateway:prompt_template:{owner_id}:{template_name}
+    名称索引: aigateway:prompt_template_index:{owner_id} (Redis SET)
+
+其中 owner_id = '' (public) | group_id (group) | user_id (private)。
 
 功能:
 - 创建/获取/列表/更新/删除模板
@@ -43,10 +45,12 @@ class PromptTemplateManager:
     """提示词模板管理器 — 提供模板的 CRUD 操作和渲染功能.
 
     模板存储在 Redis 中，Key 格式:
-        aigateway:prompt_template:{api_key_id}:{template_name}
+        aigateway:prompt_template:{owner_id}:{template_name}
 
-    每个 API Key 有一个对应的 Redis SET 作为模板名称索引:
-        aigateway:prompt_template_index:{api_key_id}
+    owner_id 语义: "" (public) | group_id (group) | user_id (private).
+
+    每个 owner 有一个对应的 Redis SET 作为模板名称索引:
+        aigateway:prompt_template_index:{owner_id}
 
     用法:
         manager = PromptTemplateManager(redis_client, config)
@@ -70,19 +74,19 @@ class PromptTemplateManager:
         self._memory_store: Dict[str, str] = {}
         self._memory_index: Dict[str, set] = {}
 
-    def _build_key(self, api_key_id: str, name: str) -> str:
+    def _build_key(self, owner_id: str, name: str) -> str:
         """构建模板数据的 Redis Key.
 
-        格式: aigateway:prompt_template:{api_key_id}:{name}
+        格式: aigateway:prompt_template:{owner_id}:{name}
         """
-        return f"{self.KEY_PREFIX}:{api_key_id}:{name}"
+        return f"{self.KEY_PREFIX}:{owner_id}:{name}"
 
-    def _build_index_key(self, api_key_id: str) -> str:
+    def _build_index_key(self, owner_id: str) -> str:
         """构建模板索引的 Redis Key.
 
-        格式: aigateway:prompt_template_index:{api_key_id}
+        格式: aigateway:prompt_template_index:{owner_id}
         """
-        return f"{self.INDEX_PREFIX}:{api_key_id}"
+        return f"{self.INDEX_PREFIX}:{owner_id}"
 
     def _validate_name(self, name: str) -> None:
         """验证模板名称.
@@ -171,14 +175,14 @@ class PromptTemplateManager:
         return self._redis_client is None
 
     async def create(
-        self, api_key_id: str, name: str, content: str, description: str = ""
+        self, owner_id: str, name: str, content: str, description: str = ""
     ) -> PromptTemplate:
         """创建模板.
 
         验证名称、内容、描述，检查重名，然后存储到 Redis。
 
         Args:
-            api_key_id: API Key 标识符
+            owner_id: 所有者标识 (''=public | group_id=group | user_id=private)
             name: 模板名称 (1-64 字符, 字母数字/连字符/下划线)
             content: 模板内容 (最大 10000 字符)
             description: 模板描述 (最大 500 字符, 可选)
@@ -195,10 +199,10 @@ class PromptTemplateManager:
         self._validate_description(description)
 
         # 检查重名（需求 8.7）
-        existing = await self.get(api_key_id, name)
+        existing = await self.get(owner_id, name)
         if existing is not None:
             raise TemplateValidationError(
-                f"模板名称已存在: '{name}' (api_key_id={api_key_id})"
+                f"模板名称已存在: '{name}' (owner_id={owner_id})"
             )
 
         now = time.time()
@@ -206,7 +210,7 @@ class PromptTemplateManager:
             name=name,
             content=content,
             description=description,
-            api_key_id=api_key_id,
+            api_key_id=owner_id,
             created_at=now,
             updated_at=now,
         )
@@ -214,35 +218,35 @@ class PromptTemplateManager:
         serialized = self._serialize_template(template)
 
         if self._use_memory:
-            key = self._build_key(api_key_id, name)
+            key = self._build_key(owner_id, name)
             self._memory_store[key] = serialized
-            if api_key_id not in self._memory_index:
-                self._memory_index[api_key_id] = set()
-            self._memory_index[api_key_id].add(name)
+            if owner_id not in self._memory_index:
+                self._memory_index[owner_id] = set()
+            self._memory_index[owner_id].add(name)
         else:
             redis = self._redis_client.redis
-            key = self._build_key(api_key_id, name)
-            index_key = self._build_index_key(api_key_id)
+            key = self._build_key(owner_id, name)
+            index_key = self._build_index_key(owner_id)
             await redis.set(key, serialized)
             await redis.sadd(index_key, name)
 
         logger.info(
             "prompt_template.created",
-            extra={"api_key_id": api_key_id, "name": name},
+            extra={"owner_id": owner_id, "name": name},
         )
         return template
 
-    async def get(self, api_key_id: str, name: str) -> Optional[PromptTemplate]:
+    async def get(self, owner_id: str, name: str) -> Optional[PromptTemplate]:
         """获取模板.
 
         Args:
-            api_key_id: API Key 标识符
+            owner_id: 所有者标识 (''=public | group_id=group | user_id=private)
             name: 模板名称
 
         Returns:
             PromptTemplate 实例，不存在时返回 None
         """
-        key = self._build_key(api_key_id, name)
+        key = self._build_key(owner_id, name)
 
         if self._use_memory:
             raw = self._memory_store.get(key)
@@ -259,12 +263,12 @@ class PromptTemplateManager:
             return self._deserialize_template(raw)
 
     async def list(
-        self, api_key_id: str, page: int = 1, page_size: int = 20
+        self, owner_id: str, page: int = 1, page_size: int = 20
     ) -> Dict[str, Any]:
-        """列出该 API Key 的所有模板（分页）.
+        """列出该 owner 的所有模板（分页）.
 
         Args:
-            api_key_id: API Key 标识符
+            owner_id: 所有者标识
             page: 页码（从 1 开始, 默认: 1）
             page_size: 每页条数（默认: 20, 最大: 100）
 
@@ -283,10 +287,10 @@ class PromptTemplateManager:
         page = max(1, page)
 
         if self._use_memory:
-            names = sorted(self._memory_index.get(api_key_id, set()))
+            names = sorted(self._memory_index.get(owner_id, set()))
         else:
             redis = self._redis_client.redis
-            index_key = self._build_index_key(api_key_id)
+            index_key = self._build_index_key(owner_id)
             raw_names = await redis.smembers(index_key)
             names = sorted(
                 n.decode("utf-8") if isinstance(n, bytes) else n for n in raw_names
@@ -303,7 +307,7 @@ class PromptTemplateManager:
         # 批量获取模板数据
         items: List[PromptTemplate] = []
         for name in page_names:
-            template = await self.get(api_key_id, name)
+            template = await self.get(owner_id, name)
             if template is not None:
                 items.append(template)
 
@@ -316,12 +320,12 @@ class PromptTemplateManager:
         }
 
     async def update(
-        self, api_key_id: str, name: str, content: str, description: str = ""
+        self, owner_id: str, name: str, content: str, description: str = ""
     ) -> PromptTemplate:
         """更新模板.
 
         Args:
-            api_key_id: API Key 标识符
+            owner_id: 所有者标识
             name: 模板名称
             content: 新的模板内容
             description: 新的模板描述
@@ -337,10 +341,10 @@ class PromptTemplateManager:
         self._validate_description(description)
 
         # 检查模板是否存在
-        existing = await self.get(api_key_id, name)
+        existing = await self.get(owner_id, name)
         if existing is None:
             raise TemplateValidationError(
-                f"模板不存在: '{name}' (api_key_id={api_key_id})"
+                f"模板不存在: '{name}' (owner_id={owner_id})"
             )
 
         # 更新字段
@@ -357,49 +361,49 @@ class PromptTemplateManager:
         serialized = self._serialize_template(updated_template)
 
         if self._use_memory:
-            key = self._build_key(api_key_id, name)
+            key = self._build_key(owner_id, name)
             self._memory_store[key] = serialized
         else:
             redis = self._redis_client.redis
-            key = self._build_key(api_key_id, name)
+            key = self._build_key(owner_id, name)
             await redis.set(key, serialized)
 
         logger.info(
             "prompt_template.updated",
-            extra={"api_key_id": api_key_id, "name": name},
+            extra={"owner_id": owner_id, "name": name},
         )
         return updated_template
 
-    async def delete(self, api_key_id: str, name: str) -> bool:
+    async def delete(self, owner_id: str, name: str) -> bool:
         """删除模板.
 
         Args:
-            api_key_id: API Key 标识符
+            owner_id: 所有者标识
             name: 模板名称
 
         Returns:
             True 删除成功，False 模板不存在
         """
         # 检查模板是否存在
-        existing = await self.get(api_key_id, name)
+        existing = await self.get(owner_id, name)
         if existing is None:
             return False
 
         if self._use_memory:
-            key = self._build_key(api_key_id, name)
+            key = self._build_key(owner_id, name)
             self._memory_store.pop(key, None)
-            if api_key_id in self._memory_index:
-                self._memory_index[api_key_id].discard(name)
+            if owner_id in self._memory_index:
+                self._memory_index[owner_id].discard(name)
         else:
             redis = self._redis_client.redis
-            key = self._build_key(api_key_id, name)
-            index_key = self._build_index_key(api_key_id)
+            key = self._build_key(owner_id, name)
+            index_key = self._build_index_key(owner_id)
             await redis.delete(key)
             await redis.srem(index_key, name)
 
         logger.info(
             "prompt_template.deleted",
-            extra={"api_key_id": api_key_id, "name": name},
+            extra={"owner_id": owner_id, "name": name},
         )
         return True
 

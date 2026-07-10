@@ -5,12 +5,12 @@ FeatureCacheManager — 特征向量缓存管理器
 管理角色 Feature Vector 的存取和复用，复用现有 Redis 基础设施。
 
 Redis Key 格式:
-    aigateway:feature:{api_key_id}:{character_id}:{model_version}
+    aigateway:feature:{owner_id}:{character_id}:{model_version}
 
 缓存行为:
 - 缓存查找超时 500ms（可配置），防止 Redis 延迟影响请求
 - 缓存命中时自动续期 TTL
-- 缓存以 API Key 隔离，不同 API Key 同名 character_id 不冲突
+- owner_id 语义: "" (public) / group_id (group scope) / user_id (private)
 - 缓存失败时降级到从原始图重新提取（由调用者处理）
 
 需求: 5.1, 5.2, 5.4, 5.5, 5.6, 5.7
@@ -32,14 +32,19 @@ class FeatureCacheManager:
     """特征缓存管理器 — 管理角色 Feature Vector 的存取和复用.
 
     复用现有 Redis 基础设施，Key 格式:
-    aigateway:feature:{api_key_id}:{character_id}:{model_version}
+    aigateway:feature:{owner_id}:{character_id}:{model_version}
+
+    owner_id 语义:
+        ""        → public  scope (全局共享)
+        group_id  → group scope (组内共享)
+        user_id   → private scope (用户独占)
 
     用法:
         cache = FeatureCacheManager(redis_client, config)
-        vector = await cache.get_feature("key123", "char_01", "clip-vit-large-patch14")
+        vector = await cache.get_feature("grp-admin", "char_01", "clip-vit-large-patch14")
         if vector is None:
             vector = await extract_feature(...)
-            await cache.store_feature("key123", "char_01", "clip-vit-large-patch14", vector)
+            await cache.store_feature("grp-admin", "char_01", "clip-vit-large-patch14", vector)
     """
 
     KEY_PREFIX = "aigateway:feature"
@@ -54,27 +59,18 @@ class FeatureCacheManager:
         self._redis_client = redis_client
         self._config = config
 
-    def _build_key(self, api_key_id: str, character_id: str, model_version: str) -> str:
+    def _build_key(self, owner_id: str, character_id: str, model_version: str) -> str:
         """构建 Redis 缓存 Key.
 
-        格式: aigateway:feature:{api_key_id}:{character_id}:{model_version}
+        格式: aigateway:feature:{owner_id}:{character_id}:{model_version}
 
-        通过 api_key_id 作为 Key 的一部分，确保不同 API Key 的同名
-        character_id 不会冲突（需求 5.7）。
-
-        Args:
-            api_key_id: API Key 标识符
-            character_id: 角色标识符
-            model_version: 特征提取模型版本
-
-        Returns:
-            完整的 Redis Key 字符串
+        owner_id = '' (public) | group_id (group) | user_id (private).
         """
-        return f"{self.KEY_PREFIX}:{api_key_id}:{character_id}:{model_version}"
+        return f"{self.KEY_PREFIX}:{owner_id}:{character_id}:{model_version}"
 
     async def get_feature(
         self,
-        api_key_id: str,
+        owner_id: str,
         character_id: str,
         model_version: str,
         timeout_ms: int = 500,
@@ -86,7 +82,7 @@ class FeatureCacheManager:
         Redis 不可用或超时时返回 None，由调用者决定降级策略。
 
         Args:
-            api_key_id: API Key 标识符
+            owner_id: 所有者标识 (''=public | group_id=group | user_id=private)
             character_id: 角色标识符
             model_version: 特征提取模型版本
             timeout_ms: 缓存查找超时毫秒数 (默认: 500)
@@ -94,14 +90,14 @@ class FeatureCacheManager:
         Returns:
             缓存的特征向量列表，未命中或失败时返回 None
         """
-        key = self._build_key(api_key_id, character_id, model_version)
+        key = self._build_key(owner_id, character_id, model_version)
 
         try:
             redis = self._redis_client.redis
             if redis is None:
                 logger.warning(
                     "feature_cache.get_feature: Redis 未连接，跳过缓存查找",
-                    extra={"api_key_id": api_key_id, "character_id": character_id},
+                    extra={"owner_id": owner_id, "character_id": character_id},
                 )
                 return None
 
@@ -120,7 +116,7 @@ class FeatureCacheManager:
             # 缓存命中，自动续期 TTL（需求 5.4）
             # 异步续期，不阻塞返回
             asyncio.ensure_future(
-                self.extend_ttl(api_key_id, character_id, model_version)
+                self.extend_ttl(owner_id, character_id, model_version)
             )
 
             return vector
@@ -129,20 +125,20 @@ class FeatureCacheManager:
             logger.warning(
                 "feature_cache.get_feature: 缓存查找超时 (%dms)",
                 timeout_ms,
-                extra={"api_key_id": api_key_id, "character_id": character_id, "key": key},
+                extra={"owner_id": owner_id, "character_id": character_id, "key": key},
             )
             return None
         except Exception as exc:
             logger.warning(
                 "feature_cache.get_feature: 缓存查找失败: %s",
                 exc,
-                extra={"api_key_id": api_key_id, "character_id": character_id, "key": key},
+                extra={"owner_id": owner_id, "character_id": character_id, "key": key},
             )
             return None
 
     async def store_feature(
         self,
-        api_key_id: str,
+        owner_id: str,
         character_id: str,
         model_version: str,
         vector: List[float],
@@ -153,20 +149,20 @@ class FeatureCacheManager:
         将 Feature Vector 序列化为 JSON 并存储到 Redis，设置 TTL。
 
         Args:
-            api_key_id: API Key 标识符
+            owner_id: 所有者标识 (''=public | group_id=group | user_id=private)
             character_id: 角色标识符
             model_version: 特征提取模型版本
             vector: 特征向量
             ttl_days: 缓存 TTL 天数 (默认: 30)
         """
-        key = self._build_key(api_key_id, character_id, model_version)
+        key = self._build_key(owner_id, character_id, model_version)
 
         try:
             redis = self._redis_client.redis
             if redis is None:
                 logger.warning(
                     "feature_cache.store_feature: Redis 未连接，跳过缓存存储",
-                    extra={"api_key_id": api_key_id, "character_id": character_id},
+                    extra={"owner_id": owner_id, "character_id": character_id},
                 )
                 return
 
@@ -180,12 +176,12 @@ class FeatureCacheManager:
             logger.warning(
                 "feature_cache.store_feature: 缓存存储失败: %s",
                 exc,
-                extra={"api_key_id": api_key_id, "character_id": character_id, "key": key},
+                extra={"owner_id": owner_id, "character_id": character_id, "key": key},
             )
 
     async def extend_ttl(
         self,
-        api_key_id: str,
+        owner_id: str,
         character_id: str,
         model_version: str,
         ttl_days: int = 30,
@@ -195,12 +191,12 @@ class FeatureCacheManager:
         对已存在的缓存条目延长 TTL（需求 5.4）。
 
         Args:
-            api_key_id: API Key 标识符
+            owner_id: 所有者标识
             character_id: 角色标识符
             model_version: 特征提取模型版本
             ttl_days: 续期 TTL 天数 (默认: 30)
         """
-        key = self._build_key(api_key_id, character_id, model_version)
+        key = self._build_key(owner_id, character_id, model_version)
 
         try:
             redis = self._redis_client.redis
@@ -214,5 +210,5 @@ class FeatureCacheManager:
             logger.warning(
                 "feature_cache.extend_ttl: TTL 续期失败: %s",
                 exc,
-                extra={"api_key_id": api_key_id, "character_id": character_id, "key": key},
+                extra={"owner_id": owner_id, "character_id": character_id, "key": key},
             )
