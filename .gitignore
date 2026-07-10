@@ -44,3 +44,4 @@ repomix-output.md
 .kiro/
 .playwright-cli/
 .test-venv/
+/*.lock
