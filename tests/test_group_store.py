@@ -6,6 +6,7 @@ to avoid a live Redis dependency.
 """
 import pytest
 from aigateway_core.shared.auth.group_store import GroupStore, slugify
+from aigateway_core.shared.auth.key_store import KeyStore
 
 
 class FakeRedis:
@@ -87,6 +88,11 @@ class FakeRedis:
     async def publish(self, channel, message):
         return 0
 
+    async def scan(self, cursor, match=None, count=None):
+        import fnmatch
+        keys = [k for k in self.store.keys() if fnmatch.fnmatch(k, match or "*")]
+        return 0, keys
+
     # ---- convenience methods mirroring redis_client.RedisClientManager ----
     async def set_group(self, gid, data):
         await self.hset(f"aigateway:group:{gid}", mapping=data)
@@ -124,6 +130,78 @@ class FakeRedis:
     async def get_quota(self, ident, period):
         raw = await self.hgetall(f"aigateway:quota:{ident}:{period}")
         return raw or None
+
+    # ---- pipeline support for pipe_batch ---
+    async def pipe_batch(self, fn):
+        """Execute a list of commands built by fn(pipe) atomically."""
+        results = []
+        store_ref = self.store
+
+        class _FakePipe:
+            def __init__(self, owner):
+                self._owner = owner
+
+            def hset(self, key, mapping=None, **kw):
+                k = key.decode() if isinstance(key, bytes) else key
+                d = store_ref.setdefault(k, {})
+                if mapping:
+                    for kk, vv in mapping.items():
+                        kk_key = kk.decode() if isinstance(kk, bytes) else kk
+                        d[kk_key] = vv
+                results.append(1)
+                return results[-1]
+
+            def set(self, key, value, ex=None):
+                k = key.decode() if isinstance(key, bytes) else key
+                store_ref[k] = value
+                results.append(None)
+                return results[-1]
+
+            def sadd(self, key, *members):
+                s = store_ref.setdefault(
+                    key.decode() if isinstance(key, bytes) else key, set()
+                )
+                n = 0
+                for m in members:
+                    mm = m.decode() if isinstance(m, bytes) else m
+                    before = len(s)
+                    s.add(mm)
+                    n += 1
+                results.append(n)
+                return results[-1]
+
+            def srem(self, key, *members):
+                s = store_ref.get(
+                    key.decode() if isinstance(key, bytes) else key
+                )
+                if not s:
+                    results.append(0)
+                    return 0
+                n = 0
+                for m in members:
+                    mm = m.decode() if isinstance(m, bytes) else m
+                    if mm in s:
+                        s.discard(mm)
+                        n += 1
+                results.append(n)
+                return results[-1]
+
+            def delete(self, *keys):
+                n = 0
+                for key in keys:
+                    k = key.decode() if isinstance(key, bytes) else key
+                    if k in store_ref:
+                        del store_ref[k]
+                        n += 1
+                results.append(n)
+                return results[-1]
+
+        fn(_FakePipe(self))
+        return results
+
+    async def pipeline(self, transaction=True):
+        """Legacy: return a real-time pipeline stub that executes immediately."""
+        return self
 
 
 @pytest.fixture
@@ -220,3 +298,35 @@ async def test_get_group_detail(store):
     detail = await store.get_group_detail(g["group_id"])
     assert detail["group_id"] == g["group_id"]
     assert detail["members"] == ["kh1"]
+
+
+@pytest.mark.asyncio
+async def test_migrate_groupless_keys_to_default(store):
+    ks = KeyStore(redis=store.redis)
+    await store.redis.set_api_key("deadbeef", {
+        "key_id": "key_abc", "user_id": "u1", "status": "active",
+        "key_prefix": "gw-deadbee",
+    })
+    await store.ensure_default_group()
+    migrated = await ks.migrate_groups(store)
+    assert migrated >= 1
+    data = await store.redis.get_api_key("deadbeef")
+    assert data["group_id"] == GroupStore.DEFAULT_GROUP_ID
+    members = await store._get_members(GroupStore.DEFAULT_GROUP_ID)
+    assert "deadbeef" in members
+
+
+@pytest.mark.asyncio
+async def test_migrate_groups_updates_key_and_membership_together(store):
+    """A groupless key gets group_id AND membership in one atomic step."""
+    ks = KeyStore(redis=store.redis)
+    await store.redis.set_api_key("deadbeef", {
+        "key_id": "key_abc", "user_id": "u1", "status": "active",
+        "key_prefix": "gw-deadbee", "cache_scope": "group",
+    })
+    await store.ensure_default_group()
+    await ks.migrate_groups(store)
+    data = await store.redis.get_api_key("deadbeef")
+    assert data["group_id"] == GroupStore.DEFAULT_GROUP_ID
+    members = await store._get_members(GroupStore.DEFAULT_GROUP_ID)
+    assert "deadbeef" in members
