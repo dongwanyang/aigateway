@@ -229,6 +229,49 @@ class RedisClientManager:
         return val.decode() if val else None
 
     # ------------------------------------------------------------------
+    # 便捷操作 - 用户组存储 (GroupStore)
+    # ------------------------------------------------------------------
+
+    async def set_group(self, group_id: str, data: dict) -> None:
+        """写入用户组 Hash。Key 格式: aigateway:group:{group_id}"""
+        if self.redis is None:
+            raise RuntimeError("Redis 尚未连接")
+        await self.redis.hset(f"aigateway:group:{group_id}", mapping=data)
+
+    async def get_group(self, group_id: str) -> dict | None:
+        """读取用户组 Hash。"""
+        if self.redis is None:
+            raise RuntimeError("Redis 尚未连接")
+        raw = await self.redis.hgetall(f"aigateway:group:{group_id}")
+        if not raw:
+            return None
+        return {k.decode(): v.decode() for k, v in raw.items()}
+
+    async def delete_group(self, group_id: str) -> bool:
+        """删除用户组主记录（不含 members/lookup，由 GroupStore 统一清理）。"""
+        if self.redis is None:
+            raise RuntimeError("Redis 尚未连接")
+        return bool(await self.redis.delete(f"aigateway:group:{group_id}"))
+
+    async def set_group_lookup(self, name: str, group_id: str) -> None:
+        """组名 -> group_id 反查。Key: aigateway:group_lookup:{name}"""
+        if self.redis is None:
+            raise RuntimeError("Redis 尚未连接")
+        await self.redis.set(f"aigateway:group_lookup:{name}", group_id)
+
+    async def get_group_lookup(self, name: str) -> str | None:
+        """通过组名反查 group_id。"""
+        if self.redis is None:
+            raise RuntimeError("Redis 尚未连接")
+        val = await self.redis.get(f"aigateway:group_lookup:{name}")
+        return val.decode() if val else None
+
+    async def delete_group_lookup(self, name: str) -> None:
+        if self.redis is None:
+            raise RuntimeError("Redis 尚未连接")
+        await self.redis.delete(f"aigateway:group_lookup:{name}")
+
+    # ------------------------------------------------------------------
     # 便捷操作 — 配额存储 (DB_SCHEMA §2)
     # ------------------------------------------------------------------
 
