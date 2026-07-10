@@ -30,8 +30,12 @@ export type ErrorCode =
   | 'forbidden'
   | 'quota_exceeded_daily_tokens'
   | 'quota_exceeded_monthly_cost'
+  | 'quota_exceeded_group_daily_tokens'
+  | 'quota_exceeded_group_monthly_cost'
   | 'rate_limit_rpm'
   | 'rate_limit_tpm'
+  | 'rate_limit_group_rpm'
+  | 'rate_limit_group_tpm'
   | 'circuit_breaker_open'
   | 'upstream_timeout'
   | 'internal_error'
@@ -243,6 +247,9 @@ export interface ApiKeyItem {
   id: string
   key_prefix: string
   user_id: string
+  group_id: string
+  group_name?: string
+  cache_scope: CacheScope
   created_at: string
   last_used_at: string | null
   status: 'active' | 'revoked' | 'suspended'
@@ -263,6 +270,8 @@ export interface ApiKeyListData {
 
 export interface CreateApiKeyRequest {
   user_id: string
+  group_id?: string
+  cache_scope?: CacheScope
   daily_tokens?: number
   monthly_cost?: number
   rate_limit_rpm?: number
@@ -372,4 +381,64 @@ export interface MetricSample {
   name: string
   labels: Record<string, string>
   value: number
+}
+
+// ------------------------------------------------------------------
+// Cache Scope
+// ------------------------------------------------------------------
+
+export type CacheScope = 'private' | 'group' | 'public'
+
+// ------------------------------------------------------------------
+// User Groups
+// ------------------------------------------------------------------
+
+export interface GroupQuotas {
+  daily_tokens_limit: number
+  daily_tokens_used: number
+  monthly_cost_limit: number
+  monthly_cost_used: number
+  rate_limit_rpm: number
+  rate_limit_tpm: number
+}
+
+export interface Group {
+  group_id: string
+  name: string
+  status: 'active' | 'suspended'
+  created_at: string
+  updated_at: string
+  member_count: number
+  daily_tokens_limit: number
+  daily_tokens_used: number
+  monthly_cost_limit: number
+  monthly_cost_used: number
+  rate_limit_rpm: number
+  rate_limit_tpm: number
+}
+
+export interface GroupListData {
+  items: Group[]
+  total: number
+}
+
+export interface CreateGroupRequest {
+  name: string
+  daily_tokens?: number
+  monthly_cost?: number
+  rate_limit_rpm?: number
+  rate_limit_tpm?: number
+}
+
+export interface UpdateGroupRequest {
+  daily_tokens?: number
+  monthly_cost?: number
+  rate_limit_rpm?: number
+  rate_limit_tpm?: number
+  status?: 'active' | 'suspended'
+}
+
+export interface AssignGroupRequest {
+  group_id: string
+  cache_scope?: CacheScope
 }

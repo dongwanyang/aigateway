@@ -364,6 +364,39 @@ class RedisClientManager:
         val = await self.redis.get(f"aigateway:ratelimit:{key_hash}:tpm")
         return int(val) if val else 0
 
+    # ------------------------------------------------------------------
+    # 原子管道 — 多步写操作的事务封装
+    # ------------------------------------------------------------------
+
+    async def pipe_batch(self, fn) -> list:
+        """Run a sequence of Redis commands in an atomic pipeline.
+
+        Usage::
+
+            results = await redis.pipe_batch(lambda p: [
+                p.hset("key:a", mapping={"x": "1"}),
+                p.sadd("key:b", "member"),
+                p.set("key:c", "val"),
+            ])
+
+        Internally creates a ``pipeline(transaction=True)`` so all commands
+        execute atomically inside ``MULTI/EXEC``.  Raises ``redis.WatchError``
+        on contention (caller should retry if needed).
+
+        Returns:
+            List of per-command results (same order as the list returned by
+            ``fn``).
+        """
+        if self.redis is None:
+            raise RuntimeError("Redis 尚未连接")
+        pipe = self.redis.pipeline(transaction=True)
+        commands = fn(pipe)
+        # If the callable returned a list of commands, execute them;
+        # otherwise (legacy single-call style) just execute the pipe.
+        if isinstance(commands, list):
+            return await pipe.execute()
+        return await pipe.execute()
+
 
 # 全局单例（懒初始化）
 _redis_manager: RedisClientManager | None = None

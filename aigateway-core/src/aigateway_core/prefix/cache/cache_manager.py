@@ -477,9 +477,9 @@ class CacheManager:
         normalized_prompt: str,
         model: str,
         pipeline_kind: str = "understanding",
-        cache_scope: str = "shared",
+        cache_scope: str = "group",
         user_id: str = "",
-        tenant_id: str = "",
+        group_id: str = "",
         **params: Any,
     ) -> str:
         """Generate cache key v2 (SHA-256).
@@ -499,19 +499,21 @@ class CacheManager:
         - pipeline_kind: understanding / generation strictly isolated, preventing
           cross-pipeline result contamination (generation image description
           hit by understanding text = disaster).
-        - cache_scope=shared (default): no user_id, shared within tenant (main
-          hit-rate boost source). scope=private: includes user_id, strict
-          isolation (e.g. PII-bearing requests).
-        - tenant_id: org-level isolation, independent of user_id.
+        - cache_scope=group (default): includes group_id, shared among group
+          members. scope=private: includes user_id, strict per-user isolation
+          (e.g. PII-bearing requests). scope=public: no user/group id, shared
+          globally.
+        - tenant_id: removed (unused — group_id replaces it for multi-tenant
+          isolation).
 
         Args:
             normalized_prompt: normalized prompt text (dispatcher should have
                 run `_normalize_prompt(system + tail N turns)`).
             model: model name, internally converted to family.
             pipeline_kind: "understanding" | "generation", default understanding.
-            cache_scope: "shared" | "private", default shared.
-            user_id: user ID, only included in key when scope=private.
-            tenant_id: tenant/org ID, default empty string (single-tenant deploy).
+            cache_scope: "private" | "group" | "public", default "group".
+            user_id: user ID, only included when scope=private.
+            group_id: group ID, only included when scope=group.
             **params: supports temperature / max_tokens / top_p sampling params;
                 other kwargs included sorted by key (forward-compatible tests).
 
@@ -534,15 +536,17 @@ class CacheManager:
         # Assemble key segments: fixed order to avoid same-params-different-order hash
         parts: List[str] = [
             "v2",  # schema version, for smooth future v3 upgrade
-            (tenant_id or ""),
             pipeline_kind or "understanding",
             family,
             temp_bucket,
             mt_bucket,
         ]
-        # Only include user_id when scope=private; shared omits it for tenant sharing
+        # Scope-specific identifier
         if cache_scope == "private" and user_id:
             parts.append(f"u={user_id}")
+        elif cache_scope == "group" and group_id:
+            parts.append(f"g={group_id}")
+        # public scope: no user/group id appended — shared globally
         # Future extension: other extra kwargs included sorted by key (compat with old tests)
         for k in sorted(params.keys()):
             v = params[k]

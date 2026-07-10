@@ -21,6 +21,7 @@ async def _wrap_stream_for_metrics(
     metrics_collector: Any,
     model: str,
     user_id: str = "",
+    group_id: str = "",
 ) -> Any:
     """包装流式生成器，从最后一个 chunk 提取 usage 并记录指标。"""
     last_chunk: Dict[str, Any] = {}
@@ -44,4 +45,4 @@ async def _wrap_stream_for_metrics(
     if total_tokens > 0:
         cost = _estimate_cost(model, total_tokens)
         if cost > 0:
-            metrics_collector.record_cost(cost, model=model, user_id=user_id)
+            metrics_collector.record_cost(cost, model=model, user_id=user_id, group_id=group_id)

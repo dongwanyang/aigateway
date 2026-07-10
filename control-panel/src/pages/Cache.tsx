@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react'
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts'
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, Cell } from 'recharts'
 import { Database, Trash2, RefreshCw, Settings } from 'lucide-react'
 import Card from '@/components/Card'
 import {
@@ -267,7 +267,14 @@ export default function Cache() {
                   <YAxis tick={{ fontSize: 11, fill: 'var(--color-text-quaternary)' }} />
                   <Tooltip contentStyle={{ backgroundColor: 'var(--color-bg-elevated)', border: '1px solid var(--color-border)', borderRadius: 8 }} />
                   <Legend />
-                  <Bar dataKey="hits" fill="var(--color-success)" name="Count" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="hits" name="Count" radius={[4, 4, 0, 0]}>
+                    {chartData.map((_entry, index) => (
+                      <Cell
+                        key={`cell-${index}`}
+                        fill={_entry.tier === 'MISS' ? 'var(--color-danger)' : 'var(--color-success)'}
+                      />
+                    ))}
+                  </Bar>
                 </BarChart>
               </ResponsiveContainer>
             </Card>

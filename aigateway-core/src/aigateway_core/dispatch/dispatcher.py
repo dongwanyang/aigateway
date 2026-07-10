@@ -68,24 +68,24 @@ def _resolve_cache_scope(request: Request, pii_meta: Optional[dict]) -> str:
     """决定本次请求的 cache_scope。
 
     优先级:
-    1. 显式请求头 X-Cache-Scope=private|shared
+    1. 显式请求头 X-Cache-Scope=private|group|public
     2. PII 检测命中 → 强制 private(避免脱敏后 prompt 泄露到共享缓存)
-    3. 默认 shared
+    3. 默认 group
 
     Args:
         request: FastAPI Request 对象。
         pii_meta: PII 检测结果(包含 detected_categories)。
 
     Returns:
-        "shared" 或 "private"。
+        "private" | "group" | "public"。
     """
     hdr = (request.headers.get("X-Cache-Scope") or "").strip().lower()
-    if hdr in ("private", "shared"):
+    if hdr in ("private", "group", "public"):
         return hdr
     # PII 命中自动升 private
     if pii_meta and pii_meta.get("detected_categories"):
         return "private"
-    return "shared"
+    return "group"
 
 
 def _emit_stage(trace_id: str, stage: str, name: str, duration_ms: float,
@@ -302,12 +302,17 @@ class RequestDispatcher:
         normalized_messages = json.dumps(cacheable_msgs, sort_keys=True, ensure_ascii=False)
         # cache_scope:X-Cache-Scope 请求头显式指定 or PII 命中自动升 private。
         cache_scope = _resolve_cache_scope(request, pii_meta)
+        # Extract group_id from auth data (set by auth_middleware)
+        group_id = ""
+        if hasattr(request.state, "api_key_data") and request.state.api_key_data:
+            group_id = request.state.api_key_data.get("group_id") or ""
         cache_key = cache_manager.generate_cache_key(
             normalized_prompt=normalized_messages,
             model=body.model,
             pipeline_kind="understanding",
             cache_scope=cache_scope,
             user_id=user_id or "",
+            group_id=group_id,
             temperature=body.temperature if body.temperature is not None else 1.0,
             max_tokens=body.max_tokens,
             top_p=body.top_p,
@@ -370,14 +375,15 @@ class RequestDispatcher:
                 if retry_after and retry_after > 0:
                     headers["Retry-After"] = str(retry_after)
                 code = "quota_exceeded"
+                is_group = fail_msg.startswith("Group ")
                 if "RPM" in fail_msg:
-                    code = "rate_limit_rpm"
+                    code = "rate_limit_group_rpm" if is_group else "rate_limit_rpm"
                 elif "TPM" in fail_msg:
-                    code = "rate_limit_tpm"
+                    code = "rate_limit_group_tpm" if is_group else "rate_limit_tpm"
                 elif "Daily" in fail_msg:
-                    code = "quota_exceeded_daily_tokens"
+                    code = "quota_exceeded_group_daily_tokens" if is_group else "quota_exceeded_daily_tokens"
                 elif "Monthly" in fail_msg:
-                    code = "quota_exceeded_monthly_cost"
+                    code = "quota_exceeded_group_monthly_cost" if is_group else "quota_exceeded_monthly_cost"
                 await _record_request_log(request=request, method="POST", endpoint="/v1/chat/completions",
                                           status_code=429, duration_ms=0, model=body.model,
                                           cache_hit=False, cache_tier=None)
@@ -401,6 +407,8 @@ class RequestDispatcher:
                     pipeline_kind="understanding",
                     user_id=user_id,
                 )
+                ctx.extra["cache_scope"] = cache_scope
+                ctx.extra["group_id"] = group_id
                 ctx.should_stream = getattr(body, "stream", False)
                 # 过滤掉已被辅助函数处理的核心插件，避免重复执行
                 # 注意名字必须与注册名一致（media 注册名为 media_optimizer，
@@ -450,13 +458,13 @@ class RequestDispatcher:
             return await self._call_llm_stream(
                 body, request, litellm_bridge, plugin_trace, request_start_time,
                 user_id, key_hash, cache_key, normalized_messages,
-                pipeline_kind="understanding",
+                pipeline_kind="understanding", group_id=group_id,
             )
         return await self._call_llm_nonstream(
             body, request, litellm_bridge, plugin_trace, request_start_time,
             user_id, key_hash, cache_key, normalized_messages,
             pii_meta, router_meta, mol_meta, compress_meta,
-            pipeline_kind="understanding",
+            pipeline_kind="understanding", group_id=group_id,
         )
 
     # ------------------------------------------------------------------
@@ -482,6 +490,13 @@ class RequestDispatcher:
         mol_meta = prefix.get("mol_meta")
         pii_meta = prefix.get("pii_meta")
 
+        # Extract group_id and cache_scope from auth data
+        group_id = ""
+        resolved_scope = "group"
+        if hasattr(request.state, "api_key_data") and request.state.api_key_data:
+            group_id = request.state.api_key_data.get("group_id") or ""
+            resolved_scope = request.state.api_key_data.get("cache_scope") or "group"
+
         # 跑生成管道 engine 插件链（ai_director → ... → cost_tracker）
         if engine is not None:
             try:
@@ -492,6 +507,8 @@ class RequestDispatcher:
                     pipeline_kind="generation",
                     user_id=user_id,
                 )
+                ctx.extra["cache_scope"] = resolved_scope
+                ctx.extra["group_id"] = group_id
                 ctx.should_stream = getattr(body, "stream", False)
                 ctx = await engine.execute_ctx(ctx)
                 # 插件链可能改写 messages / model，回写
@@ -523,14 +540,15 @@ class RequestDispatcher:
                 if retry_after and retry_after > 0:
                     headers["Retry-After"] = str(retry_after)
                 code = "quota_exceeded"
+                is_group = fail_msg.startswith("Group ")
                 if "RPM" in fail_msg:
-                    code = "rate_limit_rpm"
+                    code = "rate_limit_group_rpm" if is_group else "rate_limit_rpm"
                 elif "TPM" in fail_msg:
-                    code = "rate_limit_tpm"
+                    code = "rate_limit_group_tpm" if is_group else "rate_limit_tpm"
                 elif "Daily" in fail_msg:
-                    code = "quota_exceeded_daily_tokens"
+                    code = "quota_exceeded_group_daily_tokens" if is_group else "quota_exceeded_daily_tokens"
                 elif "Monthly" in fail_msg:
-                    code = "quota_exceeded_monthly_cost"
+                    code = "quota_exceeded_group_monthly_cost" if is_group else "quota_exceeded_monthly_cost"
                 await _record_request_log(request=request, method="POST", endpoint="/v1/chat/completions",
                                           status_code=429, duration_ms=0, model=body.model,
                                           cache_hit=False, cache_tier=None)
@@ -557,7 +575,7 @@ class RequestDispatcher:
                 user_id, key_hash,
                 cache_key=None,  # 生成管道不回填
                 normalized_messages=None,
-                pipeline_kind="generation",
+                pipeline_kind="generation", group_id=group_id,
             )
         return await self._call_llm_nonstream(
             body, request, litellm_bridge, plugin_trace, request_start_time,
@@ -565,7 +583,7 @@ class RequestDispatcher:
             cache_key=None,  # 生成管道不回填
             normalized_messages=None,
             pii_meta=pii_meta, router_meta=None, mol_meta=mol_meta, compress_meta=None,
-            pipeline_kind="generation",
+            pipeline_kind="generation", group_id=group_id,
         )
 
     # ------------------------------------------------------------------
@@ -577,6 +595,7 @@ class RequestDispatcher:
         user_id, key_hash, cache_key, normalized_messages,
         pii_meta=None, router_meta=None, mol_meta=None, compress_meta=None,
         pipeline_kind: str = "understanding",
+        group_id: str = "",
     ) -> JSONResponse:
         """非流式调 LiteLLM 出口 + 用量记录 + 缓存回填。
 
@@ -671,7 +690,9 @@ class RequestDispatcher:
                 metrics_collector.record_tokens(ct, "completion")
             final_cost = cost if cost > 0 else _estimate_cost(body.model, tt)
             if tt > 0 and final_cost > 0:
-                metrics_collector.record_cost(final_cost, model=body.model, user_id=user_id or "")
+                metrics_collector.record_cost(
+                    final_cost, model=body.model, user_id=user_id or "", group_id=group_id,
+                )
 
         # 缓存回填（生成管道 cache_key=None 不回填）
         if cache_key and cache_manager:
@@ -720,6 +741,7 @@ class RequestDispatcher:
         self, body, request, litellm_bridge, plugin_trace, request_start_time,
         user_id, key_hash, cache_key, normalized_messages,
         pipeline_kind: str = "understanding",
+        group_id: str = "",
     ) -> JSONResponse:
         """流式调 LiteLLM 出口。
 
@@ -760,6 +782,7 @@ class RequestDispatcher:
         completion_gen = self._wrap_stream_full(
             completion_gen, metrics_collector, cache_manager, key_store,
             body.model, user_id, key_hash, cache_key, normalized_messages, llm_start,
+            group_id,
         )
 
         _stream_ms = round((time.time() - llm_start) * 1000, 2)
@@ -782,6 +805,7 @@ class RequestDispatcher:
     async def _wrap_stream_full(
         self, gen, metrics_collector, cache_manager, key_store,
         model, user_id, key_hash, cache_key, normalized_messages, llm_start,
+        group_id="",
     ):
         """流式包装器:透传 chunk + 末尾做配额/缓存/metrics。
 
@@ -833,7 +857,9 @@ class RequestDispatcher:
                 metrics_collector.record_tokens(ct, "completion")
             final_cost = _estimate_cost(model, tt)
             if tt > 0 and final_cost > 0:
-                metrics_collector.record_cost(final_cost, model=model, user_id=user_id or "")
+                metrics_collector.record_cost(
+                    final_cost, model=model, user_id=user_id or "", group_id=group_id,
+                )
 
         # 配额扣减（修正点：原流式不扣）
         if key_hash and key_store and tt > 0:

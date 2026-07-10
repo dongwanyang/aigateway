@@ -13,6 +13,7 @@ Metrics — Prometheus 指标采集
 | gateway_tokens_total | counter | 总 token 数，按 type 分桶 (prompt/completion) |
 | gateway_cost_total | gauge | 总成本（美元） |
 | gateway_cost_by_model | counter | 各模型成本 |
+| gateway_cost_by_group | counter | 各用户组成本 |
 | gateway_circuit_breaker_state | gauge | 各提供商熔断器状态 (0=CLOSED, 1=OPEN, 2=HALF-OPEN) |
 | gateway_active_requests | gauge | 当前活跃请求数 |
 | gateway_up | gauge | 服务健康状态 (1=up, 0=down) |
@@ -195,6 +196,17 @@ class MetricsCollector:
             registry=registry,
         )
 
+        # gateway_cost_by_group — counter
+        self._cost_by_group_counter: Any = None
+
+        # gateway_cost_by_group — counter
+        self._cost_by_group_counter = Counter(
+            "gateway_cost_by_group",
+            "Total cost by user group",
+            labelnames=["group_id"],
+            registry=registry,
+        )
+
         # gateway_circuit_breaker_state — gauge
         self._circuit_breaker_gauge = Gauge(
             "gateway_circuit_breaker_state",
@@ -337,13 +349,20 @@ class MetricsCollector:
         if self._tokens_counter and tokens > 0:
             self._tokens_counter.labels(type=token_type).inc(tokens)
 
-    def record_cost(self, cost_usd: float, model: str = "unknown", user_id: str = "") -> None:
+    def record_cost(
+        self,
+        cost_usd: float,
+        model: str = "unknown",
+        user_id: str = "",
+        group_id: str = "",
+    ) -> None:
         """记录请求成本。
 
         Args:
             cost_usd: 成本（美元）。
             model: 模型名称。
             user_id: 用户 ID。
+            group_id: 用户组 ID。
         """
         if not self.enabled:
             return
@@ -357,6 +376,9 @@ class MetricsCollector:
 
         if self._cost_by_user_counter and user_id:
             self._cost_by_user_counter.labels(user_id=user_id).inc(cost_usd)
+
+        if self._cost_by_group_counter and group_id:
+            self._cost_by_group_counter.labels(group_id=group_id).inc(cost_usd)
 
     # ------------------------------------------------------------------
     # 熔断器状态指标

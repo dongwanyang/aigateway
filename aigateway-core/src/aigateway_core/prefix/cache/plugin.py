@@ -42,13 +42,15 @@ class PromptCachePlugin:
         cacheable_msgs = system_msgs + tail_msgs
         normalized = json.dumps(cacheable_msgs, sort_keys=True, ensure_ascii=False)
 
-        cache_scope = (ctx.extra.get("cache_scope") or "shared") if isinstance(ctx.extra, dict) else "shared"
+        cache_scope = (ctx.extra.get("cache_scope") or "group") if isinstance(ctx.extra, dict) else "group"
+        group_id = (ctx.extra.get("group_id") or "") if isinstance(ctx.extra, dict) else ""
         cache_key = cm.generate_cache_key(
             normalized_prompt=normalized,
             model=ctx.request.get("model", ""),
             pipeline_kind=ctx.pipeline_kind or "understanding",
             cache_scope=cache_scope,
             user_id=ctx.user_id or "",
+            group_id=group_id,
             temperature=ctx.request.get("temperature", 1.0),
             max_tokens=ctx.request.get("max_tokens"),
             top_p=ctx.request.get("top_p"),

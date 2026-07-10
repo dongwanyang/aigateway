@@ -5,7 +5,7 @@
 2. 参数分桶:temperature/max_tokens 细微偏差落同一桶
 3. temperature<=0.05 保留精确桶(不与 0.2 共享)
 4. top_p 被完全忽略
-5. cache_scope:shared 不带 user_id,private 才带
+5. cache_scope:group (default, includes group_id), private includes user_id, public includes neither
 6. pipeline_kind:understanding vs generation 严格隔离
 7. normalize:全半角/空白差异等价
 8. tenant_id 隔离
@@ -156,12 +156,24 @@ class TestGenerateCacheKey:
         """None / 0 都归 any → 同 key。"""
         assert self._key(max_tokens=None) == self._key(max_tokens=0)
 
-    def test_scope_shared_ignores_user_id(self):
-        """默认 shared:同 prompt 不同 user_id 共享 key。"""
-        k_alice = self._key(cache_scope="shared", user_id="alice")
-        k_bob = self._key(cache_scope="shared", user_id="bob")
-        k_none = self._key(cache_scope="shared", user_id="")
+    def test_scope_group_ignores_user_id(self):
+        """默认 group:同 prompt 不同 user_id 共享 key(只要 group_id 相同)。"""
+        k_alice = self._key(cache_scope="group", user_id="alice")
+        k_bob = self._key(cache_scope="group", user_id="bob")
+        k_none = self._key(cache_scope="group", user_id="")
         assert k_alice == k_bob == k_none
+
+    def test_scope_group_includes_group_id(self):
+        """group:不同 group_id → 不同 key。"""
+        k_g1 = self._key(cache_scope="group", group_id="grp-alpha")
+        k_g2 = self._key(cache_scope="group", group_id="grp-beta")
+        assert k_g1 != k_g2
+
+    def test_scope_public_no_identifier(self):
+        """public:不同 user/group 共享同一 key。"""
+        k1 = self._key(cache_scope="public", user_id="alice", group_id="grp-alpha")
+        k2 = self._key(cache_scope="public", user_id="bob", group_id="grp-beta")
+        assert k1 == k2
 
     def test_scope_private_includes_user_id(self):
         """private:不同 user_id → 不同 key。"""
@@ -169,12 +181,12 @@ class TestGenerateCacheKey:
         k_bob = self._key(cache_scope="private", user_id="bob")
         assert k_alice != k_bob
 
-    def test_scope_shared_vs_private_different(self):
-        """同 user 下,shared 和 private 生成不同 key(避免历史 shared 缓存
+    def test_scope_group_vs_private_different(self):
+        """同 user 下,group 和 private 生成不同 key(避免历史 group 缓存
         误命中新升 private 的请求)。"""
-        k_shared = self._key(cache_scope="shared", user_id="alice")
+        k_group = self._key(cache_scope="group", group_id="grp-x", user_id="alice")
         k_private = self._key(cache_scope="private", user_id="alice")
-        assert k_shared != k_private
+        assert k_group != k_private
 
     def test_pipeline_kind_isolation(self):
         """understanding vs generation 严格隔离,防止跨管道结果污染。"""
@@ -182,10 +194,10 @@ class TestGenerateCacheKey:
         k_g = self._key(pipeline_kind="generation")
         assert k_u != k_g
 
-    def test_tenant_isolation(self):
-        """不同 tenant_id 生成不同 key。"""
-        k_a = self._key(tenant_id="org_a")
-        k_b = self._key(tenant_id="org_b")
+    def test_group_isolation(self):
+        """不同 group_id 生成不同 key。"""
+        k_a = self._key(cache_scope="group", group_id="grp-alpha")
+        k_b = self._key(cache_scope="group", group_id="grp-beta")
         assert k_a != k_b
 
     def test_auto_model_kept_as_is(self):
@@ -196,8 +208,8 @@ class TestGenerateCacheKey:
 
     def test_key_is_stable(self):
         """同参数多次调用生成相同 key(确定性)。"""
-        k1 = self._key(temperature=0.7, max_tokens=1024, user_id="alice")
-        k2 = self._key(temperature=0.7, max_tokens=1024, user_id="alice")
+        k1 = self._key(temperature=0.7, max_tokens=1024, cache_scope="group", group_id="grp-x")
+        k2 = self._key(temperature=0.7, max_tokens=1024, cache_scope="group", group_id="grp-x")
         assert k1 == k2
 
     def test_prompt_normalize_effect(self):

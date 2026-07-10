@@ -43,6 +43,7 @@ from aigateway_core.shared.plugin_registry import PluginRegistry
 from aigateway_core.shared.qdrant_client import QdrantClientManager
 from aigateway_core.shared.redis_client import RedisClientManager
 from aigateway_core.shared.auth.key_store import KeyStore
+from aigateway_core.shared.auth.group_store import GroupStore
 
 logger = logging.getLogger(__name__)
 
@@ -314,6 +315,40 @@ async def lifespan(app: "FastAPI"):
             seeded = await key_store.seed_from_config(api_keys_config)
             logger.info("已从 config.yaml 导入 %d 个 API Key 到 Redis", seeded)
 
+    # 初始化 GroupStore + 默认组 + 迁移无组 Key
+    group_store: Optional[GroupStore] = None
+    if key_store is not None and redis_mgr is not None:
+        try:
+            group_store = GroupStore(redis=redis_mgr)
+            await group_store.ensure_default_group()
+            # auto-create groups from config seed (skip 'default' — already ensured)
+            for cfg_grp in (config_manager.get("auth", {}) or {}).get("groups", []) or []:
+                gname = (cfg_grp or {}).get("name") or ""
+                if gname and gname.lower() != "default":
+                    # Strip 'name' and 'quotas' nesting — config has flat fields
+                    if cfg_grp:
+                        quotas = dict(cfg_grp)
+                        quotas.pop("name", None)
+                        quotas.pop("quotas", None)  # nested form not used in config
+                    else:
+                        quotas = {}
+                    try:
+                        await group_store.create_group(gname, quotas or None)
+                    except ValueError:
+                        pass  # already exists
+            # also auto-create groups referenced in config api_keys[].group
+            for cfg_key in (config_manager.get("auth", {}) or {}).get("api_keys", []) or []:
+                gname = (cfg_key or {}).get("group") or ""
+                if gname:
+                    try:
+                        await group_store.create_group(gname, {})
+                    except ValueError:
+                        pass  # already exists
+            await key_store.migrate_groups(group_store)
+            logger.info("GroupStore 初始化完成")
+        except Exception as exc:
+            logger.warning("GroupStore 初始化失败: %s", exc)
+
     # 初始化 CacheManager
     cache_config = config_manager.get("plugins", [])
     prompt_cache_cfg: Dict[str, Any] = {}
@@ -502,6 +537,7 @@ async def lifespan(app: "FastAPI"):
 
     # 挂载到 app.state，供 FastAPI 中间件/依赖注入使用
     app.state.key_store = key_store
+    app.state.group_store = group_store
     app.state.config_manager = config_manager
 
     # 初始化 5 维度 Debug 开关(PR2 2026-07-05)。attach 到 ConfigManager.on_reload
