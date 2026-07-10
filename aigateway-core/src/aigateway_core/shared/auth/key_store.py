@@ -259,11 +259,6 @@ class KeyStore:
             "tpm_window_count": "0",
         }
 
-        await self.redis.set_api_key(key_hash, key_data)
-
-        # Write reverse lookup (key_prefix -> key_hash)
-        await self.redis.set_key_lookup(key_prefix, key_hash)
-
         # Initialize daily and monthly quota records (DB_SCHEMA §2)
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         month = datetime.now(timezone.utc).strftime("%Y-%m")
@@ -746,11 +741,6 @@ class KeyStore:
 
         logger.debug("Usage incremented: key_hash=%s tokens=%d cost=$%.4f group=%s",
                      key_hash, tokens, cost, group_id or "-")
-
-        logger.debug(
-            "Usage incremented: key_hash=%s tokens=%d cost=$%.4f model=%s",
-            key_hash, tokens, cost, model,
-        )
 
     # ------------------------------------------------------------------
     # Internal helper methods
