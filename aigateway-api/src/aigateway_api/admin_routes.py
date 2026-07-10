@@ -234,6 +234,8 @@ class CreateApiKeyRequest(BaseModel):
     monthly_cost: Optional[float] = Field(default=None, description="每月成本上限（美元）")
     rate_limit_rpm: Optional[int] = Field(default=None, description="每分钟请求数上限")
     rate_limit_tpm: Optional[int] = Field(default=None, description="每分钟 token 数上限")
+    group_id: Optional[str] = Field(default=None, description="用户组 ID（grp-*）")
+    cache_scope: Optional[str] = Field(default=None, description="缓存范围: private/group/public")
 
 
 class UpdateQuotaRequest(BaseModel):
@@ -287,7 +289,9 @@ def _get_budget_alert_threshold() -> float:
     return 0.8
 
 
-def _format_quota_item(key_data: Dict[str, Any], key_hash: str) -> Dict[str, Any]:
+def _format_quota_item(
+    key_data: Dict[str, Any], key_hash: str, group_name: Optional[str] = None,
+) -> Dict[str, Any]:
     """格式化单个 API Key 的配额信息。"""
     defaults = _get_auth_defaults()
     daily_limit = int(key_data.get("daily_tokens_limit", defaults["daily_tokens"]))
@@ -305,6 +309,9 @@ def _format_quota_item(key_data: Dict[str, Any], key_hash: str) -> Dict[str, Any
         "id": key_data.get("key_id", ""),
         "key_prefix": key_data.get("key_prefix", ""),
         "user_id": key_data.get("user_id", ""),
+        "group_id": key_data.get("group_id", "") or "",
+        "group_name": group_name,
+        "cache_scope": key_data.get("cache_scope", "group") or "group",
         "created_at": key_data.get("created_at", ""),
         "last_used_at": key_data.get("last_used_at") or None,
         "status": key_data.get("status", "active"),
@@ -375,7 +382,24 @@ async def list_api_keys(
     end = start + page_size
     paginated = all_keys[start:end]
 
-    items = [_format_quota_item(k, k.get("_key_hash", "")) for k in paginated]
+    # Resolve group_name for each key (one lookup per distinct group_id)
+    from aigateway_api.main import app as _app
+    group_store = getattr(_app.state, "group_store", None)
+    group_name_cache: Dict[str, Optional[str]] = {}
+    items: List[Dict[str, Any]] = []
+    for k in paginated:
+        gid = k.get("group_id", "") or ""
+        if gid and gid not in group_name_cache:
+            gname: Optional[str] = None
+            if group_store is not None:
+                try:
+                    gdata = await group_store.get_group(gid)
+                    if gdata:
+                        gname = gdata.get("name")
+                except Exception:
+                    gname = None
+            group_name_cache[gid] = gname
+        items.append(_format_quota_item(k, k.get("_key_hash", ""), group_name_cache.get(gid)))
 
     return {
         "data": {
@@ -420,7 +444,11 @@ async def create_api_key(
     }
 
     try:
-        result = await key_store.create(user_id=body.user_id, quotas=quotas)
+        group_id = body.group_id or ""
+        cache_scope = body.cache_scope or "group"
+        result = await key_store.create(
+            user_id=body.user_id, quotas=quotas, group_id=group_id, cache_scope=cache_scope,
+        )
     except ValueError as exc:
         # 检查是否是重复 user_id
         if "已存在活跃" in str(exc) or "already" in str(exc).lower():
@@ -2350,3 +2378,255 @@ async def get_provider_models(
             }
     except Exception as exc:
         raise HTTPException(status_code=502, detail={"error": {"code": "upstream_error", "message": f"Failed to fetch models from {provider}: {exc}"}})
+
+
+# ==================================================================
+# Group CRUD
+# ==================================================================
+
+
+class CreateGroupRequest(BaseModel):
+    """POST /admin/groups 请求体。"""
+
+    name: str = Field(..., min_length=1, description="组名称")
+    daily_tokens: Optional[int] = Field(default=None, description="每日 token 上限")
+    monthly_cost: Optional[float] = Field(default=None, description="每月成本上限（美元）")
+    rate_limit_rpm: Optional[int] = Field(default=None, description="每分钟请求数上限")
+    rate_limit_tpm: Optional[int] = Field(default=None, description="每分钟 token 数上限")
+
+
+class UpdateGroupRequest(BaseModel):
+    """PUT /admin/groups/{group_id} 请求体。"""
+
+    daily_tokens: Optional[int] = Field(default=None, description="每日 token 上限")
+    monthly_cost: Optional[float] = Field(default=None, description="每月成本上限（美元）")
+    rate_limit_rpm: Optional[int] = Field(default=None, description="每分钟请求数上限")
+    rate_limit_tpm: Optional[int] = Field(default=None, description="每分钟 token 数上限")
+    status: Optional[str] = Field(default=None, description="active | suspended")
+
+
+@router.get("/groups")
+async def list_groups(
+    request: Request,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+    """列出所有用户组及其成员数。"""
+    from aigateway_api.main import app
+    gs = getattr(app.state, "group_store", None)
+    if gs is None:
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "GroupStore not initialized"}})
+    groups = await gs.list_groups()
+    return {"data": {"items": groups, "total": len(groups)}, "message": "success"}
+
+
+@router.get("/groups/{group_id}")
+async def get_group(
+    request: Request,
+    group_id: str,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+    """获取单个用户组详情（含成员列表）。"""
+    from aigateway_api.main import app
+    gs = getattr(app.state, "group_store", None)
+    if gs is None:
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "GroupStore not initialized"}})
+    detail = await gs.get_group_detail(group_id)
+    if not detail:
+        raise HTTPException(status_code=404, detail={"error": {"code": "not_found", "message": f"Group {group_id} not found"}})
+    return {"data": detail, "message": "success"}
+
+
+@router.post("/groups")
+async def create_group(
+    request: Request,
+    body: CreateGroupRequest,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+    """创建新用户组。"""
+    from aigateway_api.main import app
+    gs = getattr(app.state, "group_store", None)
+    if gs is None:
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "GroupStore not initialized"}})
+
+    quotas = {}
+    if body.daily_tokens is not None:
+        quotas["daily_tokens"] = body.daily_tokens
+    if body.monthly_cost is not None:
+        quotas["monthly_cost"] = body.monthly_cost
+    if body.rate_limit_rpm is not None:
+        quotas["rate_limit_rpm"] = body.rate_limit_rpm
+    if body.rate_limit_tpm is not None:
+        quotas["rate_limit_tpm"] = body.rate_limit_tpm
+
+    try:
+        result = await gs.create_group(name=body.name, quotas=quotas or None)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": {"code": "validation_error", "message": str(exc)}})
+    return {"data": result, "message": "success"}
+
+
+@router.put("/groups/{group_id}")
+async def update_group(
+    request: Request,
+    group_id: str,
+    body: UpdateGroupRequest,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+    """更新用户组配额或状态。"""
+    from aigateway_api.main import app
+    gs = getattr(app.state, "group_store", None)
+    if gs is None:
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "GroupStore not initialized"}})
+    quotas = {}
+    if body.daily_tokens is not None:
+        quotas["daily_tokens"] = body.daily_tokens
+    if body.monthly_cost is not None:
+        quotas["monthly_cost"] = body.monthly_cost
+    if body.rate_limit_rpm is not None:
+        quotas["rate_limit_rpm"] = body.rate_limit_rpm
+    if body.rate_limit_tpm is not None:
+        quotas["rate_limit_tpm"] = body.rate_limit_tpm
+    try:
+        result = await gs.update_group(group_id=group_id, quotas=quotas or None, status=body.status)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail={"error": {"code": "not_found", "message": str(exc)}})
+    return {"data": result, "message": "success"}
+
+
+@router.delete("/groups/{group_id}")
+async def delete_group(
+    request: Request,
+    group_id: str,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+    """删除用户组（必须为空）。"""
+    from aigateway_api.main import app
+    gs = getattr(app.state, "group_store", None)
+    if gs is None:
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "GroupStore not initialized"}})
+    try:
+        deleted = await gs.delete_group(group_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": {"code": "validation_error", "message": str(exc)}})
+    if not deleted:
+        raise HTTPException(status_code=404, detail={"error": {"code": "not_found", "message": f"Group {group_id} not found"}})
+    return {"message": "deleted"}
+
+
+# ==================================================================
+# Key Group Assignment
+# ==================================================================
+
+
+class AssignKeyGroupRequest(BaseModel):
+    """PUT /admin/api-keys/{key_id}/group 请求体。"""
+
+    group_id: str = Field(..., description="目标组 ID（grp-*）")
+    cache_scope: Optional[str] = Field(default=None, description="private/group/public")
+
+
+@router.put("/api-keys/{key_id}/group")
+async def assign_key_to_group(
+    request: Request,
+    key_id: str,
+    body: AssignKeyGroupRequest,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+    """将 API Key 分配到用户组（迁移用量计数器）。"""
+    key_store, _ = _get_keystore_and_metrics(request)
+    from aigateway_api.main import app
+    gs = getattr(app.state, "group_store", None)
+    if gs is None:
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "GroupStore not initialized"}})
+    redis_mgr = key_store.redis
+
+    if not key_id.startswith("key_"):
+        raise HTTPException(status_code=400, detail={"error": {"code": "validation_error", "message": "Invalid key_id format"}})
+
+    key_hashes = await key_store._find_key_hashes_by_id(key_id)
+    if not key_hashes:
+        raise HTTPException(status_code=404, detail={"error": {"code": "not_found", "message": f"API key '{key_id}' not found"}})
+
+    kh = key_hashes[0]
+
+    # Validate target group exists
+    if not body.group_id.startswith("grp-"):
+        raise HTTPException(status_code=400, detail={"error": {"code": "validation_error", "message": "group_id must start with grp-"}})
+    group_data = await gs.get_group(body.group_id)
+    if not group_data:
+        raise HTTPException(status_code=404, detail={"error": {"code": "not_found", "message": f"Group {body.group_id} not found"}})
+
+    try:
+        await gs.assign_key_to_group(kh, body.group_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": {"code": "validation_error", "message": str(exc)}})
+
+    # Update cache_scope on the key if provided
+    if body.cache_scope:
+        if body.cache_scope not in ("private", "group", "public"):
+            raise HTTPException(status_code=400, detail={"error": {"code": "validation_error", "message": "cache_scope must be private/group/public"}})
+        key_data = await redis_mgr.get_api_key(kh)
+        if key_data:
+            key_data["cache_scope"] = body.cache_scope
+            await redis_mgr.set_api_key(kh, key_data)
+
+    return {"message": "assigned", "data": {"key_id": key_id, "group_id": body.group_id}}
+
+
+# ==================================================================
+# Prometheus Query Proxy
+# ==================================================================
+
+
+@router.get("/metrics/query")
+async def prometheus_query(
+    request: Request,
+    query: str = Query(..., description="PromQL query string"),
+    time: Optional[str] = Query(None, description="RFC3339 timestamp (default now)"),
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+    """Proxy to Prometheus /api/v1/query endpoint.
+
+    Allows the frontend to run arbitrary PromQL queries against the
+    Prometheus instance that scrapes the gateway.
+    """
+    import httpx
+    prom_url = os.environ.get("AI_GATEWAY_PROMETHEUS_URL", "http://prometheus:9090")
+    api_path = "/api/v1/query"
+    params: Dict[str, str] = {"query": query}
+    if time:
+        params["time"] = time
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"{prom_url.rstrip('/')}{api_path}", params=params)
+            resp.raise_for_status()
+            return resp.json()
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail={"error": {"code": "prometheus_error", "message": str(exc)}})
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail={"error": {"code": "prometheus_unreachable", "message": f"Cannot reach Prometheus: {exc}"}})
+
+
+@router.get("/metrics/query_range")
+async def prometheus_query_range(
+    request: Request,
+    query: str = Query(..., description="PromQL query string"),
+    start: str = Query(..., description="Start timestamp (Unix seconds)"),
+    end: str = Query(..., description="End timestamp (Unix seconds)"),
+    step: str = Query("3600", description="Query resolution (seconds)"),
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+    """Proxy to Prometheus /api/v1/query_range endpoint."""
+    import httpx
+    prom_url = os.environ.get("AI_GATEWAY_PROMETHEUS_URL", "http://prometheus:9090")
+    params: Dict[str, str] = {"query": query, "start": start, "end": end, "step": step}
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"{prom_url.rstrip('/')}/api/v1/query_range", params=params)
+            resp.raise_for_status()
+            return resp.json()
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail={"error": {"code": "prometheus_error", "message": str(exc)}})
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail={"error": {"code": "prometheus_unreachable", "message": f"Cannot reach Prometheus: {exc}"}})
