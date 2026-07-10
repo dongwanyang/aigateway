@@ -145,6 +145,14 @@ class GroupStore:
             if g:
                 g["group_id"] = gid
                 g["member_count"] = await self.get_member_count(gid)
+                # Convert Redis string fields to proper numeric types for frontend
+                for num_field in ("daily_tokens_limit", "daily_tokens_used",
+                                  "rate_limit_rpm", "rate_limit_tpm"):
+                    if num_field in g:
+                        g[num_field] = int(g[num_field])
+                for float_field in ("monthly_cost_limit", "monthly_cost_used"):
+                    if float_field in g:
+                        g[float_field] = float(g[float_field])
                 out.append(g)
         return out
 
