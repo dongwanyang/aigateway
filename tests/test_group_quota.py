@@ -343,7 +343,7 @@ async def test_assign_key_to_group_migrates_usage(ks_and_gs):
     await ks.redis.set_api_key("kh1", {"key_id": "k1", "user_id": "u1", "status": "active",
         "group_id": g1["group_id"], "cache_scope": "group",
         "daily_tokens_limit": "5000", "daily_tokens_used": "100",
-        "monthly_cost_limit": "50", "monthly_cost_used": "2.5",
+        "monthly_cost_limit": "50", "monthly_cost_used": "5.0",
         "rate_limit_rpm": "60", "rate_limit_tpm": "100000",
         "rpm_window_start": "0", "rpm_window_count": "0",
         "tpm_window_start": "0", "tpm_window_count": "0"})
@@ -363,3 +363,39 @@ async def test_assign_key_to_group_migrates_usage(ks_and_gs):
     # Member sets updated
     assert "kh1" in await gs._get_members(g2["group_id"])
     assert "kh1" not in await gs._get_members(g1["group_id"])
+
+
+@pytest.mark.asyncio
+async def test_assign_key_preserves_other_members_usage(ks_and_gs):
+    """Moving one key of many must not wipe the source group's other usage."""
+    ks, gs = ks_and_gs
+    # Source group with aggregate usage reflecting TWO keys
+    await ks.redis.set_group("grp-src", {"name": "Src", "status": "active",
+        "daily_tokens_limit": "1000000", "daily_tokens_used": "300",
+        "monthly_cost_limit": "5000", "monthly_cost_used": "15.0",
+        "rate_limit_rpm": "60", "rate_limit_tpm": "100000",
+        "rpm_window_start": "0", "rpm_window_count": "0",
+        "tpm_window_start": "0", "tpm_window_count": "0"})
+    await ks.redis.set_group("grp-dst", {"name": "Dst", "status": "active",
+        "daily_tokens_limit": "1000000", "daily_tokens_used": "0",
+        "monthly_cost_limit": "5000", "monthly_cost_used": "0.0",
+        "rate_limit_rpm": "60", "rate_limit_tpm": "100000",
+        "rpm_window_start": "0", "rpm_window_count": "0",
+        "tpm_window_start": "0", "tpm_window_count": "0"})
+    # The key being moved personally accounts for 100 tokens / $5 of the group's 300/$15
+    await ks.redis.set_api_key("kh1", {"key_id": "k1", "user_id": "u1", "status": "active",
+        "group_id": "grp-src", "cache_scope": "group",
+        "daily_tokens_limit": "1000000", "daily_tokens_used": "100",
+        "monthly_cost_limit": "200", "monthly_cost_used": "5.0",
+        "rate_limit_rpm": "60", "rate_limit_tpm": "100000",
+        "rpm_window_start": "0", "rpm_window_count": "0",
+        "tpm_window_start": "0", "tpm_window_count": "0"})
+    await gs.assign_key_to_group("kh1", "grp-dst")
+    src = await ks.redis.get_group("grp-src")
+    dst = await ks.redis.get_group("grp-dst")
+    # Source keeps the OTHER member's usage (300 - 100 = 200 tokens, $15 - $5 = $10)
+    assert src["daily_tokens_used"] == "200"
+    assert float(src["monthly_cost_used"]) == 10.0
+    # Destination gained only the moved key's usage
+    assert dst["daily_tokens_used"] == "100"
+    assert float(dst["monthly_cost_used"]) == 5.0

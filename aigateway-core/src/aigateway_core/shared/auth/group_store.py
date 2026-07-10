@@ -108,10 +108,24 @@ class GroupStore:
             suffix += 1
 
         fields = self._default_group_fields(name, quotas)
-        await self.redis.set_group(group_id, fields)
-        await self.redis.set_group_lookup(name, group_id)
-        await self._add_to_index(group_id)
-        await self._init_group_quota_periods(group_id)
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        month = datetime.now(timezone.utc).strftime("%Y-%m")
+        base_quota = {
+            "tokens_in": "0",
+            "tokens_out": "0",
+            "cost_usd": "0.0",
+            "request_count": "0",
+            "model_usage": "{}",
+        }
+
+        # Atomic batch: group hash + lookup + index + quota periods
+        await self.redis.pipe_batch(lambda p: [
+            p.hset(f"aigateway:group:{group_id}", mapping=fields),
+            p.set(f"aigateway:group_lookup:{name}", group_id),
+            p.sadd(self.GROUPS_INDEX, group_id),
+            p.hset(f"aigateway:quota:{group_id}:daily:{today}", mapping=base_quota),
+            p.hset(f"aigateway:quota:{group_id}:monthly:{month}", mapping=base_quota),
+        ])
 
         await self.redis.publish(self.PUBSUB_CHANNEL, {
             "event_type": "group_created", "group_id": group_id,
@@ -172,10 +186,13 @@ class GroupStore:
         if members:
             raise ValueError(f"group {group_id} still has {len(members)} members; reassign first")
         name = data.get("name", "")
-        await self.redis.delete_group(group_id)
-        if name:
-            await self.redis.delete_group_lookup(name)
-        await self._remove_from_index(group_id)
+        # Atomic batch: group hash + lookup + index
+        await self.redis.pipe_batch(lambda p: [
+            p.delete(f"aigateway:group:{group_id}"),
+            *(p.delete(f"aigateway:group_lookup:{name}") for _ in ([name] if name else [])),
+            p.srem(self.GROUPS_INDEX, group_id),
+        ])
+
         await self.redis.publish(self.PUBSUB_CHANNEL, {
             "event_type": "group_deleted", "group_id": group_id,
             "timestamp": self._now_iso(),
@@ -250,31 +267,37 @@ class GroupStore:
         if not new_data:
             raise ValueError(f"target group {new_group_id} not found")
 
-        # 3. Transfer usage from old → new
+        # 3. Transfer only the moved key's personal usage from old → new.
+        #    (Do NOT move the source group's aggregate — other members stay.)
+        moved_daily = int(key_data.get("daily_tokens_used", "0"))
+        moved_monthly = float(key_data.get("monthly_cost_used", "0.0"))
+
         if old_data:
-            old_daily = int(old_data.get("daily_tokens_used", "0"))
-            new_daily = int(new_data.get("daily_tokens_used", "0"))
-            new_data["daily_tokens_used"] = str(old_daily + new_daily)
-            old_data["daily_tokens_used"] = "0"
+            old_data["daily_tokens_used"] = str(
+                max(0, int(old_data.get("daily_tokens_used", "0")) - moved_daily)
+            )
+            old_data["monthly_cost_used"] = str(round(
+                max(0.0, float(old_data.get("monthly_cost_used", "0.0")) - moved_monthly), 4
+            ))
 
-            old_monthly = float(old_data.get("monthly_cost_used", "0"))
-            new_monthly = float(new_data.get("monthly_cost_used", "0"))
-            new_data["monthly_cost_used"] = str(round(old_monthly + new_monthly, 4))
-            old_data["monthly_cost_used"] = "0.0"
+        new_data["daily_tokens_used"] = str(
+            int(new_data.get("daily_tokens_used", "0")) + moved_daily
+        )
+        new_data["monthly_cost_used"] = str(round(
+            float(new_data.get("monthly_cost_used", "0.0")) + moved_monthly, 4
+        ))
 
-            await self.redis.set_group(old_group_id, old_data)
-        await self.redis.set_group(new_group_id, new_data)
-
-        # 4. Update member SETs (before key record so a failure leaves the key
-        #    in its old group — quota checks remain consistent).
-        await self.remove_member(old_group_id, key_hash)
-        await self.add_member(new_group_id, key_hash)
-
-        # 5. Update key record
+        # 4. Atomic batch: group updates + member SETs + key record
         key_data["group_id"] = new_group_id
         if "cache_scope" not in key_data:
             key_data["cache_scope"] = cache_scope
-        await self.redis.set_api_key(key_hash, key_data)
+        await self.redis.pipe_batch(lambda p: [
+            *(p.hset(f"aigateway:group:{old_group_id}", mapping=old_data) for _ in ([old_data] if old_data else [])),
+            p.hset(f"aigateway:group:{new_group_id}", mapping=new_data),
+            *(p.srem(self._members_key(old_group_id), key_hash) for _ in ([old_group_id] if old_group_id else [])),
+            p.sadd(self._members_key(new_group_id), key_hash),
+            p.hset(f"aigateway:key:{key_hash}", mapping=key_data),
+        ])
 
         await self.redis.publish(self.PUBSUB_CHANNEL, {
             "event_type": "key_assigned",
