@@ -177,3 +177,46 @@ async def test_delete_group(store):
     g = await store.create_group("G", {})
     assert await store.delete_group(g["group_id"]) is True
     assert await store.get_group(g["group_id"]) is None
+
+
+@pytest.mark.asyncio
+async def test_add_remove_member(store):
+    g = await store.create_group("G", {})
+    await store.add_member(g["group_id"], "keyhashA")
+    await store.add_member(g["group_id"], "keyhashB")
+    assert await store.get_member_count(g["group_id"]) == 2
+    await store.remove_member(g["group_id"], "keyhashA")
+    assert await store.get_member_count(g["group_id"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_list_groups_includes_member_count(store):
+    g = await store.create_group("G", {"daily_tokens": 5000})
+    await store.add_member(g["group_id"], "kh1")
+    groups = await store.list_groups()
+    assert groups[0]["member_count"] == 1
+    assert groups[0]["daily_tokens_limit"] == "5000"
+
+
+@pytest.mark.asyncio
+async def test_delete_group_with_members_rejected(store):
+    g = await store.create_group("G", {})
+    await store.add_member(g["group_id"], "kh1")
+    with pytest.raises(ValueError):
+        await store.delete_group(g["group_id"])
+
+
+@pytest.mark.asyncio
+async def test_default_group_cannot_be_deleted(store):
+    await store.ensure_default_group()
+    with pytest.raises(ValueError):
+        await store.delete_group(GroupStore.DEFAULT_GROUP_ID)
+
+
+@pytest.mark.asyncio
+async def test_get_group_detail(store):
+    g = await store.create_group("G", {})
+    await store.add_member(g["group_id"], "kh1")
+    detail = await store.get_group_detail(g["group_id"])
+    assert detail["group_id"] == g["group_id"]
+    assert detail["members"] == ["kh1"]

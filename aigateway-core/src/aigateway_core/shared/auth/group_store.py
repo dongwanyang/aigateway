@@ -130,6 +130,7 @@ class GroupStore:
             g = await self.redis.get_group(gid)
             if g:
                 g["group_id"] = gid
+                g["member_count"] = await self.get_member_count(gid)
                 out.append(g)
         return out
 
@@ -162,6 +163,8 @@ class GroupStore:
         return data
 
     async def delete_group(self, group_id: str) -> bool:
+        if group_id == self.DEFAULT_GROUP_ID:
+            raise ValueError("default group cannot be deleted")
         data = await self.redis.get_group(group_id)
         if not data:
             return False
@@ -179,11 +182,44 @@ class GroupStore:
         })
         return True
 
+    def _members_key(self, group_id: str) -> str:
+        return f"{self.GROUP_NAMESPACE}{group_id}{self.GROUP_MEMBERS_SUFFIX}"
+
+    async def add_member(self, group_id: str, key_hash: str) -> None:
+        if self.redis.redis is not None:
+            await self.redis.redis.sadd(self._members_key(group_id), key_hash)
+
+    async def remove_member(self, group_id: str, key_hash: str) -> None:
+        if self.redis.redis is not None:
+            await self.redis.redis.srem(self._members_key(group_id), key_hash)
+
     async def _get_members(self, group_id: str) -> List[str]:
         if self.redis.redis is None:
             return []
-        raw = await self.redis.redis.smembers(f"{self.GROUP_NAMESPACE}{group_id}{self.GROUP_MEMBERS_SUFFIX}")
+        raw = await self.redis.redis.smembers(self._members_key(group_id))
         return sorted(m.decode() if isinstance(m, bytes) else m for m in raw)
+
+    async def get_member_count(self, group_id: str) -> int:
+        return len(await self._get_members(group_id))
+
+    async def get_group_detail(self, group_id: str) -> Optional[Dict[str, Any]]:
+        data = await self.redis.get_group(group_id)
+        if not data:
+            return None
+        data["group_id"] = group_id
+        data["members"] = await self._get_members(group_id)
+        data["member_count"] = len(data["members"])
+        return data
+
+    async def ensure_default_group(self) -> str:
+        existing = await self.redis.get_group_lookup(self.DEFAULT_GROUP_NAME)
+        if existing:
+            return existing
+        try:
+            g = await self.create_group(self.DEFAULT_GROUP_NAME, {})
+        except ValueError:
+            return self.DEFAULT_GROUP_ID
+        return g["group_id"]
 
     async def _add_to_index(self, group_id: str) -> None:
         if self.redis.redis is not None:
