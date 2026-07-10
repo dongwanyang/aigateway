@@ -186,12 +186,14 @@ class GroupStore:
         return f"{self.GROUP_NAMESPACE}{group_id}{self.GROUP_MEMBERS_SUFFIX}"
 
     async def add_member(self, group_id: str, key_hash: str) -> None:
-        if self.redis.redis is not None:
-            await self.redis.redis.sadd(self._members_key(group_id), key_hash)
+        if self.redis.redis is None:
+            raise RuntimeError("Redis client is not connected")
+        await self.redis.redis.sadd(self._members_key(group_id), key_hash)
 
     async def remove_member(self, group_id: str, key_hash: str) -> None:
-        if self.redis.redis is not None:
-            await self.redis.redis.srem(self._members_key(group_id), key_hash)
+        if self.redis.redis is None:
+            raise RuntimeError("Redis client is not connected")
+        await self.redis.redis.srem(self._members_key(group_id), key_hash)
 
     async def _get_members(self, group_id: str) -> List[str]:
         if self.redis.redis is None:
@@ -220,6 +222,68 @@ class GroupStore:
         except ValueError:
             return self.DEFAULT_GROUP_ID
         return g["group_id"]
+
+    async def assign_key_to_group(self, key_hash: str, new_group_id: str) -> None:
+        """Move a key from its current group to a new group, migrating usage counters.
+
+        Transfers ``daily_tokens_used`` and ``monthly_cost_used`` from the old
+        group to the new group so the sum across all groups stays constant.
+        Also updates the key's ``group_id``, and the member SETs of both groups.
+        """
+        if new_group_id == self.DEFAULT_GROUP_ID:
+            raise ValueError("cannot assign to default group via this method")
+
+        # 1. Read current key data
+        key_data = await self.redis.get_api_key(key_hash)
+        if not key_data:
+            raise ValueError(f"key {key_hash} not found")
+
+        old_group_id = key_data.get("group_id") or ""
+        if old_group_id == new_group_id:
+            return  # already in the target group
+
+        cache_scope = key_data.get("cache_scope", "group")
+
+        # 2. Read both groups
+        old_data = await self.redis.get_group(old_group_id) if old_group_id else None
+        new_data = await self.redis.get_group(new_group_id)
+        if not new_data:
+            raise ValueError(f"target group {new_group_id} not found")
+
+        # 3. Transfer usage from old → new
+        if old_data:
+            old_daily = int(old_data.get("daily_tokens_used", "0"))
+            new_daily = int(new_data.get("daily_tokens_used", "0"))
+            new_data["daily_tokens_used"] = str(old_daily + new_daily)
+            old_data["daily_tokens_used"] = "0"
+
+            old_monthly = float(old_data.get("monthly_cost_used", "0"))
+            new_monthly = float(new_data.get("monthly_cost_used", "0"))
+            new_data["monthly_cost_used"] = str(round(old_monthly + new_monthly, 4))
+            old_data["monthly_cost_used"] = "0.0"
+
+            await self.redis.set_group(old_group_id, old_data)
+        await self.redis.set_group(new_group_id, new_data)
+
+        # 4. Update member SETs (before key record so a failure leaves the key
+        #    in its old group — quota checks remain consistent).
+        await self.remove_member(old_group_id, key_hash)
+        await self.add_member(new_group_id, key_hash)
+
+        # 5. Update key record
+        key_data["group_id"] = new_group_id
+        if "cache_scope" not in key_data:
+            key_data["cache_scope"] = cache_scope
+        await self.redis.set_api_key(key_hash, key_data)
+
+        await self.redis.publish(self.PUBSUB_CHANNEL, {
+            "event_type": "key_assigned",
+            "key_hash": key_hash,
+            "from_group": old_group_id,
+            "to_group": new_group_id,
+            "timestamp": self._now_iso(),
+        })
+        logger.info("Key %s assigned to group %s (was %s)", key_hash, new_group_id, old_group_id)
 
     async def _add_to_index(self, group_id: str) -> None:
         if self.redis.redis is not None:
