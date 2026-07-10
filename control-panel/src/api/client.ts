@@ -20,6 +20,12 @@ import type {
   DetailedQuotaData,
   HealthData,
   MetricSample,
+  Group,
+  GroupListData,
+  CreateGroupRequest,
+  UpdateGroupRequest,
+  AssignGroupRequest,
+  CacheScope,
 } from '@/types'
 
 // ------------------------------------------------------------------
@@ -796,4 +802,82 @@ export async function updateDebugSection(debug: Partial<DebugConfig>): Promise<v
       }),
     },
   )
+}
+
+// ------------------------------------------------------------------
+// User Groups
+// ------------------------------------------------------------------
+
+export async function listGroups(): Promise<ApiResponse<GroupListData>> {
+  return fetchJson<GroupListData>('/admin/groups')
+}
+
+export async function createGroup(body: CreateGroupRequest): Promise<ApiResponse<Group>> {
+  return fetchJson<Group>('/admin/groups', { method: 'POST', body: JSON.stringify(body) })
+}
+
+export async function getGroup(groupId: string): Promise<ApiResponse<Group>> {
+  return fetchJson<Group>(`/admin/groups/${encodeURIComponent(groupId)}`)
+}
+
+export async function updateGroup(
+  groupId: string,
+  body: UpdateGroupRequest,
+): Promise<ApiResponse<Group>> {
+  return fetchJson<Group>(`/admin/groups/${encodeURIComponent(groupId)}`, {
+    method: 'PUT',
+    body: JSON.stringify(body),
+  })
+}
+
+export async function deleteGroup(
+  groupId: string,
+): Promise<ApiResponse<{ id: string; status: string }>> {
+  return fetchJson<{ id: string; status: string }>(`/admin/groups/${encodeURIComponent(groupId)}`, {
+    method: 'DELETE',
+  })
+}
+
+export async function assignKeyGroup(
+  keyId: string,
+  groupId: string,
+  cacheScope?: CacheScope,
+): Promise<ApiResponse<unknown>> {
+  return fetchJson<unknown>(`/admin/api-keys/${encodeURIComponent(keyId)}/group`, {
+    method: 'PUT',
+    body: JSON.stringify({ group_id: groupId, cache_scope: cacheScope } as AssignGroupRequest),
+  })
+}
+
+// ------------------------------------------------------------------
+// Prometheus range-query proxy
+// ------------------------------------------------------------------
+
+export interface PromQueryValue {
+  timestamp: string
+  value: string
+}
+
+export interface PromQueryResult {
+  status: string
+  data: {
+    resultType: string
+    result: Array<{ metric: Record<string, string>; values: PromQueryValue[] }>
+  }
+}
+
+export async function metricsQuery(params: {
+  query: string
+  start?: string
+  end?: string
+  step?: string
+}): Promise<PromQueryResult> {
+  const qs = new URLSearchParams({ query: params.query, step: params.step || '3600' })
+  if (params.start) qs.set('start', params.start)
+  if (params.end) qs.set('end', params.end)
+  const resp = await fetch(`${API_BASE}/admin/metrics/query_range?${qs}`, {
+    headers: await ensureAuthHeaders(),
+  })
+  if (!resp.ok) throw new Error(`Prometheus query failed: ${resp.status}`)
+  return resp.json()
 }
