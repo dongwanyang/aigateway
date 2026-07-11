@@ -727,7 +727,14 @@ async def import_code_repository(
             relative_paths = [
                 str(p) for p in (form.getlist("relative_paths") if hasattr(form, "getlist") else [])
             ]
-            files: List[UploadFile] = [u for u in uploads if isinstance(u, UploadFile)]
+            # FastAPI 0.139 / Starlette 1.3+ 里 fastapi.UploadFile 与 starlette 的
+            # UploadFile 是两个不同的类, request.form() 返回 starlette 版本,
+            # isinstance(u, fastapi.UploadFile) 会全部 False → folder 源恒报
+            # "必须至少上传一个文件". 用 duck-typing (有 read 协程 + filename) 兼容两者.
+            files: List[UploadFile] = [
+                u for u in uploads
+                if hasattr(u, "read") and hasattr(u, "filename")
+            ]
             source_dir = await _materialize_folder_upload(
                 files,
                 relative_paths,
@@ -738,7 +745,9 @@ async def import_code_repository(
             source_label = _folder_source_label(files, relative_paths)
         elif source_type == "zip":
             upload = form.get("file")
-            if not isinstance(upload, UploadFile):
+            # 同 folder 分支: 用 duck-typing 而非 isinstance(upload, UploadFile),
+            # 否则 starlette/fastapi 双 UploadFile 类会让合法 ZIP 上传被判为缺字段.
+            if not (hasattr(upload, "read") and hasattr(upload, "filename")):
                 raise HTTPException(status_code=400, detail="ZIP 源需要 file 字段")
             data = await upload.read()
             if len(data) > max_total_size_mb * 1024 * 1024:
@@ -886,10 +895,14 @@ async def list_code_tasks(
     for key in all_keys:
         k = key.decode() if isinstance(key, bytes) else key
         tid = k.rsplit(":", 1)[-1]
-        raw = await redis_mgr.redis.hgetall(key)
-        if not raw:
+        # 复用 _read_task_state 解码 Redis Hash 的 bytes key/val,
+        # 否则 raw 是 {b"status": b"completed", ...}, _shape_task_response 用 str
+        # key 取值会全部落空, 退化成假 pending + source_label=None,
+        # 前端刷新恢复后就丢失任务来源标签。
+        state = await _read_task_state(redis_mgr, tid)
+        if not state:
             continue
-        active.append(_shape_task_response(tid, raw))
+        active.append(_shape_task_response(tid, state))
     # 按 created_at 倒序(最新的在前)
     active.sort(key=lambda t: int(t.get("created_at") or 0), reverse=True)
     return active
@@ -906,7 +919,7 @@ async def get_code_task(
     if not state:
         raise HTTPException(
             status_code=404,
-            detail={"error": {"code": "not_found", "message": f"Task '{task_id}' not found"}},
+            detail=f"Task '{task_id}' not found",
         )
     return _shape_task_response(task_id, state)
 

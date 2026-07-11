@@ -188,14 +188,10 @@ export default function KnowledgeCodeTab() {
       const backendMap = new Map(backendTasks.map(t => [t.task_id, t]))
 
       setTasks(prev => {
+        // 用后端状态覆盖本地任务, 后端不存在的保留本地(交由 pollTask 单独判真伪)
         const merged = prev
           .filter(pt => !dismissedTaskIdsRef.current.has(pt.task_id))
-          .map(pt => {
-            const bt = backendMap.get(pt.task_id)
-            if (bt) return bt // 后端有最新状态
-            // 后端暂时还没返回该任务时,保留本地已知任务,避免刚提交就刷新后消失
-            return pt
-          })
+          .map(pt => backendMap.get(pt.task_id) ?? pt)
         const mergedIds = new Set(merged.map(t => t.task_id))
         // 只补回后端非终态任务,避免把用户已 dismiss 的旧终态任务重新拉回
         for (const bt of backendTasks) {
@@ -231,9 +227,7 @@ export default function KnowledgeCodeTab() {
           // 延迟自动移除
           const dismissKey = `_${taskId}_dismiss`
           const dismissTimer2 = setTimeout(() => {
-            dismissedTaskIdsRef.current.add(taskId)
-            saveDismissedTaskIds(Array.from(dismissedTaskIdsRef.current))
-            setTasks(prev => prev.filter(t => t.task_id !== taskId))
+            dismissTask(taskId)
           }, AUTO_DISMISS_MS)
           timersRef.current.set(dismissKey, dismissTimer2)
         }
@@ -245,10 +239,7 @@ export default function KnowledgeCodeTab() {
           (exc.message.toLowerCase().includes('404') ||
            exc.message.toLowerCase().includes('not found'))
         ) {
-          clearTaskTimers(timersRef.current, taskId)
-          dismissedTaskIdsRef.current.add(taskId)
-          saveDismissedTaskIds(Array.from(dismissedTaskIdsRef.current))
-          setTasks(prev => prev.filter(t => t.task_id !== taskId))
+          dismissTask(taskId)
           return
         }
         // 轮询失败 → 标记 failed,停止轮询,保留已有 error 信息
@@ -264,7 +255,7 @@ export default function KnowledgeCodeTab() {
       })
   }
 
-  /** 手动移除任务(已完成/失败/取消) */
+  /** 从前端队列移除任务，并记录为已 dismiss，避免再次拉回 */
   function dismissTask(taskId: string) {
     clearTaskTimers(timersRef.current, taskId)
     dismissedTaskIdsRef.current.add(taskId)

@@ -39,35 +39,68 @@ def _open_db(graph_db_path: str) -> sqlite3.Connection:
     return conn
 
 
+def _file_path_match_sql(column: str = "file_path") -> tuple[str, str, str]:
+    """生成 file_path 匹配的 SQL 片段、LIKE 前缀、ESCAPE 字符。
+
+    graph_builder 把源码 symlink 成 work_dir/src 后跑 codegraph, 导致图谱里所有
+    file_path 都多了一个 builder 前缀 (如 src/auth.py / src/src/.../auth.py),
+    而 splitter 产出的是相对源根的路径 (auth.py / src/aigateway_core/...).
+    两者前缀对不上, 精确匹配 `file_path = ?` 会全部 miss → 符号查不到 →
+    chunk_type 退化成 module → 知识库函数/类计数恒为 0。
+
+    用后缀匹配容忍 builder 加的任意前缀: graph 路径等于查询路径, 或以
+    `/{查询路径}` 结尾 (前导 `%` 通配任意前缀, 加斜杠避免 auth.py 误匹配 xauth.py)。
+
+    file_path 常含 `_` / `%` (如 __init__.py), 用 ESCAPE 把它们当字面量, 避免
+    LIKE 把 `_` 当单字符通配符误匹配 (如 `__init__.py` 错配到 `x_init__.py`)。
+
+    返回 (SQL 片段, LIKE 前缀, ESCAPE 字符); 调用方把 file_path 转义后拼成
+    `前缀 + 转义后的 file_path` 作为 LIKE 参数。
+    """
+    escape = "\\"
+    return (
+        f"({column} = ? OR {column} LIKE ? ESCAPE '{escape}')",
+        "%/",
+        escape,
+    )
+
+
+def _escape_like(value: str, escape: str) -> str:
+    """转义 LIKE 模式里的通配符 (%/_) 和转义符本身, 使其按字面量匹配。"""
+    return value.replace(escape, escape + escape).replace("%", escape + "%").replace("_", escape + "_")
+
+
 def _find_symbol_node(
     conn: sqlite3.Connection,
     file_path: str,
     symbol_name: str,
 ) -> Optional[sqlite3.Row]:
+    match_sql, like_prefix, escape = _file_path_match_sql()
+    like_param = like_prefix + _escape_like(file_path, escape)
     row = conn.execute(
-        """
+        f"""
         SELECT id, kind, name, qualified_name, file_path, language, start_line, end_line
         FROM nodes
-        WHERE file_path = ?
+        WHERE {match_sql}
           AND name = ?
           AND kind IN ('function', 'class', 'method')
         ORDER BY CASE kind WHEN 'function' THEN 0 WHEN 'method' THEN 1 WHEN 'class' THEN 2 ELSE 9 END,
                  start_line ASC
         LIMIT 1
         """,
-        (file_path, symbol_name),
+        (file_path, like_param, symbol_name),
     ).fetchone()
     if row is not None:
         return row
     return conn.execute(
-        """
+        f"""
         SELECT id, kind, name, qualified_name, file_path, language, start_line, end_line
         FROM nodes
-        WHERE file_path = ? AND name = ?
+        WHERE {match_sql} AND name = ?
         ORDER BY start_line ASC
         LIMIT 1
         """,
-        (file_path, symbol_name),
+        (file_path, like_param, symbol_name),
     ).fetchone()
 
 
@@ -105,21 +138,22 @@ def _get_calls_from(
 
 
 def _get_imports_for_file(conn: sqlite3.Connection, file_path: str) -> list[str]:
+    match_sql, like_prefix, escape = _file_path_match_sql("f.file_path")
     rows = conn.execute(
-        """
+        f"""
         SELECT DISTINCT n.name
         FROM edges e
         JOIN nodes f ON f.id = e.source
         JOIN nodes n ON n.id = e.target
         WHERE e.kind = 'contains'
           AND f.kind = 'file'
-          AND f.file_path = ?
+          AND {match_sql}
           AND n.kind = 'import'
           AND n.name IS NOT NULL
           AND n.name != ''
         ORDER BY n.name
         """,
-        (file_path,),
+        (file_path, like_prefix + _escape_like(file_path, escape)),
     ).fetchall()
     return [str(r[0]) for r in rows]
 
@@ -203,6 +237,23 @@ def lookup_related_symbols_strict(
         if root is None:
             return []
 
+        # graph 节点 file_path 带 builder 前缀 (如 src/...), 而 Qdrant 存的是
+        # splitter 的相对源根路径 (无前缀). 用根节点反推前缀长度, 剥到所有结果上,
+        # 否则下游 _fetch_related_code_chunks 按 file_path scroll Qdrant 全 miss。
+        # 只认 endswith("/" + file_path) —— 带分隔符, 不会把 'auth.py' 误当前缀
+        # 匹配到 'auth.py_backup' 之类. builder 前缀恒为 'src/...' 形态, endswith 足够.
+        root_stored = str(root['file_path'] or '')
+        prefix_len = 0
+        if root_stored and root_stored != file_path and root_stored.endswith("/" + file_path):
+            prefix_len = len(root_stored) - len(file_path)  # 含末尾 '/'
+
+        def _normalize(stored: str) -> str:
+            if not stored:
+                return stored
+            if prefix_len and len(stored) > prefix_len:
+                return stored[prefix_len:]
+            return stored
+
         visited = {str(root['id'])}
         queue = deque([(str(root['id']), 0)])
         related: list[dict[str, Any]] = []
@@ -232,7 +283,7 @@ def lookup_related_symbols_strict(
                 queue.append((rid, depth + 1))
                 related.append(
                     {
-                        'file_path': str(row['file_path']),
+                        'file_path': _normalize(str(row['file_path'])),
                         'symbol_name': str(row['name']),
                         'kind': str(row['kind']),
                         'start_line': int(row['start_line'] or 1),

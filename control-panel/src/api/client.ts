@@ -615,9 +615,18 @@ export async function importCodeRepository(
   payload: FormData | CodeImportJsonPayload,
 ): Promise<{ task_id: string; status: 'pending' }> {
   const headers = await ensureAuthHeaders()
+  // FormData 必须让浏览器自动设置 Content-Type (含 multipart boundary).
+  // ensureAuthHeaders 默认带了 'Content-Type: application/json', 会覆盖浏览器的
+  // multipart/form-data; boundary=..., 导致后端按 JSON 解析二进制 body →
+  // "'utf-8' codec can't decode byte 0xfb" / "Expecting value: line 1 column 1".
   const init: RequestInit =
     payload instanceof FormData
-      ? { method: 'POST', headers, body: payload }
+      ? {
+          method: 'POST',
+          // 只透传 Authorization, 删掉默认的 application/json, 让浏览器补 boundary
+          headers: { Authorization: headers['Authorization'] || '' },
+          body: payload,
+        }
       : {
           method: 'POST',
           headers: { ...headers, 'Content-Type': 'application/json' },
@@ -648,10 +657,16 @@ export async function getCodeImportTask(taskId: string): Promise<CodeImportTask>
   )
   if (!res.ok) {
     const body = await res.json().catch(() => ({}))
-    const message = typeof body?.detail === 'string'
+    // FastAPI HTTPException(detail=str) → body.detail = string
+    // FastAPI HTTPException(detail=dict) → body = dict (detail lifted to top level)
+    const msg = typeof body?.detail === 'string'
       ? body.detail
-      : body?.detail?.error?.message || `Failed to fetch code import task: ${res.status}`
-    throw new Error(message)
+      : typeof body?.message === 'string'
+        ? body.message
+        : typeof body?.detail?.error?.message === 'string'
+          ? body.detail.error.message
+          : `Failed to fetch code import task: ${res.status}`
+    throw new Error(msg)
   }
   return await res.json()
 }

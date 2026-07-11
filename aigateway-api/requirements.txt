@@ -30,6 +30,8 @@
 
 # --- Web 框架与服务 ---
 fastapi
+# python-multipart: Starlette request.form() / UploadFile 必需, code_rag folder/zip 上传依赖
+python-multipart
 uvicorn[standard]
 gunicorn
 pyyaml

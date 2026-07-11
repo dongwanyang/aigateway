@@ -4,19 +4,25 @@
 `@colbymchenry/codegraph`，而不是我们之前误用的 Python 包 API 假设。
 
 集成路线：
-1. 在源码目录执行 `codegraph init`（会创建 `.codegraph/` 并建立索引）
-2. 再执行 `codegraph index [path]` 明确触发完整索引
-3. 将生成的 `.codegraph/codegraph.db` 复制到 `graph_db_path`
+1. 在持久化卷下的可写临时目录创建源码 symlink
+2. 执行 `codegraph init`（在可写目录创建 .codegraph/）
+3. 将生成的 .codegraph/codegraph.db 复制到 graph_db_path
 
-文档要点（来自 upstream README）：
-- 支持 20+ languages
-- 本地 SQLite DB 默认位于 `.codegraph/codegraph.db`
-- `codegraph init` / `codegraph index [path]` 是标准 CLI 工作流
+持久化策略：.codegraph/ 目录始终落在持久化卷（如 /data/code_graphs）
+内，即使容器重启也不会丢失。
+
+环境兼容：
+- 此逻辑不依赖 Docker 容器；它依赖的目标图谱目录（由
+  config.yaml 的 code_graph_db_dir 或 graph_builder 调用方传入的
+  graph_db_path 决定）必须可写。
+- 在 Docker 中通常通过持久卷（如 code_graphs_data）保证可写；
+  本地非容器部署时需确保配置的图谱目录可写。
 """
 from __future__ import annotations
 
 import shutil
 import subprocess
+import uuid
 from pathlib import Path
 
 
@@ -62,24 +68,41 @@ def build_code_graph(
     返回值：graph_db_path（最终 SQLite 文件绝对路径）
 
     失败策略：任一步失败直接抛异常，由导入任务整体标记 failed。
+
+    工作目录：在 graph_db_path 同级目录下创建临时子目录（如
+    /data/code_graphs/.tmp/xxx），codegraph init 必须在此可写目录执行，
+    完成后将 .codegraph/codegraph.db 复制到目标位置并清理临时目录。
+    这样即使容器重启，图谱数据仍保留在持久化卷中，不会丢失。
     """
     source_root = Path(source_dir).resolve()
     target = Path(graph_db_path).resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    # 官方 CLI 工作流: 在项目目录执行 init + index。
-    _run_codegraph(["codegraph", "init"], cwd=str(source_root), timeout=timeout)
-    _run_codegraph(
-        ["codegraph", "index", str(source_root)],
-        cwd=str(source_root),
-        timeout=timeout,
-    )
+    # 在目标目录同级创建可写的工作子目录，避免 codegraph init 在只读
+    # 挂载的源码目录写入 .codegraph/ 目录。
+    # 使用 UUID 命名避免并发导入时同一毫秒内的目录碰撞。
+    work_dir = target.parent / ".tmp" / f"cg_{uuid.uuid4().hex}"
+    work_dir.mkdir(parents=True, exist_ok=False)
 
-    default_db = source_root / ".codegraph" / "codegraph.db"
-    if not default_db.exists():
-        raise RuntimeError(
-            f"codegraph 索引后未生成 SQLite: expected {default_db}"
-        )
+    try:
+        # 将源码 symlink 到 work_dir，codegraph init 会跟随 symlink
+        # 在 work_dir 下创建 .codegraph/（持久化卷内可写）
+        link_name = work_dir / "src"
+        if not link_name.exists():
+            link_name.symlink_to(source_root)
 
-    shutil.copy2(default_db, target)
-    return str(target)
+        # codegraph init 在 work_dir 运行，自动扫描 symlink 指向的源码
+        # 并在此处创建 .codegraph/（持久化卷内）
+        _run_codegraph(["codegraph", "init"], cwd=str(work_dir), timeout=timeout)
+
+        db_in_work = work_dir / ".codegraph" / "codegraph.db"
+        if not db_in_work.exists():
+            raise RuntimeError(
+                f"codegraph 索引后未生成 SQLite: expected {db_in_work}"
+            )
+
+        shutil.copy2(db_in_work, target)
+        return str(target)
+    finally:
+        # 清理工作目录（db 已复制到持久化目标路径）
+        shutil.rmtree(work_dir, ignore_errors=True)
