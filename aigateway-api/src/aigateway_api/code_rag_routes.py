@@ -52,6 +52,7 @@ router = APIRouter()
 _TASK_KEY_TMPL = "aigateway:rag:code:tasks:{task_id}"
 _REPO_LIST_KEY = "aigateway:rag:code:documents"
 _TASK_TTL_SECONDS = 24 * 3600
+_CANCELLED = "cancelled"
 
 
 # ----------------------------------------------------------------------
@@ -117,7 +118,10 @@ async def _read_task_state(redis_mgr: Any, task_id: str) -> Optional[Dict[str, A
 
 
 def _shape_task_response(task_id: str, state: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """把 Redis Hash 里的字段规范化为 API 输出结构."""
+    """把 Redis Hash 里的字段规范化为 API 输出结构.
+
+    created_at 缺失时返回 0 (非 null)，保证 list 端按时间倒序时老任务排末尾.
+    """
     if not state:
         return {
             "task_id": task_id,
@@ -126,6 +130,9 @@ def _shape_task_response(task_id: str, state: Optional[Dict[str, Any]]) -> Dict[
             "total": 0,
             "current_file": None,
             "error": None,
+            "source_label": None,
+            "source_type": None,
+            "created_at": 0,
         }
     try:
         done = int(state.get("done") or 0)
@@ -135,6 +142,10 @@ def _shape_task_response(task_id: str, state: Optional[Dict[str, Any]]) -> Dict[
         total = int(state.get("total") or 0)
     except (TypeError, ValueError):
         total = 0
+    try:
+        created_at = int(state.get("created_at") or 0)
+    except (TypeError, ValueError):
+        created_at = 0
     return {
         "task_id": task_id,
         "status": state.get("status") or "pending",
@@ -142,6 +153,9 @@ def _shape_task_response(task_id: str, state: Optional[Dict[str, Any]]) -> Dict[
         "total": total,
         "current_file": state.get("current_file") or None,
         "error": state.get("error") or None,
+        "source_label": state.get("source_label") or None,
+        "source_type": state.get("source_type") or None,
+        "created_at": created_at,
     }
 
 
@@ -155,20 +169,21 @@ def _spawn_import_task(app_state: Any, coro: Any, *, task_id: str) -> Any:
 
     直接 asyncio.create_task 会让 loop 只持弱引用,长任务在低负载下可能被回收,
     弹出 "Task was destroyed but it is pending" 且中断真实导入。我们:
-    - 把 Task 放进一个 set,strong-ref 直到完成
-    - 挂 done_callback: 移出 set + 打印未捕获异常(finally 里 _mark(failed)
+    - 把 Task 放进一个 dict, strong-ref 直到完成
+    - 挂 done_callback: 移出 dict + 打印未捕获异常(finally 里 _mark(failed)
       走 Redis 是主路径,这里只做兜底日志)
+    - dict 的键是 task_id,方便取消时查找
     """
-    active: set = getattr(app_state, "code_rag_active_tasks", None)  # type: ignore[assignment]
+    active: Dict[str, asyncio.Task] = getattr(app_state, "code_rag_active_tasks", None)  # type: ignore[assignment]
     if active is None:
-        active = set()
+        active = {}
         app_state.code_rag_active_tasks = active
 
     task = asyncio.create_task(coro, name=f"code_rag_import:{task_id}")
-    active.add(task)
+    active[task_id] = task
 
     def _done(t: Any) -> None:
-        active.discard(t)
+        active.pop(task_id, None)
         try:
             exc = t.exception()
         except asyncio.CancelledError:
@@ -472,6 +487,10 @@ async def _run_code_import_task_with_deadline(
                 "error": f"import task exceeded {deadline_seconds}s deadline",
             },
         )
+    except asyncio.CancelledError:
+        # 用户取消透传,由内层 _run_code_import_task 处理 Redis 标记
+        logger.info("code rag import task %s cancelled (deadline wrapper)", task_id)
+        raise
 
 
 async def _run_code_import_task(
@@ -631,6 +650,12 @@ async def _run_code_import_task(
 
         await _mark(status="completed", error=None)
 
+    except asyncio.CancelledError:
+        # 用户主动取消,不记为 failed
+        logger.info("code rag import task %s cancelled by user", task_id)
+        await _mark(status=_CANCELLED, error=None)
+        raise  # 重新抛出让 done_callback 处理
+
     except Exception as exc:
         logger.exception("code rag import task %s failed: %s", task_id, exc)
         # Qdrant 点已写但流程中断 → 尝试清理
@@ -702,7 +727,14 @@ async def import_code_repository(
             relative_paths = [
                 str(p) for p in (form.getlist("relative_paths") if hasattr(form, "getlist") else [])
             ]
-            files: List[UploadFile] = [u for u in uploads if isinstance(u, UploadFile)]
+            # FastAPI 0.139 / Starlette 1.3+ 里 fastapi.UploadFile 与 starlette 的
+            # UploadFile 是两个不同的类, request.form() 返回 starlette 版本,
+            # isinstance(u, fastapi.UploadFile) 会全部 False → folder 源恒报
+            # "必须至少上传一个文件". 用 duck-typing (有 read 协程 + filename) 兼容两者.
+            files: List[UploadFile] = [
+                u for u in uploads
+                if hasattr(u, "read") and hasattr(u, "filename")
+            ]
             source_dir = await _materialize_folder_upload(
                 files,
                 relative_paths,
@@ -713,7 +745,9 @@ async def import_code_repository(
             source_label = _folder_source_label(files, relative_paths)
         elif source_type == "zip":
             upload = form.get("file")
-            if not isinstance(upload, UploadFile):
+            # 同 folder 分支: 用 duck-typing 而非 isinstance(upload, UploadFile),
+            # 否则 starlette/fastapi 双 UploadFile 类会让合法 ZIP 上传被判为缺字段.
+            if not (hasattr(upload, "read") and hasattr(upload, "filename")):
                 raise HTTPException(status_code=400, detail="ZIP 源需要 file 字段")
             data = await upload.read()
             if len(data) > max_total_size_mb * 1024 * 1024:
@@ -784,6 +818,96 @@ async def import_code_repository(
     return {"task_id": task_id, "status": "pending"}
 
 
+@router.post("/rag/code/tasks/{task_id}/cancel")
+async def cancel_code_task(
+    task_id: str,
+    request: Request,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+) -> Dict[str, Any]:
+    """取消一个正在运行的导入任务。
+
+    流程:
+    1. 先读 Redis 确认任务状态,已是终态则直接返回(不覆盖)
+    2. 标记 Redis 状态为 cancelled
+    3. 从 app.state.code_rag_active_tasks 中找到 asyncio.Task 并 cancel()
+    4. asyncio 会在下一次 await 处抛出 CancelledError,
+       _run_code_import_task 的 except 块捕获后走 finally 清理。
+    """
+    app_state = request.app.state
+    redis_mgr = getattr(app_state, "redis_manager", None)
+
+    # 0) 检查当前状态,不存在则直接报 404,避免伪造 cancelled 任务
+    existing = await _read_task_state(redis_mgr, task_id)
+    if not existing:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": {
+                    "code": "not_found",
+                    "message": f"Code import task '{task_id}' not found",
+                }
+            },
+        )
+
+    current_status = existing.get("status") or "pending"
+    if current_status in ("completed", "failed", "cancelled"):
+        logger.info("Code rag import task %s already terminal (status=%s), skipping cancel", task_id, current_status)
+        return {"task_id": task_id, "status": current_status}
+
+    # 1) 写 Redis 终态
+    await _write_task_state(redis_mgr, task_id, {"status": _CANCELLED})
+
+    # 2) 取消 asyncio.Task
+    active = getattr(app_state, "code_rag_active_tasks", None)
+    if active and task_id in active:
+        active[task_id].cancel()
+        logger.info("Cancelled code rag import task %s", task_id)
+    else:
+        # 任务已完成/从未创建,Redis 标记已写,静默返回
+        logger.info("Code rag import task %s not found in active tasks (already done?)", task_id)
+
+    return {"task_id": task_id, "status": _CANCELLED}
+
+
+@router.get("/rag/code/tasks")
+async def list_code_tasks(
+    request: Request,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+) -> List[Dict[str, Any]]:
+    """列出所有任务(含终态),附带 source_label 供前端展示。
+
+    前端页面刷新后可用此接口恢复正在运行的任务。
+    """
+    redis_mgr = getattr(request.app.state, "redis_manager", None)
+    if redis_mgr is None or redis_mgr.redis is None:
+        return []
+
+    # 使用 SCAN 替代 KEYS,避免阻塞 Redis 单线程事件循环
+    pattern = _TASK_KEY_TMPL.format(task_id="*")
+    cursor = 0
+    all_keys: List[str] = []
+    while True:
+        cursor, keys = await redis_mgr.redis.scan(cursor, match=pattern, count=100)
+        all_keys.extend(keys)
+        if cursor == 0:
+            break
+    active: List[Dict[str, Any]] = []
+    for key in all_keys:
+        k = key.decode() if isinstance(key, bytes) else key
+        tid = k.rsplit(":", 1)[-1]
+        # 复用 _read_task_state 解码 Redis Hash 的 bytes key/val,
+        # 否则 raw 是 {b"status": b"completed", ...}, _shape_task_response 用 str
+        # key 取值会全部落空, 退化成假 pending + source_label=None,
+        # 前端刷新恢复后就丢失任务来源标签。
+        state = await _read_task_state(redis_mgr, tid)
+        if not state:
+            continue
+        active.append(_shape_task_response(tid, state))
+    # 按 created_at 倒序(最新的在前)
+    active.sort(key=lambda t: int(t.get("created_at") or 0), reverse=True)
+    return active
+
+
 @router.get("/rag/code/tasks/{task_id}")
 async def get_code_task(
     task_id: str,
@@ -792,6 +916,11 @@ async def get_code_task(
 ) -> Dict[str, Any]:
     redis_mgr = getattr(request.app.state, "redis_manager", None)
     state = await _read_task_state(redis_mgr, task_id)
+    if not state:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Task '{task_id}' not found",
+        )
     return _shape_task_response(task_id, state)
 
 

@@ -580,6 +580,7 @@ export type CodeImportTaskStatus =
   | 'embedding'
   | 'completed'
   | 'failed'
+  | 'cancelled'
 
 export interface CodeImportTask {
   task_id: string
@@ -588,6 +589,9 @@ export interface CodeImportTask {
   done: number
   total: number
   error: string | null
+  source_label: string | null
+  source_type: string | null
+  created_at: number
 }
 
 export interface CodeRepositoryImport {
@@ -611,9 +615,18 @@ export async function importCodeRepository(
   payload: FormData | CodeImportJsonPayload,
 ): Promise<{ task_id: string; status: 'pending' }> {
   const headers = await ensureAuthHeaders()
+  // FormData 必须让浏览器自动设置 Content-Type (含 multipart boundary).
+  // ensureAuthHeaders 默认带了 'Content-Type: application/json', 会覆盖浏览器的
+  // multipart/form-data; boundary=..., 导致后端按 JSON 解析二进制 body →
+  // "'utf-8' codec can't decode byte 0xfb" / "Expecting value: line 1 column 1".
   const init: RequestInit =
     payload instanceof FormData
-      ? { method: 'POST', headers, body: payload }
+      ? {
+          method: 'POST',
+          // 只透传 Authorization, 删掉默认的 application/json, 让浏览器补 boundary
+          headers: { Authorization: headers['Authorization'] || '' },
+          body: payload,
+        }
       : {
           method: 'POST',
           headers: { ...headers, 'Content-Type': 'application/json' },
@@ -629,13 +642,48 @@ export async function importCodeRepository(
   return await res.json()
 }
 
+export async function listCodeImportTasks(): Promise<CodeImportTask[]> {
+  const headers = await ensureAuthHeaders()
+  const res = await fetch(`${API_BASE}/admin/rag/code/tasks`, { headers })
+  if (!res.ok) throw new Error(`Failed to list code import tasks: ${res.status}`)
+  return await res.json()
+}
+
 export async function getCodeImportTask(taskId: string): Promise<CodeImportTask> {
   const headers = await ensureAuthHeaders()
   const res = await fetch(
     `${API_BASE}/admin/rag/code/tasks/${encodeURIComponent(taskId)}`,
     { headers },
   )
-  if (!res.ok) throw new Error(`Failed to fetch code import task: ${res.status}`)
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}))
+    // FastAPI HTTPException(detail=str) → body.detail = string
+    // FastAPI HTTPException(detail=dict) → body = dict (detail lifted to top level)
+    const msg = typeof body?.detail === 'string'
+      ? body.detail
+      : typeof body?.message === 'string'
+        ? body.message
+        : typeof body?.detail?.error?.message === 'string'
+          ? body.detail.error.message
+          : `Failed to fetch code import task: ${res.status}`
+    throw new Error(msg)
+  }
+  return await res.json()
+}
+
+export async function cancelCodeImportTask(taskId: string): Promise<{ task_id: string; status: 'cancelled' }> {
+  const headers = await ensureAuthHeaders()
+  const res = await fetch(
+    `${API_BASE}/admin/rag/code/tasks/${encodeURIComponent(taskId)}/cancel`,
+    { method: 'POST', headers },
+  )
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }))
+    const message = typeof body?.detail === 'string'
+      ? body.detail
+      : body?.detail?.error?.message || `Failed to cancel code import task: ${res.status}`
+    throw new Error(message)
+  }
   return await res.json()
 }
 

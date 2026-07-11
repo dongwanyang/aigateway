@@ -284,6 +284,88 @@ def test_lookup_symbol_metadata_reads_codegraph_sqlite_schema(tmp_path: Path) ->
     assert meta["imports"] == ["jwt"]
 
 
+def test_lookup_symbol_metadata_matches_graph_path_with_builder_prefix(tmp_path: Path) -> None:
+    """graph_builder 把源码 symlink 成 work_dir/src 后, codegraph 存的 file_path
+    会多一个前缀 (如 src/auth.py / src/src/.../auth.py), 与 splitter 产出的相对
+    源根路径 (auth.py) 对不上. 查询端必须按后缀归一化匹配, 否则符号永远 miss,
+    chunk_type 退化成 module, 知识库函数/类计数恒为 0.
+    """
+    import sqlite3
+
+    from aigateway_core.pipelines.understanding.code_rag.graph_query import lookup_symbol_metadata
+
+    db = tmp_path / "codegraph.db"
+    conn = sqlite3.connect(db)
+    cur = conn.cursor()
+    cur.execute(
+        "CREATE TABLE nodes (id TEXT PRIMARY KEY, kind TEXT, name TEXT, qualified_name TEXT, file_path TEXT, language TEXT, start_line INTEGER, end_line INTEGER)"
+    )
+    cur.execute(
+        "CREATE TABLE edges (id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT, target TEXT, kind TEXT, metadata TEXT, line INTEGER, col INTEGER, provenance TEXT)"
+    )
+    # graph_builder 加了 src/ 前缀 → graph 存的是 src/auth.py
+    cur.executemany(
+        "INSERT INTO nodes (id, kind, name, qualified_name, file_path, language, start_line, end_line) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            ("file:auth.py", "file", "auth.py", "src/auth.py", "src/auth.py", "python", 1, 20),
+            ("function:login", "function", "login", "login", "src/auth.py", "python", 5, 8),
+        ],
+    )
+    cur.executemany(
+        "INSERT INTO edges (source, target, kind, metadata, line, col, provenance) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            ("file:auth.py", "function:login", "contains", None, None, None, None),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    # splitter 产出的是 auth.py (相对源根), graph 存的是 src/auth.py
+    meta = lookup_symbol_metadata(str(db), "auth.py", "login", "def login():\n    return 1")
+    assert meta["chunk_type"] == "function", "前缀不一致导致符号 miss, 退化成 module"
+    assert meta["function_name"] == "login"
+
+
+def test_lookup_related_symbols_strips_builder_prefix_from_file_path(tmp_path: Path) -> None:
+    """retrieval 端用 BFS 返回的 file_path 去 Qdrant scroll 相关 chunk,
+    而 Qdrant 存的是 splitter 路径 (无 builder 前缀). BFS 必须把 graph 节点的
+    前缀剥掉, 否则 scroll 永远 miss, 相关符号增强失效。
+    """
+    import sqlite3
+
+    from aigateway_core.pipelines.understanding.code_rag.graph_query import lookup_related_symbols_strict
+
+    db = tmp_path / "codegraph.db"
+    conn = sqlite3.connect(db)
+    cur = conn.cursor()
+    cur.execute(
+        "CREATE TABLE nodes (id TEXT PRIMARY KEY, kind TEXT, name TEXT, qualified_name TEXT, file_path TEXT, language TEXT, start_line INTEGER, end_line INTEGER)"
+    )
+    cur.execute(
+        "CREATE TABLE edges (id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT, target TEXT, kind TEXT, metadata TEXT, line INTEGER, col INTEGER, provenance TEXT)"
+    )
+    # graph 存的路径带 src/ 前缀; splitter 产出的是 auth.py / utils.py
+    cur.executemany(
+        "INSERT INTO nodes (id, kind, name, qualified_name, file_path, language, start_line, end_line) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            ("function:login", "function", "login", "login", "src/auth.py", "python", 5, 8),
+            ("function:hash", "function", "hash_password", "hash_password", "src/utils.py", "python", 1, 3),
+        ],
+    )
+    cur.executemany(
+        "INSERT INTO edges (source, target, kind, metadata, line, col, provenance) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [("function:login", "function:hash", "calls", None, 6, 4, None)],
+    )
+    conn.commit()
+    conn.close()
+
+    related = lookup_related_symbols_strict(str(db), "auth.py", "login", hops=1)
+    assert len(related) == 1
+    # 剥掉 src/ 前缀, 与 Qdrant 里 splitter 路径对齐
+    assert related[0]["file_path"] == "utils.py", "BFS 返回的 file_path 没剥 builder 前缀"
+    assert related[0]["symbol_name"] == "hash_password"
+
+
 def test_code_rag_routes_batches_embedding_work() -> None:
     src = (
         REPO_ROOT

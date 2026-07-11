@@ -228,8 +228,8 @@ python3 -m pytest tests/ --cov=aigateway_core --cov=aigateway_api
 
 ## Workflow Rules
 
-1. **Auto-commit after every code-changing task.** Conventional prefix (`feat:` / `fix:` / `refactor:` / `docs:` / `test:` / `chore:`). If `git add` / `git commit` hits a conflict, stop and ask — never force-resolve.
-2. **Rebuild Docker when the change lives in the image.** Backend Python under `aigateway-*/`, Dockerfile edits, new deps, or baked-in `config.yaml` structural changes → `docker compose up -d --build {gateway|control-panel}` then `curl -sf localhost:8000/health` + `docker compose logs --tail=50 gateway | grep -i error`. Live YAML edits under `hot_reload: true`, frontend under `npm run dev`, and pure docs don't need a rebuild. Report the rebuild+verify result with the commit; surface failures, never skip silently.
+0. **Review before commit.** After fixing bugs or adding features, run `window-code-review` skill on the diff first. Address confirmed findings. **Never auto-commit.** All code changes remain in the working tree until the user reviews and explicitly approves.
+1. **Rebuild Docker when the change lives in the image.** Backend Python under `aigateway-*/`, Dockerfile edits, new deps, or baked-in `config.yaml` structural changes → `docker compose up -d --build {gateway|control-panel}` then `curl -sf localhost:8000/health` + `docker compose logs --tail=50 gateway | grep -i error`. Live YAML edits under `hot_reload: true`, frontend under `npm run dev`, and pure docs don't need a rebuild. Report the rebuild+verify result with the commit; surface failures, never skip silently.
 3. **Keep this file current.** After any task that changes architecture, adds/removes a major component, alters config schema or commands, update the affected section here in the same task.
 4. **Trim this file periodically. Cap ~300 lines.**
    - Before editing CLAUDE.md, run `wc -l CLAUDE.md`. If it's over ~300 (or the delta would push it over), first prune before adding.

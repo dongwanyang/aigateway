@@ -24,6 +24,7 @@ services:
     volumes:
       - ./config.yaml:/app/config.yaml
       - code_graphs_data:/data/code_graphs
+      - .:/workspace:ro
     depends_on:
       redis:
         condition: service_healthy

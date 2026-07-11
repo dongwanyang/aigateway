@@ -165,17 +165,81 @@ def test_post_code_import_rejects_unsupported_json_source_type(
     assert "server_path/git" in response.json()["detail"]
 
 
-def test_get_code_task_returns_default_shape_when_missing(
+# ---------------------------------------------------------------------------
+# folder multipart 上传回归 (FastAPI 0.139 / Starlette 1.3+ 双 UploadFile 类):
+#   request.form() 返回 starlette.datastructures.UploadFile, 而 code_rag_routes
+#   顶部 import 的是 fastapi.UploadFile —— 两者在 0.139 是不同的类. 早期代码用
+#   isinstance(u, UploadFile) 过滤, 全部 False → files=[] → 恒报
+#   "folder 源必须至少上传一个文件", 前端 folder 上传 100% 失败.
+#   修复: duck-typing (has read + filename). 本测试用真实 multipart body 锁住.
+# ---------------------------------------------------------------------------
+
+
+def test_post_code_import_folder_multipart_accepts_files(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("multipart")  # request.form() 需要 python-multipart
+    client, _ = _make_client(monkeypatch)
+    # 真实 multipart/form-data: source_type=folder + files + relative_paths
+    response = client.post(
+        "/admin/rag/code/import",
+        data={
+            "source_type": "folder",
+            "embedding_model": "Qwen/Qwen3-Embedding-0.6B",
+            "relative_paths": "main.py",
+        },
+        files={"files": ("main.py", b"def login(u):\n    return u\n", "text/x-python")},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "pending"
+    assert body["task_id"]
+
+
+def test_post_code_import_folder_multipart_rejects_zero_files(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("multipart")
+    client, _ = _make_client(monkeypatch)
+    # source_type=folder 但没带任何 file → 必须返回 4xx (具体 detail 取决于客户端
+    # 是否发了 multipart body: TestClient files=[] 会退回 JSON 分支报 "请求体无效",
+    # 真实浏览器发空 multipart 会报 "至少上传一个文件". 两者都是 4xx 拒绝.)
+    response = client.post(
+        "/admin/rag/code/import",
+        data={"source_type": "folder", "embedding_model": "Qwen/Qwen3-Embedding-0.6B"},
+        files=[],
+    )
+    assert response.status_code in (400, 422), response.text
+
+
+def test_post_code_import_zip_multipart_accepts_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("multipart")
+    import io
+    import zipfile
+
+    client, _ = _make_client(monkeypatch)
+    # 造一个真实可解压的 zip (含一个 main.py)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("main.py", "def login(u):\n    return u\n")
+    response = client.post(
+        "/admin/rag/code/import",
+        data={"source_type": "zip", "embedding_model": "Qwen/Qwen3-Embedding-0.6B"},
+        files={"file": ("repo.zip", buf.getvalue(), "application/zip")},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "pending"
+
+
+def test_get_code_task_returns_404_when_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client, _ = _make_client(monkeypatch)
     response = client.get("/admin/rag/code/tasks/does-not-exist")
-    assert response.status_code == 200
-    body = response.json()
-    assert body["task_id"] == "does-not-exist"
-    assert body["status"] == "pending"
-    assert body["done"] == 0
-    assert body["total"] == 0
+    # 缺失任务返回 404 (而非旧的假 pending), 让前端 pollTask 能识别真死任务并 dismiss,
+    # 不再无限轮询转圈。见 get_code_task 的 HTTPException(404)。
+    assert response.status_code == 404
+    detail = response.json().get("detail", "")
+    assert "does-not-exist" in detail or "not found" in detail.lower()
 
 
 def _run(coro: Any) -> Any:
@@ -266,18 +330,18 @@ def test_spawn_import_task_tracks_task_in_app_state() -> None:
         await _asyncio.sleep(0)
         finished.set()
 
-    async def _drive() -> tuple[set, "_asyncio.Task[None]"]:
+    async def _drive() -> tuple[dict, "_asyncio.Task[None]"]:
         task = _spawn_import_task(app_state, _payload(), task_id="t-abc")
-        # spawn 后立刻应该在 active set 里
-        assert task in app_state.code_rag_active_tasks
+        # spawn 后立刻应该在 active 映射里 (key=task_id, value=Task)
+        assert app_state.code_rag_active_tasks.get("t-abc") is task
         await task
         return app_state.code_rag_active_tasks, task
 
     active, task = _asyncio.new_event_loop().run_until_complete(_drive())
     assert task.done()
     assert finished.is_set()
-    # done_callback 应该已经把 task 从 set 里摘掉
-    assert task not in active
+    # done_callback 应该已经把 task 从映射里摘掉
+    assert "t-abc" not in active
 
 
 def test_spawn_import_task_logs_uncaught_exception(caplog) -> None:
