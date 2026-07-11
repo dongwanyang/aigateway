@@ -99,7 +99,7 @@ Backfill: L2 hit → L1; L3 hit → L1 only (approximate); MISS → L1+L2 + asyn
 
 ## Security & Quotas
 
-`KeyStore` — Redis hash per key. Per-key: daily tokens (default 1M), monthly cost ($50), RPM (60), TPM (100K). Pub/Sub sync across instances. Auto-reseeds from `config.yaml` if Redis empty.
+`KeyStore` — Redis hash per key. Per-key: daily tokens (default 1M), monthly cost ($50), RPM (60), TPM (100K). Pub/Sub sync across instances. Auto-reseeds from `config.yaml` if Redis empty. Quota enforcement uses an atomic Lua script (`check_quota` → `EVALSHA`/`EVAL`) that checks all 4 dims for key+group in one round-trip and bumps counters immediately (TOCTOU-safe). The pre-flight estimate (token count ÷4, cost=0) is reserved; `increment_usage` reconciles the delta (actual − reserved) post-LLM via `_reserved_tokens`/`_reserved_cost`. FakeRedis (tests) lacks `eval` → falls back to non-atomic `_check_quota_legacy`.
 
 `GroupStore` — Redis hash per group (`aigateway:group:{group_id}`). Group-level quotas (daily tokens, monthly cost, RPM, TPM) shared pool for all member keys. Per-key personal quotas are sub-limits within the group. Quota check: group first, then personal. Error codes prefixed `Group ` for group-level rejection. Group members stored as Redis Set (`aigateway:group:{gid}:members`). Group events broadcast via `aigateway:groups:sync` Pub/Sub channel.
 
