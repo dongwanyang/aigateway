@@ -26,11 +26,18 @@ class SSEGenerator:
         self.chat_id = chat_id or f"chatcmpl-{uuid.uuid4().hex[:12]}"
 
     async def generate(self) -> AsyncIterator[str]:
-        """生成 SSE 格式的数据流。"""
+        """生成 SSE 格式的数据流。
+
+        每个 chunk 经 ``json.dumps`` 序列化为单行 JSON（``ensure_ascii=False``
+        但 JSON 会把真实换行转义成字面 ``\n``，因此输出不含裸换行），
+        直接作为一条 SSE ``data:`` 事件发出，末尾 ``data: [DONE]`` 结束。
+        不做额外转义——之前的 ``_escape_sse`` 会把 JSON 里的 ``\n`` 再翻倍成
+        ``\\n``，导致客户端 JSON 解析后得到字面 "反斜杠 n" 而非换行，
+        破坏代码块等含换行的内容。
+        """
         try:
             async for chunk in self.completion_gen:
-                sse_line = "data: " + json.dumps(chunk, ensure_ascii=False) + "\n\n"
-                yield sse_line
+                yield "data: " + json.dumps(chunk, ensure_ascii=False) + "\n\n"
         except Exception as exc:
             logger.error("SSE stream generation error: %s", exc)
             error_chunk = {

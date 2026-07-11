@@ -87,7 +87,9 @@ class IntentEvaluatorPlugin:
             修改后的管线上下文
         """
         # 检查是否禁用 — 禁用时透传不做修改
-        if not self._config.model_router.enabled:
+        # self.enabled is set by PluginRegistry.get_all() from registration-time config.
+        # Falls back to model_router.enabled (the registration-time gate) for direct instantiation.
+        if not getattr(self, "enabled", True) or not self._config.model_router.enabled:
             logger.debug(
                 "generation_optimization.intent_evaluator.disabled",
                 extra={

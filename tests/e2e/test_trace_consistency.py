@@ -50,8 +50,8 @@ def test_c2_generation_chain_full_six_plugins(user_client, trace_helpers):
     )
     evs = trace_helpers.wait(tid)
     plugin_events = [e for e in evs if e.get("kind") == "plugin"]
-    # generation 管道至少应有 events(即使上游超时,中间件也会 flush)
-    assert len(plugin_events) >= 0  # 至少不崩溃; 实际数量取决于 upstream 是否超时
+    # generation 管道至少应有一个 plugin event（即使上游超时，中间件也会 flush）
+    assert len(plugin_events) >= 1, f"Expected at least 1 plugin event, got {len(plugin_events)}. Trace: {trace_helpers.dump(tid)}"
 
 
 def test_c3_three_kinds_present_when_debug_on(admin_client, user_client, trace_helpers):
@@ -129,7 +129,7 @@ def test_c5_plugin_trace_shim(user_client, admin_client, trace_helpers):
     ev_names = {e.get("name") for e in events if e.get("kind") == "plugin"}
     pt_names = {p.get("plugin_name") if isinstance(p, dict) else str(p) for p in plugin_trace}
     # 允许 plugin_trace 少几条,但应有基本一致性
-    assert len(plugin_trace) >= 0  # 至少不崩溃
+    assert len(plugin_trace) >= 1, f"Expected at least 1 plugin_trace entry, got {len(plugin_trace)}"
 
 
 def test_c6_early_return_skip_no_bridge(admin_client, unique_prefix, trace_helpers):

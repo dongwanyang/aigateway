@@ -109,9 +109,11 @@ export default function Plugins() {
     const newValue = !currentValue
     setGlobalConfig(prev => ({ ...prev, [key]: newValue }))
     try {
+      // Only send the toggled field — backend preserves debug_mode when omitted
+      // (update_global_config falls back to the current value). Sending
+      // debug_mode: false here would silently disable debug mode on every toggle.
       await updateGlobalConfig({
         hot_reload: newValue,
-        debug_mode: globalConfig.hot_reload,
       })
     } catch {
       setGlobalConfig(prev => ({ ...prev, [key]: currentValue }))

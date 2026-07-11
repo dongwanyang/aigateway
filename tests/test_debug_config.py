@@ -54,7 +54,7 @@ def test_watcher_attach_loads_initial_config():
     """DebugConfigWatcher.attach 应立刻从 config_manager.config 做一次首次加载."""
     class FakeCM:
         def __init__(self):
-            self.config = {"debug": {"frontend": True, "cache": True}}
+            self._config = {"debug": {"frontend": True, "cache": True}}
             self._callbacks = []
         def on_reload(self, cb):
             self._callbacks.append(cb)

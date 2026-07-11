@@ -67,6 +67,6 @@ def classify_request(body: Any, config_manager: Any) -> str:
                                     return "generation"
                             return "understanding"
         except Exception as exc:
-            logger.debug("classify_request 模型推断异常: %s", exc)
+            logger.warning("classify_request 模型推断异常: %s", exc)
 
     return "understanding"

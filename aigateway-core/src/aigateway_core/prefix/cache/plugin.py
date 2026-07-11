@@ -24,6 +24,10 @@ class PromptCachePlugin:
 
     name: str = "prompt_cache"
     enabled: bool = True
+    # No depends_on: prompt_cache runs in the understanding pipeline's shared
+    # prefix. Listing intent_evaluator here was a false cross-pipeline
+    # dependency (intent_evaluator lives in generation) that logged a warning
+    # on every topological sort.
     depends_on: list = []
 
     def __init__(self, cache_manager: Optional["CacheManager"] = None) -> None:

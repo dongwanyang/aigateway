@@ -279,6 +279,8 @@ class TokenCompressorPlugin:
 
         if cache_hit and feature_vector is not None:
             # 缓存命中: 使用缓存向量
+            # 用 size_bytes // 4 作为原始 token 数的启发式估计；
+            # 对 JPEG/PNG 等有损格式误差可达 ±50%，仅用于展示目的。
             original_token_count = image.size_bytes // 4
             compressed_token_count = len(feature_vector)
             compression_ratio = (

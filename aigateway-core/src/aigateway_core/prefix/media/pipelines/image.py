@@ -440,8 +440,8 @@ class VisionCaptionProcessor(MediaProcessor):
 
         # 尝试通过 LiteLLM Bridge 调用 Vision Model
         try:
-            from aigateway_api.main import app
-            litellm_bridge = getattr(app.state, "litellm_bridge", None)
+            from aigateway_api.app_state import get_state
+            litellm_bridge = getattr(get_state(), "litellm_bridge", None)
         except Exception:
             litellm_bridge = None
 

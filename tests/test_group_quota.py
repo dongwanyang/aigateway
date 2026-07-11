@@ -180,6 +180,22 @@ class FakeRedis:
                 results.append(n)
                 return results[-1]
 
+            def hincrby(self, key, field, amount):
+                k = key.decode() if isinstance(key, bytes) else key
+                f = field if isinstance(field, str) else field.decode()
+                d = store_ref.setdefault(k, {})
+                d[f] = str(int(d.get(f, "0")) + amount)
+                results.append(1)
+                return int(d[f])
+
+            def hincrbyfloat(self, key, field, amount):
+                k = key.decode() if isinstance(key, bytes) else key
+                f = field if isinstance(field, str) else field.decode()
+                d = store_ref.setdefault(k, {})
+                d[f] = str(round(float(d.get(f, "0.0")) + amount, 10))
+                results.append(1)
+                return float(d[f])
+
         fn(_FakePipe(self))
         return results
 
@@ -297,6 +313,95 @@ async def test_increment_group_failure_does_not_block(ks_and_gs):
     await ks.increment_usage("kh1", tokens=5, cost=0.1, model="gpt-4o", tokens_in=4, tokens_out=1)
     kdata = await ks.redis.get_api_key("kh1")
     assert kdata["daily_tokens_used"] == "5"  # key still incremented
+
+
+@pytest.mark.asyncio
+async def test_increment_after_lua_check_does_not_double_incr(ks_and_gs):
+    """Production path: check_quota (Lua) already bumped counters, increment_usage must not double."""
+    ks, gs = ks_and_gs
+    await ks.redis.set_group("grp-g", {"name": "G", "status": "active",
+        "daily_tokens_limit": "5000", "daily_tokens_used": "0",
+        "monthly_cost_limit": "5000", "monthly_cost_used": "0.0",
+        "rate_limit_rpm": "60", "rate_limit_tpm": "100000",
+        "rpm_window_start": "0", "rpm_window_count": "0",
+        "tpm_window_start": "0", "tpm_window_count": "0"})
+    await ks.redis.set_api_key("kh1", {"key_id": "k1", "user_id": "u1", "status": "active",
+        "group_id": "grp-g", "cache_scope": "group",
+        "daily_tokens_limit": "200", "daily_tokens_used": "0",
+        "monthly_cost_limit": "200", "monthly_cost_used": "0.0",
+        "rate_limit_rpm": "60", "rate_limit_tpm": "100000",
+        "rpm_window_start": "0", "rpm_window_count": "0",
+        "tpm_window_start": "0", "tpm_window_count": "0"})
+    # Simulate Lua check_quota having already bumped counters
+    await ks.redis.set_api_key("kh1", {"key_id": "k1", "user_id": "u1", "status": "active",
+        "group_id": "grp-g", "cache_scope": "group",
+        "daily_tokens_limit": "200", "daily_tokens_used": "50",
+        "monthly_cost_limit": "200", "monthly_cost_used": "2.0",
+        "rate_limit_rpm": "60", "rate_limit_tpm": "100000",
+        "rpm_window_start": "0", "rpm_window_count": "1",
+        "tpm_window_start": "0", "tpm_window_count": "50"})
+    await ks.redis.set_group("grp-g", {"name": "G", "status": "active",
+        "daily_tokens_limit": "5000", "daily_tokens_used": "50",
+        "monthly_cost_limit": "5000", "monthly_cost_used": "2.0",
+        "rate_limit_rpm": "60", "rate_limit_tpm": "100000",
+        "rpm_window_start": "0", "rpm_window_count": "1",
+        "tpm_window_start": "0", "tpm_window_count": "50"})
+    # increment_usage with _lua_already_incr=True reconciles the delta between
+    # actual usage and the Lua-reserved estimate. Here actual == reserved (50/2.0),
+    # so counters must stay at the Lua-bumped values, not double to 100/4.0.
+    await ks.increment_usage("kh1", tokens=50, cost=2.0, model="gpt-4o",
+                             tokens_in=40, tokens_out=10, _lua_already_incr=True,
+                             _reserved_tokens=50, _reserved_cost=2.0)
+    kdata = await ks.redis.get_api_key("kh1")
+    gdata = await ks.redis.get_group("grp-g")
+    # Counters must stay at the Lua-bumped values, not 100/100
+    assert kdata["daily_tokens_used"] == "50"
+    assert gdata["daily_tokens_used"] == "50"
+    assert float(kdata["monthly_cost_used"]) == 2.0
+    assert float(gdata["monthly_cost_used"]) == 2.0
+
+
+@pytest.mark.asyncio
+async def test_increment_reconciles_estimate_vs_actual(ks_and_gs):
+    """Lua reserved an estimate but actual usage differed — reconcile the delta.
+
+    Pre-flight reserved 50 tokens / $2.0 (estimate). Actual LLM usage was
+    80 tokens / $3.0. Reconciliation applies +30 tokens and +$1.0 so the
+    final counters reflect real usage, not the estimate.
+    """
+    from datetime import datetime, timezone
+    now = int(datetime.now(timezone.utc).timestamp())
+    ks, gs = ks_and_gs
+    await ks.redis.set_group("grp-g", {"name": "G", "status": "active",
+        "daily_tokens_limit": "5000", "daily_tokens_used": "50",
+        "monthly_cost_limit": "5000", "monthly_cost_used": "2.0",
+        "rate_limit_rpm": "60", "rate_limit_tpm": "100000",
+        "rpm_window_start": str(now), "rpm_window_count": "1",
+        "tpm_window_start": str(now), "tpm_window_count": "50"})
+    await ks.redis.set_api_key("kh1", {"key_id": "k1", "user_id": "u1", "status": "active",
+        "group_id": "grp-g", "cache_scope": "group",
+        "daily_tokens_limit": "5000", "daily_tokens_used": "50",
+        "monthly_cost_limit": "5000", "monthly_cost_used": "2.0",
+        "rate_limit_rpm": "60", "rate_limit_tpm": "100000",
+        "rpm_window_start": str(now), "rpm_window_count": "1",
+        "tpm_window_start": str(now), "tpm_window_count": "50"})
+    await ks.increment_usage("kh1", tokens=80, cost=3.0, model="gpt-4o",
+                             tokens_in=60, tokens_out=20, _lua_already_incr=True,
+                             _reserved_tokens=50, _reserved_cost=2.0)
+    kdata = await ks.redis.get_api_key("kh1")
+    gdata = await ks.redis.get_group("grp-g")
+    # 50 reserved + 30 delta = 80 actual
+    assert kdata["daily_tokens_used"] == "80"
+    assert gdata["daily_tokens_used"] == "80"
+    # 2.0 reserved + 1.0 delta = 3.0 actual
+    assert float(kdata["monthly_cost_used"]) == 3.0
+    assert float(gdata["monthly_cost_used"]) == 3.0
+    # RPM is NOT reconciled — one request stays one RPM increment
+    assert kdata["rpm_window_count"] == "1"
+    assert gdata["rpm_window_count"] == "1"
+    # TPM window gets the delta too (window still open: start=now, now≈now)
+    assert int(kdata["tpm_window_count"]) == 80
+    assert int(gdata["tpm_window_count"]) == 80
 
 
 @pytest.mark.asyncio

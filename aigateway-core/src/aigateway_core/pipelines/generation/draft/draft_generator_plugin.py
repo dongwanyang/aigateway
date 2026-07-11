@@ -223,12 +223,6 @@ class DraftGeneratorPlugin:
         if ctx.request.get("draft_workflow") or ctx.request.get("enable_draft"):
             return True
 
-        # 检查 Intent Evaluator 是否已标记 required_modality 为 generative
-        gen_opt = ctx.extra.get(NS_GENERATION_OPTIMIZATION, {})
-        intent_result = gen_opt.get("intent_evaluator", {})
-        if intent_result.get("required_modality") == "generative":
-            return True
-
         # 检查请求中的 generation_mode 标志
         if ctx.request.get("generation_mode"):
             return True

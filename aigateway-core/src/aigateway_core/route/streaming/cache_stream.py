@@ -37,7 +37,9 @@ async def simulate_stream_from_cache(
     try:
         response_data = json.loads(response_json)
     except json.JSONDecodeError:
-        response_data = {"data": {"choices": [{"message": {"content": response_json}}]}}
+        logger.error("缓存命中流式: 响应非合法 JSON，丢弃缓存条目")
+        yield {"error": {"code": "internal_error", "message": "Corrupted cache entry"}}
+        return
 
     data = response_data.get("data", response_data)
     choices = data.get("choices", [])
@@ -56,11 +58,14 @@ async def simulate_stream_from_cache(
     chunk_size = max(1, len(content) // chunk_count)
     chunks = [content[i:i + chunk_size] for i in range(0, len(content), chunk_size)]
 
+    # 使用统一的 chat_id 以符合 OpenAI SSE 格式（所有 chunk 共享同一 id）
+    consistent_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+
     for i, chunk_text in enumerate(chunks):
         is_last = (i == len(chunks) - 1)
 
         chunk_data: Dict[str, Any] = {
-            "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
+            "id": consistent_id,
             "object": "chat.completion.chunk",
             "created": created,
             "model": model,

@@ -211,14 +211,16 @@ class GroupStore:
         return f"{self.GROUP_NAMESPACE}{group_id}{self.GROUP_MEMBERS_SUFFIX}"
 
     async def add_member(self, group_id: str, key_hash: str) -> None:
-        if self.redis.redis is None:
-            raise RuntimeError("Redis client is not connected")
-        await self.redis.redis.sadd(self._members_key(group_id), key_hash)
+        """Add a member to the group via pipe_batch for atomicity."""
+        await self.redis.pipe_batch(lambda p: [
+            p.sadd(self._members_key(group_id), key_hash),
+        ])
 
     async def remove_member(self, group_id: str, key_hash: str) -> None:
-        if self.redis.redis is None:
-            raise RuntimeError("Redis client is not connected")
-        await self.redis.redis.srem(self._members_key(group_id), key_hash)
+        """Remove a member from the group via pipe_batch for atomicity."""
+        await self.redis.pipe_batch(lambda p: [
+            p.srem(self._members_key(group_id), key_hash),
+        ])
 
     async def _get_members(self, group_id: str) -> List[str]:
         if self.redis.redis is None:
@@ -295,17 +297,38 @@ class GroupStore:
             float(new_data.get("monthly_cost_used", "0.0")) + moved_monthly, 4
         ))
 
-        # 4. Atomic batch: group updates + member SETs + key record
+        # 4. Compute today/month for quota period transfers
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        month = datetime.now(timezone.utc).strftime("%Y-%m")
+
+        # 4. Atomic batch: group updates + member SETs + key record + quota period transfers
         key_data["group_id"] = new_group_id
         if "cache_scope" not in key_data:
             key_data["cache_scope"] = cache_scope
-        await self.redis.pipe_batch(lambda p: [
-            *(p.hset(f"aigateway:group:{old_group_id}", mapping=old_data) for _ in ([old_data] if old_data else [])),
-            p.hset(f"aigateway:group:{new_group_id}", mapping=new_data),
-            *(p.srem(self._members_key(old_group_id), key_hash) for _ in ([old_group_id] if old_group_id else [])),
-            p.sadd(self._members_key(new_group_id), key_hash),
-            p.hset(f"aigateway:key:{key_hash}", mapping=key_data),
-        ])
+
+        def _build_batch(p):
+            cmds = [
+                p.hset(f"aigateway:group:{new_group_id}", mapping=new_data),
+                p.sadd(self._members_key(new_group_id), key_hash),
+                p.hset(f"aigateway:key:{key_hash}", mapping=key_data),
+            ]
+            if old_data:
+                cmds.append(p.hset(f"aigateway:group:{old_group_id}", mapping=old_data))
+            if old_group_id:
+                cmds.append(p.srem(self._members_key(old_group_id), key_hash))
+                cmds.extend([
+                    p.hincrby(f"aigateway:quota:{old_group_id}:daily:{today}", "tokens_in", -moved_daily),
+                    p.hincrby(f"aigateway:quota:{old_group_id}:daily:{today}", "tokens_out", -moved_daily),
+                    p.hincrbyfloat(f"aigateway:quota:{old_group_id}:monthly:{month}", "cost_usd", -moved_monthly),
+                ])
+            cmds.extend([
+                p.hincrby(f"aigateway:quota:{new_group_id}:daily:{today}", "tokens_in", moved_daily),
+                p.hincrby(f"aigateway:quota:{new_group_id}:daily:{today}", "tokens_out", moved_daily),
+                p.hincrbyfloat(f"aigateway:quota:{new_group_id}:monthly:{month}", "cost_usd", moved_monthly),
+            ])
+            return cmds
+
+        await self.redis.pipe_batch(_build_batch)
 
         await self.redis.publish(self.PUBSUB_CHANNEL, {
             "event_type": "key_assigned",

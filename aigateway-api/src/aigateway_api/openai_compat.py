@@ -80,9 +80,9 @@ from aigateway_core.prefix.cache.l3_semantic import (
 
 
 def _get_app_state() -> Dict[str, Any]:
-    """从 FastAPI app.state 获取全局组件。"""
-    from aigateway_api.main import app
-    s = app.state
+    """从 FastAPI get_state() 获取全局组件。"""
+    from .app_state import get_state
+    s = get_state()
     return {
         "cache_manager": getattr(s, "cache_manager"),
         "key_store": getattr(s, "key_store"),
@@ -109,7 +109,7 @@ def _get_app_state() -> Dict[str, Any]:
 def _get_redis_client() -> Any:
     """获取 Redis 客户端（跨 worker 共享）。
 
-    多 worker 模式下 app.state 不共享，
+    多 worker 模式下 get_state() 不共享，
     直接从环境变量连接 Redis 保证每个 worker 都有独立的连接。
     """
     import os
@@ -559,8 +559,8 @@ async def create_embeddings(
                 "object": "list",
                 "data": data_items,
                 "usage": {
-                    "prompt_tokens": sum(len(t) for t in input_texts),
-                    "total_tokens": sum(len(t) for t in input_texts),
+                    "prompt_tokens": max(1, sum(len(t) // 4 for t in input_texts)),
+                    "total_tokens": max(1, sum(len(t) // 4 for t in input_texts)),
                 },
             },
             "message": "success",

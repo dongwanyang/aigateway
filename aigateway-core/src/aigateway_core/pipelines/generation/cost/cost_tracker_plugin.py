@@ -109,7 +109,8 @@ class CostTrackerPlugin:
             gen_opt = ctx.extra.get(NS_GENERATION_OPTIMIZATION, {})
             request_id = ctx.request_id
             # 获取 api_key_id（用于 group 标签注入 Prometheus 指标, 需求 9.2, 9.4）
-            api_key_id = ctx.user_id or ""
+            # Prefer group_id from context for group-level cost tracking; fall back to user_id (key hash)
+            api_key_id = ctx.extra.get("group_id", "") or ctx.user_id or ""
 
             # --- 模型路由节省 ---
             routing_saving = self._calculate_routing_saving(gen_opt, request_id, api_key_id)

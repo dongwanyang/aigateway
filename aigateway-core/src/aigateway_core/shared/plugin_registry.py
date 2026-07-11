@@ -15,6 +15,7 @@ module lives under the ``shared`` layer. The legacy root path
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any, Dict, List, Optional, Type
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,7 @@ class PluginRegistry:
 
     def __init__(self) -> None:
         self._registrations: Dict[str, PluginRegistration] = {}
+        self._lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # 注册
@@ -107,15 +109,20 @@ class PluginRegistry:
         if name in self._registrations:
             raise ValueError(f"插件 '{name}' 已注册，不能重复注册")
 
-        self._registrations[name] = PluginRegistration(
-            name=name,
-            plugin_class=plugin_class,
-            enabled=enabled,
-            depends_on=depends_on or [],
-            priority=priority,
-            config=config,
-            pipeline_kind=pipeline_kind,
-        )
+        with self._lock:
+            # Re-check inside the lock to avoid a register/register race
+            # where two callers both pass the existence check above.
+            if name in self._registrations:
+                raise ValueError(f"插件 '{name}' 已注册，不能重复注册")
+            self._registrations[name] = PluginRegistration(
+                name=name,
+                plugin_class=plugin_class,
+                enabled=enabled,
+                depends_on=depends_on or [],
+                priority=priority,
+                config=config,
+                pipeline_kind=pipeline_kind,
+            )
 
         logger.info(
             "插件注册: name=%s, enabled=%s, depends_on=%s, priority=%d, pipeline_kind=%s",
@@ -135,10 +142,10 @@ class PluginRegistry:
         Raises:
             KeyError: 插件不存在时抛出。
         """
-        if name not in self._registrations:
-            raise KeyError(f"插件 '{name}' 未注册")
-
-        del self._registrations[name]
+        with self._lock:
+            if name not in self._registrations:
+                raise KeyError(f"插件 '{name}' 未注册")
+            del self._registrations[name]
         logger.info("插件已注销: name=%s", name)
 
     # ------------------------------------------------------------------
@@ -169,10 +176,12 @@ class PluginRegistry:
         Returns:
             插件实例列表。
         """
-        registrations = sorted(
-            self._registrations.values(),
-            key=lambda r: r.priority,
-        )
+        # Snapshot registrations under lock to prevent RuntimeError from
+        # concurrent dict modification during hot-reload (register/unregister).
+        with self._lock:
+            registrations = list(self._registrations.values())
+
+        registrations = sorted(registrations, key=lambda r: r.priority)
         if pipeline_kind is not None:
             registrations = [r for r in registrations if r.pipeline_kind == pipeline_kind]
 
@@ -201,7 +210,8 @@ class PluginRegistry:
         Returns:
             插件名称列表。
         """
-        return [name for name, reg in self._registrations.items() if reg.enabled]
+        with self._lock:
+            return [name for name, reg in self._registrations.items() if reg.enabled]
 
     # ------------------------------------------------------------------
     # 依赖校验
@@ -308,20 +318,22 @@ class PluginRegistry:
         Returns:
             包含插件计数、启用状态等信息的字典。
         """
-        total = len(self._registrations)
-        enabled = sum(1 for r in self._registrations.values() if r.enabled)
-        disabled = total - enabled
-
-        return {
-            "total": total,
-            "enabled": enabled,
-            "disabled": disabled,
-            "plugins": {
+        with self._lock:
+            total = len(self._registrations)
+            enabled = sum(1 for r in self._registrations.values() if r.enabled)
+            plugins = {
                 name: {
                     "enabled": reg.enabled,
                     "depends_on": reg.depends_on,
                     "priority": reg.priority,
                 }
                 for name, reg in self._registrations.items()
-            },
+            }
+        disabled = total - enabled
+
+        return {
+            "total": total,
+            "enabled": enabled,
+            "disabled": disabled,
+            "plugins": plugins,
         }

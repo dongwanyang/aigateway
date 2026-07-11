@@ -112,8 +112,14 @@ export async function createChatCompletionStream(
   })
 
   if (!res.ok) {
-    const body = (await res.json()) as ApiError
-    throw new Error(body.error.message)
+    let errorMsg = `HTTP ${res.status}`
+    try {
+      const body = (await res.json()) as ApiError
+      errorMsg = body.error?.message || errorMsg
+    } catch {
+      // Non-JSON error response (e.g. HTML nginx page); use status code
+    }
+    throw new Error(errorMsg)
   }
 
   return res.body as unknown as ReadableStream<ChatCompletionChunkData>
@@ -231,7 +237,7 @@ export function parseMetrics(text: string): MetricSample[] {
   const samples: MetricSample[] = []
   for (const line of text.split('\n')) {
     if (!line.startsWith('gateway_') || line.startsWith('#')) continue
-    const match = line.match(/^(.+?)\{(.+?)\} (.+)$/m)
+    const match = line.match(/^(.+?)\{(.+?)\} (.+)$/)
     if (match) {
       const [, name, labelsStr, value] = match
       const labels: Record<string, string> = {}
@@ -343,7 +349,7 @@ export async function getGlobalConfig(): Promise<ApiResponse<GlobalConfigData>> 
   }
 }
 
-export async function updateGlobalConfig(config: { hot_reload: boolean; debug_mode: boolean }): Promise<ApiResponse<GlobalConfigData>> {
+export async function updateGlobalConfig(config: { hot_reload: boolean; debug_mode?: boolean }): Promise<ApiResponse<GlobalConfigData>> {
   const headers = await ensureAuthHeaders()
   const res = await fetch(`${API_BASE}/admin/global-config`, {
     method: 'PUT',

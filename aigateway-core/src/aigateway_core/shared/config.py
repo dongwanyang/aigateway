@@ -464,6 +464,10 @@ class ConfigManager:
 
         Returns:
             配置值或 default。
+
+        Note:
+            Explicit ``null`` values and missing keys are treated the same
+            (both return ``default``).  To distinguish them, use ``get_raw()``.
         """
         keys = path.split(".")
         current: Any = self._config
@@ -478,6 +482,25 @@ class ConfigManager:
                     return default
 
         return current
+
+    def get_raw(self, path: str, default: Any = None) -> Tuple[Any, bool]:
+        """读取配置值，区分显式 null 和缺失键。
+
+        Returns:
+            (value, found) — found=True 表示键存在（可能为 null），
+            found=False 表示键不存在。
+        """
+        keys = path.split(".")
+        current: Any = self._config
+        with self._lock:
+            for key in keys:
+                if isinstance(current, dict):
+                    if key not in current:
+                        return (default, False)
+                    current = current[key]
+                else:
+                    return (default, False)
+        return (current, True)
 
     def set(self, path: str, value: Any) -> None:
         """按点分隔路径设置配置值（运行时动态修改）。
@@ -567,6 +590,9 @@ class ConfigManager:
 
         只写入合法的配置节，过滤掉由环境变量覆盖产生的扁平键，
         避免污染 YAML 文件结构。
+
+        WARNING: 新增的配置段必须加入 writable_keys 集合，否则会被静默丢弃。
+        添加新段时同步更新 config.yaml.template 和此处的白名单。
         """
         if self.config_path and os.path.isfile(self.config_path):
             # 合法配置节：这些键应该持久化到 YAML

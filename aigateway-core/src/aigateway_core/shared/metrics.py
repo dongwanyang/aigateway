@@ -346,8 +346,9 @@ class MetricsCollector:
             self._tokens_saved_counter.inc(tokens)
             return
 
+        # Fallback: if _tokens_saved_counter not available, record against tokens_counter
         if self._tokens_counter and tokens > 0:
-            self._tokens_counter.labels(type=token_type).inc(tokens)
+            self._tokens_counter.labels(type="saved").inc(tokens)
 
     def record_cost(
         self,

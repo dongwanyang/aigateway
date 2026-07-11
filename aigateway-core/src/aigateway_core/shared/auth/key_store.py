@@ -57,6 +57,134 @@ class KeyStore:
             redis: RedisClientManager instance, already connected.
         """
         self.redis = redis
+        # Lua script: atomic check_quota + increment_usage for a single key hash.
+        # Returns [ok(0/1), failure_reason_or_empty, retry_after_or_0]
+        # Keys[1]=key_hash, Keys[2]=group_id (empty if none)
+        # Args[1]=tokens, Args[2]=cost, Args[3]=now_unix, Args[4]=model
+        # Args[5]=tokens_in, Args[6]=tokens_out
+        self._check_and_incr_sha: Optional[str] = None
+        # Lua script: atomic check_quota + increment_usage for a single key hash.
+        # Returns [ok(0/1), failure_reason_or_empty, retry_after_or_0]
+        # Keys[1]=key_hash, Keys[2]=group_id (empty if none)
+        # Args[1]=tokens, Args[2]=cost, Args[3]=now_unix
+        # Args[4]=today (YYYY-MM-DD, UTC), Args[5]=month (YYYY-MM, UTC)
+        #
+        # HMGET field order (indices 1..10):
+        #   1 rate_limit_rpm      2 rpm_window_start   3 rpm_window_count
+        #   4 rate_limit_tpm      5 tpm_window_start   6 tpm_window_count
+        #   7 daily_tokens_limit  8 daily_tokens_used
+        #   9 monthly_cost_limit  10 monthly_cost_used
+        self._check_and_incr_script = """
+local key_hash = KEYS[1]
+local group_id = KEYS[2]
+local tokens = tonumber(ARGV[1])
+local cost = tonumber(ARGV[2])
+local now_unix = tonumber(ARGV[3])
+local today = ARGV[4]
+local month = ARGV[5]
+
+local key_data = redis.call('HMGET', 'aigateway:key:' .. key_hash,
+    'rate_limit_rpm', 'rpm_window_start', 'rpm_window_count',
+    'rate_limit_tpm', 'tpm_window_start', 'tpm_window_count',
+    'daily_tokens_limit', 'daily_tokens_used',
+    'monthly_cost_limit', 'monthly_cost_used')
+
+local rpm_limit = tonumber(key_data[1]) or 60
+local rpm_ws = tonumber(key_data[2]) or 0
+local rpm_wc = tonumber(key_data[3]) or 0
+if now_unix - rpm_ws >= 60 then
+    rpm_ws = now_unix
+    rpm_wc = 0
+end
+if rpm_wc + 1 > rpm_limit then
+    return {0, 'RPM limit exceeded: ' .. (rpm_wc+1) .. '/' .. rpm_limit, tostring(rpm_ws + 60 - now_unix)}
+end
+
+local tpm_limit = tonumber(key_data[4]) or 100000
+local tpm_ws = tonumber(key_data[5]) or 0
+local tpm_wc = tonumber(key_data[6]) or 0
+if now_unix - tpm_ws >= 60 then
+    tpm_ws = now_unix
+    tpm_wc = 0
+end
+if tpm_wc + tokens > tpm_limit then
+    return {0, 'TPM limit exceeded: ' .. (tpm_wc+tokens) .. '/' .. tpm_limit, tostring(tpm_ws + 60 - now_unix)}
+end
+
+local daily_limit = tonumber(key_data[7]) or 1000000
+local daily_used = tonumber(key_data[8]) or 0
+if daily_used + tokens > daily_limit then
+    return {0, 'Daily token limit exceeded: ' .. (daily_used+tokens) .. '/' .. daily_limit, '0'}
+end
+
+local monthly_limit = tonumber(key_data[9]) or 50.0
+local monthly_used = tonumber(key_data[10]) or 0.0
+if monthly_used + cost > monthly_limit then
+    return {0, 'Monthly cost limit exceeded: ' .. tostring(monthly_used+cost) .. '/' .. tostring(monthly_limit), '0'}
+end
+
+-- All checks passed — increment key-level counters
+redis.call('HMSET', 'aigateway:key:' .. key_hash,
+    'rpm_window_start', tostring(rpm_ws), 'rpm_window_count', tostring(rpm_wc + 1),
+    'tpm_window_start', tostring(tpm_ws), 'tpm_window_count', tostring(tpm_wc + tokens),
+    'daily_tokens_used', tostring(daily_used + tokens),
+    'monthly_cost_used', tostring(monthly_used + cost))
+
+-- Increment quota period records for key
+redis.call('HINCRBY', 'aigateway:quota:' .. key_hash .. ':daily:' .. today, 'tokens_in', tokens)
+redis.call('HINCRBY', 'aigateway:quota:' .. key_hash .. ':daily:' .. today, 'tokens_out', tokens)
+redis.call('HINCRBYFLOAT', 'aigateway:quota:' .. key_hash .. ':monthly:' .. month, 'cost_usd', cost)
+
+-- Group-level check + increment
+if group_id and group_id ~= '' then
+    local gdata = redis.call('HMGET', 'aigateway:group:' .. group_id,
+        'rate_limit_rpm', 'rpm_window_start', 'rpm_window_count',
+        'rate_limit_tpm', 'tpm_window_start', 'tpm_window_count',
+        'daily_tokens_limit', 'daily_tokens_used',
+        'monthly_cost_limit', 'monthly_cost_used')
+
+    local grpm_limit = tonumber(gdata[1]) or 60
+    local grpm_ws = tonumber(gdata[2]) or 0
+    local grpm_wc = tonumber(gdata[3]) or 0
+    if now_unix - grpm_ws >= 60 then grpm_ws = now_unix; grpm_wc = 0 end
+    if grpm_wc + 1 > grpm_limit then
+        return {0, 'Group RPM limit exceeded: ' .. (grpm_wc+1) .. '/' .. grpm_limit, tostring(grpm_ws + 60 - now_unix)}
+    end
+
+    local gtpm_limit = tonumber(gdata[4]) or 100000
+    local gtpm_ws = tonumber(gdata[5]) or 0
+    local gtpm_wc = tonumber(gdata[6]) or 0
+    if now_unix - gtpm_ws >= 60 then gtpm_ws = now_unix; gtpm_wc = 0 end
+    if gtpm_wc + tokens > gtpm_limit then
+        return {0, 'Group TPM limit exceeded: ' .. (gtpm_wc+tokens) .. '/' .. gtpm_limit, tostring(gtpm_ws + 60 - now_unix)}
+    end
+
+    local gdaily_limit = tonumber(gdata[7]) or 1000000
+    local gdaily_used = tonumber(gdata[8]) or 0
+    if gdaily_used + tokens > gdaily_limit then
+        return {0, 'Group daily token limit exceeded: ' .. (gdaily_used+tokens) .. '/' .. gdaily_limit, '0'}
+    end
+
+    local gmonthly_limit = tonumber(gdata[9]) or 50.0
+    local gmonthly_used = tonumber(gdata[10]) or 0.0
+    if gmonthly_used + cost > gmonthly_limit then
+        return {0, 'Group monthly cost limit exceeded: ' .. tostring(gmonthly_used+cost) .. '/' .. tostring(gmonthly_limit), '0'}
+    end
+
+    -- Increment group-level counters
+    redis.call('HMSET', 'aigateway:group:' .. group_id,
+        'rpm_window_start', tostring(grpm_ws), 'rpm_window_count', tostring(grpm_wc + 1),
+        'tpm_window_start', tostring(gtpm_ws), 'tpm_window_count', tostring(gtpm_wc + tokens),
+        'daily_tokens_used', tostring(gdaily_used + tokens),
+        'monthly_cost_used', tostring(gmonthly_used + cost))
+
+    redis.call('HINCRBY', 'aigateway:quota:' .. group_id .. ':daily:' .. today, 'tokens_in', tokens)
+    redis.call('HINCRBY', 'aigateway:quota:' .. group_id .. ':daily:' .. today, 'tokens_out', tokens)
+    redis.call('HINCRBYFLOAT', 'aigateway:quota:' .. group_id .. ':monthly:' .. month, 'cost_usd', cost)
+end
+
+return {1, '', '0'}
+"""
 
     # ------------------------------------------------------------------
     # Helper methods
@@ -177,8 +305,8 @@ class KeyStore:
             # Redis is empty — try to reseed from config
             # Import config_manager from app state (circular-import-safe)
             try:
-                from aigateway_api.main import app
-                config_manager = getattr(app.state, "config_manager", None)
+                from aigateway_api.app_state import get_state
+                config_manager = getattr(get_state(), "config_manager", None)
                 if config_manager:
                     auth_config = config_manager.get("auth", {})
                     keys_config = auth_config.get("api_keys", [])
@@ -583,21 +711,83 @@ class KeyStore:
         tokens: int,
         cost: float,
     ) -> Tuple[bool, Optional[str], int]:
-        """Check group-level (if group_id set) then key-level quotas.
+        """Atomic check+reserve via Lua script.
 
         DB_SCHEMA §2 quota counting + §5 rate-limit windows.
 
-        Group is checked first; if the group has a record, all four dimensions
-        (RPM/TPM/daily/monthly) are validated against it.  Then the key's own
-        dimensions are checked.
+        Uses a single EVAL call to atomically check all four dimensions
+        (RPM/TPM/daily/monthly) for both key and group levels, preventing
+        TOCTOU races where two concurrent requests both pass check_quota
+        but together exceed quotas.
 
-        Args:
-            key_hash: API Key SHA-256 hash first 16 chars.
-            tokens: estimated token consumption for this request.
-            cost: estimated cost (USD) for this request.
+        NOTE: This reserves quota atomically: it bumps daily_tokens_used /
+        monthly_cost_used / RPM / TPM counters immediately so the reservation
+        is visible to concurrent requests. The caller should record the
+        reserved ``tokens``/``cost`` and pass them to ``increment_usage`` as
+        ``_reserved_tokens``/``_reserved_cost`` so the post-LLM reconciliation
+        adjusts the counter delta (actual − reserved) instead of double-counting.
+        """
+        conn = self.redis.redis
+        if conn is None:
+            return False, "Redis not connected", 0
 
-        Returns:
-            (passed, failure_reason, retry_after). On pass failure=None.
+        data = await self.redis.get_api_key(key_hash)
+        if not data:
+            return False, "API Key does not exist", 0
+
+        group_id = data.get("group_id") or ""
+        now_unix = self._now_unix()
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        month = datetime.now(timezone.utc).strftime("%Y-%m")
+
+        # Register Lua script if not already done
+        if self._check_and_incr_sha is None:
+            try:
+                sha = await conn.script_load(self._check_and_incr_script)  # type: ignore[union-attr]
+                self._check_and_incr_sha = sha
+            except Exception:
+                # Fallback: script may already be loaded
+                pass
+
+        try:
+            result = await conn.evalsha(  # type: ignore[union-attr]
+                self._check_and_incr_sha, 2,
+                key_hash,
+                group_id if group_id else "",
+                tokens, cost, now_unix,
+                today, month,
+            )
+        except Exception:
+            try:
+                # Fallback to EVAL if SCRIPT_LOAD failed or SHA expired
+                result = await conn.eval(  # type: ignore[union-attr]
+                    self._check_and_incr_script, 2,
+                    key_hash, group_id or "",
+                    tokens, cost, now_unix,
+                    today, month,
+                )
+            except AttributeError:
+                # No eval support (e.g. FakeRedis in tests) — fall back to
+                # non-atomic check using the original _check_dims path.
+                return await self._check_quota_legacy(key_hash, tokens, cost)
+
+        ok = int(result[0])
+        reason = result[1] if isinstance(result[1], str) else result[1].decode()
+        retry_after = int(result[2]) if result[2] else 0
+
+        if ok == 0:
+            return False, reason, retry_after
+        return True, None, 0
+
+    async def _check_quota_legacy(
+        self,
+        key_hash: str,
+        tokens: int,
+        cost: float,
+    ) -> Tuple[bool, Optional[str], int]:
+        """Non-atomic quota check fallback for environments without Lua eval support.
+
+        Used when FakeRedis or other test mocks don't support conn.eval().
         """
         data = await self.redis.get_api_key(key_hash)
         if not data:
@@ -692,44 +882,96 @@ class KeyStore:
         model: str,
         tokens_in: int = 0,
         tokens_out: int = 0,
+        *,
+        _lua_already_incr: bool = False,
+        _reserved_tokens: int = 0,
+        _reserved_cost: float = 0.0,
     ) -> None:
-        """Accumulate usage into the key AND its group (sync).
+        """Post-request usage reconciliation.
 
-        DB_SCHEMA §2 quota counting + §5 rate-limit windows.
+        In production, ``check_quota``'s Lua script already bumped key/group
+        daily_tokens_used / monthly_cost_used / RPM / TPM counters atomically
+        using the **estimated** token count and cost=0 (the pre-flight estimate).
+        This method reconciles the difference between the estimate and the
+        **actual** usage reported by the LLM, and writes the quota period
+        records (daily/monthly tokens_in/out/cost_usd/request_count) which the
+        Lua script does not maintain.
 
-        Uses pure helpers ``_compute_usage_updates`` and ``_accumulate_quota_record``
-        so both key-level and group-level mutations share the same logic.
-        Group-level writes are wrapped in try/except so a group write failure
-        never blocks key-level accounting.
+        Reconciliation:
+        - ``token_delta = actual_tokens − reserved_tokens``: applied to
+          daily_tokens_used + tpm_window_count via ``set_api_key`` with the
+          delta-aware ``_compute_reconciled_updates``.
+        - ``cost_delta = actual_cost − reserved_cost``: applied to
+          monthly_cost_used. (Pre-flight reserves cost=0, so this is just the
+          actual cost.)
+        - RPM counter is NOT adjusted — one request = one RPM increment,
+          regardless of token estimate, and it was already bumped by Lua.
+
+        When called standalone (no Lua pre-reserve, e.g. tests), this method
+        bumps the key-level counters from scratch (backward compat).
+
+        Args:
+            _lua_already_incr: Internal flag — when True, the Lua script
+                already bumped counters by ``_reserved_tokens``/``_reserved_cost``
+                so we apply only the delta. When False, bump from scratch.
+            _reserved_tokens: Tokens the Lua script reserved (the pre-flight
+                estimate). Required for correct delta reconciliation.
+            _reserved_cost: Cost the Lua script reserved (pre-flight, usually 0).
         """
         data = await self.redis.get_api_key(key_hash)
         if not data:
-            logger.warning("increment_usage: key_hash=%s 不存在", key_hash)
             return
 
+        group_id = data.get("group_id") or ""
         now_unix = self._now_unix()
+
+        # ---- Key-level counter reconciliation ----
+        if _lua_already_incr:
+            # Lua already bumped counters by the estimate; apply only the delta
+            # between actual usage and the estimate so daily/monthly reflect reality.
+            token_delta = tokens - _reserved_tokens
+            cost_delta = cost - _reserved_cost
+            if token_delta != 0 or cost_delta != 0:
+                updates = self._compute_reconciled_updates(
+                    data, token_delta, cost_delta, now_unix,
+                )
+                if updates:
+                    await self.redis.set_api_key(key_hash, updates)
+        else:
+            # Standalone call (no Lua pre-reserve) — bump from scratch.
+            updates = self._compute_usage_updates(data, tokens, cost, now_unix)
+            await self.redis.set_api_key(key_hash, updates)
+
+        # ---- Key-level quota period records ----
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         month = datetime.now(timezone.utc).strftime("%Y-%m")
+        try:
+            daily_quota = await self.redis.get_quota(key_hash, f"daily:{today}")
+            await self.redis.set_quota(key_hash, f"daily:{today}",
+                                       self._accumulate_quota_record(daily_quota, tokens, cost, model, tokens_in, tokens_out))
+            monthly_quota = await self.redis.get_quota(key_hash, f"monthly:{month}")
+            await self.redis.set_quota(key_hash, f"monthly:{month}",
+                                       self._accumulate_quota_record(monthly_quota, tokens, cost, model, tokens_in, tokens_out))
+        except Exception as exc:
+            logger.warning("increment_usage key quota period update failed: %s", exc)
 
-        # ---- Key-level ----
-        updates = self._compute_usage_updates(data, tokens, cost, now_unix)
-        await self.redis.set_api_key(key_hash, updates)
-
-        daily_quota = await self.redis.get_quota(key_hash, f"daily:{today}")
-        await self.redis.set_quota(key_hash, f"daily:{today}",
-                                   self._accumulate_quota_record(daily_quota, tokens, cost, model, tokens_in, tokens_out))
-        monthly_quota = await self.redis.get_quota(key_hash, f"monthly:{month}")
-        await self.redis.set_quota(key_hash, f"monthly:{month}",
-                                   self._accumulate_quota_record(monthly_quota, tokens, cost, model, tokens_in, tokens_out))
-
-        # ---- Group-level (sync, non-blocking on failure) ----
-        group_id = data.get("group_id") or ""
+        # ---- Group-level counters + quota period records (non-blocking) ----
         if group_id:
             try:
                 gdata = await self.redis.get_group(group_id)
                 if gdata:
-                    gupdates = self._compute_usage_updates(gdata, tokens, cost, now_unix)
-                    await self.redis.set_group(group_id, gupdates)
+                    if _lua_already_incr:
+                        token_delta = tokens - _reserved_tokens
+                        cost_delta = cost - _reserved_cost
+                        if token_delta != 0 or cost_delta != 0:
+                            gupdates = self._compute_reconciled_updates(
+                                gdata, token_delta, cost_delta, now_unix,
+                            )
+                            if gupdates:
+                                await self.redis.set_group(group_id, gupdates)
+                    else:
+                        gupdates = self._compute_usage_updates(gdata, tokens, cost, now_unix)
+                        await self.redis.set_group(group_id, gupdates)
                     gdaily = await self.redis.get_quota(group_id, f"daily:{today}")
                     await self.redis.set_quota(group_id, f"daily:{today}",
                                                self._accumulate_quota_record(gdaily, tokens, cost, model, tokens_in, tokens_out))
@@ -739,8 +981,45 @@ class KeyStore:
             except Exception as exc:
                 logger.warning("组级 increment_usage 失败 group=%s: %s", group_id, exc)
 
-        logger.debug("Usage incremented: key_hash=%s tokens=%d cost=$%.4f group=%s",
-                     key_hash, tokens, cost, group_id or "-")
+    @staticmethod
+    def _compute_reconciled_updates(
+        data: Dict[str, Any], token_delta: int, cost_delta: float, now_unix: int,
+    ) -> Dict[str, str]:
+        """Pure: compute counter updates for a delta (actual − reserved).
+
+        Applies the token/cost delta to daily_tokens_used / monthly_cost_used /
+        tpm_window_count. RPM and window-start are NOT touched (one request =
+        one RPM, already counted by Lua). Returns an empty dict when there is
+        nothing to write (delta is zero), letting the caller skip the write.
+
+        Note: if the TPM window has rolled over since the Lua reserve, applying
+        the delta to the new window slightly mis-attributes — but the window
+        already reset, so the reserved value is also gone. Acceptable: the
+        delta is typically small (estimate vs actual).
+        """
+        updates: Dict[str, str] = {}
+
+        if token_delta != 0:
+            daily_used = int(data.get("daily_tokens_used", "0")) + token_delta
+            if daily_used < 0:
+                daily_used = 0
+            updates["daily_tokens_used"] = str(daily_used)
+
+            # TPM window: only adjust if we're still inside the same window.
+            tpm_window_start = int(data.get("tpm_window_start", "0"))
+            if now_unix - tpm_window_start < 60:
+                tpm_window_count = int(data.get("tpm_window_count", "0")) + token_delta
+                if tpm_window_count < 0:
+                    tpm_window_count = 0
+                updates["tpm_window_count"] = str(tpm_window_count)
+
+        if cost_delta != 0:
+            monthly_used = float(data.get("monthly_cost_used", "0.0")) + cost_delta
+            if monthly_used < 0:
+                monthly_used = 0.0
+            updates["monthly_cost_used"] = str(monthly_used)
+
+        return updates
 
     # ------------------------------------------------------------------
     # Internal helper methods

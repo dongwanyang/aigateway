@@ -24,7 +24,7 @@ export default function Costs() {
 
         const costTotal = samples.find(s => s.name === 'gateway_cost_total')?.value ?? 0
         const modelSamples = samples.filter(s => s.name === 'gateway_cost_by_model_total')
-        const groupSamples = samples.filter(s => s.name === 'gateway_cost_by_group')
+        const groupSamples = samples.filter(s => s.name === 'gateway_cost_by_group_total')
         const requestSamples = samples.filter(s => s.name === 'gateway_http_requests_total')
 
         const totalRequestsCount = requestSamples.reduce((s, r) => s + r.value, 0)

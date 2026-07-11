@@ -51,8 +51,7 @@ async def _compute_embeddings_via_litellm(texts: List[str]) -> Optional[List[Lis
     返回 1024 维向量列表，失败返回 None。
     """
     try:
-        from aigateway_api.main import app
-        s = app.state
+        s = get_state()
         config_manager = getattr(s, "config_manager", None)
 
         # 获取 embedding 配置
@@ -254,14 +253,14 @@ class UpdateQuotaRequest(BaseModel):
 
 def _get_keystore_and_metrics(request: Request) -> tuple[Any, Any]:
     """从 app.state 获取 KeyStore 和 MetricsCollector。"""
-    from aigateway_api.main import app
-    return getattr(app.state, "key_store"), getattr(app.state, "metrics_collector")
+    from .app_state import get_state
+    return getattr(get_state(), "key_store"), getattr(get_state(), "metrics_collector")
 
 
 def _get_auth_defaults() -> Dict[str, Any]:
     """从 config 获取 auth.defaults 配额默认值。"""
-    from aigateway_api.main import app
-    config_manager = getattr(app.state, "config_manager", None)
+    from .app_state import get_state
+    config_manager = getattr(get_state(), "config_manager", None)
     if config_manager:
         auth_cfg = config_manager.get("auth", {})
         defaults = auth_cfg.get("defaults", {}) if isinstance(auth_cfg, dict) else {}
@@ -281,8 +280,8 @@ def _get_auth_defaults() -> Dict[str, Any]:
 
 def _get_budget_alert_threshold() -> float:
     """从 config 获取 auth.budget_alert_threshold。"""
-    from aigateway_api.main import app
-    config_manager = getattr(app.state, "config_manager", None)
+    from .app_state import get_state
+    config_manager = getattr(get_state(), "config_manager", None)
     if config_manager:
         auth_cfg = config_manager.get("auth", {})
         return float(auth_cfg.get("budget_alert_threshold", 0.8)) if isinstance(auth_cfg, dict) else 0.8
@@ -352,8 +351,8 @@ async def list_api_keys(
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Redis connection required for key management"}})
 
     # Auto-reseed: 如果 Redis 中没有 API Key，自动从 config.yaml 重新导入
-    from aigateway_api.main import app
-    config_manager = getattr(app.state, "config_manager")
+    from .app_state import get_state
+    config_manager = getattr(get_state(), "config_manager")
     if config_manager:
         auth_config = config_manager.get("auth", {})
         keys_config = auth_config.get("api_keys", [])
@@ -383,8 +382,8 @@ async def list_api_keys(
     paginated = all_keys[start:end]
 
     # Resolve group_name for each key (one lookup per distinct group_id)
-    from aigateway_api.main import app as _app
-    group_store = getattr(_app.state, "group_store", None)
+    s = get_state()
+    group_store = getattr(s, "group_store", None)
     group_name_cache: Dict[str, Optional[str]] = {}
     items: List[Dict[str, Any]] = []
     for k in paginated:
@@ -587,8 +586,8 @@ async def get_metrics_json(
 ):
 
     """返回 Prometheus 指标的 JSON 格式，供前端仪表板使用。"""
-    from aigateway_api.main import app
-    s = app.state
+    from .app_state import get_state
+    s = get_state()
     metrics_collector = getattr(s, "metrics_collector")
     key_store = getattr(s, "key_store")
 
@@ -630,7 +629,7 @@ async def get_metrics_json(
                     key_stats["total_keys"] += 1
                     key_stats["total_daily_tokens_used"] += int(data.get("daily_tokens_used", 0))
                     key_stats["total_monthly_cost_used"] += float(data.get("monthly_cost_used", 0))
-                    key_stats["total_requests"] += int(data.get("daily_tokens_used", 0))
+                    key_stats["total_requests"] += int(data.get("request_count", 0))
             if cursor == 0:
                 break
 
@@ -667,8 +666,8 @@ async def get_plugins_config(
     多 worker 场景下，内存中的 _config 可能过期，
     直接从文件读取确保返回最新值。
     """
-    from aigateway_api.main import app
-    s = app.state
+    from .app_state import get_state
+    s = get_state()
     config_manager = getattr(s, "config_manager")
     # 从 registry 查每个插件的 pipeline_kind（注册时由代码设置，不在 YAML 里）
     registry = getattr(s, "plugin_registry", None)
@@ -790,8 +789,8 @@ async def update_plugins_config(
     if not name:
         raise HTTPException(status_code=400, detail={"error": {"code": "validation_error", "message": "Plugin name is required"}})
 
-    from aigateway_api.main import app
-    s = app.state
+    from .app_state import get_state
+    s = get_state()
     config_manager = getattr(s, "config_manager")
 
     if not config_manager:
@@ -856,12 +855,12 @@ async def update_plugins_config(
             config_manager._set_nested(new_config, "generation_optimization.enabled", True)
         else:
             config_manager._set_nested(new_config, "plugins", plugins_cfg)
+
+        # 在锁内执行原子交换（atomic_swap 内部有自己的锁），触发 on_reload 回调
+        config_manager.atomic_swap(new_config)
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         lock_fd.close()
-
-    # 在锁外执行原子交换（atomic_swap 内部有自己的锁），触发 on_reload 回调
-    config_manager.atomic_swap(new_config)
 
     return {
         "data": {"name": name, "enabled": enabled},
@@ -993,8 +992,8 @@ async def set_plugin_debug(
     """
     import os
     import yaml
-    from aigateway_api.main import app
-    s = app.state
+    from .app_state import get_state
+    s = get_state()
     config_manager = getattr(s, "config_manager")
     if not config_manager:
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "ConfigManager not initialized"}})
@@ -1068,8 +1067,8 @@ async def get_global_config(
     """
     import os
     import yaml
-    from aigateway_api.main import app
-    s = app.state
+    from .app_state import get_state
+    s = get_state()
     config_manager = getattr(s, "config_manager")
 
     hot_reload = False
@@ -1102,8 +1101,8 @@ async def update_global_config(
 ):
 
     """更新全局配置（热重载、调试模式）。"""
-    from aigateway_api.main import app
-    s = app.state
+    from .app_state import get_state
+    s = get_state()
     config_manager = getattr(s, "config_manager")
     import yaml
 
@@ -1204,8 +1203,8 @@ async def get_request_logs(
     _auth: Dict[str, Any] = Depends(authenticate_admin),
 ):
     """从 Redis 查询最近的请求日志（支持服务端分页）。"""
-    from aigateway_api.main import app
-    s = app.state
+    from .app_state import get_state
+    s = get_state()
     redis_mgr = getattr(s, "redis_manager")
 
     if redis_mgr is None or redis_mgr.redis is None:
@@ -1218,8 +1217,10 @@ async def get_request_logs(
     has_filters = bool(user_id or model or status or cache_only)
 
     if has_filters:
-        # 有过滤条件时，获取最近 500 条然后过滤
-        all_logs = await redis_mgr.redis.zrevrange("aigateway:logs:requests", 0, 499, withscores=True)
+        # 有过滤条件时，获取更多条目进行过滤以确保分页准确性。
+        # 获取 min(500, total_count) 条然后过滤，避免分页跳行。
+        fetch_limit = min(2000, total_count) if total_count > 0 else 500
+        all_logs = await redis_mgr.redis.zrevrange("aigateway:logs:requests", 0, fetch_limit - 1, withscores=True)
         filtered = []
         for raw, score in all_logs:
             entry = json.loads(raw.decode() if isinstance(raw, bytes) else raw)
@@ -1296,8 +1297,8 @@ async def get_trace_detail(
     响应始终包含 `events` 数组(新)+ `plugin_trace` 数组(旧字段,filter kind=plugin
     构建,供旧前端兼容,PR3 前端切换完成后 Task 21 会删)。
     """
-    from aigateway_api.main import app
-    s = app.state
+    from .app_state import get_state
+    s = get_state()
     redis_mgr = getattr(s, "redis_manager")
 
     if redis_mgr is None or redis_mgr.redis is None:
@@ -1373,8 +1374,8 @@ async def delete_all_logs(
     _auth: Dict[str, Any] = Depends(authenticate_admin),
 ):
     """清空所有请求日志。"""
-    from aigateway_api.main import app
-    s = app.state
+    from .app_state import get_state
+    s = get_state()
     redis_mgr = getattr(s, "redis_manager")
 
     if redis_mgr is None or redis_mgr.redis is None:
@@ -1416,8 +1417,8 @@ async def batch_delete_logs(
     Returns:
         {"deleted": N, "requested": M}  N 为实际删除条数,M 为请求 id 数。
     """
-    from aigateway_api.main import app
-    s = app.state
+    from .app_state import get_state
+    s = get_state()
     redis_mgr = getattr(s, "redis_manager")
 
     if redis_mgr is None or redis_mgr.redis is None:
@@ -1426,16 +1427,18 @@ async def batch_delete_logs(
     ids_set = set(payload.request_ids)
     zset_key = "aigateway:logs:requests"
 
-    # 拉近 10000 条(与写入侧的保留窗口对齐)
-    entries = await redis_mgr.redis.zrange(zset_key, 0, 9999)
+    # 拉最近 10000 条(与写入侧的保留窗口对齐); 使用 zrevrange 从最新开始扫描,
+    # 因为大多数删除操作针对的是近期的请求。
+    # zrevrange(..., withscores=True) 返回 [(member, score), ...]; member 是 JSON 字符串。
+    entries = await redis_mgr.redis.zrevrange(zset_key, 0, 9999, withscores=True)
     to_remove: List[bytes] = []
-    for raw in entries:
+    for member, _score in entries:
         try:
-            entry = json.loads(raw.decode() if isinstance(raw, bytes) else raw)
+            entry = json.loads(member.decode() if isinstance(member, bytes) else member)
         except (ValueError, AttributeError):
             continue
         if entry.get("request_id") in ids_set:
-            to_remove.append(raw)
+            to_remove.append(member if isinstance(member, bytes) else member.encode())
             if len(to_remove) >= len(ids_set):
                 break  # 全部找到,提前退出
 
@@ -1466,8 +1469,8 @@ async def get_full_config(
     """返回当前 config.yaml 的完整内容（脱敏 API Key）。"""
     import os
     import yaml
-    from aigateway_api.main import app
-    s = app.state
+    from .app_state import get_state
+    s = get_state()
     config_manager = getattr(s, "config_manager")
 
     if not config_manager:
@@ -1504,8 +1507,8 @@ async def update_full_config(
     import fcntl
     import os
     import yaml
-    from aigateway_api.main import app
-    s = app.state
+    from .app_state import get_state
+    s = get_state()
     config_manager = getattr(s, "config_manager")
 
     if not config_manager:
@@ -1544,8 +1547,7 @@ async def update_full_config(
                                 pcfg["api_key"] = orig.get("api_key", pcfg["api_key"])
                 file_config[key] = new_config[key]
 
-        with open(config_path, "w", encoding="utf-8") as f:
-            yaml.dump(file_config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+        _atomic_write_yaml(config_path, file_config)
 
         # 触发热重载
         config_manager.load()
@@ -1571,8 +1573,8 @@ async def list_rag_documents(
     _auth: Dict[str, Any] = Depends(authenticate_admin),
 ):
     """列出已导入的 RAG 文档。"""
-    from aigateway_api.main import app
-    s = app.state
+    from .app_state import get_state
+    s = get_state()
     redis_mgr = getattr(s, "redis_manager")
 
     if redis_mgr is None or redis_mgr.redis is None:
@@ -1609,8 +1611,8 @@ async def import_rag_document(
     import uuid
     import hashlib
 
-    from aigateway_api.main import app
-    s = app.state
+    from .app_state import get_state
+    s = get_state()
     redis_mgr = getattr(s, "redis_manager")
     qdrant_mgr = getattr(s, "qdrant_manager")
 
@@ -1688,8 +1690,8 @@ async def import_rag_document(
             st_model = _get_embedding_model()
             if st_model is None:
                 # 从配置读取模型名，默认使用 Qwen3-Embedding-0.6B
-                from aigateway_api.main import app
-                _cfg_mgr = getattr(app.state, "config_manager", None)
+                from .app_state import get_state
+                _cfg_mgr = getattr(get_state(), "config_manager", None)
                 _emb_cfg = _cfg_mgr.get("embedding", {}) if _cfg_mgr else {}
                 _model_name = _emb_cfg.get("model", "Qwen/Qwen3-Embedding-0.6B")
                 st_model = SentenceTransformer(_model_name)
@@ -1773,8 +1775,8 @@ async def delete_rag_document(
     _auth: Dict[str, Any] = Depends(authenticate_admin),
 ):
     """删除指定 RAG 文档及其在 Qdrant 中的所有向量。"""
-    from aigateway_api.main import app
-    s = app.state
+    from .app_state import get_state
+    s = get_state()
     redis_mgr = getattr(s, "redis_manager")
     qdrant_mgr = getattr(s, "qdrant_manager")
 
@@ -1894,8 +1896,8 @@ async def get_l3_cache_config(
     """返回当前 L3 缓存管理配置。"""
     import os
     import yaml
-    from aigateway_api.main import app
-    s = app.state
+    from .app_state import get_state
+    s = get_state()
     config_manager = getattr(s, "config_manager")
 
     # 从 config.yaml 读取 cache.l3 配置
@@ -1929,8 +1931,8 @@ async def update_l3_cache_config(
 ):
     """更新 L3 缓存配置并持久化到 config.yaml。"""
     import yaml
-    from aigateway_api.main import app
-    s = app.state
+    from .app_state import get_state
+    s = get_state()
     config_manager = getattr(s, "config_manager")
 
     if not config_manager:
@@ -1985,8 +1987,8 @@ async def list_l3_entries(
     _auth: Dict[str, Any] = Depends(authenticate_admin),
 ):
     """列出 L3 缓存条目，支持分页、按模式和用户过滤。"""
-    from aigateway_api.main import app
-    s = app.state
+    from .app_state import get_state
+    s = get_state()
     qdrant_mgr = getattr(s, "qdrant_manager")
 
     if qdrant_mgr is None or qdrant_mgr._http is None:
@@ -2070,8 +2072,8 @@ async def update_entry_mode(
     manual → auto: 按 ttl_hours 设置过期时间
     """
     import time as time_mod
-    from aigateway_api.main import app
-    s = app.state
+    from .app_state import get_state
+    s = get_state()
     qdrant_mgr = getattr(s, "qdrant_manager")
     config_manager = getattr(s, "config_manager")
 
@@ -2126,8 +2128,8 @@ async def delete_l3_entry(
     _auth: Dict[str, Any] = Depends(authenticate_admin),
 ):
     """手动删除指定的 L3 缓存条目（任何模式均可删除）。"""
-    from aigateway_api.main import app
-    s = app.state
+    from .app_state import get_state
+    s = get_state()
     qdrant_mgr = getattr(s, "qdrant_manager")
 
     if qdrant_mgr is None or qdrant_mgr._http is None:
@@ -2153,8 +2155,8 @@ async def trigger_l3_cleanup(
     _auth: Dict[str, Any] = Depends(authenticate_admin),
 ):
     """手动触发一次 L3 过期清理（只清理 mode=auto 且已过期的条目）。"""
-    from aigateway_api.main import app
-    s = app.state
+    from .app_state import get_state
+    s = get_state()
     cache_manager = getattr(s, "cache_manager")
 
     if cache_manager is None:
@@ -2187,8 +2189,8 @@ async def test_provider_connectivity(
     import time as time_mod
     import yaml
 
-    from aigateway_api.main import app
-    s = app.state
+    from .app_state import get_state
+    s = get_state()
     config_manager = getattr(s, "config_manager")
 
     if not config_manager:
@@ -2300,8 +2302,8 @@ async def get_provider_models(
     import os
     import yaml
 
-    from aigateway_api.main import app
-    s = app.state
+    from .app_state import get_state
+    s = get_state()
     config_manager = getattr(s, "config_manager")
 
     if not config_manager:
@@ -2411,8 +2413,8 @@ async def list_groups(
     _auth: Dict[str, Any] = Depends(authenticate_admin),
 ):
     """列出所有用户组及其成员数。"""
-    from aigateway_api.main import app
-    gs = getattr(app.state, "group_store", None)
+    from .app_state import get_state
+    gs = getattr(get_state(), "group_store", None)
     if gs is None:
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "GroupStore not initialized"}})
     groups = await gs.list_groups()
@@ -2426,8 +2428,8 @@ async def get_group(
     _auth: Dict[str, Any] = Depends(authenticate_admin),
 ):
     """获取单个用户组详情（含成员列表）。"""
-    from aigateway_api.main import app
-    gs = getattr(app.state, "group_store", None)
+    from .app_state import get_state
+    gs = getattr(get_state(), "group_store", None)
     if gs is None:
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "GroupStore not initialized"}})
     detail = await gs.get_group_detail(group_id)
@@ -2443,8 +2445,8 @@ async def create_group(
     _auth: Dict[str, Any] = Depends(authenticate_admin),
 ):
     """创建新用户组。"""
-    from aigateway_api.main import app
-    gs = getattr(app.state, "group_store", None)
+    from .app_state import get_state
+    gs = getattr(get_state(), "group_store", None)
     if gs is None:
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "GroupStore not initialized"}})
 
@@ -2473,8 +2475,8 @@ async def update_group(
     _auth: Dict[str, Any] = Depends(authenticate_admin),
 ):
     """更新用户组配额或状态。"""
-    from aigateway_api.main import app
-    gs = getattr(app.state, "group_store", None)
+    from .app_state import get_state
+    gs = getattr(get_state(), "group_store", None)
     if gs is None:
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "GroupStore not initialized"}})
     quotas = {}
@@ -2500,8 +2502,8 @@ async def delete_group(
     _auth: Dict[str, Any] = Depends(authenticate_admin),
 ):
     """删除用户组（必须为空）。"""
-    from aigateway_api.main import app
-    gs = getattr(app.state, "group_store", None)
+    from .app_state import get_state
+    gs = getattr(get_state(), "group_store", None)
     if gs is None:
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "GroupStore not initialized"}})
     try:
@@ -2534,8 +2536,8 @@ async def assign_key_to_group(
 ):
     """将 API Key 分配到用户组（迁移用量计数器）。"""
     key_store, _ = _get_keystore_and_metrics(request)
-    from aigateway_api.main import app
-    gs = getattr(app.state, "group_store", None)
+    from .app_state import get_state
+    gs = getattr(get_state(), "group_store", None)
     if gs is None:
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "GroupStore not initialized"}})
     redis_mgr = key_store.redis
@@ -2550,6 +2552,9 @@ async def assign_key_to_group(
     kh = key_hashes[0]
 
     # Validate target group exists
+    # Validate target group exists and is not the default group
+    if body.group_id == "grp-default":
+        raise HTTPException(status_code=400, detail={"error": {"code": "validation_error", "message": "Cannot assign key to default group"}})
     if not body.group_id.startswith("grp-"):
         raise HTTPException(status_code=400, detail={"error": {"code": "validation_error", "message": "group_id must start with grp-"}})
     group_data = await gs.get_group(body.group_id)

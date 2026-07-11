@@ -85,8 +85,8 @@ class DebugConfigWatcher:
         if hasattr(config_manager, "on_reload"):
             config_manager.on_reload(self._on_config_reload)
         # 首次加载
-        if hasattr(config_manager, "config"):
-            self._on_config_reload(config_manager.config)
+        if hasattr(config_manager, "_config"):
+            self._on_config_reload(config_manager._config)
 
     def _on_config_reload(self, new_full_config: Dict[str, Any]) -> None:
         """ConfigManager 触发的回调 —— 接收整个新 config dict,取 debug: 段."""

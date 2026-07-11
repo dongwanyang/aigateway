@@ -56,7 +56,7 @@ def _emit_cache_debug(key: str, tier_hit: str, start_monotonic: float,
         stage="cache", name="cache_manager.get",
         duration_ms=(_time.monotonic() - start_monotonic) * 1000,
         status=status, dimension="cache",
-        payload={"key_hash": hash(str(key)) % 10**8, "tier_hit": tier_hit},
+        payload={"key_hash": int(hashlib.sha256(str(key).encode()).hexdigest(), 16) % (10**8), "tier_hit": tier_hit},
     )
 
 
@@ -291,7 +291,8 @@ class CacheManager:
             logger.debug("L3 缓存结果已过期: ttl_expire=%d now=%d", ttl_expire, now)
             return None
 
-        # Increment hit count
+        # Increment hit count (best-effort; race condition in multi-instance
+        # deployments is acceptable — lost increments don't affect correctness)
         hit_count = payload.get("hit_count", 0) + 1
         payload["hit_count"] = hit_count
         await self._qdrant_client.store_embedding(

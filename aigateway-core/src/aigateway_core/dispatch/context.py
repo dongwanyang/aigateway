@@ -49,6 +49,11 @@ class PipelineContext:
         request_id: 唯一请求 ID（UUID4）。
         user_id: 从 API Key 解析出的用户 ID。
         extra: 插件间传递的命名空间数据字典。
+
+    Note:
+        Do NOT use ``copy.copy(ctx)`` — the ``default_factory`` for
+        ``request_id`` will not be re-invoked, causing shared IDs across
+        copies.  Create a new instance via the constructor instead.
     """
 
     request: Dict[str, Any]

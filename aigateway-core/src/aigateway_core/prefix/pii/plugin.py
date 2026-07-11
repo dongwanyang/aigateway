@@ -40,20 +40,30 @@ class PIIDetectorPlugin:
         if not messages:
             return ctx
 
-        texts: list[str] = []
+        # Collect the text of every message (string content, or the joined
+        # text blocks of list content) for detection. We keep the per-message
+        # text so sanitization can be written back to each message
+        # individually — overwriting every message with one concatenated
+        # sanitized blob (the old behavior) corrupts multi-turn conversations.
+        per_msg_texts: list[str] = []
         for msg in messages:
             content = msg.get("content", "")
             if isinstance(content, str):
-                texts.append(content)
+                per_msg_texts.append(content)
             elif isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        texts.append(block.get("text", ""))
+                parts = [
+                    block.get("text", "")
+                    for block in content
+                    if isinstance(block, dict) and block.get("type") == "text"
+                ]
+                per_msg_texts.append("\n".join(parts))
+            else:
+                per_msg_texts.append("")
 
-        if not texts:
+        if not any(t.strip() for t in per_msg_texts):
             return ctx
 
-        full_text = "\n".join(texts)
+        full_text = "\n".join(per_msg_texts)
 
         try:
             sanitized = self.detector.process(full_text)
@@ -74,26 +84,29 @@ class PIIDetectorPlugin:
         ctx.detected_categories = list(self.detector.detected_categories)
         ctx.sanitized_prompt = sanitized
 
-        if sanitized != full_text:
-            messages = ctx.request.get("messages", [])
-            if messages:
-                updated = list(messages)
-                for i in reversed(range(len(updated))):
-                    msg = updated[i]
-                    content = msg.get("content", "")
-                    if isinstance(content, str) and content.strip():
-                        updated[i] = {**msg, "content": sanitized}
-                        break
-                    elif isinstance(content, list):
-                        new_content = []
-                        for block in content:
-                            if isinstance(block, dict) and block.get("type") == "text":
-                                new_content.append({**block, "text": sanitized})
-                            else:
-                                new_content.append(block)
-                        updated[i] = {**msg, "content": new_content}
-                        break
-                ctx.request["messages"] = updated
+        # Only rewrite messages if PII was actually detected/scrubbed.
+        if sanitized != full_text and self.detector.detected_categories:
+            updated = list(messages)
+            # Sanitize each message's text individually so PII in one message
+            # doesn't bleed surrounding context into another.
+            for i, msg in enumerate(updated):
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    if content.strip():
+                        updated[i] = {**msg, "content": self.detector.process(content)}
+                elif isinstance(content, list):
+                    new_content = []
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            block_text = block.get("text", "")
+                            new_content.append(
+                                {**block, "text": self.detector.process(block_text)}
+                                if block_text else block
+                            )
+                        else:
+                            new_content.append(block)
+                    updated[i] = {**msg, "content": new_content}
+            ctx.request["messages"] = updated
 
         if self.detector.detected_categories:
             logger.info(

@@ -14,7 +14,7 @@ refactor)，使核心 dispatch 层可直接 import 而不依赖 API surface。
 
 from __future__ import annotations
 
-from typing import Any, AsyncIterator, Dict
+from typing import Any, AsyncIterator, Dict, Optional
 
 from fastapi.responses import StreamingResponse
 
@@ -23,7 +23,7 @@ from aigateway_core.route.streaming.sse import SSEGenerator
 
 def create_sse_response(
     completion_gen: AsyncIterator[Dict[str, Any]],
-    chat_id: str = None,
+    chat_id: Optional[str] = None,
 ) -> StreamingResponse:
     """创建 SSE StreamingResponse。
 

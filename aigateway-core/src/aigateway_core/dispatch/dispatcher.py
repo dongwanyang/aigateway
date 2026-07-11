@@ -18,6 +18,7 @@ LiteLLMBridge 是两条管道的统一出口（「总出口」）。
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -364,6 +365,10 @@ class RequestDispatcher:
             allowed, fail_msg, retry_after = await key_store.check_quota(
                 key_hash=key_hash, tokens=estimated_tokens, cost=0.0
             )
+            if allowed:
+                request.state._lua_quota_reserved = True
+                request.state._lua_reserved_tokens = estimated_tokens
+                request.state._lua_reserved_cost = 0.0
             if not allowed:
                 _qfail_ms = round((time.time() - quota_start) * 1000, 2)
                 plugin_trace.append({"plugin_name": "quota_check",
@@ -490,12 +495,12 @@ class RequestDispatcher:
         mol_meta = prefix.get("mol_meta")
         pii_meta = prefix.get("pii_meta")
 
-        # Extract group_id and cache_scope from auth data
+        # Extract group_id from auth data; compute resolved_scope from PII + header
         group_id = ""
-        resolved_scope = "group"
         if hasattr(request.state, "api_key_data") and request.state.api_key_data:
             group_id = request.state.api_key_data.get("group_id") or ""
-            resolved_scope = request.state.api_key_data.get("cache_scope") or "group"
+
+        resolved_scope = _resolve_cache_scope(request, pii_meta)
 
         # 跑生成管道 engine 插件链（ai_director → ... → cost_tracker）
         if engine is not None:
@@ -529,6 +534,10 @@ class RequestDispatcher:
             allowed, fail_msg, retry_after = await key_store.check_quota(
                 key_hash=key_hash, tokens=estimated_tokens, cost=0.0
             )
+            if allowed:
+                request.state._lua_quota_reserved = True
+                request.state._lua_reserved_tokens = estimated_tokens
+                request.state._lua_reserved_cost = 0.0
             if not allowed:
                 _qfail_ms = round((time.time() - quota_start) * 1000, 2)
                 plugin_trace.append({"plugin_name": "quota_check",
@@ -679,6 +688,9 @@ class RequestDispatcher:
                 await key_store.increment_usage(
                     key_hash, tokens=tt, cost=cost, model=body.model,
                     tokens_in=pt, tokens_out=ct,
+                    _lua_already_incr=getattr(request.state, "_lua_quota_reserved", False),
+                    _reserved_tokens=getattr(request.state, "_lua_reserved_tokens", 0),
+                    _reserved_cost=getattr(request.state, "_lua_reserved_cost", 0.0),
                 )
             except Exception as exc:
                 logger.warning("increment_usage 失败: %s", exc)
@@ -705,12 +717,15 @@ class RequestDispatcher:
                     logger.warning("L2 回填失败: %s", exc)
                 # L3 异步回填（需要 normalized_messages 计算 embedding；缺则跳过）
                 if normalized_messages:
-                    import asyncio
                     from aigateway_core.prefix.cache.l3_semantic import _safe_l3_backfill
-                    asyncio.create_task(_safe_l3_backfill(
+                    _l3_backfill_task = asyncio.create_task(_safe_l3_backfill(
                         cache_manager, cache_key, value_str,
                         normalized_messages, body.model, user_id or "", tt,
                     ))
+                    _l3_backfill_task.add_done_callback(
+                        lambda t: logger.warning("L3 异步回填异常: %s", t.exception())
+                        if t.exception() else None
+                    )
             except Exception as exc:
                 logger.warning("缓存回填失败: %s", exc)
 
@@ -820,26 +835,41 @@ class RequestDispatcher:
         last_chunk = {}
         # 累积每个 choice 的 content / role / tool_calls，用于组装非流式格式
         accum: Dict[int, Dict[str, Any]] = {}
-        async for chunk in gen:
-            last_chunk = chunk
-            # 累积 delta 到 accum（供缓存回填使用）
-            if isinstance(chunk, dict):
-                for choice in chunk.get("choices", []) or []:
-                    if not isinstance(choice, dict):
-                        continue
-                    idx = choice.get("index", 0)
-                    slot = accum.setdefault(idx, {"role": "assistant", "content": ""})
-                    delta = choice.get("delta") or {}
-                    if isinstance(delta, dict):
-                        if delta.get("role"):
-                            slot["role"] = delta["role"]
-                        piece = delta.get("content")
-                        if isinstance(piece, str):
-                            slot["content"] += piece
-                    fr = choice.get("finish_reason")
-                    if fr:
-                        slot["finish_reason"] = fr
-            yield chunk
+        client_disconnected = False
+        try:
+            async for chunk in gen:
+                last_chunk = chunk
+                # 累积 delta 到 accum（供缓存回填使用）
+                if isinstance(chunk, dict):
+                    for choice in chunk.get("choices", []) or []:
+                        if not isinstance(choice, dict):
+                            continue
+                        idx = choice.get("index", 0)
+                        slot = accum.setdefault(idx, {"role": "assistant", "content": ""})
+                        delta = choice.get("delta") or {}
+                        if isinstance(delta, dict):
+                            if delta.get("role"):
+                                slot["role"] = delta["role"]
+                            piece = delta.get("content")
+                            if isinstance(piece, str):
+                                slot["content"] += piece
+                        fr = choice.get("finish_reason")
+                        if fr:
+                            slot["finish_reason"] = fr
+                yield chunk
+        except asyncio.CancelledError:
+            # Client disconnected. Explicitly close the upstream generator so
+            # the provider connection is released promptly rather than waiting
+            # on GC. Post-processing below still runs (quota/metrics) using
+            # whatever we accumulated, but we skip cache backfill — a partial
+            # stream is not a complete response and would poison the cache.
+            client_disconnected = True
+            aclose = getattr(gen, "aclose", None)
+            if aclose is not None:
+                try:
+                    await aclose()
+                except Exception:
+                    pass
 
         usage = last_chunk.get("usage", {}) if isinstance(last_chunk, dict) else {}
         pt = usage.get("prompt_tokens", 0)
@@ -867,13 +897,18 @@ class RequestDispatcher:
                 await key_store.increment_usage(
                     key_hash, tokens=tt, cost=_estimate_cost(model, tt),
                     model=model, tokens_in=pt, tokens_out=ct,
+                    _lua_already_incr=getattr(request.state, "_lua_quota_reserved", False),
+                    _reserved_tokens=getattr(request.state, "_lua_reserved_tokens", 0),
+                    _reserved_cost=getattr(request.state, "_lua_reserved_cost", 0.0),
                 )
             except Exception as exc:
                 logger.warning("流式 increment_usage 失败: %s", exc)
 
         # 缓存回填（修正点：原流式回填时写空 choices→simulate_stream_from_cache
         # 短路返回 Empty response 错误。本次改成累积真实 delta.content 后回填）
-        if cache_key and cache_manager and accum:
+        # Skip on client disconnect — accum is a partial stream, not a complete
+        # response; caching it would poison the cache for future requests.
+        if cache_key and cache_manager and accum and not client_disconnected:
             try:
                 choices_out = []
                 for idx in sorted(accum.keys()):
@@ -890,6 +925,7 @@ class RequestDispatcher:
                         "finish_reason": slot.get("finish_reason", "stop"),
                     })
                 if not choices_out:
+                    logger.debug("流式缓存回填跳过: 无可用内容 (tool-call-only response)")
                     return  # 没有可用内容，不投毒
                 value_str = json.dumps({
                     "choices": choices_out,
@@ -903,12 +939,15 @@ class RequestDispatcher:
                     logger.warning("流式 L2 回填失败: %s", exc)
                 # L3 异步回填（与非流式对齐；需要 normalized_messages 计算 embedding）
                 if normalized_messages:
-                    import asyncio
                     from aigateway_core.prefix.cache.l3_semantic import _safe_l3_backfill
-                    asyncio.create_task(_safe_l3_backfill(
+                    _l3_backfill_task = asyncio.create_task(_safe_l3_backfill(
                         cache_manager, cache_key, value_str,
                         normalized_messages, model, user_id or "", tt,
                     ))
+                    _l3_backfill_task.add_done_callback(
+                        lambda t: logger.warning("L3 异步回填异常: %s", t.exception())
+                        if t.exception() else None
+                    )
             except Exception as exc:
                 logger.warning("流式缓存回填失败: %s", exc)
 
@@ -997,7 +1036,9 @@ class RequestDispatcher:
             return ctx
 
         pipeline_start = _time.monotonic()
-        for plugin in engine._ordered_plugins:
+        # Snapshot ordered plugins to protect against in-flight mutation
+        # (e.g. a plugin unregistering itself during hot-reload).
+        for plugin in list(engine._ordered_plugins):
             if ctx.should_stop:
                 break
             if plugin.name in skip:

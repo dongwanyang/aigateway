@@ -133,70 +133,109 @@ class FakeRedis:
 
     # ---- pipeline support for pipe_batch ---
     async def pipe_batch(self, fn):
-        """Execute a list of commands built by fn(pipe) atomically."""
-        results = []
-        store_ref = self.store
+        """Execute a list of commands built by fn(pipe) atomically.
+
+        Unlike real Redis MULTI/EXEC, this uses a two-phase approach:
+        1. Build commands via fn(pipe) — pipe queues ops instead of executing
+        2. Execute all queued ops atomically (simulating MULTI/EXEC)
+        """
+        queued: list = []
 
         class _FakePipe:
             def __init__(self, owner):
                 self._owner = owner
 
+            def _queue(self, cmd):
+                queued.append(cmd)
+
             def hset(self, key, mapping=None, **kw):
                 k = key.decode() if isinstance(key, bytes) else key
-                d = store_ref.setdefault(k, {})
-                if mapping:
-                    for kk, vv in mapping.items():
-                        kk_key = kk.decode() if isinstance(kk, bytes) else kk
-                        d[kk_key] = vv
-                results.append(1)
-                return results[-1]
+                self._queue(("hset", k, mapping or {}))
+                return 1
 
             def set(self, key, value, ex=None):
                 k = key.decode() if isinstance(key, bytes) else key
-                store_ref[k] = value
-                results.append(None)
-                return results[-1]
+                self._queue(("set", k, value))
+                return None
 
             def sadd(self, key, *members):
-                s = store_ref.setdefault(
-                    key.decode() if isinstance(key, bytes) else key, set()
-                )
-                n = 0
-                for m in members:
-                    mm = m.decode() if isinstance(m, bytes) else m
-                    before = len(s)
-                    s.add(mm)
-                    n += 1
-                results.append(n)
-                return results[-1]
+                k = key.decode() if isinstance(key, bytes) else key
+                mm = [m.decode() if isinstance(m, bytes) else m for m in members]
+                self._queue(("sadd", k, mm))
+                return len(mm)
 
             def srem(self, key, *members):
-                s = store_ref.get(
-                    key.decode() if isinstance(key, bytes) else key
-                )
-                if not s:
-                    results.append(0)
-                    return 0
-                n = 0
-                for m in members:
-                    mm = m.decode() if isinstance(m, bytes) else m
-                    if mm in s:
-                        s.discard(mm)
-                        n += 1
-                results.append(n)
-                return results[-1]
+                k = key.decode() if isinstance(key, bytes) else key
+                mm = [m.decode() if isinstance(m, bytes) else m for m in members]
+                self._queue(("srem", k, mm))
+                # Return count of removed members (approximate)
+                s = self._owner.store.get(k, set())
+                return sum(1 for m in mm if m in s)
 
             def delete(self, *keys):
                 n = 0
+                last_k = None
                 for key in keys:
                     k = key.decode() if isinstance(key, bytes) else key
-                    if k in store_ref:
-                        del store_ref[k]
+                    last_k = k
+                    if k in self._owner.store:
+                        del self._owner.store[k]
                         n += 1
-                results.append(n)
-                return results[-1]
+                self._queue(("delete", last_k))
+                return n
+
+            def hincrby(self, key, field, amount):
+                self._queue(("hincrby", key, field, amount))
+                return 0  # placeholder; real value computed during EXEC
+
+            def hincrbyfloat(self, key, field, amount):
+                self._queue(("hincrbyfloat", key, field, amount))
+                return 0.0  # placeholder; real value computed during EXEC
 
         fn(_FakePipe(self))
+
+        # Execute all queued commands atomically (simulating Redis EXEC)
+        results = []
+        for cmd in queued:
+            if cmd[0] == "hset":
+                _, k, mapping = cmd
+                d = self.store.setdefault(k, {})
+                for kk, vv in mapping.items():
+                    d[kk] = vv
+                results.append(1)
+            elif cmd[0] == "set":
+                _, k, value = cmd
+                self.store[k] = value
+                results.append(None)
+            elif cmd[0] == "sadd":
+                _, k, members = cmd
+                s = self.store.setdefault(k, set())
+                for m in members:
+                    s.add(m)
+                results.append(len(members))
+            elif cmd[0] == "srem":
+                _, k, members = cmd
+                s = self.store.get(k)
+                n = 0
+                if s:
+                    for m in members:
+                        if m in s:
+                            s.discard(m)
+                            n += 1
+                results.append(n)
+            elif cmd[0] == "delete":
+                results.append(0)  # Already deleted during queue build
+            elif cmd[0] == "hincrby":
+                _, k, f, amount = cmd
+                d = self.store.setdefault(k, {})
+                d[f] = str(int(d.get(f, "0")) + amount)
+                results.append(int(d[f]))
+            elif cmd[0] == "hincrbyfloat":
+                _, k, f, amount = cmd
+                d = self.store.setdefault(k, {})
+                d[f] = str(round(float(d.get(f, "0.0")) + amount, 10))
+                results.append(float(d[f]))
+
         return results
 
     async def pipeline(self, transaction=True):
@@ -273,7 +312,7 @@ async def test_list_groups_includes_member_count(store):
     await store.add_member(g["group_id"], "kh1")
     groups = await store.list_groups()
     assert groups[0]["member_count"] == 1
-    assert groups[0]["daily_tokens_limit"] == "5000"
+    assert groups[0]["daily_tokens_limit"] == 5000
 
 
 @pytest.mark.asyncio
