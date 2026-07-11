@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Trash2, X, Code2, FolderOpen, Server, GitBranch, Package } from 'lucide-react'
+import { Trash2, X, Code2, FolderOpen, Server, GitBranch, Package, Loader2, XCircle, CheckCircle, PlayCircle } from 'lucide-react'
 import Card from '@/components/Card'
 import {
   importCodeRepository,
+  listCodeImportTasks,
   getCodeImportTask,
+  cancelCodeImportTask,
   listCodeRepositories,
   deleteCodeRepository,
 } from '@/api/client'
@@ -27,7 +29,71 @@ const SOURCE_ICON: Record<CodeImportSourceType, JSX.Element> = {
   zip: <Package size={14} />,
 }
 
-const TERMINAL_STATUS: Array<CodeImportTask['status']> = ['completed', 'failed']
+const STATUS_LABEL: Record<CodeImportTask['status'], string> = {
+  pending: '排队中',
+  scanning: '扫描中',
+  splitting: '分块中',
+  building_graph: '构建图谱中',
+  embedding: '嵌入中',
+  completed: '已完成',
+  failed: '失败',
+  cancelled: '已取消',
+}
+
+const STATUS_ICON: Record<CodeImportTask['status'], JSX.Element> = {
+  pending: <Loader2 size={14} className="animate-spin" />,
+  scanning: <Loader2 size={14} className="animate-spin" />,
+  splitting: <Loader2 size={14} className="animate-spin" />,
+  building_graph: <Loader2 size={14} className="animate-spin" />,
+  embedding: <Loader2 size={14} className="animate-spin" />,
+  completed: <CheckCircle size={14} />,
+  failed: <XCircle size={14} />,
+  cancelled: <XCircle size={14} />,
+}
+
+const TERMINAL_STATUS: Array<CodeImportTask['status']> = ['completed', 'failed', 'cancelled']
+const POLL_INTERVAL_MS = 2000
+const AUTO_DISMISS_MS = 5000 // 终端任务自动移除延迟
+const TASK_STORAGE_KEY = 'code_import_tasks'
+const DISMISSED_TASK_STORAGE_KEY = 'code_import_tasks_dismissed'
+
+/** 清除某任务的所有 timer(轮询 + dismiss) */
+function clearTaskTimers(map: Map<string, ReturnType<typeof setTimeout>>, taskId: string) {
+  const timer = map.get(taskId)
+  if (timer) { clearTimeout(timer); map.delete(taskId) }
+  const dismissKey = `_${taskId}_dismiss`
+  const dismissTimer = map.get(dismissKey)
+  if (dismissTimer) { clearTimeout(dismissTimer); map.delete(dismissKey) }
+}
+
+function loadDismissedTaskIds(): string[] {
+  try {
+    const raw = localStorage.getItem(DISMISSED_TASK_STORAGE_KEY)
+    if (raw) return JSON.parse(raw) as string[]
+  } catch { /* corrupt → 清空 */ }
+  return []
+}
+
+function saveDismissedTaskIds(taskIds: string[]) {
+  try {
+    localStorage.setItem(DISMISSED_TASK_STORAGE_KEY, JSON.stringify(taskIds))
+  } catch { /* quota exceeded, ignore */ }
+}
+
+/** 持久化到 localStorage 的任务快照,页面刷新后恢复 */
+function loadSavedTasks(): CodeImportTask[] {
+  try {
+    const raw = localStorage.getItem(TASK_STORAGE_KEY)
+    if (raw) return JSON.parse(raw) as CodeImportTask[]
+  } catch { /* corrupt → 清空 */ }
+  return []
+}
+
+function saveTasks(tasks: CodeImportTask[]) {
+  try {
+    localStorage.setItem(TASK_STORAGE_KEY, JSON.stringify(tasks))
+  } catch { /* quota exceeded, ignore */ }
+}
 
 /**
  * 代码知识库标签页 —— 与文本知识库解耦的独立子系统。
@@ -38,7 +104,8 @@ const TERMINAL_STATUS: Array<CodeImportTask['status']> = ['completed', 'failed']
  *   git    — 公共 https:// 仓库浅克隆
  *   zip    — 单个 .zip 包
  *
- * 导入是异步的:提交后拿到 task_id,组件每 2s 轮询进度,达到 completed/failed 停止。
+ * 导入是异步的:提交后拿到 task_id,组件为每个任务独立轮询进度。
+ * 支持多任务队列 + 手动取消 + 页面刷新恢复。
  */
 export default function KnowledgeCodeTab() {
   const [repositories, setRepositories] = useState<CodeRepositoryImport[]>([])
@@ -56,15 +123,50 @@ export default function KnowledgeCodeTab() {
 
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
-  const [task, setTask] = useState<CodeImportTask | null>(null)
+
+  // 任务队列:每个任务独立轮询
+  const [tasks, setTasks] = useState<CodeImportTask[]>(loadSavedTasks)
+  const dismissedTaskIdsRef = useRef<Set<string>>(new Set(loadDismissedTaskIds()))
+  // 每任务的轮询 timer 引用 (key = task_id)
+  const timersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
 
   const folderInputRef = useRef<HTMLInputElement | null>(null)
   const zipInputRef = useRef<HTMLInputElement | null>(null)
 
-  // 初次加载 + 每次任务终态刷新仓库列表
+  // ---------- 挂载: 恢复仓库列表 + 从后端同步活跃任务 ----------
   useEffect(() => {
     void reloadRepositories()
+    void syncActiveTasks()
+    return () => {
+      // 卸载时清所有轮询 timer
+      timersRef.current.forEach(t => clearTimeout(t))
+      timersRef.current.clear()
+    }
   }, [])
+
+  // ---------- 持久化: 任务队列变化时写 localStorage ----------
+  useEffect(() => {
+    saveTasks(tasks)
+  }, [tasks])
+
+  // ---------- 轮询: 每个非终态任务独立计时器 ----------
+  useEffect(() => {
+    const activeIds = new Set<string>()
+    for (const task of tasks) {
+      if (TERMINAL_STATUS.includes(task.status)) continue
+      if (timersRef.current.has(task.task_id)) continue // 已有 timer
+      const timer = setTimeout(() => pollTask(task.task_id), POLL_INTERVAL_MS)
+      timersRef.current.set(task.task_id, timer)
+      activeIds.add(task.task_id)
+    }
+    // 清理已变为终态的任务的 timer
+    for (const [tid, timer] of timersRef.current) {
+      if (!activeIds.has(tid) && !tid.startsWith('_')) {
+        clearTimeout(timer)
+        timersRef.current.delete(tid)
+      }
+    }
+  }, [tasks])
 
   async function reloadRepositories() {
     setRepoLoading(true)
@@ -79,28 +181,102 @@ export default function KnowledgeCodeTab() {
     }
   }
 
-  // 任务进度轮询
-  useEffect(() => {
-    if (!task) return
-    if (TERMINAL_STATUS.includes(task.status)) {
-      if (task.status === 'completed') void reloadRepositories()
-      return
+  /** 从后端拉取所有活跃任务,合并到前端队列,并补充前端缺失的任务 */
+  async function syncActiveTasks() {
+    try {
+      const backendTasks = await listCodeImportTasks()
+      const backendMap = new Map(backendTasks.map(t => [t.task_id, t]))
+
+      setTasks(prev => {
+        const merged = prev
+          .filter(pt => !dismissedTaskIdsRef.current.has(pt.task_id))
+          .map(pt => {
+            const bt = backendMap.get(pt.task_id)
+            if (bt) return bt // 后端有最新状态
+            // 后端暂时还没返回该任务时,保留本地已知任务,避免刚提交就刷新后消失
+            return pt
+          })
+        const mergedIds = new Set(merged.map(t => t.task_id))
+        // 只补回后端非终态任务,避免把用户已 dismiss 的旧终态任务重新拉回
+        for (const bt of backendTasks) {
+          if (dismissedTaskIdsRef.current.has(bt.task_id)) continue
+          if (TERMINAL_STATUS.includes(bt.status)) continue
+          if (!mergedIds.has(bt.task_id)) {
+            merged.push(bt)
+            mergedIds.add(bt.task_id)
+          }
+        }
+        return merged
+      })
+    } catch {
+      // 后端不可用(如 Redis 断开),保持前端状态
     }
-    const timer = window.setInterval(() => {
-      void getCodeImportTask(task.task_id)
-        .then(next => {
-          setTask(next)
-        })
-        .catch(exc => {
-          setTask(prev =>
-            prev
-              ? { ...prev, status: 'failed', error: exc instanceof Error ? exc.message : '轮询失败' }
-              : prev,
-          )
-        })
-    }, 2000)
-    return () => window.clearInterval(timer)
-  }, [task])
+  }
+
+  /** 轮询单个任务 */
+  function pollTask(taskId: string) {
+    getCodeImportTask(taskId)
+      .then(next => {
+        setTasks(prev =>
+          prev.map(t => (t.task_id === taskId ? next : t)),
+        )
+        // 到达终态 → 停止轮询,延迟移除
+        if (TERMINAL_STATUS.includes(next.status)) {
+          clearTaskTimers(timersRef.current, taskId)
+          // 如果是 completed,刷新仓库列表
+          if (next.status === 'completed') {
+            void reloadRepositories()
+          }
+          // 延迟自动移除
+          const dismissKey = `_${taskId}_dismiss`
+          const dismissTimer2 = setTimeout(() => {
+            dismissedTaskIdsRef.current.add(taskId)
+            saveDismissedTaskIds(Array.from(dismissedTaskIdsRef.current))
+            setTasks(prev => prev.filter(t => t.task_id !== taskId))
+          }, AUTO_DISMISS_MS)
+          timersRef.current.set(dismissKey, dismissTimer2)
+        }
+      })
+      .catch(exc => {
+        // 轮询失败 → 标记 failed,停止轮询,保留已有 error 信息
+        setTasks(prev =>
+          prev.map(t =>
+            t.task_id === taskId
+              ? { ...t, status: 'failed', error: t.error || (exc instanceof Error ? exc.message : '轮询失败') }
+              : t,
+          ),
+        )
+        // 清 timer
+        clearTaskTimers(timersRef.current, taskId)
+      })
+  }
+
+  /** 手动移除任务(已完成/失败/取消) */
+  function dismissTask(taskId: string) {
+    clearTaskTimers(timersRef.current, taskId)
+    dismissedTaskIdsRef.current.add(taskId)
+    saveDismissedTaskIds(Array.from(dismissedTaskIdsRef.current))
+    setTasks(prev => prev.filter(t => t.task_id !== taskId))
+  }
+
+  /** 取消任务 — cancel API 同步返回 200 后才更新状态,不需要乐观更新 */
+  async function handleCancelTask(task: CodeImportTask) {
+    try {
+      await cancelCodeImportTask(task.task_id)
+      // 后端已确认,安全更新为 cancelled
+      setTasks(prev =>
+        prev.map(t =>
+          t.task_id === task.task_id
+            ? { ...t, status: 'cancelled' as const, error: null }
+            : t,
+        ),
+      )
+      // 清轮询 timer — 不再需要 poll 纠正
+      clearTaskTimers(timersRef.current, task.task_id)
+    } catch (exc) {
+      alert(`取消失败: ${exc instanceof Error ? exc.message : '未知错误'}`)
+    }
+  }
 
   function resetFormFiles() {
     setZipFile(null)
@@ -150,14 +326,24 @@ export default function KnowledgeCodeTab() {
         }
         response = await importCodeRepository(form)
       }
-      setTask({
+
+      // 新任务清掉旧的 dismiss 记录,避免同 task_id 被恢复逻辑忽略
+      dismissedTaskIdsRef.current.delete(response.task_id)
+      saveDismissedTaskIds(Array.from(dismissedTaskIdsRef.current))
+
+      // 加入队列,不阻塞表单
+      const newTask: CodeImportTask = {
         task_id: response.task_id,
         status: 'pending',
         current_file: null,
         done: 0,
         total: 0,
         error: null,
-      })
+        source_label: '',
+        source_type: sourceType,
+        created_at: 0,
+      }
+      setTasks(prev => [...prev, newTask])
       resetFormFiles()
     } catch (exc) {
       setSubmitError(exc instanceof Error ? exc.message : '提交导入任务失败')
@@ -176,10 +362,10 @@ export default function KnowledgeCodeTab() {
     }
   }
 
-  const progressPercent = useMemo(() => {
-    if (!task || !task.total) return 0
-    return Math.min(100, Math.round((task.done / task.total) * 100))
-  }, [task])
+  const activeCount = useMemo(
+    () => tasks.filter(t => !TERMINAL_STATUS.includes(t.status)).length,
+    [tasks],
+  )
 
   return (
     <div className="space-y-6">
@@ -336,7 +522,7 @@ export default function KnowledgeCodeTab() {
             onClick={handleStartImport}
             disabled={submitting}
           >
-            {submitting ? '提交中...' : '开始导入'}
+            {submitting ? <><Loader2 size={14} className="inline animate-spin mr-1" /> 提交中...</> : <><PlayCircle size={14} className="inline mr-1" /> 开始导入</>}
           </button>
         </div>
 
@@ -347,34 +533,123 @@ export default function KnowledgeCodeTab() {
         )}
       </Card>
 
-      {/* 任务进度 */}
-      {task && (
+      {/* 任务队列 */}
+      {tasks.length > 0 && (
         <Card>
-          <div className="flex items-center justify-between mb-2">
-            <h3 className="text-md font-semibold">导入任务进度</h3>
-            <span className="badge badge-neutral">{task.status}</span>
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-md font-semibold">导入任务队列</h3>
+            <span className="badge badge-neutral">
+              {activeCount} 活跃 / {tasks.length} 总计
+            </span>
           </div>
-          <div className="text-xs mb-2" style={{ color: 'var(--color-text-tertiary)' }}>
-            task_id: <span style={{ fontFamily: 'var(--font-mono)' }}>{task.task_id}</span>
+
+          <div className="space-y-3">
+            {tasks.map(task => {
+              const isTerminal = TERMINAL_STATUS.includes(task.status)
+              const isRunning = !isTerminal
+              const progressPercent = task.total > 0 ? Math.min(100, Math.round((task.done / task.total) * 100)) : 0
+
+              return (
+                <div
+                  key={task.task_id}
+                  className="p-3 rounded-lg border"
+                  style={{
+                    borderColor: isTerminal
+                      ? task.status === 'failed'
+                        ? 'var(--color-danger)'
+                        : task.status === 'cancelled'
+                          ? 'var(--color-warning)'
+                          : 'var(--color-success)'
+                      : 'var(--color-bg-tertiary)',
+                    backgroundColor: isRunning
+                      ? 'rgba(59, 130, 246, 0.05)'
+                      : 'transparent',
+                  }}
+                >
+                  <div className="flex items-center gap-3">
+                    {/* 状态图标 */}
+                    <div style={{ color: isTerminal
+                      ? task.status === 'failed'
+                        ? 'var(--color-danger)'
+                        : task.status === 'cancelled'
+                          ? 'var(--color-warning)'
+                          : 'var(--color-success)'
+                      : 'var(--color-primary)'
+                    }}>
+                      {STATUS_ICON[task.status]}
+                    </div>
+
+                    {/* 信息 */}
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium truncate">
+                          {task.source_label || '未知来源'}
+                        </span>
+                        <span className="badge badge-neutral" style={{ fontSize: '11px' }}>
+                          {STATUS_LABEL[task.status]}
+                        </span>
+                      </div>
+                      <div className="text-xs mt-1" style={{ color: 'var(--color-text-tertiary)' }}>
+                        task_id: <span style={{ fontFamily: 'var(--font-mono)', fontSize: '11px' }}>{task.task_id.slice(0, 8)}…</span>
+                        {task.source_type && ` · ${task.source_type}`}
+                      </div>
+
+                      {/* 进度条 */}
+                      {isRunning && task.total > 0 && (
+                        <div className="mt-2">
+                          <div className="w-full rounded overflow-hidden" style={{ height: 4, backgroundColor: 'var(--color-bg-tertiary)' }}>
+                            <div
+                              style={{
+                                height: '100%',
+                                width: `${progressPercent}%`,
+                                backgroundColor: 'var(--color-primary)',
+                                transition: 'width 200ms',
+                              }}
+                            />
+                          </div>
+                          <div className="text-xs mt-1" style={{ color: 'var(--color-text-tertiary)' }}>
+                            {task.done}/{task.total} · 当前文件: {task.current_file || '-'}
+                            {progressPercent > 0 && ` (${progressPercent}%)`}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* 错误信息 */}
+                      {task.error && (
+                        <div className="mt-1 text-xs" style={{ color: 'var(--color-danger)' }}>
+                          ❌ {task.error}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* 操作按钮 */}
+                    <div className="flex items-center gap-1">
+                      {isRunning && (
+                        <button
+                          className="btn btn-secondary"
+                          style={{ padding: '4px 10px', fontSize: '12px' }}
+                          onClick={() => handleCancelTask(task)}
+                          title="取消任务"
+                        >
+                          <XCircle size={14} /> 取消
+                        </button>
+                      )}
+                      {isTerminal && (
+                        <button
+                          className="p-1 rounded cursor-pointer"
+                          style={{ color: 'var(--color-text-tertiary)' }}
+                          onClick={() => dismissTask(task.task_id)}
+                          title="移除"
+                        >
+                          <X size={14} />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )
+            })}
           </div>
-          <div className="w-full rounded overflow-hidden" style={{ height: 6, backgroundColor: 'var(--color-bg-tertiary)' }}>
-            <div
-              style={{
-                height: '100%',
-                width: `${progressPercent}%`,
-                backgroundColor: task.status === 'failed' ? 'var(--color-danger)' : 'var(--color-primary)',
-                transition: 'width 200ms',
-              }}
-            />
-          </div>
-          <div className="text-xs mt-2" style={{ color: 'var(--color-text-tertiary)' }}>
-            {task.done}/{task.total} · 当前文件: {task.current_file || '-'}
-          </div>
-          {task.error && (
-            <div className="mt-3 p-3 rounded-lg" style={{ backgroundColor: 'rgba(239, 68, 68, 0.1)', color: 'var(--color-danger)', fontSize: '13px' }}>
-              ❌ {task.error}
-            </div>
-          )}
         </Card>
       )}
 

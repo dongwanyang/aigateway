@@ -580,6 +580,7 @@ export type CodeImportTaskStatus =
   | 'embedding'
   | 'completed'
   | 'failed'
+  | 'cancelled'
 
 export interface CodeImportTask {
   task_id: string
@@ -588,6 +589,9 @@ export interface CodeImportTask {
   done: number
   total: number
   error: string | null
+  source_label: string | null
+  source_type: string | null
+  created_at: number
 }
 
 export interface CodeRepositoryImport {
@@ -629,6 +633,13 @@ export async function importCodeRepository(
   return await res.json()
 }
 
+export async function listCodeImportTasks(): Promise<CodeImportTask[]> {
+  const headers = await ensureAuthHeaders()
+  const res = await fetch(`${API_BASE}/admin/rag/code/tasks`, { headers })
+  if (!res.ok) throw new Error(`Failed to list code import tasks: ${res.status}`)
+  return await res.json()
+}
+
 export async function getCodeImportTask(taskId: string): Promise<CodeImportTask> {
   const headers = await ensureAuthHeaders()
   const res = await fetch(
@@ -636,6 +647,22 @@ export async function getCodeImportTask(taskId: string): Promise<CodeImportTask>
     { headers },
   )
   if (!res.ok) throw new Error(`Failed to fetch code import task: ${res.status}`)
+  return await res.json()
+}
+
+export async function cancelCodeImportTask(taskId: string): Promise<{ task_id: string; status: 'cancelled' }> {
+  const headers = await ensureAuthHeaders()
+  const res = await fetch(
+    `${API_BASE}/admin/rag/code/tasks/${encodeURIComponent(taskId)}/cancel`,
+    { method: 'POST', headers },
+  )
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }))
+    const message = typeof body?.detail === 'string'
+      ? body.detail
+      : body?.detail?.error?.message || `Failed to cancel code import task: ${res.status}`
+    throw new Error(message)
+  }
   return await res.json()
 }
 

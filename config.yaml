@@ -273,6 +273,7 @@ debug:
   plugins_enabled: false
   plugins:
     enabled: false
+    per_plugin:
 media_optimization:
   enabled: true
   download_timeouts:
