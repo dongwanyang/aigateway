@@ -59,7 +59,6 @@ def test_c3_three_kinds_present_when_debug_on(admin_client, user_client, trace_h
     # 打开 debug.entry + debug.plugins_enabled
     admin_client.put("/admin/global-config",
                      json={"debug": {"entry": True, "plugins_enabled": True}})
-    time.sleep(1)
     try:
         tid = _tid()
         # 使用长提示避免缓存命中
@@ -133,7 +132,7 @@ def test_c5_plugin_trace_shim(user_client, admin_client, trace_helpers):
 
 
 def test_c6_early_return_skip_no_bridge(admin_client, unique_prefix, trace_helpers):
-    """§9 #6: 配额耗尽 -> events 有 skip,之后不再有 bridge event."""
+    """§9 #6: 配额耗尽 -> check_quota 报 error,之后不再有 bridge event."""
     r = admin_client.post("/admin/api-keys", json={
         "user_id": f"{unique_prefix}q",
         "quotas": {"daily_tokens": 1, "monthly_cost": 0.001,
@@ -159,8 +158,23 @@ def test_c6_early_return_skip_no_bridge(admin_client, unique_prefix, trace_helpe
         }, headers={"X-Trace-Id": tid}, timeout=60)
         c.close()
         evs = trace_helpers.wait(tid, timeout=3.0)
-        # 只要有 events 就说明链路完整
+        # 链路完整:至少有 events
         assert len(evs) > 0, "No events for quota-exhausted request"
+        # 配额耗尽应产生 status=error 的 key_store.check_quota stage
+        names = [e.get("name") for e in evs]
+        quota_err = [e for e in evs
+                     if e.get("name") == "key_store.check_quota"
+                     and e.get("kind") == "stage"
+                     and e.get("status") == "error"]
+        assert quota_err, \
+            f"No error check_quota stage for quota-exhausted request: {names}"
+        # check_quota error 之后不应再出现 bridge 事件(短路返回)
+        idx = next(i for i, e in enumerate(evs)
+                   if e.get("name") == "key_store.check_quota"
+                   and e.get("status") == "error")
+        after = names[idx + 1:]
+        assert not any("bridge" in str(n or "") or "litellm" in str(n or "") for n in after), \
+            f"bridge event after quota rejection (should short-circuit): {after}"
     finally:
         if kid:
             admin_client.delete(f"/admin/api-keys/{kid}")
@@ -231,8 +245,10 @@ def test_c8_async_l3_backfill(user_client, trace_helpers):
         if found:
             break
         time.sleep(3)
-    # L3 回填可能因 token 不足或 Qdrant 配置而跳过,不强制断言
-    # 但至少 trace events 应被记录
+    # prompt >100 tokens, L3 backfill 应在 60s 内写入 qdrant
+    assert found, \
+        f"L3 backfill did not write a qdrant point for trace {tid} within 60s"
+    # trace 链路也应有 events
     evs = trace_helpers.wait(tid)
     assert len(evs) > 0, f"No events for L3 backfill trace {tid}"
 
@@ -249,7 +265,8 @@ def test_c9_logger_trace_matches_header(admin_client, trace_helpers):
         headers={"X-Trace-Id": tid},
         timeout=60,
     )
-    time.sleep(1.5)
+    evs = trace_helpers.wait(tid, timeout=5.0)
+    assert evs, f"No events for logger trace test {tid}"
     # 尝试多种容器名
     container_names = ["gateway", "gateway2-gateway-1", "gateway-1"]
     found = False

@@ -92,7 +92,6 @@ def all_debug_off():
     for p in plugins:
         if isinstance(p, dict) and p.get("debug") is True:
             _admin_post(f"/admin/plugins/{p['name']}/debug", {"enabled": False})
-    time.sleep(0.5)
     yield
     # teardown: restore all off
     _admin_put("/admin/global-config", {"debug": {
@@ -103,7 +102,6 @@ def all_debug_off():
 
 def _dim_toggle(name: str, on: bool):
     _admin_put("/admin/global-config", {"debug": {name: on}})
-    time.sleep(0.5)
 
 
 def test_d1_all_off_no_debug_events(all_debug_off):
@@ -154,7 +152,6 @@ def test_d5_plugins_and_per_plugin_gate(all_debug_off):
     """
     # 开 plugins_enabled
     _admin_put("/admin/global-config", {"debug": {"plugins_enabled": True}})
-    time.sleep(0.5)
     state = _get_debug_state()
     # 由于 watcher 从 plugins.enabled 读取,flat key 可能不被反映;
     # 但 PUT 端点会回显我们发送的值
@@ -164,7 +161,6 @@ def test_d5_plugins_and_per_plugin_gate(all_debug_off):
 
     # 开 per-plugin
     _admin_post("/admin/plugins/rag_retriever/debug", {"enabled": True})
-    time.sleep(0.5)
     plugins_resp = _admin_get("/admin/plugins-config")
     plugins = plugins_resp.json().get("data", {}).get("plugins", [])
     rag = next((p for p in plugins if p.get("name") == "rag_retriever"), None)
@@ -190,7 +186,6 @@ def test_d7_hot_reload_3s(all_debug_off):
     """
     # 直接 PUT 修改 cache 段(不走文件 Watchdog)
     _admin_put("/admin/global-config", {"debug": {"cache": True}})
-    time.sleep(0.5)
     data = _get_debug_state()
     assert data.get("cache") is True, f"PUT hot-reload did not pick up cache=true: {data}"
 
@@ -213,9 +208,7 @@ def test_d8_invalid_value_accepted(all_debug_off):
 def test_d9_single_plugin_toggle(all_debug_off):
     """§5.3 #9: POST /admin/plugins/rag_retriever/debug → 只 rag_retriever debug 起效."""
     _admin_put("/admin/global-config", {"debug": {"plugins_enabled": True}})
-    time.sleep(0.5)
     _admin_post("/admin/plugins/rag_retriever/debug", {"enabled": True})
-    time.sleep(0.5)
     plugins_resp = _admin_get("/admin/plugins-config")
     plugins = plugins_resp.json().get("data", {}).get("plugins", [])
     # 只 rag_retriever 应为 True

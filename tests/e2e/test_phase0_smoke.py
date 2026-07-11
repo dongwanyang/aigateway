@@ -1,12 +1,17 @@
 """Phase 0 smoke tests — 证明 fixtures/常量/健康检查都跑得起来."""
 import httpx
+import pytest
 import redis
 from tests.conftest import BASE, REDIS_URL, QDRANT_URL, ADMIN_KEY
 
 
 def test_gateway_health():
     r = httpx.get(f"{BASE}/health", timeout=15)
-    assert r.status_code == 200
+    assert r.status_code == 200, f"Gateway unhealthy: {r.status_code} {r.text[:200]}"
+    data = r.json()
+    body = data.get("data", data)
+    assert body.get("status") == "healthy", \
+        f"Unexpected health response: {data}"
 
 
 def test_admin_key_present():
@@ -73,13 +78,18 @@ def test_trace_events_roundtrip(admin_client, trace_helpers):
         resp = chat(admin_c, "hello e2e smoke", trace_id=tid)
     finally:
         admin_c.close()
-    assert resp.status_code in (200, 402, 429, 502), f"unexpected chat status {resp.status_code}: {resp.text[:200]}"
+    # Upstream may return 502; skip rather than pass on an unverifiable chain
+    if resp.status_code == 502:
+        pytest.skip("Upstream returned 502 — trace chain unverifiable")
+    assert resp.status_code in (200, 402, 429), \
+        f"Unexpected status {resp.status_code}"
     events = trace_helpers.wait(tid, timeout=5.0)
-    # If upstream model chain produced no trace events (e.g. provider misconfigured),
-    # the roundtrip is still valid — the helper works, there are just no events.
-    # This test primarily verifies the trace fetch/poll path does not crash.
-    if events:
-        assert len(events) > 0, f"No events for trace_id {tid}"
+    # The trace chain must actually produce events with the required fields.
+    # An empty list means the trace roundtrip is broken — fail, don't pass.
+    assert events, f"No trace events returned for trace_id {tid}"
+    for e in events:
+        for field in ("kind", "name"):
+            assert field in e, f"trace event missing {field}: {e}"
 
 
 def test_assert_events_order_helper():

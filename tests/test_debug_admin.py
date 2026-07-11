@@ -25,14 +25,12 @@ def test_get_debug_config_endpoint_returns_all_dims(monkeypatch):
     # 直接打 /admin/config/debug,带 admin bearer
     resp = client.get("/admin/config/debug",
                       headers={"Authorization": "Bearer gw-rRIop4dpcyJJNUTJbHmHpr9Bj3M11s5o"})
-    # 不强求 200(lifespan 可能未完整跑);只要返回了 data 就算通
-    if resp.status_code == 200:
-        data = resp.json()["data"]
-        assert data["frontend"] is True
-        assert data["cache"] is True
-        assert data["plugins_enabled"] is True
-        assert data["per_plugin"]["pii_detector"] is True
-    else:
-        # lifespan 没跑起来就跳过(环境限制),不视为失败
+    # Test may fail if routes weren't mounted (unit-test env without full lifespan)
+    if resp.status_code != 200:
         import pytest
-        pytest.skip(f"app lifespan not fully initialized in test env: {resp.status_code}")
+        pytest.skip(f"Routes not mounted in unit-test env (status={resp.status_code}); requires full lifespan")
+    data = resp.json()["data"]
+    assert data["frontend"] is True
+    assert data["cache"] is True
+    assert data["plugins_enabled"] is True
+    assert data["per_plugin"]["pii_detector"] is True

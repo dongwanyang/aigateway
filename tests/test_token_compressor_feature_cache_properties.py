@@ -141,11 +141,14 @@ _UNSUPPORTED_MIME_TYPES = [
 
 _UNSUPPORTED_SIZES = [0, 1, 100, 1024, 4096, 8192, 65536, 1_000_000, 5_000_000]
 
+# Deterministic sample (3 sizes) for parametrized inputs — avoids random.seed() pollution.
+_SAMPLED_SIZES = [_UNSUPPORTED_SIZES[0], _UNSUPPORTED_SIZES[3], _UNSUPPORTED_SIZES[6]]
+
 # Create parametrized inputs: (mime_type, size_bytes)
 _PASSTHROUGH_PARAMS = [
     (mime, size)
     for mime in _UNSUPPORTED_MIME_TYPES
-    for size in random.sample(_UNSUPPORTED_SIZES, min(3, len(_UNSUPPORTED_SIZES)))
+    for size in _SAMPLED_SIZES
 ]
 
 

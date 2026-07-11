@@ -116,22 +116,22 @@ def test_e1_yaml_hot_reload_plugin_enabled(host_config):
 def test_e2_engine_rebuild_on_reload(host_config):
     """§7 #2: 改插件 enabled → 后端日志有 pipeline rebuilt 标记(需 debug.entry)."""
     _admin_put("/admin/global-config", {"debug": {"entry": True}})
-    time.sleep(1)
     try:
         cfg = host_config.read()
         for p in cfg["plugins"]:
             if p["name"] == "pii_detector":
                 p["enabled"] = not p.get("enabled", True)
         host_config.write(cfg)
-        time.sleep(1)
         proc = subprocess.run(
             ["bash", "-lc",
              "sudo docker logs $(sudo docker ps -qf name=gateway2-gateway-1) --since 15s 2>&1 | grep -iE 'pipeline.*(rebuil|reload|updated)' | head -5"],
             capture_output=True, text=True, timeout=10,
         )
-        # 如果没找到重建日志,说明 Watchdog 未运行(预期行为)
-        # 但至少验证了文件修改成功了
-        assert proc.returncode == 0, f"docker logs failed: {proc.stderr[:300]}"
+        # docker logs 命令本身应成功
+        assert proc.returncode == 0, f"docker logs command failed: {proc.stderr[:300]}"
+        # 日志里应能找到 pipeline rebuild/reload 标记;空输出说明 Watchdog 未拾起变更
+        assert proc.stdout.strip(), \
+            "No pipeline rebuild/reload log line found — Watchdog did not pick up the config change"
     finally:
         _admin_put("/admin/global-config", {"debug": {"entry": False}})
 
@@ -140,7 +140,6 @@ def test_e3_admin_put_writes_file_and_flock():
     """§7 #3: PUT 修改 debug 段 → 文件落盘;并发 PUT 不崩."""
     r1 = _admin_put("/admin/global-config", {"debug": {"frontend": True}})
     assert r1.status_code in (200, 204), f"PUT failed: {r1.status_code} {r1.text[:200]}"
-    time.sleep(0.3)
     with open(HOST_CONFIG_YAML) as f:
         raw = f.read()
     assert "frontend: true" in raw or "frontend:true" in raw, "file not updated"
@@ -222,11 +221,8 @@ def test_e6_gen_opt_invalid_value_fallback():
     # 4xx 也可以;关键是 5xx 崩了才算失败
     assert r_put.status_code < 500, f"invalid gen-opt PUT crashed: {r_put.status_code}"
     # gateway 仍健康(增加超时)
-    try:
-        h = httpx.get(f"{BASE}/health", timeout=10)
-        assert h.status_code == 200, "gateway crashed after invalid PUT"
-    except Exception:
-        pass  # health check may timeout under load; not a failure
+    h = httpx.get(f"{BASE}/health", timeout=10)
+    assert h.status_code == 200, f"gateway unhealthy after invalid PUT: {h.status_code} {h.text[:200]}"
     # 值应保持
     r_after = _admin_get("/admin/global-config")
     if r_after.status_code >= 400:
