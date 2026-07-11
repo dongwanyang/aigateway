@@ -646,7 +646,13 @@ export async function getCodeImportTask(taskId: string): Promise<CodeImportTask>
     `${API_BASE}/admin/rag/code/tasks/${encodeURIComponent(taskId)}`,
     { headers },
   )
-  if (!res.ok) throw new Error(`Failed to fetch code import task: ${res.status}`)
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}))
+    const message = typeof body?.detail === 'string'
+      ? body.detail
+      : body?.detail?.error?.message || `Failed to fetch code import task: ${res.status}`
+    throw new Error(message)
+  }
   return await res.json()
 }
 

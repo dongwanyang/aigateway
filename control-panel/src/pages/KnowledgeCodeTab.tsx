@@ -208,8 +208,9 @@ export default function KnowledgeCodeTab() {
         }
         return merged
       })
-    } catch {
-      // 后端不可用(如 Redis 断开),保持前端状态
+    } catch (exc) {
+      // 后端不可用(如 Redis 断开),保持前端状态但记录警告
+      console.warn('[CodeTab] syncActiveTasks failed:', exc instanceof Error ? exc.message : String(exc))
     }
   }
 
@@ -238,6 +239,18 @@ export default function KnowledgeCodeTab() {
         }
       })
       .catch(exc => {
+        // 404 → 任务已过期/不存在，直接 dismiss
+        if (
+          exc instanceof Error &&
+          (exc.message.toLowerCase().includes('404') ||
+           exc.message.toLowerCase().includes('not found'))
+        ) {
+          clearTaskTimers(timersRef.current, taskId)
+          dismissedTaskIdsRef.current.add(taskId)
+          saveDismissedTaskIds(Array.from(dismissedTaskIdsRef.current))
+          setTasks(prev => prev.filter(t => t.task_id !== taskId))
+          return
+        }
         // 轮询失败 → 标记 failed,停止轮询,保留已有 error 信息
         setTasks(prev =>
           prev.map(t =>

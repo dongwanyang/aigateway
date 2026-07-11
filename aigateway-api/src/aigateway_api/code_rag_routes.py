@@ -903,6 +903,11 @@ async def get_code_task(
 ) -> Dict[str, Any]:
     redis_mgr = getattr(request.app.state, "redis_manager", None)
     state = await _read_task_state(redis_mgr, task_id)
+    if not state:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"code": "not_found", "message": f"Task '{task_id}' not found"}},
+        )
     return _shape_task_response(task_id, state)
 
 
