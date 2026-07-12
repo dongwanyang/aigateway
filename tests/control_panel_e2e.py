@@ -275,10 +275,14 @@ class TestModelsPage:
             "POST", f"/admin/providers/{provider_name}/test",
             expect_ok=False,
         )
-        # Connectivity test may fail (no real API key), but should not 500
+        # May fail (no real API key), but should not 500
         if ok2:
             data = result2.get("data", {})
             assert "provider" in data or "success" in data
+        else:
+            assert isinstance(result2, dict), f"Non-dict error body: {result2}"
+            assert result2.get("detail") != "Internal Server Error", \
+                f"Provider connectivity test returned 500: {result2}"
 
 
 class TestPluginsPage:
@@ -773,6 +777,10 @@ class TestKnowledgePage:
         # May fail if the URL is unreachable, but should not 500
         if ok:
             assert "doc_id" in result.get("data", {}), f"Expected doc_id in response: {result}"
+        else:
+            assert isinstance(result, dict), f"Non-dict error body: {result}"
+            assert result.get("detail") != "Internal Server Error", \
+                f"RAG document import returned 500: {result}"
 
     @pytest.mark.asyncio
     async def test_delete_rag_document(self):
@@ -862,10 +870,13 @@ class TestCodeRagPage:
 
     @pytest.mark.asyncio
     async def test_list_code_repositories_empty(self):
-        """GET /admin/rag/code/repositories — should return list."""
+        """GET /admin/rag/code/repositories — should return list or wrapped data."""
         ok, result = await _direct_api("GET", "/admin/rag/code/repositories")
         assert ok, f"listCodeRepositories failed: {result}"
-        assert isinstance(result, list)
+        # Response may be a bare list or wrapped in {"data": [...]}
+        if isinstance(result, dict):
+            result = result.get("data", result)
+        assert isinstance(result, list), f"Expected list, got {type(result)}: {result}"
 
     @pytest.mark.asyncio
     async def test_import_code_server_path(self):
@@ -875,11 +886,13 @@ class TestCodeRagPage:
             "server_path": "/home/ubuntu/gateway2",
             "embedding_model": "Qwen/Qwen3-Embedding-0.6B",
         }, expect_ok=False)
+        # May fail (server path may not exist), but should not 500
         if ok:
             assert "task_id" in result
-
-    @pytest.mark.asyncio
-    async def test_import_code_git(self):
+        else:
+            assert isinstance(result, dict), f"Non-dict error body: {result}"
+            assert result.get("detail") != "Internal Server Error", \
+                f"Code import (server_path) returned 500: {result}"
         """POST /admin/rag/code/import with source_type=git (JSON body)."""
         ok, result = await _direct_api("POST", "/admin/rag/code/import", body={
             "source_type": "git",
@@ -890,6 +903,10 @@ class TestCodeRagPage:
         # May fail (network, invalid repo), but should not 500
         if ok:
             assert "task_id" in result
+        else:
+            assert isinstance(result, dict), f"Non-dict error body: {result}"
+            assert result.get("detail") != "Internal Server Error", \
+                f"Code import (git) returned 500: {result}"
 
     @pytest.mark.asyncio
     async def test_import_code_folder(self):
@@ -914,6 +931,10 @@ class TestCodeRagPage:
             )
             if ok:
                 assert "task_id" in result
+            else:
+                assert isinstance(result, dict), f"Non-dict error body: {result}"
+                assert result.get("detail") != "Internal Server Error", \
+                    f"Code import (folder) returned 500: {result}"
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -939,6 +960,10 @@ class TestCodeRagPage:
             )
             if ok:
                 assert "task_id" in result
+            else:
+                assert isinstance(result, dict), f"Non-dict error body: {result}"
+                assert result.get("detail") != "Internal Server Error", \
+                    f"Code import (zip) returned 500: {result}"
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -1054,6 +1079,10 @@ class TestLogsPageExtra:
         if ok:
             data = result.get("data", {})
             assert "deleted" in data or "count" in data or data.get("message") == "success"
+        else:
+            assert isinstance(result, dict), f"Non-dict error body: {result}"
+            assert result.get("detail") != "Internal Server Error", \
+                f"Batch delete logs returned 500: {result}"
 
 
 class TestCachePageExtra:
@@ -1180,8 +1209,13 @@ class TestMetricsAndQuotasExtra:
             "GET", f"/admin/providers/{provider_name}/models",
             expect_ok=False,
         )
+        # May fail (external API), but should not 500
         if ok2:
             assert isinstance(result2, list) or "data" in result2
+        else:
+            assert isinstance(result2, dict), f"Non-dict error body: {result2}"
+            assert result2.get("detail") != "Internal Server Error", \
+                f"Provider model list returned 500: {result2}"
 
 
 class TestKnowledgePageExtra:
@@ -1194,8 +1228,13 @@ class TestKnowledgePageExtra:
             "content": "This is a test document for RAG knowledge base.\n" + "Lorem ipsum " * 50,
             "filename": "test_doc.txt",
         }, expect_ok=False)
+        # May fail (server error), but should not 500
         if ok:
             assert "doc_id" in result.get("data", {})
+        else:
+            assert isinstance(result, dict), f"Non-dict error body: {result}"
+            assert result.get("detail") != "Internal Server Error", \
+                f"Text document import returned 500: {result}"
 
     @pytest.mark.asyncio
     async def test_import_document_without_url_or_content(self):
