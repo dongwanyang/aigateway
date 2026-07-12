@@ -3,7 +3,7 @@
 Adjustments from plan:
 - E1: LLM calls may fail (Agnes API 401). We test plugin enable/disable via
   host_config file verification instead of trace events.
-- E2: Docker container name is gateway2-gateway-1. Uses custom admin client.
+- E2: Docker container name is aigateway-gateway-1 (compose project renamed). Uses custom admin client.
 - E3: Uses custom admin client with rate-limit retries.
 - E4: Verifies env existence; skips if not set.
 - E5: Agnes provider may return 401 or rate-limit. Graceful skip.
@@ -124,7 +124,7 @@ def test_e2_engine_rebuild_on_reload(host_config):
         host_config.write(cfg)
         proc = subprocess.run(
             ["bash", "-lc",
-             "sudo docker logs $(sudo docker ps -qf name=gateway2-gateway-1) --since 15s 2>&1 | grep -iE 'pipeline.*(rebuil|reload|updated)' | head -5"],
+             "sudo docker logs $(sudo docker ps -qf name=aigateway-gateway-1) --since 15s 2>&1 | grep -iE 'pipeline.*(rebuil|reload|updated)' | head -5"],
             capture_output=True, text=True, timeout=10,
         )
         # docker logs 命令本身应成功
@@ -165,7 +165,7 @@ def test_e4_env_override_priority():
     """§7 #4: 若容器 env AI_GATEWAY_REDIS_URL 已设 → 验证 env 存在;未设则 skip."""
     proc = subprocess.run(
         ["bash", "-lc",
-         "sudo docker exec $(sudo docker ps -qf name=gateway2-gateway-1) env | grep AI_GATEWAY_REDIS_URL || true"],
+         "sudo docker exec $(sudo docker ps -qf name=aigateway-gateway-1) env | grep AI_GATEWAY_REDIS_URL || true"],
         capture_output=True, text=True, timeout=5,
     )
     env_line = proc.stdout.strip()

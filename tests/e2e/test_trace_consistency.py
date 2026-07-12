@@ -268,7 +268,7 @@ def test_c9_logger_trace_matches_header(admin_client, trace_helpers):
     evs = trace_helpers.wait(tid, timeout=5.0)
     assert evs, f"No events for logger trace test {tid}"
     # 尝试多种容器名
-    container_names = ["gateway", "gateway2-gateway-1", "gateway-1"]
+    container_names = ["gateway", "aigateway-gateway-1", "gateway2-gateway-1", "gateway-1"]
     found = False
     for cname in container_names:
         proc = subprocess.run(

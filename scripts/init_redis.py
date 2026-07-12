@@ -18,11 +18,12 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import sys
 import uuid
 
-# 将项目根目录加入 PYTHONPATH
-sys.path.insert(0, "/home/ubuntu/gateway2/aigateway-core/src")
+# 将项目根目录加入 PYTHONPATH（相对脚本位置解析，避免硬编码绝对路径）
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "aigateway-core", "src"))
 
 from aigateway_core.shared.redis_client import RedisClientManager
 

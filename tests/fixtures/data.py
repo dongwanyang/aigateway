@@ -5,6 +5,7 @@
 - test 用它去命名一切写入 redis/qdrant 的东西
 - test 结束后 cleanup_test_data 直连 redis 和 qdrant 扫删该前缀
 """
+import sys
 import uuid
 import pytest
 import redis as _redis
@@ -77,8 +78,9 @@ def _scan_and_delete_qdrant_points_by_prefix(prefix: str) -> int:
                 offset = result.get("next_page_offset")
                 if offset is None:
                     break
-    except Exception:
-        pass  # cleanup best-effort — never fail a test on teardown
+    except Exception as exc:
+        # Log cleanup error but don't fail the test on teardown
+        print(f"[WARN] Qdrant cleanup failed for prefix {unique_prefix}: {exc}", file=sys.stderr)
     return deleted
 
 

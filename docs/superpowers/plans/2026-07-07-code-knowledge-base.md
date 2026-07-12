@@ -542,7 +542,7 @@ def test_post_code_import_returns_task_id(monkeypatch):
         "/admin/rag/code/import",
         json={
             "source_type": "server_path",
-            "server_path": "/home/ubuntu/gateway2",
+            "server_path": "/home/ubuntu/aigateway",
             "embedding_model": "Qwen/Qwen3-Embedding-0.6B",
         },
         headers={"x-api-key": "test-key"},
@@ -1391,7 +1391,7 @@ Run these checks:
 curl -s -X POST http://localhost:8000/admin/rag/code/import \
   -H 'Content-Type: application/json' \
   -H 'x-api-key: <ADMIN_KEY>' \
-  -d '{"source_type":"server_path","server_path":"/home/ubuntu/gateway2","embedding_model":"Qwen/Qwen3-Embedding-0.6B"}'
+  -d '{"source_type":"server_path","server_path":"/home/ubuntu/aigateway","embedding_model":"Qwen/Qwen3-Embedding-0.6B"}'
 ```
 
 Then poll:

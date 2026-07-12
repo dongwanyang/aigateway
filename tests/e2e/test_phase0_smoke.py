@@ -39,7 +39,11 @@ def test_admin_client_fixture(admin_client):
     assert r.status_code == 200
     data = r.json()
     # 5 维度 debug 段应有 5 个 bool 字段(frontend/entry/cache/bridge/plugins_enabled)
-    assert isinstance(data, dict)
+    assert isinstance(data, dict), f"Expected dict, got {type(data)}"
+    debug_data = data.get("data", data)
+    assert isinstance(debug_data, dict), f"Expected data dict, got {type(debug_data)}"
+    for dim in ("frontend", "entry", "cache", "bridge", "plugins_enabled"):
+        assert dim in debug_data, f"Missing debug dimension: {dim}"
 
 
 def test_prom_scrape_parses(prom_scrape):
@@ -54,8 +58,14 @@ def test_prom_scrape_parses(prom_scrape):
 
 def test_host_config_read(host_config):
     cfg = host_config.read()
-    assert "providers" in cfg
-    assert "agnes" in cfg["providers"]
+    assert "providers" in cfg, "Config should have 'providers' section"
+    assert isinstance(cfg["providers"], dict), "Providers should be a dict"
+    assert len(cfg["providers"]) > 0, "At least one provider should be configured"
+    # Verify each provider has basic structure
+    for name, prov in cfg["providers"].items():
+        assert isinstance(prov, dict), f"Provider {name} should be a dict"
+        assert "model_grouper" in prov or "models" in prov or "api_key" in prov or "base_url" in prov, \
+            f"Provider {name} missing expected fields: {list(prov.keys())}"
 
 
 def test_host_config_snapshot_restore(host_config):

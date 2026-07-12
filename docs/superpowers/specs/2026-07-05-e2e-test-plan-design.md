@@ -123,7 +123,7 @@ python3 -m pytest tests/e2e/test_debug_dimensions.py -v
 BASE = "http://localhost:8000"
 UI_BASE = "http://localhost:3000"
 ADMIN_KEY = os.environ["AI_GATEWAY_ADMIN_KEY"]         # 强制 env,不给默认
-HOST_CONFIG_YAML = "/home/ubuntu/gateway2/config.yaml"  # 宿主可读
+HOST_CONFIG_YAML = "/home/ubuntu/aigateway/config.yaml"  # 宿主可读
 
 def pytest_configure(config):
     r = httpx.get(f"{BASE}/health", timeout=3)

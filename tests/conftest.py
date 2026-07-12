@@ -17,7 +17,7 @@ PROM_URL = "http://localhost:9090"
 GRAFANA_URL = "http://localhost:3001"
 # 宿主 config.yaml —— 必须指向 gateway 容器实际 bind-mount 的文件。
 # worktree 下的 config.yaml 才是被 mount 进 /app/config.yaml 的那份,
-# 不是主 checkout 的 /home/ubuntu/gateway2/config.yaml。
+# 不是主 checkout 的 config.yaml（路径随项目目录重命名变化，故相对解析）。
 HOST_CONFIG_YAML = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.yaml")
 AGNES_TEXT_MODEL = "agnes-2.0-flash"
 AGNES_IMAGE_MODEL = "agnes-image-2.1-flash"
@@ -63,13 +63,13 @@ def _reset_trace_collector():
         from aigateway_core.shared.trace_event import TraceCollector
         TraceCollector._current.set(None)
     except ImportError:
-        pass
+        pytest.skip("aigateway_core not installed — TraceCollector isolation skipped")
     yield
     try:
         from aigateway_core.shared.trace_event import TraceCollector
         TraceCollector._current.set(None)
     except ImportError:
-        pass
+        pass  # teardown: non-critical, core not available
 
 
 # ---- 让 tests/fixtures/*.py 里的 fixture 被 pytest 全局识别 ----

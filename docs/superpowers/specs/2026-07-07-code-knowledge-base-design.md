@@ -540,7 +540,7 @@ code_rag:
 
 ### Manual validation
 
-1. import current repo via `server_path=/home/ubuntu/gateway2`
+1. import current repo via `server_path=/home/ubuntu/aigateway`
 2. verify graph DB is created
 3. verify Qdrant `rag_code_*` collection exists with expected dimension
 4. ask a code question that should require call-chain context

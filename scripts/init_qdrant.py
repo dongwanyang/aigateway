@@ -15,10 +15,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import sys
 
-# 将项目根目录加入 PYTHONPATH
-sys.path.insert(0, "/home/ubuntu/gateway2/aigateway-core/src")
+# 将项目根目录加入 PYTHONPATH（相对脚本位置解析，避免硬编码绝对路径）
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "aigateway-core", "src"))
 
 from aigateway_core.shared.qdrant_client import QdrantClientManager
 

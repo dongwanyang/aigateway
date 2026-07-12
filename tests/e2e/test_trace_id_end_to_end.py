@@ -140,7 +140,7 @@ def test_t6_logger_carries_trace_id(admin_client, trace_helpers):
     evs = trace_helpers.wait(tid, timeout=10.0)
     assert evs, f"No events for logger test trace_id {tid}"
     # docker logs 找 gateway 容器 — 尝试多种容器名
-    container_names = ["gateway", "gateway2-gateway-1", "gateway-1"]
+    container_names = ["gateway", "aigateway-gateway-1", "gateway2-gateway-1", "gateway-1"]
     found = False
     for cname in container_names:
         proc = subprocess.run(

@@ -4,6 +4,8 @@
 #   或直接:sudo DOCKER_BUILDKIT=1 docker compose up -d --build gateway
 # .dockerignore 已排除 .venv/node_modules/.git 等,构建上下文 < 10MB
 # ============================================================
+name: aigateway
+
 services:
   # ==========================================================
   # API Gateway 服务
@@ -19,8 +21,8 @@ services:
     env_file:
       - .env
     environment:
-      - AI_GATEWAY_REDIS_URL=redis://redis:6379/0
-      - AI_GATEWAY_QDRANT_URL=http://qdrant:6333
+      - AI_GATEWAY_REDIS_URL=redis://aigateway-redis-1:6379/0
+      - AI_GATEWAY_QDRANT_URL=http://aigateway-qdrant-1:6333
     volumes:
       - ./config.yaml:/app/config.yaml
       - code_graphs_data:/data/code_graphs

@@ -89,18 +89,19 @@ def test_c3_generation_modality_inferred_image(user_client, trace_helpers):
             {"type": "image_url", "image_url": {"url": tiny_png}},
         ]}],
     }
+    resp = None
     try:
         resp = user_client.post("/v1/chat/completions", json=body,
                          headers={"X-Trace-Id": tid}, timeout=60)
-    except (httpx.ReadTimeout, httpx.TimeoutException):
-        pass
+    except (httpx.ReadTimeout, httpx.TimeoutException) as exc:
+        pytest.skip(f"Request timed out: {exc}")
     else:
         # 502 = upstream unavailable, trace chain unverifiable
         if resp.status_code == 502:
             pytest.skip("Upstream returned 502 — trace chain unverifiable")
     # 请求可能因上游拒绝而 4xx/5xx,但 media/pii 都已埋点、finally 已 flush
     evs = trace_helpers.wait(tid, timeout=30.0)
-    assert len(evs) > 0, f"No events for multimodal request"
+    assert evs, f"No events for multimodal request"
     stage_names = {e.get("name") for e in evs if e.get("kind") == "stage"}
     # 至少应含 pii_detector 或 media 相关 stage
     assert "pii_detector.sanitize" in stage_names or \

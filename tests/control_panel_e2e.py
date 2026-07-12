@@ -195,9 +195,12 @@ class TestHealthAndAuth:
 
     @pytest.mark.asyncio
     async def test_gateway_health(self):
-        """Gateway /health returns 200."""
-        ok, _ = await _direct_api("GET", "/health")
+        """Gateway /health returns 200 with healthy status."""
+        ok, result = await _direct_api("GET", "/health")
         assert ok, "Gateway /health is not responding"
+        body = result if isinstance(result, dict) else result.get("data", {})
+        assert body.get("status") == "healthy", \
+            f"Unexpected health response: {result}"
 
     @pytest.mark.asyncio
     async def test_control_panel_loads(self, page: Page):
@@ -218,20 +221,27 @@ class TestOverviewPage:
         await _login(page)
         await page.click('text=概览', timeout=5000)
         await page.wait_for_timeout(1500)
-        # Should see stat cards
+        # Should see stat cards with visible text
         cards = await page.locator(".stat-card, [class*='card']").count()
         assert cards > 0, "Overview page should show stat cards"
+        # At least the first card should have text content
+        if cards > 0:
+            first_card_text = await page.locator(".stat-card, [class*='card']").nth(0).inner_text()
+            assert first_card_text.strip(), "First stat card should have visible text"
 
     @pytest.mark.asyncio
     async def test_overview_metrics_present(self, page: Page):
-        """Overview page shows metrics data (not all zeros)."""
+        """Overview page shows metrics data (not just page title)."""
         await _login(page)
         await page.click('text=概览', timeout=5000)
         await page.wait_for_timeout(3000)
-        # Should see at least some numeric content
-        content = await page.content()
-        # If metrics are all zeros that's OK (no traffic yet) — just ensure page rendered
-        assert "概览" in content or "health" in content.lower()
+        # Should see stat cards with actual content
+        cards = await page.locator(".stat-card, [class*='card']").count()
+        assert cards > 0, "Overview page should show stat cards"
+        # At least some cards should have visible text content
+        for i in range(min(cards, 3)):
+            card_text = await page.locator(f".stat-card, [class*='card']").nth(i).inner_text()
+            assert card_text.strip(), f"Stat card {i} has no visible text"
 
 
 class TestModelsPage:
@@ -244,13 +254,21 @@ class TestModelsPage:
         await page.wait_for_timeout(1500)
         content = await page.content()
         assert "模型" in content or "provider" in content.lower() or "model" in content.lower()
+        # Verify page has actual content beyond just the title
+        body_text = await page.locator("body").inner_text()
+        assert len(body_text.strip()) > 50, \
+            f"Models page seems empty — only {len(body_text)} chars of text"
 
     @pytest.mark.asyncio
     async def test_get_full_config(self):
-        """GET /admin/config returns valid JSON."""
+        """GET /admin/config returns valid JSON with expected config sections."""
         ok, result = await _direct_api("GET", "/admin/config", timeout_val=30)
         assert ok, f"GET /admin/config failed: {result}"
-        assert isinstance(result.get("data"), dict), "Expected data dict"
+        data = result.get("data", result)
+        assert isinstance(data, dict), f"Expected data dict, got {type(data)}"
+        # Config should have at least some known sections
+        assert any(key in data for key in ("providers", "plugins", "debug", "cache", "generation_optimization")), \
+            f"Expected config to contain known sections, got keys: {list(data.keys())}"
 
     @pytest.mark.asyncio
     async def test_put_config_noop(self):
@@ -295,6 +313,9 @@ class TestPluginsPage:
         await page.wait_for_timeout(1500)
         content = await page.content()
         assert "插件" in content or "plugin" in content.lower()
+        body_text = await page.locator("body").inner_text()
+        assert len(body_text.strip()) > 30, \
+            f"Plugins page seems empty — only {len(body_text)} chars of text"
 
     @pytest.mark.asyncio
     async def test_get_plugins_config(self):
@@ -381,20 +402,31 @@ class TestQuotasPage:
         await page.wait_for_timeout(1500)
         content = await page.content()
         assert "配额" in content or "quota" in content.lower() or "API Key" in content
+        body_text = await page.locator("body").inner_text()
+        assert len(body_text.strip()) > 30, \
+            f"Quotas page seems empty — only {len(body_text)} chars of text"
 
     @pytest.mark.asyncio
     async def test_list_api_keys(self):
         ok, result = await _direct_api("GET", "/admin/api-keys")
         assert ok, f"listApiKeys failed: {result}"
         items = result.get("data", {}).get("items", [])
-        assert isinstance(items, list)
+        assert isinstance(items, list), f"Expected list, got {type(items)}"
+        # If items exist, verify structure
+        if items:
+            first = items[0]
+            assert "id" in first, f"API key item missing 'id': {first}"
 
     @pytest.mark.asyncio
     async def test_list_groups(self):
         ok, result = await _direct_api("GET", "/admin/groups")
         assert ok, f"listGroups failed: {result}"
         items = result.get("data", {}).get("items", [])
-        assert isinstance(items, list)
+        assert isinstance(items, list), f"Expected list, got {type(items)}"
+        # If items exist, verify structure
+        if items:
+            first = items[0]
+            assert "group_id" in first, f"Group item missing 'group_id': {first}"
 
     @pytest.mark.asyncio
     async def test_create_and_delete_group(self):
@@ -679,6 +711,9 @@ class TestCachePage:
         await page.wait_for_timeout(1500)
         content = await page.content()
         assert "缓存" in content or "cache" in content.lower()
+        body_text = await page.locator("body").inner_text()
+        assert len(body_text.strip()) > 30, \
+            f"Cache page seems empty — only {len(body_text)} chars of text"
 
     @pytest.mark.asyncio
     async def test_get_l3_cache_config(self):
@@ -689,20 +724,43 @@ class TestCachePage:
     async def test_list_l3_entries(self):
         ok, result = await _direct_api("GET", "/admin/cache/l3/entries")
         assert ok, f"GET /admin/cache/l3/entries failed: {result}"
+        # Should return a list or wrapped list
+        data = result.get("data", result) if isinstance(result, dict) else result
+        if isinstance(data, dict):
+            items = data.get("items", data.get("entries", []))
+            assert isinstance(items, list), f"Expected items list, got {type(items)}"
+        elif isinstance(data, list):
+            pass  # bare list is fine
+        else:
+            pytest.skip(f"Unexpected L3 entries response shape: {type(data)}")
 
     @pytest.mark.asyncio
     async def test_update_l3_cache_config(self):
-        """PUT /admin/cache/l3/config — update a setting."""
+        """PUT /admin/cache/l3/config — update a setting and verify persistence."""
         ok, result = await _direct_api("PUT", "/admin/cache/l3/config", body={
             "default_ttl_hours": 48,
         })
         assert ok, f"PUT /admin/cache/l3/config failed: {result}"
+        # Verify the value was persisted by reading it back
+        ok2, result2 = await _direct_api("GET", "/admin/cache/l3/config")
+        assert ok2, f"GET /admin/cache/l3/config failed after update: {result2}"
+        data = result2.get("data", result2) if isinstance(result2, dict) else result2
+        ttl = data.get("default_ttl_hours", data.get("ttl_hours", 0))
+        assert int(ttl) == 48, f"Expected ttl=48, got {ttl}"
 
     @pytest.mark.asyncio
     async def test_trigger_l3_cleanup(self):
-        """POST /admin/cache/l3/cleanup — trigger manual cleanup."""
+        """POST /admin/cache/l3/cleanup — trigger manual cleanup, verify response."""
         ok, result = await _direct_api("POST", "/admin/cache/l3/cleanup")
         assert ok, f"POST /admin/cache/l3/cleanup failed: {result}"
+        # Response should contain some info about the cleanup
+        data = result.get("data", result) if isinstance(result, dict) else result
+        if isinstance(data, dict):
+            # Accept either a count or a message
+            has_count = "count" in data or "deleted" in data or "cleaned" in data
+            has_message = "message" in data or "msg" in data
+            assert has_count or has_message, \
+                f"Cleanup response missing expected fields: {data}"
 
 
 class TestLogsPage:
@@ -715,6 +773,9 @@ class TestLogsPage:
         await page.wait_for_timeout(1500)
         content = await page.content()
         assert "日志" in content or "log" in content.lower()
+        body_text = await page.locator("body").inner_text()
+        assert len(body_text.strip()) > 20, \
+            f"Logs page seems empty — only {len(body_text)} chars of text"
 
     @pytest.mark.asyncio
     async def test_get_request_logs(self):
@@ -759,6 +820,9 @@ class TestKnowledgePage:
         await page.wait_for_timeout(1500)
         content = await page.content()
         assert "知识" in content or "knowledge" in content.lower() or "rag" in content.lower()
+        body_text = await page.locator("body").inner_text()
+        assert len(body_text.strip()) > 30, \
+            f"Knowledge page seems empty — only {len(body_text)} chars of text"
 
     @pytest.mark.asyncio
     async def test_list_rag_documents(self):
@@ -767,14 +831,12 @@ class TestKnowledgePage:
 
     @pytest.mark.asyncio
     async def test_import_rag_document(self):
-        """POST /admin/rag/documents — import a dummy document."""
+        """POST /admin/rag/documents — import a document by content (not URL, which may be unreachable)."""
         ok, result = await _direct_api("POST", "/admin/rag/documents", body={
-            "url": "https://example.com/test-doc.txt",
-            "chunk_strategy": "fixed_size",
-            "chunk_size": 512,
-            "chunk_overlap": 64,
+            "content": "This is a test document for RAG knowledge base.\n" + "Lorem ipsum " * 50,
+            "filename": "test_doc_import.txt",
         }, expect_ok=False)
-        # May fail if the URL is unreachable, but should not 500
+        # May fail (embedding/Qdrant unavailable), but should not 500
         if ok:
             assert "doc_id" in result.get("data", {}), f"Expected doc_id in response: {result}"
         else:
@@ -805,6 +867,9 @@ class TestCostsPage:
         await page.wait_for_timeout(1500)
         content = await page.content()
         assert "成本" in content or "cost" in content.lower()
+        body_text = await page.locator("body").inner_text()
+        assert len(body_text.strip()) > 20, \
+            f"Costs page seems empty — only {len(body_text)} chars of text"
 
     @pytest.mark.asyncio
     async def test_get_metrics_text(self):
@@ -842,6 +907,10 @@ gateway_cost_total 42.5
         if ok:
             data = result.get("data", {})
             assert "resultType" in data or "result" in data
+        else:
+            assert isinstance(result, dict), f"Non-dict error body: {result}"
+            assert result.get("detail") != "Internal Server Error", \
+                f"Prometheus query_range returned 500: {result}"
 
 
 # ---------------------------------------------------------------------------
@@ -859,31 +928,47 @@ class TestCodeRagPage:
         await page.wait_for_timeout(1500)
         content = await page.content()
         assert "知识" in content or "knowledge" in content.lower() or "rag" in content.lower()
+        body_text = await page.locator("body").inner_text()
+        assert len(body_text.strip()) > 20, \
+            f"Code RAG page seems empty — only {len(body_text)} chars of text"
 
     @pytest.mark.asyncio
     async def test_list_code_import_tasks_empty(self):
-        """GET /admin/rag/code/tasks — may not exist in all builds."""
+        """GET /admin/rag/code/tasks — returns list or wrapped data, never 500."""
         ok, result = await _direct_api("GET", "/admin/rag/code/tasks", expect_ok=False)
-        # Route may not be mounted; just verify no 500
-        if not ok and isinstance(result, dict):
+        if ok:
+            # Success path: should be a list or wrapped in data
+            if isinstance(result, dict):
+                data = result.get("data", result)
+                assert isinstance(data, list), f"Expected list in response, got {type(data)}"
+            else:
+                assert isinstance(result, list), f"Expected list, got {type(result)}"
+        else:
+            # Failure is acceptable (route may not be mounted) but NOT a 500.
+            assert isinstance(result, dict), f"Non-dict error body: {result}"
             assert result.get("detail") != "Internal Server Error", "Code tasks 500"
 
     @pytest.mark.asyncio
     async def test_list_code_repositories_empty(self):
-        """GET /admin/rag/code/repositories — should return list or wrapped data."""
+        """GET /admin/rag/code/repositories — should return list or wrapped data with expected structure."""
         ok, result = await _direct_api("GET", "/admin/rag/code/repositories")
         assert ok, f"listCodeRepositories failed: {result}"
         # Response may be a bare list or wrapped in {"data": [...]}
         if isinstance(result, dict):
-            result = result.get("data", result)
-        assert isinstance(result, list), f"Expected list, got {type(result)}: {result}"
+            data = result.get("data", result)
+            assert isinstance(data, list), f"Expected list in data, got {type(data)}"
+            if data:
+                assert "repo_id" in data[0] or "name" in data[0] or "id" in data[0], \
+                    f"Repository item missing expected fields: {data[0]}"
+        else:
+            assert isinstance(result, list), f"Expected list, got {type(result)}"
 
     @pytest.mark.asyncio
     async def test_import_code_server_path(self):
         """POST /admin/rag/code/import with source_type=server_path (JSON body)."""
         ok, result = await _direct_api("POST", "/admin/rag/code/import", body={
             "source_type": "server_path",
-            "server_path": "/home/ubuntu/gateway2",
+            "server_path": "/home/ubuntu/aigateway",
             "embedding_model": "Qwen/Qwen3-Embedding-0.6B",
         }, expect_ok=False)
         # May fail (server path may not exist), but should not 500
@@ -893,6 +978,9 @@ class TestCodeRagPage:
             assert isinstance(result, dict), f"Non-dict error body: {result}"
             assert result.get("detail") != "Internal Server Error", \
                 f"Code import (server_path) returned 500: {result}"
+
+    @pytest.mark.asyncio
+    async def test_import_code_git(self):
         """POST /admin/rag/code/import with source_type=git (JSON body)."""
         ok, result = await _direct_api("POST", "/admin/rag/code/import", body={
             "source_type": "git",
@@ -969,47 +1057,61 @@ class TestCodeRagPage:
 
     @pytest.mark.asyncio
     async def test_import_code_invalid_source_type(self):
-        """POST /admin/rag/code/import with bad source_type returns 400."""
+        """POST /admin/rag/code/import with bad source_type returns 400 with validation error."""
         ok, result = await _direct_api(
             "POST", "/admin/rag/code/import",
             body={"source_type": "invalid_type", "server_path": "/tmp"},
             expect_ok=False,
         )
         assert not ok, "Should fail with invalid source_type"
+        assert isinstance(result, dict), f"Expected dict error body, got {type(result)}"
+        detail = result.get("detail", "")
+        assert "invalid" in detail.lower() or "source_type" in detail.lower() or "validation" in detail.lower(), \
+            f"Expected validation error detail, got: {detail}"
 
     @pytest.mark.asyncio
     async def test_get_code_task_detail(self):
-        """GET /admin/rag/code/tasks/{task_id} — fake task_id should not 500."""
+        """GET /admin/rag/code/tasks/{task_id} — fake task_id should return 404, not 500."""
         fake_id = secrets.token_hex(8)
         ok, result = await _direct_api(
             "GET", f"/admin/rag/code/tasks/{fake_id}",
             expect_ok=False,
         )
-        if not ok and isinstance(result, dict):
-            assert result.get("detail") != "Internal Server Error", "Code task detail 500"
+        assert not ok, "Fake task_id should return failure"
+        assert isinstance(result, dict), f"Expected dict error body, got {type(result)}"
+        detail = result.get("detail", "")
+        assert "not found" in detail.lower() or result.get("status") == 404, \
+            f"Expected 404/not found, got: {detail}"
 
     @pytest.mark.asyncio
     async def test_cancel_code_task(self):
-        """POST /admin/rag/code/tasks/{task_id}/cancel — fake task_id should not 500."""
+        """POST /admin/rag/code/tasks/{task_id}/cancel — fake task_id should return 404, not 500."""
         fake_id = secrets.token_hex(8)
         ok, result = await _direct_api(
             "POST", f"/admin/rag/code/tasks/{fake_id}/cancel",
             expect_ok=False,
         )
-        if not ok and isinstance(result, dict):
-            assert result.get("detail") != "Internal Server Error", "Cancel task 500"
+        assert not ok, "Fake task_id cancel should return failure"
+        assert isinstance(result, dict), f"Expected dict error body, got {type(result)}"
+        detail = result.get("detail", "")
+        assert "not found" in detail.lower() or result.get("status") == 404, \
+            f"Expected 404/not found, got: {detail}"
 
     @pytest.mark.asyncio
     async def test_import_code_bad_json_body(self):
-        """POST /admin/rag/code/import with no body returns 400, not 500."""
+        """POST /admin/rag/code/import with no body returns 422 validation error, not 500."""
         ok, result = await _direct_api(
             "POST", "/admin/rag/code/import",
             body=None,
             expect_ok=False,
         )
-        # Should fail (bad request) but not 500
-        if not ok and isinstance(result, dict):
-            assert result.get("detail") != "Internal Server Error", "Bad JSON body 500"
+        # Should fail with validation error (missing required fields)
+        assert not ok, "Empty body should fail"
+        assert isinstance(result, dict), f"Expected dict error body, got {type(result)}"
+        detail = result.get("detail", "")
+        # FastAPI returns 422 for missing body fields
+        assert "validation" in detail.lower() or "field" in detail.lower() or "required" in detail.lower() or result.get("status") in (400, 422), \
+            f"Expected validation error, got: {detail}"
 
 
 @pytest.mark.asyncio
@@ -1068,6 +1170,10 @@ class TestLogsPageExtra:
         if ok:
             data = result.get("data", {})
             assert "trace_id" in data or "error" in data
+        else:
+            assert isinstance(result, dict), f"Non-dict error body: {result}"
+            assert result.get("detail") != "Internal Server Error", \
+                f"Trace detail returned 500: {result}"
 
     @pytest.mark.asyncio
     async def test_post_batch_delete_logs(self):
@@ -1086,43 +1192,64 @@ class TestLogsPageExtra:
 
 
 class TestCachePageExtra:
-    """Cache operations: l1/l2 config, stats, flush (may not exist in all builds)."""
+    """Cache operations: l1/l2 config, stats, flush (may not exist in all builds).
+
+    These endpoints may not be mounted in all builds. Tests assert that if they exist,
+    they return structured responses; if they don't exist, they return 404 (not 500).
+    """
 
     @pytest.mark.asyncio
     async def test_get_l1_cache_config(self):
         ok, result = await _direct_api("GET", "/admin/cache/l1/config", expect_ok=False)
-        # Endpoint may not exist; just verify no 500
-        if not ok and isinstance(result, dict):
+        if ok:
+            assert isinstance(result, dict), f"Expected dict, got {type(result)}"
+        else:
+            assert isinstance(result, dict), f"Non-dict error body: {result}"
             assert result.get("detail") != "Internal Server Error", "L1 config 500"
 
     @pytest.mark.asyncio
     async def test_get_l2_cache_config(self):
         ok, result = await _direct_api("GET", "/admin/cache/l2/config", expect_ok=False)
-        if not ok and isinstance(result, dict):
+        if ok:
+            assert isinstance(result, dict), f"Expected dict, got {type(result)}"
+        else:
+            assert isinstance(result, dict), f"Non-dict error body: {result}"
             assert result.get("detail") != "Internal Server Error", "L2 config 500"
 
     @pytest.mark.asyncio
     async def test_l1_cache_stats(self):
         ok, result = await _direct_api("GET", "/admin/cache/l1/stats", expect_ok=False)
-        if not ok and isinstance(result, dict):
+        if ok:
+            assert isinstance(result, dict), f"Expected dict, got {type(result)}"
+        else:
+            assert isinstance(result, dict), f"Non-dict error body: {result}"
             assert result.get("detail") != "Internal Server Error", "L1 stats 500"
 
     @pytest.mark.asyncio
     async def test_l2_cache_stats(self):
         ok, result = await _direct_api("GET", "/admin/cache/l2/stats", expect_ok=False)
-        if not ok and isinstance(result, dict):
+        if ok:
+            assert isinstance(result, dict), f"Expected dict, got {type(result)}"
+        else:
+            assert isinstance(result, dict), f"Non-dict error body: {result}"
             assert result.get("detail") != "Internal Server Error", "L2 stats 500"
 
     @pytest.mark.asyncio
     async def test_flush_l1_cache(self):
         ok, result = await _direct_api("POST", "/admin/cache/l1/flush", expect_ok=False)
-        if not ok and isinstance(result, dict):
+        if ok:
+            assert isinstance(result, dict), f"Expected dict, got {type(result)}"
+        else:
+            assert isinstance(result, dict), f"Non-dict error body: {result}"
             assert result.get("detail") != "Internal Server Error", "L1 flush 500"
 
     @pytest.mark.asyncio
     async def test_flush_l2_cache(self):
         ok, result = await _direct_api("POST", "/admin/cache/l2/flush", expect_ok=False)
-        if not ok and isinstance(result, dict):
+        if ok:
+            assert isinstance(result, dict), f"Expected dict, got {type(result)}"
+        else:
+            assert isinstance(result, dict), f"Non-dict error body: {result}"
             assert result.get("detail") != "Internal Server Error", "L2 flush 500"
 
     @pytest.mark.asyncio
@@ -1168,9 +1295,18 @@ class TestMetricsAndQuotasExtra:
 
     @pytest.mark.asyncio
     async def test_metrics_json(self):
-        """GET /admin/metrics-json — Prometheus text format."""
+        """GET /admin/metrics-json — Prometheus text format with expected metric names."""
         ok, result = await _direct_api("GET", "/admin/metrics-json")
         assert ok, f"GET /admin/metrics-json failed: {result}"
+        # Result should be a string (Prometheus text format) or dict with text
+        if isinstance(result, str):
+            assert len(result) > 0, "Metrics text should not be empty"
+            assert "gateway_" in result, "Expected gateway_ prefixed metrics"
+        elif isinstance(result, dict):
+            text = result.get("data", result.get("text", ""))
+            if isinstance(text, str):
+                assert len(text) > 0, "Metrics text should not be empty"
+                assert "gateway_" in text, "Expected gateway_ prefixed metrics"
 
     @pytest.mark.asyncio
     async def test_quota_detail(self):
@@ -1238,13 +1374,17 @@ class TestKnowledgePageExtra:
 
     @pytest.mark.asyncio
     async def test_import_document_without_url_or_content(self):
-        """POST /admin/rag/documents with no url or content should fail gracefully."""
+        """POST /admin/rag/documents with no url or content should fail with validation error."""
         ok, result = await _direct_api(
             "POST", "/admin/rag/documents",
             body={},
             expect_ok=False,
         )
         assert not ok, "Should fail without url or content"
+        assert isinstance(result, dict), f"Expected dict error body, got {type(result)}"
+        detail = result.get("detail", "")
+        assert "url" in detail.lower() or "content" in detail.lower() or "validation" in detail.lower() or "required" in detail.lower(), \
+            f"Expected validation error about missing url/content, got: {detail}"
 
 
 # ---------------------------------------------------------------------------

@@ -34,3 +34,6 @@ def test_get_debug_config_endpoint_returns_all_dims(monkeypatch):
     assert data["cache"] is True
     assert data["plugins_enabled"] is True
     assert data["per_plugin"]["pii_detector"] is True
+    # Verify all 5 dimensions are present
+    for dim in ("frontend", "entry", "cache", "bridge", "plugins_enabled"):
+        assert dim in data, f"Missing dimension: {dim}"

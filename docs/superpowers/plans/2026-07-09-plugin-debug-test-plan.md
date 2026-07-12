@@ -1005,7 +1005,7 @@ Expected: `Syntax OK`
 
 - [ ] **Step 2: Dry-run the test (may skip if infra not available)**
 
-Run: `cd /home/ubuntu/gateway2 && python3 -m pytest tests/test_plugin_debug_integration.py -v --tb=short 2>&1 | head -60`
+Run: `cd /home/ubuntu/aigateway && python3 -m pytest tests/test_plugin_debug_integration.py -v --tb=short 2>&1 | head -60`
 Expected: Tests run; some may skip if Redis/Qdrant unavailable (graceful degradation)
 
 - [ ] **Step 3: Commit**

@@ -10,11 +10,11 @@
 
 ## Global Constraints
 
-- **Working directory**: `/home/ubuntu/gateway2/.claude/worktrees/trace-debug-modality`
+- **Working directory**: `/home/ubuntu/aigateway/.claude/worktrees/trace-debug-modality`
 - **Base branch for Phase 1 sub-branches**: `worktree-trace-debug-modality`
 - **Environment**: existing running `docker compose` — do NOT `docker compose down` mid-plan; verify `curl -s http://localhost:8000/health` returns 200 before every task
 - **Admin auth header**: `Authorization: Bearer gw-rRIop4dpcyJJNUTJbHmHpr9Bj3M11s5o` (from `config.yaml` `auth.api_keys[0]` — `is_admin: true`). Env var name for tests: `AI_GATEWAY_ADMIN_KEY`. Set once at shell startup: `export AI_GATEWAY_ADMIN_KEY=gw-rRIop4dpcyJJNUTJbHmHpr9Bj3M11s5o`
-- **Host config.yaml path**: `/home/ubuntu/gateway2/config.yaml` (bind-mounted, host-readable)
+- **Host config.yaml path**: `/home/ubuntu/aigateway/config.yaml` (bind-mounted, host-readable)
 - **Redis**: `redis://localhost:6379/0`
 - **Qdrant**: `http://localhost:6333`
 - **Prometheus**: `http://localhost:9090`
@@ -339,7 +339,7 @@ REDIS_URL = "redis://localhost:6379/0"
 QDRANT_URL = "http://localhost:6333"
 PROM_URL = "http://localhost:9090"
 GRAFANA_URL = "http://localhost:3001"
-HOST_CONFIG_YAML = "/home/ubuntu/gateway2/config.yaml"
+HOST_CONFIG_YAML = "/home/ubuntu/aigateway/config.yaml"
 AGNES_TEXT_MODEL = "agnes-2.0-flash"
 AGNES_IMAGE_MODEL = "agnes-image-2.1-flash"
 AGNES_VIDEO_MODEL = "agnes-video-v2.0"
@@ -1325,7 +1325,7 @@ Skip if working purely locally.
 
 **Setup (each window, once):**
 ```bash
-cd /home/ubuntu/gateway2/.claude/worktrees/trace-debug-modality
+cd /home/ubuntu/aigateway/.claude/worktrees/trace-debug-modality
 git checkout -b test-e2e-window-<letter> phase0-done
 export AI_GATEWAY_ADMIN_KEY=gw-rRIop4dpcyJJNUTJbHmHpr9Bj3M11s5o
 # verify env:
