@@ -76,11 +76,11 @@ qdrant-client
 # langchain-community: GenericLoader + LanguageParser(底层封装 tree-sitter)
 # langchain-text-splitters: RecursiveCharacterTextSplitter.from_language(AST 语义边界切分)
 # gitpython: Git URL 浅克隆(shallow clone)
-# codegraph: 基于 tree-sitter 预索引的调用图谱(SQLite),追踪 callers/callees/imports
+# codegraph CLI 不在这里:它是 npm 包 @colbymchenry/codegraph,由 Dockerfile 全局安装,
+# 不要加 PyPI 同名包 codegraph(那是 xnuinside 的无关工具)。
 langchain-community
 langchain-text-splitters
 gitpython
-codegraph
 
 # --- 对话历史压缩(langchain 1.x 把 Legacy Memory 移到 langchain-classic)---
 langchain-classic
