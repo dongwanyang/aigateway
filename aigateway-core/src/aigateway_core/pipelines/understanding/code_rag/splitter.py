@@ -1,16 +1,22 @@
 """代码库切分 + 路径白名单 + 行号跨度回退.
 
-切分链路(AST.txt 指定):
-  GenericLoader.from_filesystem
-    → LanguageParser  (底层 tree-sitter,按类/函数边界切)
-    → RecursiveCharacterTextSplitter.from_language  (超长块按 AST 边界二次切)
+两条切分链路:
+1. **build_symbol_chunks(重构后主路径)**:从 codegraph db 读符号节点,用
+   start_line/end_line 从源文件切出 chunk_text,并构造**结构描述嵌入文本**
+   (符号名/签名/callers/callees/docstring)。一个符号一个 chunk,与 Qdrant
+   point 一一对应。嵌入的是结构描述而非源码 → 意图语义强、向量稳定、增量友好。
+2. **split_code_directory(兼容入口)**:LangChain GenericLoader + LanguageParser
+   (tree-sitter) + RecursiveCharacterTextSplitter。保留给老调用方/单测,内部
+   不再委托 build_symbol_chunks(两条链路独立,split_code_directory 仍嵌源码)。
 
 路径白名单用 realpath 展开对比,拒绝符号链接逃逸。
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -205,8 +211,6 @@ def split_code_directory(
       warning 并跳过,不影响其他文件(与 spec 的"file parse failure: skip"一致)。
     - 忽略规则: 只要文件路径中包含任一 ignore_patterns 中的子串就跳过。
     """
-    import logging
-
     from langchain_community.document_loaders.generic import GenericLoader
     from langchain_community.document_loaders.parsers import LanguageParser
     from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -276,3 +280,244 @@ def split_code_directory(
                     }
                 )
     return results
+
+
+# ----------------------------------------------------------------------
+# build_symbol_chunks — 重构后的主切分路径(codegraph 行号切源码 + 结构描述嵌入)
+# ----------------------------------------------------------------------
+
+
+# 源码片段行数兜底:当 db 的 start_line/end_line 取不到源码(文件已删/越界)时,
+# fallback 到读取源文件前 N 行,避免 chunk_text 为空把向量打废。
+_SOURCE_FALLBACK_LINES = 40
+# 无 docstring 时,embed_text 拼上源码前 N 行(注释 + 签名),避免向量区分度过低。
+# 实测 ~88% 函数无 docstring,靠符号名 + callers/callees + 签名 + 首行补偿。
+_EMBED_SOURCE_PREVIEW_LINES = 6
+
+
+def _graph_db_path(graph_repo_path: str) -> str:
+    return str(Path(graph_repo_path) / ".codegraph" / "codegraph.db")
+
+
+def _read_symbol_nodes(
+    graph_repo_path: str, only_files: list[str] | None = None
+) -> list[dict[str, Any]]:
+    """从 codegraph db 读 function/method/class 节点。
+
+    only_files 给定时只读这些 db file_path(带 src/ 前缀)的节点——增量 sync 用,
+    只重切变了文件的符号。
+    返回 [{kind,name,file_path,start_line,end_line,signature,docstring,language}].
+    file_path 带 src/ 前缀(graph_builder symlink 约定)。
+    """
+    db_path = _graph_db_path(graph_repo_path)
+    if not Path(db_path).exists():
+        return []
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        if only_files:
+            placeholders = ",".join("?" for _ in only_files)
+            rows = conn.execute(
+                f"""
+                SELECT kind, name, file_path, start_line, end_line, signature, docstring, language
+                FROM nodes
+                WHERE kind IN ('function', 'method', 'class')
+                  AND name IS NOT NULL AND name != ''
+                  AND file_path IN ({placeholders})
+                ORDER BY file_path, start_line
+                """,
+                only_files,
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT kind, name, file_path, start_line, end_line, signature, docstring, language
+                FROM nodes
+                WHERE kind IN ('function', 'method', 'class')
+                  AND name IS NOT NULL AND name != ''
+                ORDER BY file_path, start_line
+                """
+            ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def _resolve_source_file(file_path_in_db: str, source_dir: str) -> tuple[str, str]:
+    """把 db 里带 src/ 前缀的 file_path 解析成 (绝对源文件路径, 相对源根路径)。
+
+    graph_builder 把源码 symlink 成 work_dir/src,db 存 src/<rel>。剥掉 src/ 前缀
+    得到相对 source_dir 的路径,再 join source_dir 得绝对路径。
+    若 db 路径不以 src/ 开头(理论上不会,但兜底),直接 join source_dir。
+    """
+    rel = file_path_in_db
+    if rel.startswith("src/"):
+        rel = rel[len("src/"):]
+    elif rel.startswith("src\\"):
+        rel = rel[len("src\\"):]
+    abs_path = str(Path(source_dir) / rel) if rel else str(Path(source_dir))
+    return abs_path, rel
+
+
+def _slice_source_lines(
+    abs_path: str, start_line: int, end_line: int
+) -> str:
+    """从源文件切出 [start_line, end_line] 行(1 起,含尾)。失败返回空串。"""
+    try:
+        with open(abs_path, "r", encoding="utf-8", errors="replace") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return ""
+    # 1-based → 0-based slice
+    start = max(1, int(start_line or 1)) - 1
+    end = max(start + 1, int(end_line or start_line or 1))
+    return "".join(lines[start:end])
+
+
+def _build_embed_text(
+    kind: str,
+    name: str,
+    file_path: str,
+    signature: str | None,
+    docstring: str | None,
+    callers: list[str],
+    callees: list[str],
+    source_preview: str,
+) -> str:
+    """构造结构描述嵌入文本(意图语义强、向量稳定、增量友好)。
+
+    形如:
+        function login in auth.py
+        signature: (user, pw) -> str
+        callers: register
+        callees: hash_password, jwt_encode
+        docstring: 用户登录认证
+
+    无 docstring 时拼上源码前 N 行(注释+签名),避免嵌入文本过短。
+    """
+    rel = file_path
+    if rel.startswith("src/"):
+        rel = rel[len("src/"):]
+    parts = [f"{kind} {name} in {rel}"]
+    if signature:
+        parts.append(f"signature: {signature}")
+    if callers:
+        parts.append("callers: " + ", ".join(callers))
+    if callees:
+        parts.append("callees: " + ", ".join(callees))
+    if docstring and docstring.strip():
+        parts.append(f"docstring: {docstring.strip()}")
+    else:
+        # 兜底:无 docstring 的符号(~88%),拼源码前 N 行(注释 + 首行签名)
+        preview = "\n".join(
+            ln for ln in source_preview.splitlines()[:_EMBED_SOURCE_PREVIEW_LINES]
+            if ln.strip()
+        )
+        if preview:
+            parts.append(f"source:\n{preview}")
+    return "\n".join(parts)
+
+
+def build_symbol_chunks(
+    source_dir: str,
+    graph_repo_path: str,
+    ignore_patterns: list[str],
+    *,
+    only_files: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """从 codegraph db 读符号节点,用行号切源码 + 构造结构描述嵌入文本。
+
+    每个符号节点产出 1 个 chunk,字段:
+      embed_text(结构描述,用于 embedding)
+      chunk_text(源码,存 payload)
+      file_path / filename / language / chunk_index
+      start_line / end_line / function_name / class_name
+      callers / callees / imports / signature / docstring
+
+    callers/callees 调 graph_query(CLI);imports 走 db 点查询。
+    ignore_patterns: 路径含任一子串的符号跳过(与 split_code_directory 一致)。
+    only_files: 增量 sync 用,只切这些 db file_path(带 src/ 前缀)的符号;
+      不给则切全部。注意 only_files 里的 chunk_index 从 0 重新计(单文件重切)。
+    """
+    from aigateway_core.pipelines.understanding.code_rag.graph_query import (
+        _callees_list,
+        _callers_list,
+        _get_imports_for_file,
+    )
+
+    logger = logging.getLogger(__name__)
+    source_root = Path(source_dir).resolve()
+    nodes = _read_symbol_nodes(graph_repo_path, only_files=only_files)
+
+    chunks: list[dict[str, Any]] = []
+    per_file_index: dict[str, int] = {}
+
+    for node in nodes:
+        rel_in_db = str(node.get("file_path") or "")
+        if any(pat and pat in rel_in_db for pat in (ignore_patterns or [])):
+            continue
+        abs_path, rel_path = _resolve_source_file(rel_in_db, str(source_root))
+        name = str(node.get("name") or "")
+        kind = str(node.get("kind") or "function")
+        start_line = int(node.get("start_line") or 1)
+        end_line = int(node.get("end_line") or start_line)
+
+        chunk_text = _slice_source_lines(abs_path, start_line, end_line)
+        if not chunk_text:
+            logger.warning(
+                "code_rag: 无法切出源码 %s L%d-%d,跳过该符号",
+                rel_path, start_line, end_line,
+            )
+            continue
+
+        # callers/callees 走 CLI(失败容忍:空列表)
+        try:
+            callers = _callers_list(graph_repo_path, name)
+        except Exception as exc:
+            logger.debug("code_rag: callers 查询失败 %s: %s", name, exc)
+            callers = []
+        try:
+            callees = _callees_list(graph_repo_path, name)
+        except Exception as exc:
+            logger.debug("code_rag: callees 查询失败 %s: %s", name, exc)
+            callees = []
+        try:
+            imports = _get_imports_for_file(graph_repo_path, rel_path)
+        except Exception:
+            imports = []
+
+        signature = node.get("signature")
+        docstring = node.get("docstring")
+        language = str(node.get("language") or "text")
+
+        embed_text = _build_embed_text(
+            kind, name, rel_path, signature, docstring, callers, callees, chunk_text,
+        )
+
+        idx = per_file_index.get(rel_path, 0)
+        per_file_index[rel_path] = idx + 1
+
+        function_name = name if kind in ("function", "method") else None
+        class_name = name if kind == "class" else None
+
+        chunks.append(
+            {
+                "embed_text": embed_text,
+                "chunk_text": chunk_text,
+                "file_path": rel_path,
+                "filename": Path(rel_path).name,
+                "language": language,
+                "chunk_index": idx,
+                "start_line": start_line,
+                "end_line": end_line,
+                "function_name": function_name,
+                "class_name": class_name,
+                "callers": callers,
+                "callees": callees,
+                "imports": imports,
+                "signature": signature or "",
+                "docstring": docstring or "",
+            }
+        )
+    return chunks
+

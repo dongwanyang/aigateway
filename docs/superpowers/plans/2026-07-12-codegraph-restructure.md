@@ -69,12 +69,13 @@
 
 **配套：`git` 源持久化（为步骤 6 sync 服务）**。当前 `git` 源 clone 到临时目录、加入 `cleanup_dirs`，导入完在 `finally`（`code_rag_routes.py:676`）删掉 → sync 时无源码。改为：
 
-- import endpoint（`code_rag_routes.py:771-775`）：`git` 源 clone 到持久目录 `{graph_repo_path}/source/`（即 `{graph_db_dir}/{document_id}/source/`），**不进 `cleanup_dirs`**。
+- import endpoint（`code_rag_routes.py:771-775`）：`git` 源 clone 到持久目录 `{graph_repo_path}/src/`（即 `{graph_db_dir}/{document_id}/src/`），**不进 `cleanup_dirs`**。注意：路径段必须是 `src/`——graph_builder 把源码 symlink 成 `work_dir/src` 后跑 `codegraph init`，db 里所有 `file_path` 都带 `src/` 前缀（如 `src/auth.py`）；持久化源码落在 `src/` 下才能让 `codegraph node`（输出源码块）与 `codegraph sync`（增量重扫）按 `files.path` 正确解析。
 - `_materialize_git_repo` 增加可选 `dest_dir` 参数，指定时 clone 到该目录而非 `tempfile.mkdtemp`。
-- `repo_meta` 新增 `workspace_path`（`{graph_repo_path}/source/`）与 `source_type`，供 sync 端点判断该仓是否可增量（`git`/`server_path` 可，`folder`/`zip` 不可）。
-- 删仓时（步骤 4）删整个 `{graph_repo_path}/` 目录，顺带清掉 `source/`。
-- `folder`/`zip` 源**仍走临时目录 + cleanup**（快照源，无 sync 需求）。
+- `repo_meta` 新增 `workspace_path`（`{graph_repo_path}/src/`）与 `source_type`，供 sync 端点判断该仓是否可增量（`git`/`server_path` 可，`folder`/`zip` 不可）。
+- 删仓时（步骤 4）删整个 `{graph_repo_path}/` 目录，顺带清掉 `src/`。
+- `folder`/`zip` 源**仍走临时目录 + cleanup**（快照源，无 sync 需求；其检索源码来自 Qdrant payload 的 `chunk_text`，不依赖持久源文件）。
 
+> `server_path` 不复制源码（源本就在场，路径白名单内的目录直接读），sync 时重扫原路径；但 `codegraph sync` 需要 db `files.path` 对应的源文件可解析，故 server_path 仓的 `workspace_path` 记录原 `server_path` 目录，sync 时把 `.codegraph/` 临时放到一个 `src/` symlink 指向该目录的结构下（或直接在原路径旁建 `.codegraph/`，见步骤 6 实现细节）。
 > 这样 `git` 与 `server_path` 都成为 spec §5.1 的 managed 源，sync 可拉取/重扫源码后跑 `codegraph sync`。`folder`/`zip` 是 snapshot 源，sync 返回 400。
 
 ### 步骤 2：重写 graph_query.py — 替换为 codegraph CLI 子进程
@@ -180,9 +181,9 @@ def lookup_related_symbols_strict(graph_repo_path, file_path, symbol_name, *, ho
 增量流程：
 1. 读 `repo_meta`，校验 `source_type ∈ {git, server_path}`；`folder`/`zip` 返回 400「快照源不支持 sync，请重新导入」。
 2. **刷新源码**（managed 源才有）：
-   - `git`：在持久化的 `{graph_repo_path}/source/` 里 `git fetch + reset --hard origin/<branch>`（不重新 clone）。
-   - `server_path`：重扫既有路径（源文件本就在场）。
-3. `codegraph sync <graph_repo_path>` — 增量更新图谱（位置参数，**不接 `-p`**，走 `_run_codegraph_raw`，cwd 指向 source 目录）
+   - `git`：在持久化的 `{graph_repo_path}/src/` 里 `git fetch + reset --hard origin/<branch>`（不重新 clone）。源码在 `src/` 下，db `files.path` 前缀就是 `src/`，`codegraph sync` 可直接解析。
+   - `server_path`：原 `server_path` 目录本就在场（白名单内），重扫即可。由于 server_path 仓的 `.codegraph/` 在 `{graph_repo_path}/`、而源码在原路径，sync 前需让 `files.path`（`src/...` 前缀）能解析到源文件——做法：sync 时临时在 `{graph_repo_path}/` 下确保 `src` 是指向 `workspace_path`（原 server_path 目录）的 symlink（导入时已建立，sync 复用）。
+3. `codegraph sync <graph_repo_path>` — 增量更新图谱（位置参数，**不接 `-p`**，走 `_run_codegraph_raw`，cwd 指向 `{graph_repo_path}`）
 4. 对比 sync 前后 `files` 表的 `content_hash`，找出变化文件
 5. 对每个变化文件：
    - Qdrant `delete_by_filter`（按 `document_id` + `file_path` 删旧 chunk）
@@ -190,23 +191,23 @@ def lookup_related_symbols_strict(graph_repo_path, file_path, symbol_name, *, ho
 6. 未变文件完全不动
 7. 返回 `{synced_files, refreshed_symbols}`
 
-**注意**：步骤 1 已把 `git` 源 clone 持久化到 `{graph_repo_path}/source/`（不进 cleanup_dirs），所以 git 可增量 sync。`folder`/`zip` 仍走临时目录 + cleanup，sync 返回 400。
+**注意**：步骤 1 已把 `git` 源 clone 持久化到 `{graph_repo_path}/src/`（不进 cleanup_dirs），所以 git 可增量 sync。`server_path` 导入时把原路径 symlink 成 `{graph_repo_path}/src`（同样不进 cleanup），sync 时复用。`folder`/`zip` 仍走临时目录 + cleanup，sync 返回 400。
 
 ### 步骤 7：新增 CLI — aigateway codegraph 子命令
 
 **新增文件**：`aigateway-cli/src/aigateway_cli/codegraph.py`
 
-子命令（本地直查 `.codegraph` 目录，走 codegraph CLI）：
+子命令（**全部走 admin API**，不本地直查 `.codegraph` —— 本地 CLI 用户通常无法访问服务端 `/data/code_graphs/...`，故统一通过 `GET/POST /admin/rag/code/repositories/{document_id}/*` 转发，由服务端跑 codegraph CLI）：
 - `aigateway codegraph status` — 列仓库（走 API `GET /admin/rag/code/repositories`）
-- `aigateway codegraph query <symbol> -p <repo> [--kind K] [--limit N] [--json]`
-- `aigateway codegraph callers <symbol> -p <repo> [--json]`
-- `aigateway codegraph callees <symbol> -p <repo> [--json]`
-- `aigateway codegraph impact <symbol> -p <repo> [--depth N] [--json]`
-- `aigateway codegraph node <symbol> -p <repo>` — 调用链 trail（符号模式不输出源码块；源码获取走 db 行号切片，见步骤 2/3）
-- `aigateway codegraph files -p <repo> [--json]`
-- `aigateway codegraph sync -p <repo>` — 走 API 触发增量
+- `aigateway codegraph query <symbol> -d <document_id> [--kind K] [--limit N] [--json]`
+- `aigateway codegraph callers <symbol> -d <document_id> [--json]`
+- `aigateway codegraph callees <symbol> -d <document_id> [--json]`
+- `aigateway codegraph impact <symbol> -d <document_id> [--depth N] [--json]`
+- `aigateway codegraph node <symbol> -d <document_id>` — 调用链 trail（服务端走 `codegraph node -p <repo>`，符号模式在源在场时也会输出源码块；源码获取另有 db 行号切片兜底，见步骤 2/3）
+- `aigateway codegraph files -d <document_id> [--json]`
+- `aigateway codegraph sync -d <document_id>` — 走 API `POST .../sync` 触发增量
 
-`-p/--path` 指向 `{graph_db_dir}/{document_id}` 目录（仅查询类命令 `query`/`callers`/`callees`/`impact`/`files`/`node` 用 `-p`；`sync`/`init` 用位置参数）。
+`-d/--document` 指定仓库 `document_id`（映射到服务端 `{graph_db_dir}/{document_id}` 目录）。`-p/--path` 本地路径不可用，已改为 API 路由。
 
 **修改**：`aigateway-cli/src/aigateway_cli/__main__.py` 注册 `codegraph` 子解析器 + main 分支。
 
@@ -229,7 +230,7 @@ def lookup_related_symbols_strict(graph_repo_path, file_path, symbol_name, *, ho
 **修改**：`control-panel/src/pages/KnowledgeCodeTab.tsx` — 在仓库列表每行（现仅有「删除」按钮，`KnowledgeCodeTab.tsx:705`）追加功能按钮：
 
 - **同步** 按钮：仅 `source_type ∈ {git, server_path}` 显示；点击调 `syncCodeRepository`，loading 态 + 完成后提示 `synced_files/refreshed_symbols`。`folder`/`zip` 源隐藏该按钮（或置灰 tooltip「快照源不支持同步」）。
-- **调用关系** 按钮：点开行内 drawer/弹窗，含符号搜索框 → 调 `queryCodeSymbols` → 选中符号后展示 `callers`/`callees`/`impact`（三个 tab，分别调对应 API）。无源码块展示（与步骤 2 `get_node` 一致：符号模式不输出源码）。
+- **调用关系** 按钮：点开行内 drawer/弹窗，含符号搜索框 → 调 `queryCodeSymbols` → 选中符号后展示 `callers`/`callees`/`impact`（三个 tab，分别调对应 API）。无源码块展示（关系列表只展示 name/kind/file_path/start_line）。
 - 保留现有「删除」按钮。
 
 > UI 形态参考 spec §15（list/tree 优先，不做高级图谱可视化）。本计划只加按钮 + 最小可用查询面板；workbench 级 UI（repo catalog、operations panel、watcher）属 spec 范畴，不在本计划。

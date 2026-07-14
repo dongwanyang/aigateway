@@ -124,6 +124,60 @@ def build_parser() -> argparse.ArgumentParser:
         help="温度参数，范围 0.0-2.0（默认 1.0）",
     )
 
+    # ---------- codegraph 子命令 ----------
+    codegraph_parser = subparsers.add_parser(
+        "codegraph",
+        help="代码图谱查询与管理（走 admin API）",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "示例:\n"
+            "  aigateway codegraph status\n"
+            "  aigateway codegraph query login -d code_abc123\n"
+            "  aigateway codegraph callers login -d code_abc123 --json\n"
+            "  aigateway codegraph impact login -d code_abc123 --depth 2\n"
+            "  aigateway codegraph sync -d code_abc123\n"
+        ),
+    )
+    codegraph_parser.add_argument(
+        "action",
+        choices=["status", "query", "callers", "callees", "impact", "node", "files", "sync"],
+        help="子操作",
+    )
+    codegraph_parser.add_argument(
+        "symbol",
+        nargs="?",
+        default=None,
+        help="符号名（query/callers/callees/impact/node 需要）",
+    )
+    codegraph_parser.add_argument(
+        "-d", "--document",
+        default=None,
+        help="document_id（除 status 外都需要）",
+    )
+    codegraph_parser.add_argument(
+        "--kind",
+        default=None,
+        help="query 时按节点类型过滤（function/class/method）",
+    )
+    codegraph_parser.add_argument(
+        "--limit",
+        type=int,
+        default=10,
+        help="query 最大结果数（默认 10）",
+    )
+    codegraph_parser.add_argument(
+        "--depth",
+        type=int,
+        default=2,
+        help="impact 遍历深度（默认 2）",
+    )
+    codegraph_parser.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="输出原始 JSON",
+    )
+
     return parser
 
 
@@ -169,6 +223,21 @@ def main(argv: list[str] | None = None) -> int:
             model=args.model,
             output_format=args.format,
             temperature=args.temperature,
+        )
+
+    elif args.command == "codegraph":
+        from aigateway_cli.codegraph import main as codegraph_main
+
+        return codegraph_main(
+            api_key=api_key,
+            base_url=base_url,
+            action=args.action,
+            symbol=args.symbol,
+            document=args.document,
+            kind=args.kind,
+            limit=args.limit,
+            depth=args.depth,
+            as_json=args.as_json,
         )
 
     return 0

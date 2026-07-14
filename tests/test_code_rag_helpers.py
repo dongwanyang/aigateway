@@ -182,6 +182,8 @@ def test_code_chunk_payload_includes_required_fields() -> None:
         "callers",
         "callees",
         "imports",
+        "signature",
+        "docstring",
         "embedding_model",
     }
     sample = {
@@ -199,16 +201,20 @@ def test_code_chunk_payload_includes_required_fields() -> None:
         "callers": [],
         "callees": [],
         "imports": [],
+        "signature": "(user, pw)",
+        "docstring": "用户登录认证",
         "embedding_model": "Qwen/Qwen3-Embedding-0.6B",
     }
     assert required.issubset(set(sample.keys()))
 
 
 def test_code_rag_routes_build_matching_payload_shape(monkeypatch) -> None:
-    """确认 code_rag_routes 侧构造 payload 的字段集与 spec 一致。
+    """轻量防回归:确认 code_rag_routes 侧 payload 字段集仍在源码里。
 
-    这里做静态字符串核对而不启动完整导入(依赖 codegraph/sentence-transformers),
-    避免在开发机跑重资产依赖。
+    真实的 payload 字段集*落盘*已由
+    tests/test_code_rag_routes.py::test_run_code_import_task_passes_real_symbol_name_to_graph_lookup
+    运行时验证(完整 17 字段 issubset 检查)。本静态字符串核对仅作廉价 guard,
+    避免开发机跑 codegraph/sentence-transformers 重依赖。
     """
     src = (
         REPO_ROOT
@@ -232,50 +238,64 @@ def test_code_rag_routes_build_matching_payload_shape(monkeypatch) -> None:
         "callers",
         "callees",
         "imports",
+        "signature",
+        "docstring",
         "embedding_model",
     ):
         assert f'"{field}"' in src, f"code_rag_routes 缺少 payload 字段 '{field}'"
 
 
-def test_lookup_symbol_metadata_reads_codegraph_sqlite_schema(tmp_path: Path) -> None:
-    import sqlite3
+def _build_codegraph_repo(tmp_path: Path, files: dict[str, str]) -> Path:
+    """用真实 codegraph CLI 构建一个微型仓库,返回 repo 目录(graph_repo_path)。
 
+    files: {rel_path: content},rel_path 相对 repo 根。源码放在 src/ 下(与
+    graph_builder 的 symlink 约定一致 → db file_path 带 src/ 前缀)。
+    需要本机装了 @colbymchenry/codegraph CLI;没装则 skip。
+    """
+    import shutil
+    import subprocess
+
+    if not shutil.which("codegraph"):
+        pytest.skip("codegraph CLI 未安装,跳过真实图谱测试")
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True, exist_ok=True)
+    for rel, content in files.items():
+        target = repo / "src" / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    proc = subprocess.run(
+        ["codegraph", "init", str(repo)],
+        cwd=str(repo),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=120,
+    )
+    if proc.returncode != 0:
+        pytest.skip(f"codegraph init 失败: {proc.stdout[:300]}")
+    return repo
+
+
+def test_lookup_symbol_metadata_reads_codegraph_sqlite_schema(tmp_path: Path) -> None:
+    """lookup_symbol_metadata 走 codegraph CLI(重构后),验证 callers/callees/imports。"""
     from aigateway_core.pipelines.understanding.code_rag.graph_query import lookup_symbol_metadata
 
-    db = tmp_path / "codegraph.db"
-    conn = sqlite3.connect(db)
-    cur = conn.cursor()
-    cur.execute(
-        "CREATE TABLE nodes (id TEXT PRIMARY KEY, kind TEXT, name TEXT, qualified_name TEXT, file_path TEXT, language TEXT, start_line INTEGER, end_line INTEGER)"
+    repo = _build_codegraph_repo(
+        tmp_path,
+        {
+            "auth.py": (
+                "import jwt\n"
+                "def login():\n"
+                "    return hash_password()\n"
+                "def hash_password():\n"
+                "    return 'h'\n"
+                "def register():\n"
+                "    return login()\n"
+            ),
+        },
     )
-    cur.execute(
-        "CREATE TABLE edges (id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT, target TEXT, kind TEXT, metadata TEXT, line INTEGER, col INTEGER, provenance TEXT)"
-    )
-    cur.executemany(
-        "INSERT INTO nodes (id, kind, name, qualified_name, file_path, language, start_line, end_line) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        [
-            ("file:auth.py", "file", "auth.py", "auth.py", "auth.py", "python", 1, 20),
-            ("import:jwt", "import", "jwt", "jwt", "auth.py", "python", 1, 1),
-            ("function:login", "function", "login", "login", "auth.py", "python", 5, 8),
-            ("function:register", "function", "register", "register", "auth.py", "python", 10, 12),
-            ("function:hash", "function", "hash_password", "hash_password", "auth.py", "python", 14, 16),
-        ],
-    )
-    cur.executemany(
-        "INSERT INTO edges (source, target, kind, metadata, line, col, provenance) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        [
-            ("file:auth.py", "import:jwt", "contains", None, None, None, None),
-            ("file:auth.py", "function:login", "contains", None, None, None, None),
-            ("file:auth.py", "function:register", "contains", None, None, None, None),
-            ("file:auth.py", "function:hash", "contains", None, None, None, None),
-            ("function:register", "function:login", "calls", '{"confidence": 0.9}', 11, 3, None),
-            ("function:login", "function:hash", "calls", '{"confidence": 0.9}', 6, 4, None),
-        ],
-    )
-    conn.commit()
-    conn.close()
 
-    meta = lookup_symbol_metadata(str(db), "auth.py", "login", "def login():\n    return hash_password()")
+    meta = lookup_symbol_metadata(str(repo), "auth.py", "login", "def login():\n    return hash_password()")
     assert meta["chunk_type"] == "function"
     assert meta["function_name"] == "login"
     assert meta["class_name"] is None
@@ -286,87 +306,55 @@ def test_lookup_symbol_metadata_reads_codegraph_sqlite_schema(tmp_path: Path) ->
 
 def test_lookup_symbol_metadata_matches_graph_path_with_builder_prefix(tmp_path: Path) -> None:
     """graph_builder 把源码 symlink 成 work_dir/src 后, codegraph 存的 file_path
-    会多一个前缀 (如 src/auth.py / src/src/.../auth.py), 与 splitter 产出的相对
-    源根路径 (auth.py) 对不上. 查询端必须按后缀归一化匹配, 否则符号永远 miss,
-    chunk_type 退化成 module, 知识库函数/类计数恒为 0.
+    带 src/ 前缀 (src/auth.py), 与调用方传入的相对源根路径 (auth.py) 对不上.
+    查询端按后缀归一化匹配, 否则符号 miss → chunk_type 退化成 module。
     """
-    import sqlite3
-
     from aigateway_core.pipelines.understanding.code_rag.graph_query import lookup_symbol_metadata
 
-    db = tmp_path / "codegraph.db"
-    conn = sqlite3.connect(db)
-    cur = conn.cursor()
-    cur.execute(
-        "CREATE TABLE nodes (id TEXT PRIMARY KEY, kind TEXT, name TEXT, qualified_name TEXT, file_path TEXT, language TEXT, start_line INTEGER, end_line INTEGER)"
+    repo = _build_codegraph_repo(
+        tmp_path,
+        {"auth.py": "def login():\n    return 1\n"},
     )
-    cur.execute(
-        "CREATE TABLE edges (id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT, target TEXT, kind TEXT, metadata TEXT, line INTEGER, col INTEGER, provenance TEXT)"
-    )
-    # graph_builder 加了 src/ 前缀 → graph 存的是 src/auth.py
-    cur.executemany(
-        "INSERT INTO nodes (id, kind, name, qualified_name, file_path, language, start_line, end_line) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        [
-            ("file:auth.py", "file", "auth.py", "src/auth.py", "src/auth.py", "python", 1, 20),
-            ("function:login", "function", "login", "login", "src/auth.py", "python", 5, 8),
-        ],
-    )
-    cur.executemany(
-        "INSERT INTO edges (source, target, kind, metadata, line, col, provenance) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        [
-            ("file:auth.py", "function:login", "contains", None, None, None, None),
-        ],
-    )
-    conn.commit()
-    conn.close()
 
-    # splitter 产出的是 auth.py (相对源根), graph 存的是 src/auth.py
-    meta = lookup_symbol_metadata(str(db), "auth.py", "login", "def login():\n    return 1")
+    # 调用方传 auth.py (相对源根), graph 存的是 src/auth.py
+    meta = lookup_symbol_metadata(str(repo), "auth.py", "login", "def login():\n    return 1")
     assert meta["chunk_type"] == "function", "前缀不一致导致符号 miss, 退化成 module"
     assert meta["function_name"] == "login"
 
 
 def test_lookup_related_symbols_strips_builder_prefix_from_file_path(tmp_path: Path) -> None:
-    """retrieval 端用 BFS 返回的 file_path 去 Qdrant scroll 相关 chunk,
-    而 Qdrant 存的是 splitter 路径 (无 builder 前缀). BFS 必须把 graph 节点的
+    """retrieval 端用 impact 返回的 file_path 去 Qdrant scroll 相关 chunk,
+    而 Qdrant 存的是 splitter 路径 (无 src/ 前缀). impact 必须把 graph 节点的
     前缀剥掉, 否则 scroll 永远 miss, 相关符号增强失效。
     """
-    import sqlite3
-
     from aigateway_core.pipelines.understanding.code_rag.graph_query import lookup_related_symbols_strict
 
-    db = tmp_path / "codegraph.db"
-    conn = sqlite3.connect(db)
-    cur = conn.cursor()
-    cur.execute(
-        "CREATE TABLE nodes (id TEXT PRIMARY KEY, kind TEXT, name TEXT, qualified_name TEXT, file_path TEXT, language TEXT, start_line INTEGER, end_line INTEGER)"
+    repo = _build_codegraph_repo(
+        tmp_path,
+        {
+            "auth.py": "from utils import helper\n\ndef login():\n    return helper()\n",
+            "utils.py": "def helper():\n    return 'ok'\n",
+        },
     )
-    cur.execute(
-        "CREATE TABLE edges (id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT, target TEXT, kind TEXT, metadata TEXT, line INTEGER, col INTEGER, provenance TEXT)"
-    )
-    # graph 存的路径带 src/ 前缀; splitter 产出的是 auth.py / utils.py
-    cur.executemany(
-        "INSERT INTO nodes (id, kind, name, qualified_name, file_path, language, start_line, end_line) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        [
-            ("function:login", "function", "login", "login", "src/auth.py", "python", 5, 8),
-            ("function:hash", "function", "hash_password", "hash_password", "src/utils.py", "python", 1, 3),
-        ],
-    )
-    cur.executemany(
-        "INSERT INTO edges (source, target, kind, metadata, line, col, provenance) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        [("function:login", "function:hash", "calls", None, 6, 4, None)],
-    )
-    conn.commit()
-    conn.close()
 
-    related = lookup_related_symbols_strict(str(db), "auth.py", "login", hops=1)
-    assert len(related) == 1
-    # 剥掉 src/ 前缀, 与 Qdrant 里 splitter 路径对齐
-    assert related[0]["file_path"] == "utils.py", "BFS 返回的 file_path 没剥 builder 前缀"
-    assert related[0]["symbol_name"] == "hash_password"
+    related = lookup_related_symbols_strict(str(repo), "auth.py", "login", hops=1)
+    # impact 返回 login 自身 + 直接邻居 helper;剥掉 src/ 前缀与 Qdrant 路径对齐
+    names = {r["symbol_name"] for r in related}
+    assert "helper" in names, "impact 没找到直接邻居 helper"
+    for r in related:
+        assert not r["file_path"].startswith("src/"), (
+            f"file_path 没剥 src/ 前缀: {r['file_path']}"
+        )
 
 
 def test_code_rag_routes_batches_embedding_work() -> None:
+    """轻量防回归:源码里仍保留 batch_size=64 的分批循环。
+
+    真实的分批*行为*已由
+    tests/test_code_rag_routes.py::test_run_code_import_task_batches_encode_calls_at_64_boundary
+    运行时验证(70 chunks → encode_texts 调 2 次,每批单独 upsert)。
+    本静态断言仅作廉价 guard,防止有人把分批常量删掉却没触发行为测试。
+    """
     src = (
         REPO_ROOT
         / "aigateway-api"
@@ -376,10 +364,16 @@ def test_code_rag_routes_batches_embedding_work() -> None:
     ).read_text(encoding="utf-8")
     assert "batch_size = 64" in src
     assert "for batch_start in range(0, len(chunks), batch_size):" in src
-    assert "await _mark(done=processed, current_file=current_file)" in src
 
 
-def test_code_rag_routes_use_strict_graph_lookup_during_import() -> None:
+def test_code_rag_routes_uses_build_symbol_chunks_during_import() -> None:
+    """轻量防回归:导入走 build_symbol_chunks + 嵌 embed_text。
+
+    真实的链路*行为*已由
+    tests/test_code_rag_routes.py::test_run_code_import_task_passes_real_symbol_name_to_graph_lookup
+    运行时验证(encode 的是 embed_text 结构描述,payload 带 function_name/callers/signature)。
+    本静态断言仅作廉价 guard。
+    """
     src = (
         REPO_ROOT
         / "aigateway-api"
@@ -387,8 +381,10 @@ def test_code_rag_routes_use_strict_graph_lookup_during_import() -> None:
         / "aigateway_api"
         / "code_rag_routes.py"
     ).read_text(encoding="utf-8")
-    assert "lookup_symbol_metadata_strict" in src
-    assert "graph_meta = lookup_symbol_metadata_strict(" in src
+    assert "build_symbol_chunks" in src
+    assert 'lambda: build_symbol_chunks(' in src
+    # 嵌入结构描述(embed_text),而非源码(chunk_text)
+    assert '[c["embed_text"] for c in batch_chunks]' in src
 
 
 def test_folder_source_label_prefers_root_folder_name() -> None:
@@ -405,7 +401,16 @@ def test_folder_source_label_prefers_root_folder_name() -> None:
 
 
 def test_rag_retriever_source_mentions_real_graph_hops() -> None:
-    src = (
+    """已升级为运行时行为测试 test_expand_code_hits_with_graph_invokes_lookup_when_hops_positive,
+    见 tests/test_rag_retriever_code_rag.py。
+
+    旧的静态字符串核对(grep rag_retriever_plugin.py 源码里的
+    'lookup_related_symbols' / 'code_rag_graph_hops')是被动断言 —— 源码里
+    有这些字符串不代表 graph-hops 链路真的会被触发。这里仅保留一个轻量
+    断言:配置项确实在 plugin 配置类上可读写(code_rag_graph_hops 的契约存在),
+    避免删测试丢掉"该 flag 必须存在"这一约束。
+    """
+    plugin_src = (
         REPO_ROOT
         / "aigateway-core"
         / "src"
@@ -415,9 +420,8 @@ def test_rag_retriever_source_mentions_real_graph_hops() -> None:
         / "rag"
         / "rag_retriever_plugin.py"
     ).read_text(encoding="utf-8")
-    assert "lookup_related_symbols" in src
-    assert 'code_rag_graph_hops' in src
-    assert 'related_chunks = await self._fetch_related_code_chunks(' in src
+    # _expand_code_hits_with_graph 必须读 code_rag_graph_hops(否则多跳扩展永远不触发)。
+    assert "code_rag_graph_hops" in plugin_src
 
 
 # ---------------------------------------------------------------------------

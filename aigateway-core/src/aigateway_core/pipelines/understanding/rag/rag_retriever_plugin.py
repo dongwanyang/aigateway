@@ -491,63 +491,98 @@ class RAGRetrieverPlugin:
         if not file_to_symbols:
             return []
 
-        out: List[Dict[str, Any]] = []
         async with httpx.AsyncClient(timeout=10.0) as client:
-            for file_path, symbols in file_to_symbols.items():
-                try:
-                    resp = await client.post(
-                        f"{self._qdrant_url()}/collections/{collection_name}/points/scroll",
-                        json={
-                            "limit": 200,
-                            "with_payload": True,
-                            "filter": {
-                                "must": [
-                                    {
-                                        "key": "document_id",
-                                        "match": {"value": base_hit.get("document_id")},
-                                    },
-                                    {"key": "file_path", "match": {"value": file_path}},
-                                ]
-                            },
-                        },
-                    )
-                    if resp.status_code == 404:
-                        continue
-                    resp.raise_for_status()
-                    payload = resp.json()
-                except Exception as exc:
-                    logger.warning(
-                        "code_rag: scroll related chunks 失败 coll=%s file=%s: %s",
-                        collection_name,
-                        file_path,
-                        exc,
-                    )
-                    continue
+            # 并发各文件 scroll(旧实现串行,最坏 = hits × 相关文件数 往返)。
+            tasks = [
+                self._scroll_related_file(
+                    client, collection_name, file_path, symbols, base_hit
+                )
+                for file_path, symbols in file_to_symbols.items()
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
 
-                for item in payload.get("result", {}).get("points", []) or []:
-                    chunk = dict(item.get("payload") or {})
-                    symbol = chunk.get("function_name") or chunk.get("class_name")
-                    if symbol not in symbols:
-                        continue
-                    chunk["_collection"] = collection_name
-                    chunk["_score"] = base_hit.get("_score")
-                    chunk["_graph_related"] = True
-                    out.append(chunk)
+        out: List[Dict[str, Any]] = []
+        for res in results:
+            if isinstance(res, Exception):
+                logger.warning(
+                    "code_rag: scroll related chunks 失败 coll=%s: %s",
+                    collection_name, res,
+                )
+                continue
+            out.extend(res)
+        return out
+
+    async def _scroll_related_file(
+        self,
+        client: Any,
+        collection_name: str,
+        file_path: str,
+        symbols: set[str],
+        base_hit: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """单个文件一次 scroll,返回该文件里属于 symbols 集合的 chunk。"""
+        try:
+            resp = await client.post(
+                f"{self._qdrant_url()}/collections/{collection_name}/points/scroll",
+                json={
+                    "limit": 200,
+                    "with_payload": True,
+                    "filter": {
+                        "must": [
+                            {
+                                "key": "document_id",
+                                "match": {"value": base_hit.get("document_id")},
+                            },
+                            {"key": "file_path", "match": {"value": file_path}},
+                        ]
+                    },
+                },
+            )
+            if resp.status_code == 404:
+                return []
+            resp.raise_for_status()
+            payload = resp.json()
+        except Exception as exc:
+            logger.warning(
+                "code_rag: scroll related chunks 失败 coll=%s file=%s: %s",
+                collection_name, file_path, exc,
+            )
+            return []
+
+        out: List[Dict[str, Any]] = []
+        for item in payload.get("result", {}).get("points", []) or []:
+            chunk = dict(item.get("payload") or {})
+            symbol = chunk.get("function_name") or chunk.get("class_name")
+            if symbol not in symbols:
+                continue
+            chunk["_collection"] = collection_name
+            chunk["_score"] = base_hit.get("_score")
+            chunk["_graph_related"] = True
+            out.append(chunk)
         return out
 
     async def _expand_code_hits_with_graph(
         self, hits: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
-        """导入 metadata，并按 code_rag_graph_hops 抓取 related symbol chunks."""
+        """按 code_rag_graph_hops 抓取 related symbol chunks.
+
+        重构后:callers/callees/imports 已在导入时(build_symbol_chunks)存进 payload,
+        这里**直接读 payload**,不再回查 graph lookup_symbol_metadata 覆盖
+        (旧实现的冗余重查见 plan 步骤 5)。多跳扩展走 codegraph impact
+        (lookup_related_symbols),相关符号的源码 chunk 用一次/并发 scroll 从
+        Qdrant 取(旧实现对每个相关文件串行 scroll,最坏 = hits × 相关文件数 往返)。
+        """
         if not hits:
             return hits
 
         graph_dir = getattr(self._config, "code_graph_db_dir", "/data/code_graphs")
-        hops = int(getattr(self._config, "code_rag_graph_hops", 1) or 1)
+        # 注意:不能写 `... or 1` —— 显式配置 code_rag_graph_hops=0 (禁用多跳扩展)
+        # 会被 0 or 1 静默改成 1。只在配置缺失/None 时回退到默认 1。
+        _raw_hops = getattr(self._config, "code_rag_graph_hops", 1)
+        hops = int(_raw_hops) if _raw_hops is not None else 1
         try:
             from aigateway_core.pipelines.understanding.code_rag.graph_query import (
                 lookup_related_symbols,
-                lookup_symbol_metadata,
             )
         except Exception as exc:
             logger.warning("code_rag: 无法加载 graph_query,跳过图谱展开: %s", exc)
@@ -556,23 +591,17 @@ class RAGRetrieverPlugin:
         expanded: List[Dict[str, Any]] = []
         seen = {_code_hit_identity(hit) for hit in hits}
         for hit in hits:
-            doc_id = str(hit.get("document_id", ""))
-            graph_db_path = os.path.join(graph_dir, f"{doc_id}.db")
-            symbol = hit.get("function_name") or hit.get("class_name")
-            try:
-                meta = lookup_symbol_metadata(
-                    graph_db_path,
-                    str(hit.get("file_path", "")),
-                    symbol if symbol else None,
-                    str(hit.get("chunk_text", "")),
-                )
-                enriched = _expand_code_hit_metadata(hit, meta)
-                expanded.append(enriched)
+            # hit payload 已带 callers/callees/imports(导入时存),直接用
+            expanded.append(hit)
 
-                if not symbol or hops <= 0:
-                    continue
+            symbol = hit.get("function_name") or hit.get("class_name")
+            if not symbol or hops <= 0:
+                continue
+            doc_id = str(hit.get("document_id", ""))
+            graph_repo_path = os.path.join(graph_dir, doc_id)
+            try:
                 related_symbols = lookup_related_symbols(
-                    graph_db_path,
+                    graph_repo_path,
                     str(hit.get("file_path", "")),
                     str(symbol),
                     hops=hops,
@@ -580,7 +609,7 @@ class RAGRetrieverPlugin:
                 related_chunks = await self._fetch_related_code_chunks(
                     str(hit.get("_collection", "")),
                     related_symbols,
-                    enriched,
+                    hit,
                 )
                 for chunk in related_chunks:
                     ident = _code_hit_identity(chunk)
@@ -592,7 +621,6 @@ class RAGRetrieverPlugin:
                 logger.warning(
                     "code_rag: 图谱查询失败 doc=%s symbol=%s: %s", doc_id, symbol, exc
                 )
-                expanded.append(hit)
         return expanded
 
     def _format_code_hit(self, hit: Dict[str, Any]) -> str:
@@ -615,6 +643,13 @@ class RAGRetrieverPlugin:
         if not body:
             return ""
         lines = [header]
+        # signature / docstring(重构后 payload 已带,直接展示,增强意图语义)
+        sig = str(hit.get("signature") or "").strip()
+        doc = str(hit.get("docstring") or "").strip()
+        if sig:
+            lines.append(f"signature: {sig}")
+        if doc:
+            lines.append(f"docstring: {doc}")
         if neighbors:
             lines.append("(" + " ; ".join(neighbors) + ")")
         lines.append(body)

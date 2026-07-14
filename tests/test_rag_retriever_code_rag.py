@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from types import SimpleNamespace
 from typing import Any, Dict, List
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -80,15 +81,40 @@ def _make_plugin_without_init(**cfg_overrides: Any) -> RAGRetrieverPlugin:
     return plugin
 
 
-def test_code_rag_disabled_returns_no_code_hits() -> None:
+def test_code_rag_disabled_skips_code_hit_retrieval() -> None:
     plugin = _make_plugin_without_init(code_rag_enabled=False)
-    result = asyncio.new_event_loop().run_until_complete(
-        plugin._list_code_collections()
+    plugin._retrieve_code_hits = AsyncMock(return_value=[{"file_path": "auth.py"}])
+    plugin._inject_system_message = MagicMock()
+
+    class _Node:
+        def __init__(self, text: str):
+            self._text = text
+            self.score = 1.0
+
+        def get_content(self):
+            return self._text
+
+    class _Retriever:
+        async def aretrieve(self, query: str):
+            return [_Node(f"doc for {query}")]
+
+    class _Index:
+        def as_retriever(self, similarity_top_k: int):
+            return _Retriever()
+
+    plugin._index = _Index()
+
+    context = SimpleNamespace(
+        request={"messages": [{"role": "user", "content": "how login works?"}]},
+        extra={},
+        request_id="req-test",
     )
-    # 集合列表逻辑本身与 flag 独立;真实控制在 execute()。此处只验证
-    # config 字段可读且默认为关闭态。
-    assert plugin._config.code_rag_enabled is False
-    assert isinstance(result, list)
+    result = asyncio.new_event_loop().run_until_complete(plugin.execute(context))
+
+    plugin._retrieve_code_hits.assert_not_awaited()
+    assert result is context
+    assert context.extra["rag_retriever"]["retrieved_chunks"] == ["doc for how login works?"]
+    assert "code_hits" not in context.extra["rag_retriever"]
 
 
 def test_encode_query_returns_none_for_non_local_backend() -> None:
@@ -109,18 +135,150 @@ def test_expand_code_hits_with_graph_returns_input_when_empty() -> None:
     assert result == []
 
 
-def test_expand_code_hits_with_graph_merges_lookup_result() -> None:
+def test_expand_code_hits_with_graph_invokes_lookup_when_hops_positive() -> None:
+    """运行时验证 code_rag_graph_hops>0 时 graph 展开链路真的被触发,
+    而不只是源码里有 'lookup_related_symbols' 字符串(被动断言)。
+
+    锁死:hops>0 → 调用 lookup_related_symbols + _fetch_related_code_chunks,
+    且相关 chunk 被并入结果;hops=0 → 两者都不被调用(只回原 hit)。
+    """
     plugin = _make_plugin_without_init()
-    plugin._config.code_graph_db_dir = "/tmp/nonexistent"
-    hits = [
-        {"document_id": "doc1", "file_path": "auth.py", "function_name": "login", "chunk_text": "def login(): pass"},
-    ]
-    fake_meta = {"callers": ["register"], "callees": [], "imports": ["jwt"], "chunk_type": "function"}
-    with patch("aigateway_core.pipelines.understanding.code_rag.graph_query.lookup_symbol_metadata", return_value=fake_meta):
+    plugin._config.code_graph_db_dir = "/tmp/code_graphs_test"
+    plugin._config.code_rag_graph_hops = 1
+
+    call_log: Dict[str, Any] = {"lookup": 0, "fetch": 0}
+
+    def _fake_lookup(graph_repo_path, file_path, symbol, *, hops):
+        call_log["lookup"] += 1
+        call_log["lookup_args"] = {
+            "graph_repo_path": graph_repo_path,
+            "file_path": file_path,
+            "symbol": symbol,
+            "hops": hops,
+        }
+        return [
+            {"symbol_name": "helper", "file_path": "utils.py"},
+        ]
+
+    async def _fake_fetch(collection_name, related_symbols, base_hit):
+        call_log["fetch"] += 1
+        # 模拟 scroll 命中:返回 helper 的 chunk(与原 hit 不同 doc_id/file_path 避免去重)
+        return [
+            {
+                "document_id": base_hit.get("document_id"),
+                "file_path": "utils.py",
+                "function_name": "helper",
+                "chunk_text": "def helper():\n    return 'ok'\n",
+                "chunk_index": 0,
+            }
+        ]
+
+    with patch(
+        "aigateway_core.pipelines.understanding.code_rag.graph_query.lookup_related_symbols",
+        _fake_lookup,
+    ):
+        plugin._fetch_related_code_chunks = _fake_fetch
+
+        hits = [
+            {
+                "document_id": "code_sym",
+                "file_path": "auth.py",
+                "function_name": "login",
+                "chunk_text": "def login():\n    pass\n",
+                "chunk_index": 0,
+                "callers": ["register"],
+                "callees": ["helper"],
+                "imports": [],
+            }
+        ]
         expanded = asyncio.new_event_loop().run_until_complete(
             plugin._expand_code_hits_with_graph(hits)
         )
+
+    # hops>0 → lookup_related_symbols 被调用,且参数透传正确
+    assert call_log["lookup"] == 1
+    assert call_log["lookup_args"]["symbol"] == "login"
+    assert call_log["lookup_args"]["hops"] == 1
+    assert call_log["lookup_args"]["graph_repo_path"].endswith(
+        os.path.join("code_graphs_test", "code_sym")
+    ), "graph_repo_path 应由 code_graph_db_dir + document_id 拼出"
+    # _fetch_related_code_chunks 被调用(scroll 相关 chunk)
+    assert call_log["fetch"] == 1
+    # helper 的 chunk 被并入结果(去重后保留原 hit + 新相关 chunk)
+    symbols = {h.get("function_name") for h in expanded}
+    assert {"login", "helper"}.issubset(symbols), f"相关符号未并入: {symbols}"
+    # 注:_graph_related 标记由真实 _scroll_related_file 设置,本测试 mock 了
+    # _fetch_related_code_chunks 所以不会带该标记 —— 这里验证的是"相关 chunk
+    # 被并入结果"这一行为契约,而非 scroll 内部打标细节。
+
+
+def test_expand_code_hits_with_graph_skips_lookup_when_hops_zero() -> None:
+    """hops=0 时不能触发 graph lookup(纯 payload 直读,无多跳扩展)。"""
+    plugin = _make_plugin_without_init()
+    plugin._config.code_graph_db_dir = "/tmp/code_graphs_test"
+    plugin._config.code_rag_graph_hops = 0
+
+    call_log = {"lookup": 0}
+
+    def _fake_lookup(*a, **kw):
+        call_log["lookup"] += 1
+        return []
+
+    plugin._fetch_related_code_chunks = AsyncMock(return_value=[])
+
+    with patch(
+        "aigateway_core.pipelines.understanding.code_rag.graph_query.lookup_related_symbols",
+        _fake_lookup,
+    ):
+        hits = [
+            {
+                "document_id": "code_sym",
+                "file_path": "auth.py",
+                "function_name": "login",
+                "chunk_text": "def login():\n    pass\n",
+                "chunk_index": 0,
+                "callers": ["register"],
+                "callees": [],
+                "imports": [],
+            }
+        ]
+        expanded = asyncio.new_event_loop().run_until_complete(
+            plugin._expand_code_hits_with_graph(hits)
+        )
+
+    assert call_log["lookup"] == 0, "hops=0 不应触发 graph lookup"
+    plugin._fetch_related_code_chunks.assert_not_awaited()
+    # 原 hit 原样保留
+    assert len(expanded) == 1
+    assert expanded[0]["function_name"] == "login"
+
+
+def test_expand_code_hits_with_graph_preserves_payload_relationships() -> None:
+    """重构后:_expand_code_hits_with_graph 不再回查 graph lookup_symbol_metadata
+    覆盖 payload,而是直接读 payload 里的 callers/callees/imports(导入时已存)。
+    验证:payload 里的 callers/imports 原样保留(不被空查询覆盖成空)。
+    """
+    plugin = _make_plugin_without_init()
+    plugin._config.code_graph_db_dir = "/tmp/nonexistent"
+    # hops=0 跳过多跳扩展(无图谱时 lookup_related_symbols 返回空,不影响断言)
+    plugin._config.code_rag_graph_hops = 0
+    hits = [
+        {
+            "document_id": "doc1",
+            "file_path": "auth.py",
+            "function_name": "login",
+            "chunk_text": "def login(): pass",
+            "callers": ["register"],
+            "callees": ["hash_password"],
+            "imports": ["jwt"],
+        },
+    ]
+    expanded = asyncio.new_event_loop().run_until_complete(
+        plugin._expand_code_hits_with_graph(hits)
+    )
+    # payload 里的 callers/callees/imports 必须原样保留(不再被回查覆盖)
     assert expanded[0]["callers"] == ["register"]
+    assert expanded[0]["callees"] == ["hash_password"]
     assert expanded[0]["imports"] == ["jwt"]
 
 

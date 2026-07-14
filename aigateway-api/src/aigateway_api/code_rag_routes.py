@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import shutil
 import tempfile
 import time
@@ -274,15 +275,23 @@ def _materialize_git_repo(
     git_branch: Optional[str],
     *,
     timeout: float = 300.0,
+    dest_dir: Optional[str] = None,
 ) -> str:
-    """浅克隆到临时目录,返回临时目录路径。
+    """浅克隆到目录,返回该目录路径。
+
+    dest_dir 给定时克隆到该持久目录(git 源持久化:为增量 sync 保留源码,
+    不进 cleanup_dirs);不给时落到临时目录(fallback,导入后清理)。
 
     通过 GIT_HTTP_LOW_SPEED_LIMIT/TIME + 外部 wall-clock 阻断长时间挂住的克隆,
     避免 "silently stuck" 出现在 gateway 侧。
     """
     from git import Repo  # lazy: gitpython 只在生产镜像里装
 
-    tmp_dir = tempfile.mkdtemp(prefix="code_rag_git_")
+    if dest_dir:
+        target_dir = dest_dir
+        Path(target_dir).mkdir(parents=True, exist_ok=True)
+    else:
+        target_dir = tempfile.mkdtemp(prefix="code_rag_git_")
     try:
         clone_kwargs: Dict[str, Any] = {
             "depth": 1,
@@ -298,7 +307,7 @@ def _materialize_git_repo(
             clone_kwargs["branch"] = git_branch
 
         def _clone() -> None:
-            Repo.clone_from(git_url, tmp_dir, **clone_kwargs)
+            Repo.clone_from(git_url, target_dir, **clone_kwargs)
 
         import threading
 
@@ -315,14 +324,14 @@ def _materialize_git_repo(
         thread.join(timeout=timeout)
         if thread.is_alive():
             # 后台线程留在原地慢慢死;主流程按超时报错并清理
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+            shutil.rmtree(target_dir, ignore_errors=True)
             raise RuntimeError(f"git clone timed out after {timeout}s: {git_url}")
         if error:
             raise error[0]
     except Exception:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+        shutil.rmtree(target_dir, ignore_errors=True)
         raise
-    return tmp_dir
+    return target_dir
 
 
 def _materialize_zip_upload(zip_bytes: bytes, max_total_mb: int) -> str:
@@ -383,6 +392,33 @@ def _bytes_io(data: bytes) -> Any:
     import io
 
     return io.BytesIO(data)
+
+
+def _ensure_workspace_symlink(graph_repo_path: str, real_source_dir: str) -> None:
+    """把 real_source_dir 软链接成 {graph_repo_path}/src(managed 源持久化)。
+
+    codegraph db 里 file_path 都带 src/ 前缀(graph_builder 把源码 symlink 成
+    work_dir/src 后索引),所以 {graph_repo_path}/src 必须指向真实源码目录,
+    codegraph sync(增量重扫)与 codegraph node(源码块)才能按 files.path 解析。
+
+    已存在(非 symlink 或指向别处)时先删后建。失败抛 RuntimeError(导入失败)。
+    """
+    repo_dir = Path(graph_repo_path)
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    link = repo_dir / "src"
+    try:
+        if link.is_symlink() or link.exists():
+            if link.is_symlink() and Path(os.readlink(link)) == Path(real_source_dir).resolve():
+                return  # 已正确指向,幂等
+            if link.is_dir() and not link.is_symlink():
+                shutil.rmtree(link, ignore_errors=True)
+            else:
+                link.unlink()
+        link.symlink_to(Path(real_source_dir).resolve())
+    except OSError as exc:
+        raise RuntimeError(
+            f"无法建立 workspace symlink {link} -> {real_source_dir}: {exc}"
+        ) from exc
 
 
 def _sanitize_relative_path(raw: str) -> str:
@@ -502,18 +538,24 @@ async def _run_code_import_task(
     source_label: str,
     embedding_model: str,
     ignore_patterns: List[str],
-    graph_db_dir: str,
+    graph_repo_path: str,
+    workspace_path: Optional[str],
     cleanup_dirs: List[str],
+    git_branch: Optional[str] = None,
 ) -> None:
-    """异步导入任务主体(见 spec: Async task flow)."""
+    """异步导入任务主体(见 spec: Async task flow).
+
+    重构后:用 build_symbol_chunks(codegraph 行号切源码 + 结构描述)替代
+    split_code_directory;embedding 嵌 embed_text(结构描述)而非 chunk_text(源码);
+    build_code_graph 接收 graph_repo_path(目录),保留整个 .codegraph/ 目录。
+    """
     from aigateway_core.pipelines.understanding.code_rag.embedding_router import (
         encode_texts,
         probe_embedding_dimension,
         resolve_collection_name,
     )
     from aigateway_core.pipelines.understanding.code_rag.graph_builder import build_code_graph
-    from aigateway_core.pipelines.understanding.code_rag.graph_query import lookup_symbol_metadata_strict
-    from aigateway_core.pipelines.understanding.code_rag.splitter import split_code_directory
+    from aigateway_core.pipelines.understanding.code_rag.splitter import build_symbol_chunks
 
     redis_mgr = getattr(app_state, "redis_manager", None)
     qdrant_mgr = getattr(app_state, "qdrant_manager", None)
@@ -522,24 +564,26 @@ async def _run_code_import_task(
         await _write_task_state(redis_mgr, task_id, fields)
 
     collection_name = resolve_collection_name(embedding_model)
-    graph_db_path = str(Path(graph_db_dir) / f"{document_id}.db")
     written_points = False
 
     try:
-        # 1) split
-        await _mark(status="splitting", current_file=None, error=None)
+        # 1) build code graph (strict — 失败即整体失败)。
+        # 必须先建图谱,build_symbol_chunks 要从 db 读符号节点。
+        await _mark(status="building_graph", current_file=None, error=None)
         loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None, lambda: build_code_graph(source_dir, graph_repo_path)
+        )
+
+        # 2) split:用 codegraph 行号切源码 + 构造结构描述嵌入文本
+        await _mark(status="splitting")
         chunks: List[Dict[str, Any]] = await loop.run_in_executor(
-            None, lambda: split_code_directory(source_dir, ignore_patterns)
+            None, lambda: build_symbol_chunks(source_dir, graph_repo_path, ignore_patterns)
         )
         await _mark(total=len(chunks))
         if not chunks:
             await _mark(status="completed", done=0)
             return
-
-        # 2) build code graph (strict — 失败即整体失败)
-        await _mark(status="building_graph")
-        await loop.run_in_executor(None, lambda: build_code_graph(source_dir, graph_db_path))
 
         # 3) probe embedding dim + upsert collection
         await _mark(status="embedding")
@@ -552,19 +596,17 @@ async def _run_code_import_task(
             name=collection_name, size=int(vector_dim), distance="COSINE"
         )
 
-        # 4) encode + enrich + upsert（分批,避免 1000+ chunks 一次性 encode 卡死）
-        # 大仓库（例如 click / 本仓库）切出来的 chunk 数可能轻松上千；若一次性
-        # 调 sentence-transformers.encode(texts) 会出现：
-        #   - 长时间无进度更新，看起来像任务“卡在 embedding”
-        #   - 内存峰值偏高
-        # 因此改为固定批次编码 + 固定批次 upsert；每批后刷新 done/current_file。
+        # 4) encode + upsert（分批,避免 1000+ chunks 一次性 encode 卡死）
+        # 嵌入的是 embed_text(结构描述:符号名/签名/callers/callees/docstring),
+        # 而非 chunk_text(源码)。源码存 payload chunk_text,检索命中直接返回,
+        # 源码改动不重算向量(增量友好)。
         batch_size = 64
         payloads: List[Dict[str, Any]] = []
         processed = 0
 
         for batch_start in range(0, len(chunks), batch_size):
             batch_chunks = chunks[batch_start : batch_start + batch_size]
-            batch_texts = [c["chunk_text"] for c in batch_chunks]
+            batch_texts = [c["embed_text"] for c in batch_chunks]
             batch_vectors = await loop.run_in_executor(
                 None, lambda: encode_texts(embedding_model, batch_texts)
             )
@@ -572,16 +614,10 @@ async def _run_code_import_task(
             batch_points: List[Dict[str, Any]] = []
             for offset, chunk in enumerate(batch_chunks):
                 global_idx = batch_start + offset
-                symbol_name = (
-                    chunk.get("function_name")
-                    or chunk.get("class_name")
-                    or None
-                )
-                graph_meta = lookup_symbol_metadata_strict(
-                    graph_db_path,
-                    chunk.get("file_path") or "",
-                    symbol_name,
-                    chunk.get("chunk_text") or "",
+                chunk_type = (
+                    "function" if chunk.get("function_name")
+                    else "class" if chunk.get("class_name")
+                    else "module"
                 )
                 payload = {
                     "document_id": document_id,
@@ -590,14 +626,16 @@ async def _run_code_import_task(
                     "language": chunk.get("language", ""),
                     "chunk_index": int(chunk.get("chunk_index", global_idx)),
                     "chunk_text": chunk.get("chunk_text", ""),
-                    "chunk_type": graph_meta.get("chunk_type", "module"),
-                    "function_name": graph_meta.get("function_name"),
-                    "class_name": graph_meta.get("class_name"),
+                    "chunk_type": chunk_type,
+                    "function_name": chunk.get("function_name"),
+                    "class_name": chunk.get("class_name"),
                     "start_line": int(chunk.get("start_line", 1)),
                     "end_line": int(chunk.get("end_line", 1)),
-                    "callers": graph_meta.get("callers", []),
-                    "callees": graph_meta.get("callees", []),
-                    "imports": graph_meta.get("imports", []),
+                    "callers": chunk.get("callers", []),
+                    "callees": chunk.get("callees", []),
+                    "imports": chunk.get("imports", []),
+                    "signature": chunk.get("signature", ""),
+                    "docstring": chunk.get("docstring", ""),
                     "embedding_model": embedding_model,
                 }
                 payloads.append(payload)
@@ -638,12 +676,15 @@ async def _run_code_import_task(
             "document_id": document_id,
             "source_type": source_type,
             "source_label": source_label,
+            "workspace_path": workspace_path,
+            "graph_repo_path": graph_repo_path,
+            "git_branch": git_branch,
+            "embedding_model": embedding_model,
             "file_count": len({p["file_path"] for p in payloads if p["file_path"]}),
             "language_summary": sorted({p["language"] for p in payloads if p["language"]}),
             "function_count": sum(1 for p in payloads if p["chunk_type"] == "function"),
             "class_count": sum(1 for p in payloads if p["chunk_type"] == "class"),
             "chunk_count": len(payloads),
-            "embedding_model": embedding_model,
             "import_time": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         }
         await _append_repository(redis_mgr, repo_meta)
@@ -717,6 +758,10 @@ async def import_code_repository(
     task_id = str(uuid.uuid4())
     document_id = f"code_{uuid.uuid4().hex[:12]}"
     cleanup_dirs: List[str] = []
+    # graph_repo_path: 持久化目录 {graph_db_dir}/{document_id}/,存放 .codegraph/
+    # 与 managed 源(git clone / server_path symlink)。folder/zip 不在此持久化源码。
+    graph_repo_path = str(Path(graph_db_dir) / document_id)
+    workspace_path: Optional[str] = None  # managed 源持久化路径(供 sync 判断)
 
     if "multipart/form-data" in content_type:
         form = await request.form()
@@ -768,11 +813,21 @@ async def import_code_repository(
             resolved = _validate_server_path(body.server_path or "", allowed_roots)
             source_dir = str(resolved)
             source_label = f"server_path://{resolved}"
+            # managed 源:把原 server_path 目录 symlink 成 {graph_repo_path}/src,
+            # 使 db file_path(src/...前缀)可被 codegraph sync/node 解析。
+            # 不进 cleanup_dirs(增量 sync 复用)。
+            _ensure_workspace_symlink(graph_repo_path, str(resolved))
+            workspace_path = str(Path(graph_repo_path) / "src")
         elif source_type == "git":
             _validate_git_url(body.git_url or "")
-            source_dir = _materialize_git_repo(body.git_url or "", body.git_branch)
+            # managed 源:clone 到持久目录 {graph_repo_path}/src/(不进 cleanup_dirs),
+            # 供增量 sync (git fetch + reset) 与 codegraph node(源码块)复用。
+            git_src_dir = str(Path(graph_repo_path) / "src")
+            source_dir = _materialize_git_repo(
+                body.git_url or "", body.git_branch, dest_dir=git_src_dir
+            )
             source_label = f"git://{body.git_url}"
-            cleanup_dirs.append(source_dir)
+            workspace_path = git_src_dir
         else:
             raise HTTPException(
                 status_code=400,
@@ -809,8 +864,10 @@ async def import_code_repository(
             source_label=source_label,
             embedding_model=embedding_model,
             ignore_patterns=ignore_patterns,
-            graph_db_dir=graph_db_dir,
+            graph_repo_path=graph_repo_path,
+            workspace_path=workspace_path,
             cleanup_dirs=cleanup_dirs,
+            git_branch=body.git_branch if source_type == "git" else None,
         ),
         task_id=task_id,
     )
@@ -943,6 +1000,25 @@ async def delete_code_repository(
     code_cfg = _load_code_rag_config(app_state)
     graph_db_dir = str(code_cfg.get("graph_db_dir") or "/data/code_graphs")
 
+    # 安全校验:document_id 必须是已注册的仓库。FastAPI path param 不含 '/',
+    # 但 `..` 是合法单段——`Path(graph_db_dir) / ".."` 会解析成上级目录,
+    # 而 shutil.rmtree 会递归删整个数据卷(Redis/Qdrant/code_graphs)。
+    # 旧实现用 .unlink()(对目录抛 IsADirectoryError 无害);重构改 rmtree 后
+    # 变成可利用,故此处必须先校验。
+    redis_mgr = getattr(app_state, "redis_manager", None)
+    repos = await _list_repositories(redis_mgr)
+    if not any(r.get("document_id") == document_id for r in repos):
+        raise HTTPException(status_code=404, detail=f"仓库 {document_id} 不存在")
+
+    # defense-in-depth:解析后路径必须在 graph_db_dir 之内,挡住任何未来
+    # 绕过注册校验的畸形 document_id(如 URL 编码 / 旁路注入)。
+    graph_root = Path(graph_db_dir).resolve()
+    graph_repo_dir = (graph_root / document_id).resolve()
+    try:
+        graph_repo_dir.relative_to(graph_root)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="非法 document_id")
+
     qdrant_mgr = getattr(app_state, "qdrant_manager", None)
     if qdrant_mgr is not None and qdrant_mgr._http is not None:
         try:
@@ -964,11 +1040,452 @@ async def delete_code_repository(
         except Exception as exc:
             logger.warning("枚举代码集合失败: %s", exc)
 
-    graph_db_path = Path(graph_db_dir) / f"{document_id}.db"
-    if graph_db_path.exists():
+    # 删除整个 {graph_db_dir}/{document_id}/ 目录(重构后:含 .codegraph/ + src/
+    # managed 源)。同时兜底删旧的 {document_id}.db 裸文件(存量数据,见 plan 风险项)。
+    # graph_repo_dir 已在上方校验为 graph_db_dir 的合法子路径。
+    if graph_repo_dir.exists():
         try:
-            graph_db_path.unlink()
+            shutil.rmtree(graph_repo_dir, ignore_errors=True)
         except OSError as exc:
-            logger.warning("删除图谱库 %s 失败: %s", graph_db_path, exc)
+            logger.warning("删除图谱目录 %s 失败: %s", graph_repo_dir, exc)
+    legacy_db = graph_root / f"{document_id}.db"
+    if legacy_db.exists():
+        try:
+            legacy_db.unlink()
+        except OSError as exc:
+            logger.warning("删除旧图谱库 %s 失败: %s", legacy_db, exc)
 
     await _remove_repository(getattr(app_state, "redis_manager", None), document_id)
+
+
+# ----------------------------------------------------------------------
+# Repository sync (增量更新 — git/server_path managed 源)
+# ----------------------------------------------------------------------
+
+
+def _find_repo_meta(repos: List[Dict[str, Any]], document_id: str) -> Optional[Dict[str, Any]]:
+    for repo in repos:
+        if repo.get("document_id") == document_id:
+            return repo
+    return None
+
+
+def _git_fetch_reset(
+    workspace_path: str, *, git_branch: Optional[str] = None, timeout: float = 300.0
+) -> None:
+    """在持久化的 git 工作目录里 git fetch + reset --hard(不重新 clone)。
+
+    供增量 sync 用:刷新源码到最新,再跑 codegraph sync 重索引变了的文件。
+
+    git_branch:导入时用户指定的分支(持久化在 repo_meta)。给定时 reset 到
+    `origin/<branch>`(与导入时的浅克隆分支一致);不给时退回 `origin/HEAD`
+    (远端默认分支)。仅用 `origin/HEAD` 的坑:浅克隆 `--branch <name>` 后
+    `origin/HEAD` 可能未设置或指向远端默认分支 → reset 失败或静默切到别的分支。
+    """
+    from git import Repo
+
+    repo = Repo(workspace_path)
+    # 拉取所有分支的远端更新,然后硬重置到指定分支的远端跟踪
+    try:
+        import threading
+
+        error: List[BaseException] = []
+
+        def _target() -> None:
+            try:
+                repo.remotes.origin.fetch()
+                # 优先 reset 到 origin/<branch>(与导入分支对齐);
+                # 无 branch 或 origin/<branch> 不存在时退回 origin/HEAD。
+                ref = f"origin/{git_branch}" if git_branch else "origin/HEAD"
+                try:
+                    repo.git.reset("--hard", ref)
+                except BaseException:  # noqa: BLE001
+                    if not git_branch or ref == "origin/HEAD":
+                        raise
+                    # 指定分支的远端引用不存在(可能被删/改名)→ 退回默认分支
+                    repo.git.reset("--hard", "origin/HEAD")
+            except BaseException as exc:  # noqa: BLE001
+                error.append(exc)
+
+        thread = threading.Thread(target=_target, daemon=True)
+        thread.start()
+        thread.join(timeout=timeout)
+        if thread.is_alive():
+            raise RuntimeError(f"git fetch+reset timed out after {timeout}s")
+        if error:
+            raise error[0]
+    finally:
+        repo.close()
+
+
+@router.post("/rag/code/repositories/{document_id}/sync")
+async def sync_code_repository(
+    document_id: str,
+    request: Request,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+) -> Dict[str, Any]:
+    """增量同步代码仓库(git/server_path managed 源)。
+
+    流程(plan 步骤 6):
+    1. 校验 source_type ∈ {git, server_path};folder/zip 返回 400(快照源不支持 sync)。
+    2. 刷新源码:git fetch+reset / server_path 重扫(源本就在场)。
+    3. codegraph sync <graph_repo_path>(位置参数)增量重索引图谱。
+    4. 对比 sync 前后 files.content_hash,找出变化文件。
+    5. 对每个变化文件:Qdrant delete_by_filter 删旧 chunk → 重切符号 → 重算结构描述
+       向量 → upsert 新 chunk。未变文件不动。
+    6. 返回 {synced_files, refreshed_symbols}。
+    """
+    app_state = request.app.state
+    code_cfg = _load_code_rag_config(app_state)
+    graph_db_dir = str(code_cfg.get("graph_db_dir") or "/data/code_graphs")
+
+    redis_mgr = getattr(app_state, "redis_manager", None)
+    repos = await _list_repositories(redis_mgr)
+    repo_meta = _find_repo_meta(repos, document_id)
+    if repo_meta is None:
+        raise HTTPException(status_code=404, detail=f"仓库 {document_id} 不存在")
+
+    source_type = str(repo_meta.get("source_type") or "")
+    if source_type not in ("git", "server_path"):
+        raise HTTPException(
+            status_code=400,
+            detail="快照源(folder/zip)不支持 sync,请重新导入以更新",
+        )
+
+    graph_repo_path = str(repo_meta.get("graph_repo_path") or str(Path(graph_db_dir) / document_id))
+    workspace_path = str(repo_meta.get("workspace_path") or "")
+    git_branch = repo_meta.get("git_branch")  # 导入时持久化的分支(可空)
+    embedding_model = str(repo_meta.get("embedding_model") or "Qwen/Qwen3-Embedding-0.6B")
+    # 与导入路径一致地从配置取 ignore_patterns:sync 重切的符号也必须排除被忽略的文件,
+    # 否则 codegraph sync 重索引的 node_modules/dist 等会回灌 Qdrant 污染检索结果。
+    ignore_patterns = list(code_cfg.get("ignore_patterns") or [])
+
+    if not Path(graph_repo_path).exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"图谱目录不存在: {graph_repo_path}(可能已删除或导入未完成)",
+        )
+
+    qdrant_mgr = getattr(app_state, "qdrant_manager", None)
+    if qdrant_mgr is None or qdrant_mgr._http is None:
+        raise HTTPException(status_code=503, detail="Qdrant not connected")
+
+    # lazy import(避免 admin 路由启动阶段拉 code_rag 全包)
+    from aigateway_core.pipelines.understanding.code_rag.embedding_router import (
+        encode_texts,
+        resolve_collection_name,
+    )
+    from aigateway_core.pipelines.understanding.code_rag.graph_query import (
+        read_file_hashes,
+        run_codegraph_sync,
+    )
+    from aigateway_core.pipelines.understanding.code_rag.splitter import build_symbol_chunks
+
+    try:
+        # 1) 刷新源码(managed 源才有)
+        if source_type == "git":
+            if not workspace_path or not Path(workspace_path).exists():
+                raise HTTPException(
+                    status_code=409,
+                    detail="git 工作目录不存在(workspace_path 未持久化),无法增量 sync",
+                )
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: _git_fetch_reset(workspace_path, git_branch=git_branch)
+            )
+        # server_path: 源本就在场,workspace_path 是 src symlink → 原路径,无需操作
+
+        # 2) sync 前快照 files.content_hash
+        before = await asyncio.get_running_loop().run_in_executor(
+            None, lambda: read_file_hashes(graph_repo_path)
+        )
+
+        # 3) codegraph sync 增量重索引
+        await asyncio.get_running_loop().run_in_executor(
+            None, lambda: run_codegraph_sync(graph_repo_path)
+        )
+
+        # 4) sync 后快照,对比找出变化文件
+        after = await asyncio.get_running_loop().run_in_executor(
+            None, lambda: read_file_hashes(graph_repo_path)
+        )
+        changed_db_paths: List[str] = []
+        for path, h in after.items():
+            if before.get(path) != h:
+                changed_db_paths.append(path)
+        # 删除的文件:before 有 after 无
+        deleted_db_paths = [p for p in before if p not in after]
+
+        if not changed_db_paths and not deleted_db_paths:
+            return {"document_id": document_id, "synced_files": 0, "refreshed_symbols": 0}
+
+        collection_name = resolve_collection_name(embedding_model)
+        # 5) 对每个变化文件:重切 → 重嵌 → (新 chunk 就绪后)删旧 chunk → upsert 新
+        # 顺序很关键:先 build+encode,任一步抛异常则该文件整体跳过(旧 chunk 保留),
+        # 不会出现「删了旧又没写进新」的静默数据丢失。仅当新 chunk 就绪后才删旧、
+        # 再 upsert 新(delete 用 document_id+file_path 过滤,会清掉旧的同文件 chunk;
+        # 新 chunk 紧随其后写入,upsert 成功即覆盖该文件的检索结果)。
+        refreshed = 0
+        for db_path in changed_db_paths:
+            # db path 带 src/ 前缀,剥成相对源根(与 Qdrant payload file_path 对齐)
+            rel = db_path
+            if rel.startswith("src/"):
+                rel = rel[len("src/"):]
+
+            # 重切该文件的符号(source_dir = workspace_path 的真实源码)
+            source_dir = workspace_path
+            if source_type == "server_path":
+                # workspace_path 是 src symlink → 原路径;取真实路径
+                src_link = Path(graph_repo_path) / "src"
+                source_dir = str(src_link.resolve()) if src_link.is_symlink() else workspace_path
+            chunks = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda dp=db_path: build_symbol_chunks(
+                    source_dir, graph_repo_path, ignore_patterns, only_files=[dp]
+                ),
+            )
+            if not chunks:
+                # 文件已无符号:删旧 chunk,不写新
+                try:
+                    await qdrant_mgr.delete_by_filter(
+                        collection_name,
+                        {"must": [
+                            {"key": "document_id", "match": {"value": document_id}},
+                            {"key": "file_path", "match": {"value": rel}},
+                        ]},
+                    )
+                except Exception as exc:
+                    logger.warning("sync: 删旧 chunk 失败 %s/%s: %s", document_id, rel, exc)
+                continue
+            batch_texts = [c["embed_text"] for c in chunks]
+            vectors = await asyncio.get_running_loop().run_in_executor(
+                None, lambda: encode_texts(embedding_model, batch_texts)
+            )
+            points: List[Dict[str, Any]] = []
+            for offset, chunk in enumerate(chunks):
+                payload = {
+                    "document_id": document_id,
+                    "filename": chunk.get("filename", ""),
+                    "file_path": chunk.get("file_path", ""),
+                    "language": chunk.get("language", ""),
+                    "chunk_index": int(chunk.get("chunk_index", offset)),
+                    "chunk_text": chunk.get("chunk_text", ""),
+                    "chunk_type": (
+                        "function" if chunk.get("function_name")
+                        else "class" if chunk.get("class_name")
+                        else "module"
+                    ),
+                    "function_name": chunk.get("function_name"),
+                    "class_name": chunk.get("class_name"),
+                    "start_line": int(chunk.get("start_line", 1)),
+                    "end_line": int(chunk.get("end_line", 1)),
+                    "callers": chunk.get("callers", []),
+                    "callees": chunk.get("callees", []),
+                    "imports": chunk.get("imports", []),
+                    "signature": chunk.get("signature", ""),
+                    "docstring": chunk.get("docstring", ""),
+                    "embedding_model": embedding_model,
+                }
+                points.append({
+                    "id": str(uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        f"{document_id}:{payload['file_path']}:{payload['chunk_index']}",
+                    )),
+                    "vector": vectors[offset],
+                    "payload": payload,
+                })
+            # 新 chunk 已就绪:先删旧同文件 chunk,再 upsert 新(失败仅告警,旧已删但
+            # 新未写——该文件检索暂时缺失,下次 sync 若源再变会重试;权衡优于删后
+            # build 抛异常导致永久丢失且无重试机会的旧实现)。
+            try:
+                await qdrant_mgr.delete_by_filter(
+                    collection_name,
+                    {"must": [
+                        {"key": "document_id", "match": {"value": document_id}},
+                        {"key": "file_path", "match": {"value": rel}},
+                    ]},
+                )
+            except Exception as exc:
+                logger.warning("sync: 删旧 chunk 失败 %s/%s: %s", document_id, rel, exc)
+            try:
+                resp = await qdrant_mgr._http.put(
+                    f"/collections/{collection_name}/points",
+                    json={"points": points},
+                )
+                resp.raise_for_status()
+                refreshed += len(points)
+            except Exception as exc:
+                logger.warning("sync: upsert 失败 %s/%s: %s", document_id, rel, exc)
+
+        # 删除的文件:清掉 Qdrant 里该文件的旧 chunk
+        for db_path in deleted_db_paths:
+            rel = db_path
+            if rel.startswith("src/"):
+                rel = rel[len("src/"):]
+            try:
+                await qdrant_mgr.delete_by_filter(
+                    collection_name,
+                    {"must": [
+                        {"key": "document_id", "match": {"value": document_id}},
+                        {"key": "file_path", "match": {"value": rel}},
+                    ]},
+                )
+            except Exception as exc:
+                logger.warning("sync: 删已移除文件 chunk 失败 %s/%s: %s", document_id, rel, exc)
+
+        return {
+            "document_id": document_id,
+            "synced_files": len(changed_db_paths),
+            "refreshed_symbols": refreshed,
+            "deleted_files": len(deleted_db_paths),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("code rag sync %s failed: %s", document_id, exc)
+        raise HTTPException(status_code=500, detail=f"sync 失败: {exc}")
+
+
+# ----------------------------------------------------------------------
+# Repository graph query (走 codegraph CLI,供 CLI 与 Control Panel 调用)
+# ----------------------------------------------------------------------
+
+
+def _resolve_graph_repo_path(request: Request, document_id: str) -> str:
+    """从 document_id 推出 {graph_db_dir}/{document_id}/ 目录,校验存在。"""
+    app_state = request.app.state
+    code_cfg = _load_code_rag_config(app_state)
+    graph_db_dir = str(code_cfg.get("graph_db_dir") or "/data/code_graphs")
+    graph_repo_path = str(Path(graph_db_dir) / document_id)
+    if not Path(graph_repo_path).exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"图谱目录不存在: {document_id}(可能已删除或导入未完成)",
+        )
+    return graph_repo_path
+
+
+@router.get("/rag/code/repositories/{document_id}/query")
+async def query_code_symbols(
+    document_id: str,
+    request: Request,
+    symbol: str,
+    kind: Optional[str] = None,
+    limit: int = 10,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+) -> List[Dict[str, Any]]:
+    """符号搜索(走 codegraph query --json)。"""
+    from aigateway_core.pipelines.understanding.code_rag.graph_query import query_symbols
+
+    graph_repo_path = _resolve_graph_repo_path(request, document_id)
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(
+            None,
+            lambda: query_symbols(graph_repo_path, symbol, kind=kind, limit=limit),
+        )
+    except Exception as exc:
+        logger.warning("code query 失败 %s/%s: %s", document_id, symbol, exc)
+        raise HTTPException(status_code=500, detail=f"查询失败: {exc}")
+
+
+@router.get("/rag/code/repositories/{document_id}/callers")
+async def get_code_callers(
+    document_id: str,
+    request: Request,
+    symbol: str,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+) -> Dict[str, Any]:
+    from aigateway_core.pipelines.understanding.code_rag.graph_query import get_callers
+
+    graph_repo_path = _resolve_graph_repo_path(request, document_id)
+    loop = asyncio.get_running_loop()
+    try:
+        callers = await loop.run_in_executor(
+            None, lambda: get_callers(graph_repo_path, symbol)
+        )
+    except Exception as exc:
+        logger.warning("code callers 失败 %s/%s: %s", document_id, symbol, exc)
+        raise HTTPException(status_code=500, detail=f"查询失败: {exc}")
+    return {"symbol": symbol, "callers": callers}
+
+
+@router.get("/rag/code/repositories/{document_id}/callees")
+async def get_code_callees(
+    document_id: str,
+    request: Request,
+    symbol: str,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+) -> Dict[str, Any]:
+    from aigateway_core.pipelines.understanding.code_rag.graph_query import get_callees
+
+    graph_repo_path = _resolve_graph_repo_path(request, document_id)
+    loop = asyncio.get_running_loop()
+    try:
+        callees = await loop.run_in_executor(
+            None, lambda: get_callees(graph_repo_path, symbol)
+        )
+    except Exception as exc:
+        logger.warning("code callees 失败 %s/%s: %s", document_id, symbol, exc)
+        raise HTTPException(status_code=500, detail=f"查询失败: {exc}")
+    return {"symbol": symbol, "callees": callees}
+
+
+@router.get("/rag/code/repositories/{document_id}/impact")
+async def get_code_impact(
+    document_id: str,
+    request: Request,
+    symbol: str,
+    depth: int = 2,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+) -> Dict[str, Any]:
+    from aigateway_core.pipelines.understanding.code_rag.graph_query import get_impact
+
+    graph_repo_path = _resolve_graph_repo_path(request, document_id)
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(
+            None, lambda: get_impact(graph_repo_path, symbol, depth=depth)
+        )
+    except Exception as exc:
+        logger.warning("code impact 失败 %s/%s: %s", document_id, symbol, exc)
+        raise HTTPException(status_code=500, detail=f"查询失败: {exc}")
+
+
+@router.get("/rag/code/repositories/{document_id}/node")
+async def get_code_node(
+    document_id: str,
+    request: Request,
+    symbol: str,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+) -> Dict[str, Any]:
+    from aigateway_core.pipelines.understanding.code_rag.graph_query import get_node
+
+    graph_repo_path = _resolve_graph_repo_path(request, document_id)
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(
+            None, lambda: get_node(graph_repo_path, symbol)
+        )
+    except Exception as exc:
+        logger.warning("code node 失败 %s/%s: %s", document_id, symbol, exc)
+        raise HTTPException(status_code=500, detail=f"查询失败: {exc}")
+
+
+@router.get("/rag/code/repositories/{document_id}/files")
+async def list_code_files(
+    document_id: str,
+    request: Request,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+) -> List[Dict[str, Any]]:
+    from aigateway_core.pipelines.understanding.code_rag.graph_query import list_files
+
+    graph_repo_path = _resolve_graph_repo_path(request, document_id)
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(
+            None, lambda: list_files(graph_repo_path)
+        )
+    except Exception as exc:
+        logger.warning("code files 失败 %s: %s", document_id, exc)
+        raise HTTPException(status_code=500, detail=f"查询失败: {exc}")

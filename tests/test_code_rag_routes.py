@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
+import tempfile
+from pathlib import Path
 from typing import Any, Dict, List
 from unittest.mock import AsyncMock, MagicMock
 
@@ -107,7 +110,7 @@ def _make_client(monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, FastAPI]:
 
 
 def test_post_code_import_server_path_returns_task_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    client, _ = _make_client(monkeypatch)
+    client, app = _make_client(monkeypatch)
     response = client.post(
         "/admin/rag/code/import",
         json={
@@ -120,6 +123,28 @@ def test_post_code_import_server_path_returns_task_id(monkeypatch: pytest.Monkey
     body = response.json()
     assert body["status"] == "pending"
     assert body["task_id"]
+
+    # 不再只是断言 task_id truthy —— 验证真实的持久化与派生行为,
+    # 否则 import 端点把任务状态写空 / 不 spawn 任务也能让本测试通过(fake-test 漏洞).
+    task_id = body["task_id"]
+
+    # 1) 任务状态确实落进了 Redis Hash,且关键字段由端点写入了正确值
+    state = _run(app.state.redis_manager.redis.hgetall(f"aigateway:rag:code:tasks:{task_id}"))
+    assert state, "import 端点没有把 task 状态写入 Redis"
+    assert state.get("status") == "pending"
+    assert state.get("source_type") == "server_path"
+    assert state.get("source_label") == "server_path:///tmp"
+    assert state.get("embedding_model") == "Qwen/Qwen3-Embedding-0.6B"
+    # created_at 必须是个正整数时间戳(证明 _write_task_state 真的写了 time.time())
+    created_at = int(state.get("created_at") or 0)
+    assert created_at > 0, f"created_at 未写入或非正: {state!r}"
+    # document_id 由端点生成 (code_ 前缀 + hex),后续 cancel/query/list 都依赖它
+    assert (state.get("document_id") or "").startswith("code_")
+
+    # 后台任务被 _spawn_import_task strong-ref 的行为,已由
+    # test_spawn_import_task_tracks_task_in_app_state 确定性覆盖;
+    # 这里不再断言 active_tasks —— TestClient 同步返回时被 patch 成 no-op 的
+    # 后台任务可能已完成并被 done_callback 摘除,断言它"还在"是在测事件循环时序。
 
 
 def test_post_code_import_rejects_disallowed_server_path(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -177,7 +202,7 @@ def test_post_code_import_rejects_unsupported_json_source_type(
 
 def test_post_code_import_folder_multipart_accepts_files(monkeypatch: pytest.MonkeyPatch) -> None:
     pytest.importorskip("multipart")  # request.form() 需要 python-multipart
-    client, _ = _make_client(monkeypatch)
+    client, app = _make_client(monkeypatch)
     # 真实 multipart/form-data: source_type=folder + files + relative_paths
     response = client.post(
         "/admin/rag/code/import",
@@ -192,6 +217,14 @@ def test_post_code_import_folder_multipart_accepts_files(monkeypatch: pytest.Mon
     body = response.json()
     assert body["status"] == "pending"
     assert body["task_id"]
+
+    # 验证 folder 源把 source_type/source_label 真正落进了 Redis,
+    # 否则前端轮询拿到的任务元数据全是空(fake-test 漏洞).
+    task_id = body["task_id"]
+    state = _run(app.state.redis_manager.redis.hgetall(f"aigateway:rag:code:tasks:{task_id}"))
+    assert state.get("source_type") == "folder"
+    assert state.get("source_label") == "folder://main.py"
+    assert state.get("embedding_model") == "Qwen/Qwen3-Embedding-0.6B"
 
 
 def test_post_code_import_folder_multipart_rejects_zero_files(
@@ -215,7 +248,7 @@ def test_post_code_import_zip_multipart_accepts_file(monkeypatch: pytest.MonkeyP
     import io
     import zipfile
 
-    client, _ = _make_client(monkeypatch)
+    client, app = _make_client(monkeypatch)
     # 造一个真实可解压的 zip (含一个 main.py)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -228,6 +261,14 @@ def test_post_code_import_zip_multipart_accepts_file(monkeypatch: pytest.MonkeyP
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["status"] == "pending"
+    assert body["task_id"]
+
+    # 验证 zip 源把 source_type/source_label 真正落进了 Redis.
+    task_id = body["task_id"]
+    state = _run(app.state.redis_manager.redis.hgetall(f"aigateway:rag:code:tasks:{task_id}"))
+    assert state.get("source_type") == "zip"
+    assert state.get("source_label") == "zip://repo.zip"
+    assert state.get("embedding_model") == "Qwen/Qwen3-Embedding-0.6B"
 
 
 def test_get_code_task_returns_404_when_missing(
@@ -308,6 +349,30 @@ def test_delete_code_repository_removes_redis_metadata(
     assert all("code_del_me" not in item for item in remaining)
 
 
+def test_delete_code_repository_rejects_unregistered_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review round 3 C1:document_id 未在 Redis 注册时必须 404,不能落到 shutil.rmtree。
+    `..` 是合法单段 path param,旧实现会 rmtree 掉上级数据卷。"""
+    client, app = _make_client(monkeypatch)
+    # 不注册任何仓库 → delete 应 404,绝不触碰文件系统
+    with tempfile.TemporaryDirectory() as guard_dir:
+        # 把 graph_db_dir 指向临时目录,确保即使守卫被绕过也不污染真实 /data/code_graphs
+        app.state.config_manager._cfg["code_rag"]["graph_db_dir"] = guard_dir
+        # 在 guard_dir 的上级放一个诱饵目录,验证它绝不会被删
+        bait = Path(guard_dir).parent / f"bait_{Path(guard_dir).name}"
+        bait.mkdir(parents=True, exist_ok=True)
+        try:
+            # 未注册的 document_id
+            resp = client.delete("/admin/rag/code/repositories/code_never_registered")
+            assert resp.status_code == 404
+            # 路径穿越尝试
+            resp2 = client.delete("/admin/rag/code/repositories/..")
+            assert resp2.status_code == 404
+            # 诱饵目录仍在(未被 rmtree)
+            assert bait.exists()
+        finally:
+            shutil.rmtree(bait, ignore_errors=True)
+
+
 # ---------------------------------------------------------------------------
 # Task GC protection (Review finding 4):
 #   asyncio.create_task 返回值必须被 strong-ref,否则 GC 可能在导入未跑完时
@@ -374,13 +439,9 @@ def test_spawn_import_task_logs_uncaught_exception(caplog) -> None:
 def test_run_code_import_task_passes_real_symbol_name_to_graph_lookup(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
-    """回归 Review 发现 1:_run_code_import_task 里 symbol_name 只取
-    chunk["function_name"] / chunk["class_name"]。这些字段必须被
-    splitter 真的填上,否则 lookup_symbol_metadata_strict 拿到 None 短路,
-    整条 graph 增强链路是死的。
-
-    这里 stub 掉重资产依赖,验证 strict lookup 被至少调用一次并且
-    收到了非空的 symbol_name。
+    """重构后:_run_code_import_task 走 build_symbol_chunks(返回带 callers/callees
+    与 embed_text 的 chunk),embedding 嵌 embed_text(结构描述)而非 chunk_text(源码)。
+    验证:chunk 的 function_name 非空、callers 落进 payload、embed_text 被编码。
     """
     import asyncio as _asyncio
     from types import SimpleNamespace
@@ -388,8 +449,8 @@ def test_run_code_import_task_passes_real_symbol_name_to_graph_lookup(
 
     from aigateway_api import code_rag_routes as routes_mod
 
-    # ---- 桩:splitter 产出的 chunk 携带 function_name ----
-    def _fake_split(source_dir: str, ignore_patterns: list[str]) -> list[dict]:
+    # ---- 桩:build_symbol_chunks 产出的 chunk 携带 function_name + callers + embed_text ----
+    def _fake_build_symbol_chunks(source_dir, graph_repo_path, ignore_patterns, *, only_files=None):
         return [
             {
                 "file_path": "auth.py",
@@ -397,15 +458,22 @@ def test_run_code_import_task_passes_real_symbol_name_to_graph_lookup(
                 "language": "python",
                 "chunk_index": 0,
                 "chunk_text": "def login(user):\n    return user\n",
+                "embed_text": "function login in auth.py\nsignature: (user)\ncallers: register",
                 "start_line": 1,
                 "end_line": 2,
                 "function_name": "login",
                 "class_name": None,
+                "callers": ["register"],
+                "callees": [],
+                "imports": [],
+                "signature": "(user)",
+                "docstring": "",
             }
         ]
 
     monkeypatch.setattr(
-        "aigateway_core.pipelines.understanding.code_rag.splitter.split_code_directory", _fake_split
+        "aigateway_core.pipelines.understanding.code_rag.splitter.build_symbol_chunks",
+        _fake_build_symbol_chunks,
     )
     monkeypatch.setattr(
         "aigateway_core.pipelines.understanding.code_rag.graph_builder.build_code_graph",
@@ -415,27 +483,14 @@ def test_run_code_import_task_passes_real_symbol_name_to_graph_lookup(
         "aigateway_core.pipelines.understanding.code_rag.embedding_router.probe_embedding_dimension",
         lambda model: 4,
     )
+
+    encoded_texts: list[list[str]] = []
+    def _fake_encode(model, texts):
+        encoded_texts.append(list(texts))
+        return [[0.1, 0.2, 0.3, 0.4] for _ in texts]
     monkeypatch.setattr(
         "aigateway_core.pipelines.understanding.code_rag.embedding_router.encode_texts",
-        lambda model, texts: [[0.1, 0.2, 0.3, 0.4] for _ in texts],
-    )
-
-    strict_lookup_calls: list[tuple] = []
-
-    def _fake_strict(graph_db_path, file_path, symbol_name, chunk_text):
-        strict_lookup_calls.append((file_path, symbol_name))
-        return {
-            "callers": ["register"],
-            "callees": [],
-            "imports": [],
-            "chunk_type": "function",
-            "function_name": symbol_name,
-            "class_name": None,
-        }
-
-    monkeypatch.setattr(
-        "aigateway_core.pipelines.understanding.code_rag.graph_query.lookup_symbol_metadata_strict",
-        _fake_strict,
+        _fake_encode,
     )
 
     # ---- 桩:app.state ----
@@ -447,6 +502,8 @@ def test_run_code_import_task_passes_real_symbol_name_to_graph_lookup(
     qdrant_mgr._http.put = AsyncMock(return_value=put_resp)
     app_state.qdrant_manager = qdrant_mgr
 
+    graph_repo_path = str(tmp_path / "code_sym")
+
     async def _drive() -> None:
         await routes_mod._run_code_import_task(
             app_state=app_state,
@@ -457,22 +514,22 @@ def test_run_code_import_task_passes_real_symbol_name_to_graph_lookup(
             source_label="server_path:///tmp/x",
             embedding_model="Qwen/Qwen3-Embedding-0.6B",
             ignore_patterns=[],
-            graph_db_dir=str(tmp_path),
+            graph_repo_path=graph_repo_path,
+            workspace_path=None,
             cleanup_dirs=[],
         )
 
     _asyncio.new_event_loop().run_until_complete(_drive())
 
-    assert strict_lookup_calls, "strict lookup 完全没被调用,链路断了"
-    # 关键断言:传给 strict lookup 的 symbol_name 不能是 None
-    file_paths, symbol_names = zip(*strict_lookup_calls)
-    assert "login" in symbol_names, (
-        f"symbol_name 期望包含真实符号 'login',实际收到: {symbol_names}. "
-        "如果全是 None,说明 splitter 没写 function_name/class_name,"
-        "graph 增强永远不会触发。"
+    # 关键断言:编码的是 embed_text(结构描述),不是 chunk_text(源码)
+    assert encoded_texts, "encode_texts 完全没被调用,链路断了"
+    encoded = encoded_texts[0]
+    assert "function login" in encoded[0], (
+        f"编码的应是 embed_text(结构描述),实际收到: {encoded}. "
+        "如果源码被打进 embedding,说明重构没生效。"
     )
 
-    # upsert 的 payload 里 callers 也必须落盘,证明 graph_meta 真被合并了
+    # upsert 的 payload 里 function_name / callers / signature 都必须落盘
     upsert_call = qdrant_mgr._http.put.await_args
     body = upsert_call.kwargs["json"] if "json" in upsert_call.kwargs else upsert_call.args[1]
     if not isinstance(body, dict):
@@ -482,3 +539,124 @@ def test_run_code_import_task_passes_real_symbol_name_to_graph_lookup(
     payload = written_points[0]["payload"]
     assert payload["function_name"] == "login"
     assert payload["callers"] == ["register"]
+    assert payload["signature"] == "(user)"
+
+    # 完整 payload 字段集(spec §Payload)运行时落盘 —— 替代
+    # test_code_rag_helpers.py::test_code_rag_routes_build_matching_payload_shape
+    # 的静态源码字符串核对。缺任一字段说明 payload 组装漏写。
+    required_payload_fields = {
+        "document_id", "filename", "file_path", "language", "chunk_index",
+        "chunk_text", "chunk_type", "function_name", "class_name",
+        "start_line", "end_line", "callers", "callees", "imports",
+        "signature", "docstring", "embedding_model",
+    }
+    assert required_payload_fields.issubset(set(payload.keys())), (
+        f"payload 缺字段: {required_payload_fields - set(payload.keys())}"
+    )
+
+
+def test_run_code_import_task_batches_encode_calls_at_64_boundary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """运行时验证 embedding 的分批行为(batch_size=64)——替代旧的静态源码字符串核对
+    (test_code_rag_routes_batches_embedding_work 只是 grep 'batch_size = 64' 字符串)。
+
+    生成 70 个 chunk(>64),encode_texts 应被调用 2 次:64 + 6;且每个 batch
+    单独 upsert 一次(_http.put 被 await 2 次)。如果分批逻辑被破坏成一次性全量 encode,
+    这里会 encode 调用次数 = 1 / 单批 70 条 → 测试失败。
+    """
+    import asyncio as _asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from aigateway_api import code_rag_routes as routes_mod
+
+    TOTAL = 70
+    BATCH = 64
+
+    def _fake_build_symbol_chunks(source_dir, graph_repo_path, ignore_patterns, *, only_files=None):
+        return [
+            {
+                "file_path": f"mod_{i}.py",
+                "filename": f"mod_{i}.py",
+                "language": "python",
+                "chunk_index": 0,
+                "chunk_text": f"def fn_{i}():\n    pass\n",
+                "embed_text": f"function fn_{i} in mod_{i}.py",
+                "start_line": 1,
+                "end_line": 2,
+                "function_name": f"fn_{i}",
+                "class_name": None,
+                "callers": [],
+                "callees": [],
+                "imports": [],
+                "signature": "()",
+                "docstring": "",
+            }
+            for i in range(TOTAL)
+        ]
+
+    monkeypatch.setattr(
+        "aigateway_core.pipelines.understanding.code_rag.splitter.build_symbol_chunks",
+        _fake_build_symbol_chunks,
+    )
+    monkeypatch.setattr(
+        "aigateway_core.pipelines.understanding.code_rag.graph_builder.build_code_graph",
+        lambda src, dst: dst,
+    )
+    monkeypatch.setattr(
+        "aigateway_core.pipelines.understanding.code_rag.embedding_router.probe_embedding_dimension",
+        lambda model: 4,
+    )
+
+    encode_calls: list[list[str]] = []
+
+    def _fake_encode(model, texts):
+        encode_calls.append(list(texts))
+        return [[0.1, 0.2, 0.3, 0.4] for _ in texts]
+
+    monkeypatch.setattr(
+        "aigateway_core.pipelines.understanding.code_rag.embedding_router.encode_texts",
+        _fake_encode,
+    )
+
+    app_state = SimpleNamespace()
+    app_state.redis_manager = _FakeRedisManager()
+    qdrant_mgr = _FakeQdrantManager()
+    put_resp = MagicMock()
+    put_resp.raise_for_status = MagicMock()
+    qdrant_mgr._http.put = AsyncMock(return_value=put_resp)
+    app_state.qdrant_manager = qdrant_mgr
+
+    graph_repo_path = str(tmp_path / "code_batch")
+
+    async def _drive() -> None:
+        await routes_mod._run_code_import_task(
+            app_state=app_state,
+            task_id="t-batch",
+            document_id="code_batch",
+            source_dir=str(tmp_path),
+            source_type="server_path",
+            source_label="server_path:///tmp/x",
+            embedding_model="Qwen/Qwen3-Embedding-0.6B",
+            ignore_patterns=[],
+            graph_repo_path=graph_repo_path,
+            workspace_path=None,
+            cleanup_dirs=[],
+        )
+
+    _asyncio.new_event_loop().run_until_complete(_drive())
+
+    # 70 chunks 按 batch_size=64 切:应为 2 批(64 + 6)
+    assert len(encode_calls) == 2, (
+        f"encode_texts 应被调用 2 次(分批),实际 {len(encode_calls)} 次 —— "
+        "若为 1 次说明分批逻辑被破坏成一次性全量"
+    )
+    assert len(encode_calls[0]) == BATCH
+    assert len(encode_calls[1]) == TOTAL - BATCH
+    # 每批单独 upsert 一次
+    assert qdrant_mgr._http.put.await_count == 2
+
+    # total 落进 task 状态(分批前 _mark(total=len(chunks)))
+    state = _run(app_state.redis_manager.redis.hgetall("aigateway:rag:code:tasks:t-batch"))
+    assert int(state.get("total") or 0) == TOTAL

@@ -703,6 +703,106 @@ export async function deleteCodeRepository(documentId: string): Promise<void> {
   if (!res.ok) throw new Error(`Failed to delete code repository: ${res.status}`)
 }
 
+// --- Code RAG graph query / sync (重构后:走 codegraph CLI 的查询端点) ---
+
+export interface CodeSymbolNode {
+  id: string | null
+  kind: string | null
+  name: string | null
+  qualified_name: string | null
+  file_path: string | null
+  language: string | null
+  start_line: number | null
+  end_line: number | null
+  signature: string | null
+  docstring: string | null
+}
+
+export interface CodeSymbolRef {
+  name: string | null
+  kind: string | null
+  file_path: string | null
+  start_line: number | null
+}
+
+export interface CodeFileSyncResult {
+  document_id: string
+  synced_files: number
+  refreshed_symbols: number
+  deleted_files?: number
+}
+
+export async function syncCodeRepository(documentId: string): Promise<CodeFileSyncResult> {
+  const headers = await ensureAuthHeaders()
+  const res = await fetch(
+    `${API_BASE}/admin/rag/code/repositories/${encodeURIComponent(documentId)}/sync`,
+    { method: 'POST', headers },
+  )
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }))
+    throw new Error(
+      typeof body?.detail === 'string' ? body.detail : `Code sync failed: ${res.status}`,
+    )
+  }
+  return await res.json()
+}
+
+export async function queryCodeSymbols(
+  documentId: string,
+  symbol: string,
+  opts?: { kind?: string; limit?: number },
+): Promise<CodeSymbolNode[]> {
+  const headers = await ensureAuthHeaders()
+  const params = new URLSearchParams({ symbol, limit: String(opts?.limit ?? 10) })
+  if (opts?.kind) params.set('kind', opts.kind)
+  const res = await fetch(
+    `${API_BASE}/admin/rag/code/repositories/${encodeURIComponent(documentId)}/query?${params}`,
+    { headers },
+  )
+  if (!res.ok) throw new Error(`Code query failed: ${res.status}`)
+  return await res.json()
+}
+
+export async function getCodeCallers(documentId: string, symbol: string): Promise<CodeSymbolRef[]> {
+  const headers = await ensureAuthHeaders()
+  const params = new URLSearchParams({ symbol })
+  const res = await fetch(
+    `${API_BASE}/admin/rag/code/repositories/${encodeURIComponent(documentId)}/callers?${params}`,
+    { headers },
+  )
+  if (!res.ok) throw new Error(`Code callers failed: ${res.status}`)
+  const body = await res.json()
+  return body?.callers ?? []
+}
+
+export async function getCodeCallees(documentId: string, symbol: string): Promise<CodeSymbolRef[]> {
+  const headers = await ensureAuthHeaders()
+  const params = new URLSearchParams({ symbol })
+  const res = await fetch(
+    `${API_BASE}/admin/rag/code/repositories/${encodeURIComponent(documentId)}/callees?${params}`,
+    { headers },
+  )
+  if (!res.ok) throw new Error(`Code callees failed: ${res.status}`)
+  const body = await res.json()
+  return body?.callees ?? []
+}
+
+export async function getCodeImpact(
+  documentId: string,
+  symbol: string,
+  depth = 2,
+): Promise<CodeSymbolRef[]> {
+  const headers = await ensureAuthHeaders()
+  const params = new URLSearchParams({ symbol, depth: String(depth) })
+  const res = await fetch(
+    `${API_BASE}/admin/rag/code/repositories/${encodeURIComponent(documentId)}/impact?${params}`,
+    { headers },
+  )
+  if (!res.ok) throw new Error(`Code impact failed: ${res.status}`)
+  const body = await res.json()
+  return body?.affected ?? []
+}
+
 
 // ------------------------------------------------------------------
 // Admin: L3 Cache Lifecycle Management (Design §9b)
