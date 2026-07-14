@@ -131,13 +131,29 @@ class TestGetFeature:
 
         await cache.get_feature("key1", "char1", "v1")
 
-        # Give the background task a chance to run
+        # The TTL extension runs in a background task; wait for it to be scheduled.
         await asyncio.sleep(0.05)
 
         mock_redis.expire.assert_called_once()
         call_args = mock_redis.expire.call_args
         assert call_args[0][0] == "aigateway:feature:key1:char1:v1"
         assert call_args[0][1] == 30 * 86400  # 30 days in seconds
+
+    @pytest.mark.asyncio
+    async def test_cache_hit_extends_ttl_deterministic(self, mock_redis_client, config):
+        """Directly call extend_ttl to avoid timing dependency on asyncio.sleep."""
+        from aigateway_core.pipelines.generation.token.feature_cache import FeatureCacheManager
+
+        cache = FeatureCacheManager(mock_redis_client, config)
+        mock_redis_client.redis.expire = AsyncMock(return_value=True)
+
+        # Call extend_ttl directly with correct signature — no background task, no timing dependency
+        await cache.extend_ttl("key123", "char_01", "v1", ttl_days=30)
+
+        mock_redis_client.redis.expire.assert_called_once()
+        call_args = mock_redis_client.redis.expire.call_args
+        assert call_args[0][0] == "aigateway:feature:key123:char_01:v1"
+        assert call_args[0][1] == 30 * 86400
 
     @pytest.mark.asyncio
     async def test_timeout_returns_none(self, cache, mock_redis):

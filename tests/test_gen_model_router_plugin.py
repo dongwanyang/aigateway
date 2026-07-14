@@ -118,6 +118,8 @@ class TestGenModelRouterPluginDisabled:
         result = await plugin.execute(ctx)
 
         assert result is ctx
+        assert result.should_stop is False
+        assert result.response is None
         gen_opt = ctx.extra.get(NS_GENERATION_OPTIMIZATION, {})
         assert "model_router" not in gen_opt
 

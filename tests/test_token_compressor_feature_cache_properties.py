@@ -598,7 +598,7 @@ class TestProperty18CacheHitTTLExtension:
 
         result = await cache.get_feature(api_key, char_id, model_ver)
 
-        # Wait for the background TTL extension task
+        # Wait for the background TTL extension task to be scheduled
         await asyncio.sleep(0.05)
 
         assert result == vector, "Should return the cached vector"
@@ -606,7 +606,6 @@ class TestProperty18CacheHitTTLExtension:
 
         call_args = redis_mock.expire.call_args[0]
         expected_key = f"aigateway:feature:{api_key}:{char_id}:{model_ver}"
-        # extend_ttl is called with its default ttl_days=30 from get_feature()
         expected_ttl = _EXTEND_TTL_DEFAULT_DAYS * 86400
 
         assert call_args[0] == expected_key, (

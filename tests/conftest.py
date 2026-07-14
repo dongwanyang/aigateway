@@ -59,17 +59,21 @@ def _reset_trace_collector():
     只在 aigateway_core 可导入的环境下生效(单元测试直接 import 该包;
     e2e 测试通过 HTTP 调 gateway,不需要该 fixture 但保持全局 autouse 无副作用)。
     """
+    tc = None
     try:
         from aigateway_core.shared.trace_event import TraceCollector
-        TraceCollector._current.set(None)
+        tc = TraceCollector
     except ImportError:
-        pytest.skip("aigateway_core not installed — TraceCollector isolation skipped")
+        # Core not available — skip isolation for this test
+        yield
+        return
+    tc._current.set(None)
     yield
     try:
-        from aigateway_core.shared.trace_event import TraceCollector
-        TraceCollector._current.set(None)
-    except ImportError:
-        pass  # teardown: non-critical, core not available
+        tc._current.set(None)
+    except Exception:
+        # Teardown: best-effort cleanup
+        pass
 
 
 # ---- 让 tests/fixtures/*.py 里的 fixture 被 pytest 全局识别 ----

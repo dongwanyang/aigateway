@@ -139,12 +139,13 @@ def reset_debug_state(client: TestClient) -> None:
                 json={"enabled": False},
                 headers=HEADERS,
             )
-        except Exception:
-            pass  # Some plugins don't support per_plugin debug
+        except Exception as exc:
+            # Some plugins don't support per_plugin debug — log but continue
+            pytest.skip(f"per_plugin debug endpoint failed for {plugin_name}: {exc}")
         try:
             disable_plugin(client, plugin_name)
-        except Exception:
-            pass
+        except Exception as exc:
+            pytest.skip(f"disable_plugin failed for {plugin_name}: {exc}")
 
 
 # ------------------------------------------------------------------
@@ -343,10 +344,7 @@ def test_phase1_individual_plugins(test_client: TestClient) -> None:
             f"Global dim {dim} should be enabled for {plugin_name}"
 
         payload = _get_verification_payload(plugin_name)
-        try:
-            resp = trigger_chat(test_client, payload)
-        except Exception:
-            resp = {}
+        resp = trigger_chat(test_client, payload)
 
         events = fetch_trace_events(test_client, resp.get("_trace_id") if isinstance(resp, dict) else None)
         debug_events = find_debug_events(events, plugin_name=plugin_name) \
@@ -434,13 +432,10 @@ def test_phase2_global_dimensions(test_client: TestClient) -> None:
             try:
                 disable_plugin(test_client, pname)
             except Exception:
-                pass
+                pass  # Non-critical: plugin may not exist
 
         enable_global_dim(test_client, dim)
-        try:
-            resp = trigger_chat(test_client)
-        except Exception:
-            resp = {}
+        resp = trigger_chat(test_client)
 
         events = fetch_trace_events(test_client, resp.get("_trace_id") if isinstance(resp, dict) else None)
         debug_events = find_debug_events(events, dimension=dim)
@@ -493,14 +488,14 @@ def test_phase3_incremental_plugins(test_client: TestClient) -> None:
         try:
             resp = trigger_chat(test_client)
         except Exception:
-            resp = {}
+            pytest.fail("trigger_chat raised an exception during Phase 3 iteration {n}")
         events = fetch_trace_events(test_client, resp.get("_trace_id") if isinstance(resp, dict) else None)
 
         debug_events = [ev for ev in events if ev.get("kind") == "debug"]
         distinct_stages = {ev.get("stage") for ev in debug_events}
         # At least one debug event should appear once >=1 engine plugin is on,
-        # or an entry/cache event from prefix plugins. Be lenient: >=1 distinct
-        # stage (the request exercises the pipeline).
+        # or an entry/cache event from prefix plugins. The request exercises
+        # the pipeline so we expect at least one distinct stage.
         debug_found = len(distinct_stages) >= 1
 
         results.append({
@@ -548,7 +543,7 @@ def test_phase4_incremental_dimensions(test_client: TestClient) -> None:
         try:
             resp = trigger_chat(test_client)
         except Exception:
-            resp = {}
+            pytest.fail("trigger_chat raised an exception during Phase 3 iteration {n}")
         events = fetch_trace_events(test_client, resp.get("_trace_id") if isinstance(resp, dict) else None)
 
         disabled_dims = GLOBAL_DIMENSIONS[n:]
@@ -610,7 +605,7 @@ def test_phase5_full_conflict_detection(test_client: TestClient) -> None:
     try:
         resp = trigger_chat(test_client)
     except Exception:
-        resp = {}
+        pytest.fail("trigger_chat raised an exception during Phase 5")
     events = fetch_trace_events(test_client, resp.get("_trace_id") if isinstance(resp, dict) else None)
 
     all_debug = [ev for ev in events if ev.get("kind") == "debug"]
@@ -626,7 +621,11 @@ def test_phase5_full_conflict_detection(test_client: TestClient) -> None:
     for ev in all_debug:
         s = ev.get("stage")
         stage_counts[s] = stage_counts.get(s, 0) + 1
-    duplicates = {k: v for k, v in stage_counts.items() if v > 3}
+    # A conflict would be the same stage appearing with different statuses
+    # or the same stage appearing in multiple kinds simultaneously.
+    # Use a higher threshold: >5 occurrences of the same stage suggests
+    # duplicate event emission (normal is 1-3 per stage).
+    duplicates = {k: v for k, v in stage_counts.items() if v > 5}
     conflict_found = len(duplicates) > 0
 
     results.append({

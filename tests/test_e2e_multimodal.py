@@ -281,3 +281,7 @@ class TestE2EMultimodal:
             "/v1/models", headers={"Authorization": "Bearer test-key"}
         )
         assert resp.status_code == 200
+        data = resp.json()
+        assert "data" in data
+        assert isinstance(data["data"], list)
+        assert len(data["data"]) > 0

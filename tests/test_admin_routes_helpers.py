@@ -84,9 +84,12 @@ class TestSplitText:
 
     def test_default_parameters(self):
         split = self._get_split_func()
-        text = "Word " * 100  # ~400 chars
+        text = "Word " * 100  # ~500 chars
         chunks = split(text)  # defaults: fixed_size, 512, 64
         assert isinstance(chunks, list)
+        assert len(chunks) >= 1
+        # Chunks should not exceed chunk_size
+        assert all(len(c) <= 512 for c in chunks)
 
     def test_fixed_size_last_chunk_shorter(self):
         split = self._get_split_func()

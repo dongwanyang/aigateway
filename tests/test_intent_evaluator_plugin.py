@@ -105,6 +105,8 @@ class TestIntentEvaluatorPluginDisabled:
         result = await plugin.execute(ctx)
 
         assert result is ctx
+        assert result.should_stop is False
+        assert result.response is None
         # Should not write intent_evaluator data
         gen_opt = ctx.extra.get(NS_GENERATION_OPTIMIZATION, {})
         assert "intent_evaluator" not in gen_opt
@@ -121,6 +123,8 @@ class TestIntentEvaluatorPluginDisabled:
         await plugin.execute(ctx)
 
         mock_strategy.evaluate.assert_not_called()
+        # Also verify ctx.extra was not modified
+        assert "intent_evaluator" not in ctx.extra.get(NS_GENERATION_OPTIMIZATION, {})
 
 
 class TestIntentEvaluatorPluginEnabled:
