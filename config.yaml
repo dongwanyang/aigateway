@@ -289,7 +289,7 @@ media_optimization:
     ocr_languages:
     - eng
     - chi_sim
-    caption_model: gpt-4o
+    caption_model: agnes-image-2.1-flash
     max_file_size_mb: 20.0
     caption_max_tokens: 150
     caption_temperature: 0.3
