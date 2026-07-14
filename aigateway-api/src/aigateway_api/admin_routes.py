@@ -1628,8 +1628,12 @@ async def import_rag_document(
     content = body.get("content", "")
     filename = body.get("filename", "")
     chunk_strategy = body.get("chunk_strategy", "fixed_size")  # paragraph | fixed_size | sentence
-    chunk_size = int(body.get("chunk_size", 512))
-    chunk_overlap = int(body.get("chunk_overlap", 64))
+    try:
+        chunk_size = int(body.get("chunk_size", 512))
+        chunk_overlap = int(body.get("chunk_overlap", 64))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail={"error": {"code": "validation_error", "message": "chunk_size / chunk_overlap must be integers"}})
+    # 值域兜底在 _split_text 内做(chunk_size<1 / overlap 非法),这里只拦类型错误防 500。
 
     start_time = time_mod.time()
 
@@ -1838,6 +1842,16 @@ def _split_text(text: str, strategy: str = "fixed_size", chunk_size: int = 512, 
     if not text or len(text) < 10:
         return []
 
+    # 输入归一化(防 OOM / 防 chunk 超限):
+    # - chunk_size 必须 >= 1,否则 fixed_size 分支 end<=start、while 永不前进 → 死循环。
+    #   chunk_size 来自请求体(见 import_rag_document),只过 int() 无校验,这里兜底。
+    # - overlap 必须 0 < overlap < chunk_size,否则步进 <= 0(fixed_size 死循环)或
+    #   current[-overlap:] 吞掉整块(paragraph/sentence 产出远超 chunk_size 的畸形 chunk)。
+    #   非法 overlap 退化为 0(无重叠),与各分支 overlap==0 行为一致。
+    if chunk_size < 1:
+        chunk_size = 512
+    overlap = overlap if 0 < overlap < chunk_size else 0
+
     if strategy == "paragraph":
         # 按段落分割（双换行符）
         paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
@@ -1872,6 +1886,7 @@ def _split_text(text: str, strategy: str = "fixed_size", chunk_size: int = 512, 
 
     else:
         # fixed_size: 按固定字符数分块
+        # overlap 已在函数顶部归一化(0 <= overlap < chunk_size),步进恒 > 0。
         chunks = []
         start = 0
         while start < len(text):
