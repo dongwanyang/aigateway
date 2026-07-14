@@ -269,11 +269,10 @@ code_rag:
   graph_db_dir: /data/code_graphs
 hot_reload: true
 debug:
-  entry: false
-  plugins_enabled: false
+  bridge: true
+  plugins_enabled: true
   plugins:
-    enabled: false
-    per_plugin:
+    enabled: true
 media_optimization:
   enabled: true
   download_timeouts:
@@ -351,7 +350,8 @@ media_optimization:
   max_concurrent_processors: 4
 generation_optimization:
   enabled: true
-  ai_director: {}
+  ai_director:
+    enabled: true
   model_router:
     model_capabilities:
       agnes-2.0-flash: 60
@@ -364,17 +364,21 @@ generation_optimization:
       - generative
       agnes-video-v2.0:
       - generative
+    enabled: true
   feature_cache: {}
-  cost_tracking: {}
+  cost_tracking:
+    enabled: true
   prompt_templates: {}
   token_compressor:
     clip:
       model_name: openai/clip-vit-large-patch14
       device: cpu
       batch_size: 1
+    enabled: true
   draft_workflow:
     comfyui:
       server_url: http://localhost:8188
       connect_timeout: 10
       execution_timeout: 300
+    enabled: true
 debug_mode: true

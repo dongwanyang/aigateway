@@ -1,6 +1,6 @@
 # Plugin & Debug Switch Integration Test Report
 
-Generated: 2026-07-11 06:50:41
+Generated: 2026-07-14 12:14:34
 
 
 ## Summary

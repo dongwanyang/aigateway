@@ -47,3 +47,4 @@ repomix-output.md
 .test-venv/
 /*.lock
 .CodeBuddy/
+project-tasks/

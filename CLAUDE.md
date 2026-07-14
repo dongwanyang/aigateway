@@ -40,6 +40,7 @@ Client → aigateway-api (FastAPI :8000)
 ```
 aigateway-api/src/aigateway_api/    FastAPI app (protocol surface only)
   main.py               App factory, lifespan (init state, build both PipelineEngines)
+  app_state.py          Shared state accessor (_get_app_state)
   dispatcher.py         Thin adapter; real RequestDispatcher in core dispatch/dispatcher.py
   openai_compat.py      /v1/chat/completions handler + helpers (_apply_*/_record_request_log)
   admin_routes.py       API key CRUD, quotas, plugin config, logs, RAG, L3 cache mgmt
@@ -141,7 +142,7 @@ Backfill: L2 hit → L1; L3 hit → L1 only (approximate); MISS → L1+L2 + asyn
 | `route/bridge/litellm_bridge.py` | Multi-provider calls, fallback, cooldown, auto resolver. Cooldown reads `circuit_breaker:` section. |
 | `pipelines/generation/` | 6 gen plugins + strategies (+ `_common/`, `registration.py`). |
 | `prefix/media/` | Media Optimization V2. |
-| `control-panel/src/pages/` | 9 page components. |
+| `control-panel/src/pages/` | 10 page components. |
 | `control-panel/src/api/client.ts` | Fetch calls + `parseMetrics()` (client-side Prometheus text parse). |
 
 ## Development
@@ -180,7 +181,7 @@ python3 -m pytest tests/ -v --ignore=tests/test_template_routes.py   # flaky, sk
 python3 -m pytest tests/test_cache_key_v2.py -v
 python3 -m pytest tests/ --cov=aigateway_core --cov=aigateway_api
 ```
-25 files. No `conftest.py` / `pytest.ini`. Env uses `python3` (no `python` alias).
+57 test files. No `conftest.py` / `pytest.ini`. Env uses `python3` (no `python` alias).
 
 ### Config precedence (high → low)
 1. Real process env (docker-compose `environment:` / shell `export`)
