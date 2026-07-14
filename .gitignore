@@ -20,6 +20,7 @@ build/
 *.swp
 *.swo
 
+
 # TypeScript build artifacts
 *.tsbuildinfo
 
@@ -45,3 +46,4 @@ repomix-output.md
 .playwright-cli/
 .test-venv/
 /*.lock
+.CodeBuddy/
