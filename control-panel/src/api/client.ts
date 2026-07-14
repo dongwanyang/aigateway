@@ -805,6 +805,47 @@ export async function getCodeImpact(
 
 
 // ------------------------------------------------------------------
+// Code RAG: File list + full symbol listing (call-graph panel)
+// ------------------------------------------------------------------
+
+export interface CodeFile {
+  path: string
+  language: string
+  node_count: number | null
+  size: number | null
+}
+
+export async function listCodeFiles(documentId: string): Promise<CodeFile[]> {
+  const headers = await ensureAuthHeaders()
+  const res = await fetch(
+    `${API_BASE}/admin/rag/code/repositories/${encodeURIComponent(documentId)}/files`,
+    { headers },
+  )
+  if (!res.ok) throw new Error(`Code files failed: ${res.status}`)
+  return await res.json()
+}
+
+// List all symbols via empty-string search (no new backend endpoint needed).
+// codegraph CLI ignores --limit partially on empty search, so pass a large limit
+// to fetch the full set; caller checks length === limit to detect truncation.
+export async function listAllSymbols(
+  documentId: string,
+  opts?: { kind?: string; limit?: number },
+): Promise<CodeSymbolNode[]> {
+  const headers = await ensureAuthHeaders()
+  const limit = opts?.limit ?? 5000
+  const params = new URLSearchParams({ symbol: '', limit: String(limit) })
+  if (opts?.kind) params.set('kind', opts.kind)
+  const res = await fetch(
+    `${API_BASE}/admin/rag/code/repositories/${encodeURIComponent(documentId)}/query?${params}`,
+    { headers },
+  )
+  if (!res.ok) throw new Error(`List symbols failed: ${res.status}`)
+  return await res.json()
+}
+
+
+// ------------------------------------------------------------------
 // Admin: L3 Cache Lifecycle Management (Design §9b)
 // ------------------------------------------------------------------
 
