@@ -55,6 +55,24 @@ _REPO_LIST_KEY = "aigateway:rag:code:documents"
 _TASK_TTL_SECONDS = 24 * 3600
 _CANCELLED = "cancelled"
 
+# Lua script: atomically set status=cancelled only if current status is not terminal.
+# Returns "ok" on success, "already_terminal" if already done, "missing" if key gone.
+# This prevents the race where cancel writes "cancelled" then task completion
+# overwrites it with "completed"/"failed".
+_CANCELLATION_LUA = """
+local key = KEYS[1]
+local current = redis.call('HGET', key, 'status')
+if not current then
+    return 'missing'
+end
+local terminal = {['completed']=true, ['failed']=true, ['cancelled']=true}
+if terminal[current] then
+    return 'already_terminal'
+end
+redis.call('HSET', key, 'status', ARGV[1])
+return 'ok'
+"""
+
 
 # ----------------------------------------------------------------------
 # Request / response schemas
@@ -102,6 +120,13 @@ async def _write_task_state(
             payload[k] = str(v)
     await redis_mgr.redis.hset(_task_key(task_id), mapping=payload)
     await redis_mgr.redis.expire(_task_key(task_id), _TASK_TTL_SECONDS)
+
+
+async def _delete_task_key(redis_mgr: Any, task_id: str) -> None:
+    """任务完成后立即删除 Redis key，避免 24h TTL 内的脏数据。"""
+    if redis_mgr is None or redis_mgr.redis is None:
+        return
+    await redis_mgr.redis.delete(_task_key(task_id))
 
 
 async def _read_task_state(redis_mgr: Any, task_id: str) -> Optional[Dict[str, Any]]:
@@ -583,6 +608,7 @@ async def _run_code_import_task(
         await _mark(total=len(chunks))
         if not chunks:
             await _mark(status="completed", done=0)
+            await _delete_task_key(redis_mgr, task_id)
             return
 
         # 3) probe embedding dim + upsert collection
@@ -690,11 +716,13 @@ async def _run_code_import_task(
         await _append_repository(redis_mgr, repo_meta)
 
         await _mark(status="completed", error=None)
+        await _delete_task_key(redis_mgr, task_id)
 
     except asyncio.CancelledError:
         # 用户主动取消,不记为 failed
         logger.info("code rag import task %s cancelled by user", task_id)
         await _mark(status=_CANCELLED, error=None)
+        await _delete_task_key(redis_mgr, task_id)
         raise  # 重新抛出让 done_callback 处理
 
     except Exception as exc:
@@ -713,6 +741,7 @@ async def _run_code_import_task(
             task_id,
             {"status": "failed", "error": str(exc)},
         )
+        await _delete_task_key(redis_mgr, task_id)
     finally:
         for cleanup in cleanup_dirs:
             shutil.rmtree(cleanup, ignore_errors=True)
@@ -811,13 +840,16 @@ async def import_code_repository(
         embedding_model = body.embedding_model
         if source_type == "server_path":
             resolved = _validate_server_path(body.server_path or "", allowed_roots)
-            source_dir = str(resolved)
-            source_label = f"server_path://{resolved}"
             # managed 源:把原 server_path 目录 symlink 成 {graph_repo_path}/src,
-            # 使 db file_path(src/...前缀)可被 codegraph sync/node 解析。
-            # 不进 cleanup_dirs(增量 sync 复用)。
+            # 使 DB file_path(src/...前缀)可被 codegraph sync/node 解析。
+            # source_dir 用 {graph_repo_path}/src（和 git 导入一致），
+            # codegraph 通过 work_dir/src → {graph_repo_path}/src → resolved
+            # 索引出 src/<files>；_resolve_source_file 剥掉 src/ 后再 join
+            # 到 {graph_repo_path}/src，符号链接自动展开到 resolved。
             _ensure_workspace_symlink(graph_repo_path, str(resolved))
-            workspace_path = str(Path(graph_repo_path) / "src")
+            source_dir = str(Path(graph_repo_path) / "src")
+            source_label = f"server_path://{resolved}"
+            workspace_path = source_dir
         elif source_type == "git":
             _validate_git_url(body.git_url or "")
             # managed 源:clone 到持久目录 {graph_repo_path}/src/(不进 cleanup_dirs),
@@ -911,8 +943,21 @@ async def cancel_code_task(
         logger.info("Code rag import task %s already terminal (status=%s), skipping cancel", task_id, current_status)
         return {"task_id": task_id, "status": current_status}
 
-    # 1) 写 Redis 终态
-    await _write_task_state(redis_mgr, task_id, {"status": _CANCELLED})
+    # 1) 原子 CAS: 仅当当前非终态时才写 cancelled,防止与任务完成路径竞争
+    try:
+        cas_result = await redis_mgr.redis.eval(_CANCELLATION_LUA, 1, _task_key(task_id), _CANCELLED)
+    except Exception:
+        # eval 不可用(如 FakeRedis fallback):回退到旧路径
+        await _write_task_state(redis_mgr, task_id, {"status": _CANCELLED})
+        cas_result = "ok"
+
+    if cas_result == "already_terminal":
+        # 并发写入导致状态已变,重新读取真实状态
+        updated = await _read_task_state(redis_mgr, task_id)
+        return {"task_id": task_id, "status": updated.get("status") or "cancelled"}
+    elif cas_result == "missing":
+        logger.warning("Code rag import task %s Redis key vanished during cancel", task_id)
+        return {"task_id": task_id, "status": "cancelled"}
 
     # 2) 取消 asyncio.Task
     active = getattr(app_state, "code_rag_active_tasks", None)
@@ -931,9 +976,10 @@ async def list_code_tasks(
     request: Request,
     _auth: Dict[str, Any] = Depends(authenticate_admin),
 ) -> List[Dict[str, Any]]:
-    """列出所有任务(含终态),附带 source_label 供前端展示。
+    """列出所有活跃任务(终态任务在完成后已从 Redis 删除)。
 
-    前端页面刷新后可用此接口恢复正在运行的任务。
+    前端页面刷新后可用此接口恢复正在运行的任务。已完成/失败/已取消的
+    任务由前端本地状态(localStorage)维护。
     """
     redis_mgr = getattr(request.app.state, "redis_manager", None)
     if redis_mgr is None or redis_mgr.redis is None:

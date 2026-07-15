@@ -272,19 +272,19 @@ export default function KnowledgeCodeTab() {
     setTasks(prev => prev.filter(t => t.task_id !== taskId))
   }
 
-  /** 取消任务 — cancel API 同步返回 200 后才更新状态,不需要乐观更新 */
+  /** 取消任务 — cancel API 同步返回实际状态,用后端返回的 status 更新 */
   async function handleCancelTask(task: CodeImportTask) {
     try {
-      await cancelCodeImportTask(task.task_id)
-      // 后端已确认,安全更新为 cancelled
+      const resp = await cancelCodeImportTask(task.task_id)
+      // 后端可能返回已终态的真实 status(如 completed),以实际为准
+      const actualStatus = (resp as { status: string }).status || 'cancelled'
       setTasks(prev =>
         prev.map(t =>
           t.task_id === task.task_id
-            ? { ...t, status: 'cancelled' as const, error: null }
+            ? { ...t, status: actualStatus as CodeImportTask['status'], error: null }
             : t,
         ),
       )
-      // 清轮询 timer — 不再需要 poll 纠正
       clearTaskTimers(timersRef.current, task.task_id)
     } catch (exc) {
       alert(`取消失败: ${exc instanceof Error ? exc.message : '未知错误'}`)

@@ -671,7 +671,7 @@ export async function getCodeImportTask(taskId: string): Promise<CodeImportTask>
   return await res.json()
 }
 
-export async function cancelCodeImportTask(taskId: string): Promise<{ task_id: string; status: 'cancelled' }> {
+export async function cancelCodeImportTask(taskId: string): Promise<{ task_id: string; status: CodeImportTaskStatus }> {
   const headers = await ensureAuthHeaders()
   const res = await fetch(
     `${API_BASE}/admin/rag/code/tasks/${encodeURIComponent(taskId)}/cancel`,
