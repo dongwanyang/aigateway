@@ -18,9 +18,18 @@ import logging
 import time
 from typing import Any, AsyncIterator, Dict, List, Optional
 
+import httpx
+
 from .cooldown import ProviderCooldownTracker
 
 logger = logging.getLogger(__name__)
+
+# Intent → required capability mapping (used by _resolve_by_intent + completion/completion_stream)
+_INTENT_TO_CAPABILITY = {
+    "understanding": "text",
+    "generation:image": "image",
+    "generation:video": "video",
+}
 
 
 def _emit_bridge_debug(start_monotonic: float, status: str,
@@ -64,11 +73,11 @@ class LiteLLMBridge:
         self.cost_tracker: Any = None
         self._fallback_chain: List[str] = []
         self._model_alias_map: Dict[str, str] = {}  # 裸模型名 -> Router 注册名
-        self._model_modalities: Dict[str, List[str]] = {}  # 裸模型名 -> modality 列表
+        self._model_capabilities: Dict[str, List[str]] = {}  # 裸模型名 -> capabilities 列表
         self._model_pricing: Dict[str, Dict[str, float]] = {}  # litellm_model -> {prompt, completion}
         # auto 模型解析器(可选,由 main.py 注入)
-        # bridge 收到 model=='auto' 时用它按 pipeline_kind + complexity 选模型,
-        # 让「选哪个模型」的决策在管道链末端而不是入口做。
+        # 留作后续复杂度评分接入点; 当前 _resolve_by_intent 不依赖它
+        # (ModelRouterStrategy 内部仍用旧 llm/mllm/generative 分类, 见 Task 9)。
         self._auto_resolver: Any = None
         # cooldown tracker(在 initialize() 里创建,init 时占位)
         self._cooldown_tracker: Optional[ProviderCooldownTracker] = None
@@ -76,79 +85,58 @@ class LiteLLMBridge:
     def set_auto_resolver(self, resolver: Any) -> None:
         """注入 auto 模型解析器(通常是 ModelRouterStrategy 单例)。
 
-        没注入时,收到 model=='auto' 会回落到「取第一个已注册模型」。
+        留作后续复杂度评分接入点; 当前 intent-based 解析不依赖它。
         """
         self._auto_resolver = resolver
 
-    async def _resolve_auto(
+    async def _resolve_by_intent(
         self,
-        messages: List[Dict[str, Any]],
-        pipeline_kind: str,
+        intent: str,
+        model_hint: Optional[str],
     ) -> Dict[str, Any]:
-        """把 model=='auto' 解析为真实模型名。
+        """按意图对应能力过滤候选池, 选最佳模型.
 
         Args:
-            messages: 当前请求 messages(已过 PII/media 前置),用于估算 complexity。
-            pipeline_kind: "understanding" | "generation",决定候选池模态。
+            intent: "understanding" | "generation:image" | "generation:video"
+            model_hint: 客户端/预判指定的模型名(裸名), 可为 None.
+                若在候选池内则优先选它; 否则忽略.
 
         Returns:
-            {"model": <resolved>, "meta": {...}} 或
-            {"error": {...}} 表示无可用模型。
+            {"model": <resolved>, "meta": {...}} 或 {"error": {...}} (池空).
+
+        Note: 不调 _auto_resolver —— ModelRouterStrategy 内部仍用旧 llm/mllm/generative
+        分类(见 Task 9 才迁移 capabilities), 取值与本函数的 text/image/video 不匹配,
+        调用会选不到模型。池内选首 + hint 优先即可; 复杂度评分留作后续接入点。
         """
-        # 按管道确定所需模态
-        required_modality = "generative" if pipeline_kind == "generation" else "llm"
+        required_capability = _INTENT_TO_CAPABILITY.get(intent, "text")
 
-        # 估算 complexity(与原 _resolve_auto_model 保持一致)
-        full_text_parts: List[str] = []
-        for m in messages or []:
-            content = m.get("content", "") if isinstance(m, dict) else ""
-            if isinstance(content, str):
-                full_text_parts.append(content)
-            elif isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        full_text_parts.append(block.get("text", ""))
-        full_text = " ".join(full_text_parts)
-        complexity_score = min(100, max(0, len(full_text) // 50))
-
-        if self._auto_resolver is not None:
-            try:
-                decision = await self._auto_resolver.route(
-                    complexity_score=complexity_score,
-                    required_modality=required_modality,
-                )
-                return {
-                    "model": decision.selected_model,
-                    "meta": {
-                        "selected_model": decision.selected_model,
-                        "selected_provider": decision.selected_provider,
-                        "reason": decision.reason,
-                        "estimated_cost": decision.estimated_cost,
-                        "pipeline_kind": pipeline_kind,
-                    },
-                }
-            except Exception as exc:
-                logger.warning("bridge auto 解析失败,回落到 fallback: %s", exc)
-
-        # Fallback: 取第一个符合模态的已注册模型
         registered = self.get_registered_models()
-        for m in registered:
-            mods = self._model_modalities.get(m, [])
-            if required_modality == "generative":
-                if any(x in mods for x in ("generative", "image", "video")):
-                    return {"model": m, "meta": {"selected_model": m, "reason": "auto_fallback",
-                                                  "pipeline_kind": pipeline_kind}}
-            else:
-                # understanding: llm / mllm / 未标记的都当理解模型
-                if not mods or any(x in mods for x in ("llm", "mllm")):
-                    return {"model": m, "meta": {"selected_model": m, "reason": "auto_fallback",
-                                                  "pipeline_kind": pipeline_kind}}
-        if registered:
-            return {"model": registered[0], "meta": {"selected_model": registered[0],
-                                                       "reason": "auto_last_resort",
-                                                       "pipeline_kind": pipeline_kind}}
-        return {"error": {"code": "model_not_found",
-                          "message": f"'auto' 无可用 {required_modality} 模型"}}
+        pool = [
+            m for m in registered
+            if required_capability in self._model_capabilities.get(m, ["text"])
+        ]
+        if not pool:
+            return {
+                "error": {
+                    "code": "no_model_for_intent",
+                    "message": f"No model with capability '{required_capability}' for intent '{intent}'",
+                }
+            }
+
+        # hint 在池内 -> 优先
+        if model_hint and model_hint in pool:
+            return {
+                "model": model_hint,
+                "meta": {"selected_model": model_hint, "reason": "hint_matched",
+                          "intent": intent},
+            }
+
+        # 无 hint 或 hint 不在池内 -> 取池首(后续可接 intent_evaluator 评分)
+        return {
+            "model": pool[0],
+            "meta": {"selected_model": pool[0], "reason": "pool_first",
+                      "intent": intent},
+        }
 
     # ------------------------------------------------------------------
     # 初始化
@@ -286,7 +274,7 @@ class LiteLLMBridge:
                 for group in model_grouper:
                     fallback_models = group.get("fallback_models", [])
                     for model_entry in group.get("models", []):
-                        # 支持字符串或字典格式；modality 必须为 list
+                        # 支持字符串或字典格式；capabilities 必须为 list
                         model_base_url: Optional[str] = None
                         if isinstance(model_entry, dict):
                             model_name = model_entry.get("name", "")
@@ -294,28 +282,28 @@ class LiteLLMBridge:
                                 continue
                             # 可选：per-model base_url 覆盖 provider 级别
                             model_base_url = model_entry.get("base_url") or None
-                            raw_modality = model_entry.get("modality")
-                            if isinstance(raw_modality, list):
-                                model_modality = [
-                                    str(x) for x in raw_modality if x
-                                ] or ["generative"]
+                            raw_caps = model_entry.get("capabilities")
+                            if isinstance(raw_caps, list):
+                                model_caps = [
+                                    str(x) for x in raw_caps if x
+                                ] or ["text"]
                             else:
-                                if raw_modality is not None:
+                                if raw_caps is not None:
                                     logger.warning(
-                                        "litellm_bridge: model=%s modality expected list, "
-                                        "got %r; defaulting to ['generative']",
+                                        "litellm_bridge: model=%s capabilities expected list, "
+                                        "got %r; defaulting to ['text']",
                                         model_name,
-                                        type(raw_modality).__name__,
+                                        type(raw_caps).__name__,
                                     )
-                                model_modality = ["generative"]
+                                model_caps = ["text"]
                         elif isinstance(model_entry, str):
                             model_name = model_entry
-                            model_modality = ["generative"]
+                            model_caps = ["text"]
                         else:
                             continue
 
-                        # 记录 modality
-                        self._model_modalities[model_name] = model_modality
+                        # 记录 capabilities
+                        self._model_capabilities[model_name] = model_caps
 
                         # 生效的 base_url：优先 per-model，回退 provider 级别
                         effective_base_url = model_base_url or base_url
@@ -542,17 +530,20 @@ class LiteLLMBridge:
         fallback_chain: Optional[List[str]] = None,
         max_retries: Optional[int] = None,
         extra_headers: Optional[Dict[str, str]] = None,
-        pipeline_kind: str = "understanding",
+        intent: str = "understanding",
+        model_hint: Optional[str] = None,
+        # 过渡别名:Task 6 之前 dispatcher 仍传 pipeline_kind=,Task 6 后移除。
+        pipeline_kind: Optional[str] = None,
     ) -> Dict[str, Any]:
         """发送聊天补全请求到下游 LLM。
 
-        支持 model=='auto' 的末端解析:bridge 内部按 pipeline_kind 选模型,
+        支持按意图解析模型:bridge 内部按 intent 选模型,
         让「选哪个模型」的决策发生在管道链末端而非入口。
         支持重试和 fallback 链——当主模型调用失败时,依次尝试 fallback_chain 中的模型。
 
         Args:
             messages: 消息列表，OpenAI 格式。
-            model: 目标模型名称。传 'auto' 时由 bridge 结合 pipeline_kind 内部解析。
+            model: 目标模型名称。作为 hint;若不具备 intent 所需 capability 则忽略,走池解析。
             user_id: 用户 ID，用于用量追踪。
             temperature: 采样温度。
             max_tokens: 最大输出 token 数。
@@ -566,11 +557,12 @@ class LiteLLMBridge:
             fallback_chain: 降级模型列表 [{model, provider}]。
             max_retries: 最大重试次数。
             extra_headers: 额外 HTTP 请求头（用于 trace context 传播等）。
-            pipeline_kind: 请求所属管道 "understanding" | "generation",
-                仅在 model=='auto' 时用于筛选候选池模态。
+            intent: 请求意图 "understanding" | "generation:image" | "generation:video",
+                决定候选池所需 capability。
+            model_hint: 预判/客户端指定的模型名(裸名),在候选池内则优先选它。
 
         Returns:
-            完整的响应字典（OpenAI 格式）。model=='auto' 时 _meta.model_router
+            完整的响应字典（OpenAI 格式）。_meta.model_router
             会记录实际选中的模型。
         """
         import time as _time
@@ -580,15 +572,35 @@ class LiteLLMBridge:
         last_error: Optional[Exception] = None
         fallback_used: List[str] = []
 
-        # ===== model=='auto' 末端解析(总分总架构:让 bridge 决定用哪个模型)=====
+        # 过渡兼容:Task 6 之前 dispatcher 仍传 pipeline_kind= 而非 intent=。
+        # 把旧值映射到 intent; 显式 intent= 优先,仅当 intent 取默认值且 pipeline_kind 显式传入时采用 pipeline_kind。
+        _PIPELINE_KIND_TO_INTENT = {
+            "understanding": "understanding",
+            "generation": "generation:image",
+            "generation:video": "generation:video",
+        }
+        if pipeline_kind is not None and intent == "understanding":
+            intent = _PIPELINE_KIND_TO_INTENT.get(pipeline_kind, "understanding")
+
+        # ===== 按意图解析模型(取消 auto 魔法字符串; 客户端 model 作 hint)=====
         auto_router_meta: Optional[Dict[str, Any]] = None
-        if model == "auto":
-            resolved = await self._resolve_auto(messages, pipeline_kind)
+        required_capability = _INTENT_TO_CAPABILITY.get(intent, "text")
+
+        explicit_model = model if (model and model != "auto") else None
+        # 显式模型已注册 AND 具备本次意图所需 capability -> 直连(内部调用/合法 hint 走此路径)
+        if explicit_model and self.is_model_registered(explicit_model) \
+                and required_capability in self._model_capabilities.get(explicit_model, []):
+            # 不触发智能路由(预判/ai_director 内部调用也走此路径)
+            pass
+        else:
+            # 显式模型不具备所需能力(如传 text 模型却意图 image) -> 忽略它作 hint, 走池解析
+            hint = model_hint or explicit_model
+            resolved = await self._resolve_by_intent(intent=intent, model_hint=hint)
             if "error" in resolved:
                 return {"error": resolved["error"]}
             model = resolved["model"]
             auto_router_meta = resolved.get("meta")
-            logger.info("bridge auto 解析: pipeline=%s → model=%s", pipeline_kind, model)
+            logger.info("bridge 意图解析: intent=%s → model=%s", intent, model)
 
         # 前置校验：检查模型是否已注册
         if not self.is_model_registered(model):
@@ -603,6 +615,22 @@ class LiteLLMBridge:
                     ),
                 }
             }
+
+        # ===== 按意图分发: image/video 走专门分支(不调 chat completions)=====
+        if intent == "generation:image":
+            # 从 messages 抽 prompt(若 ai_director 已改写, 取最后 user 文本)
+            prompt_text = self._extract_prompt_from_messages(messages)
+            img_result = await self._do_image_generation(
+                prompt=prompt_text, model=model, extra_headers=extra_headers,
+            )
+            return {"data": img_result, "_meta": {"routed_to": {"model": model, "intent": intent}, "cost": 0.0},
+                    "usage": img_result.get("usage", {})}
+        if intent == "generation:video":
+            vid_result = await self._do_video_generation(
+                messages=messages, model=model, extra_headers=extra_headers,
+            )
+            return {"data": vid_result, "_meta": {"routed_to": {"model": model, "intent": intent}, "cost": 0.0},
+                    "usage": {}}
 
         # 构建尝试模型列表：先尝试指定 model，再走 fallback
         candidates = [model]
@@ -649,7 +677,7 @@ class LiteLLMBridge:
                             "fallback_chain": fallback_used,
                         },
                         "cost": request_cost,
-                        # auto 解析结果(model=='auto' 时才有,None 表示走的是显式模型)
+                        # 意图解析结果(池解析时才有,显式直连时为 None)
                         "model_router": auto_router_meta,
                     },
                     "usage": result.get("usage", {}) if isinstance(result, dict) else {},
@@ -756,6 +784,154 @@ class LiteLLMBridge:
         response_data = response.dict() if hasattr(response, "dict") else dict(response)
         _emit_bridge_debug(_start, "ok", {"model": model, "stream": False})
         return response_data
+
+    async def _do_image_generation(
+        self,
+        prompt: str,
+        model: str,
+        size: Optional[str] = None,
+        n: int = 1,
+        response_format: Optional[str] = None,
+        quality: Optional[str] = None,
+        extra_headers: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        """调 OpenAI Images API (/images/generations) 生成图片, 归一为 chat completions.
+
+        严格遵循 OpenAI Images API 格式: 请求体 model/prompt/n/size/quality/response_format 顶级参数.
+        """
+        import httpx
+
+        gen_cfg = (self.config.get("generation", {}) or {}).get("image", {}) or {}
+        size = size or gen_cfg.get("default_size", "1024x1024")
+        response_format = response_format or gen_cfg.get("response_format", "url")
+        quality = quality or gen_cfg.get("quality", "auto")
+
+        base_url, api_key = self._get_model_endpoint(model)
+        endpoint = f"{base_url.rstrip('/')}/images/generations"
+
+        body = {
+            "model": model,
+            "prompt": prompt,
+            "n": n,
+            "size": size,
+            "quality": quality,
+        }
+        if response_format:
+            body["response_format"] = response_format
+
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        if extra_headers:
+            headers.update(extra_headers)
+
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(endpoint, headers=headers, json=body)
+        resp.raise_for_status()
+        payload = resp.json()
+
+        data_list = payload.get("data", [])
+        content_parts = []
+        for item in data_list:
+            if item.get("url"):
+                content_parts.append(item["url"])
+            elif item.get("b64_json"):
+                content_parts.append(item["b64_json"])
+        content = content_parts[0] if content_parts else ""
+
+        usage = payload.get("usage", {}) or {}
+        prompt_tokens = usage.get("input_tokens", usage.get("prompt_tokens", 0))
+        total = usage.get("total_tokens", prompt_tokens)
+
+        return {
+            "choices": [
+                {
+                    "message": {"role": "assistant", "content": content},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": 0,
+                "total_tokens": total,
+            },
+        }
+
+    async def _do_video_generation(
+        self,
+        messages: List[Dict[str, Any]],
+        model: str,
+        seconds: str = "4",
+        size: Optional[str] = None,
+        input_reference: Optional[Dict[str, Any]] = None,
+        extra_headers: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        """调 OpenAI Videos API (POST /videos, 异步) 提交任务, 返回含 task_id 的 chat completions."""
+        import httpx
+
+        base_url, api_key = self._get_model_endpoint(model)
+        endpoint = f"{base_url.rstrip('/')}/videos"
+
+        prompt = self._extract_prompt_from_messages(messages)
+        body: Dict[str, Any] = {
+            "model": model,
+            "prompt": prompt,
+            "seconds": seconds,
+            "size": size or "720x1280",
+        }
+        if input_reference:
+            body["input_reference"] = input_reference
+
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        if extra_headers:
+            headers.update(extra_headers)
+
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(endpoint, headers=headers, json=body)
+        resp.raise_for_status()
+        payload = resp.json()
+
+        video_id = payload.get("id", "")
+        content = f"Video generation submitted. id={video_id}, poll /v1/videos/{video_id}"
+        return {
+            "choices": [
+                {
+                    "message": {"role": "assistant", "content": content},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        }
+
+    async def retrieve_video(self, video_id: str) -> Dict[str, Any]:
+        """轮询视频任务状态 (GET /videos/{id}), 对应 OpenAI Retrieve a video."""
+        import httpx
+
+        # 找一个有 base_url 的 provider
+        providers = self.config.get("providers", {}) if isinstance(self.config, dict) else {}
+        base_url = ""
+        api_key = ""
+        for provider_cfg in providers.values():
+            if isinstance(provider_cfg, dict) and provider_cfg.get("base_url"):
+                base_url = provider_cfg["base_url"]
+                api_key = provider_cfg.get("api_key", "")
+                break
+        endpoint = f"{base_url.rstrip('/')}/videos/{video_id}"
+        headers = {"Authorization": f"Bearer {api_key}"}
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(endpoint, headers=headers)
+        resp.raise_for_status()
+        return resp.json()
+
+    def _extract_prompt_from_messages(self, messages: List[Dict[str, Any]]) -> str:
+        for m in reversed(messages or []):
+            if isinstance(m, dict) and m.get("role") == "user":
+                c = m.get("content")
+                if isinstance(c, str):
+                    return c
+                if isinstance(c, list):
+                    parts = [b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text"]
+                    if parts:
+                        return " ".join(parts)
+        return ""
 
     def _aggregate_stream_chunks(
         self, chunks: List[Dict[str, Any]]
@@ -938,6 +1114,25 @@ class LiteLLMBridge:
             return "ollama"
         return "unknown"
 
+    def _get_model_endpoint(self, model: str) -> tuple[str, str]:
+        """返回 (base_url, api_key) 供 Images/Video API 直调."""
+        bare = model.split("/")[-1] if "/" in model else model
+        providers = self.config.get("providers", {}) if isinstance(self.config, dict) else {}
+        for provider_cfg in providers.values():
+            if not isinstance(provider_cfg, dict):
+                continue
+            api_key = provider_cfg.get("api_key", "")
+            base_url = provider_cfg.get("base_url", "")
+            for group in provider_cfg.get("model_grouper", []) or []:
+                for m in (group.get("models", []) if isinstance(group, dict) else []):
+                    if isinstance(m, dict) and m.get("name") == bare:
+                        return base_url, api_key
+        # fallback: 第一个有 base_url 的 provider
+        for provider_cfg in providers.values():
+            if isinstance(provider_cfg, dict) and provider_cfg.get("base_url"):
+                return provider_cfg["base_url"], provider_cfg.get("api_key", "")
+        return "", ""
+
     # ------------------------------------------------------------------
     # 模型列表
     # ------------------------------------------------------------------
@@ -959,8 +1154,8 @@ class LiteLLMBridge:
                 model_info = m.get("model_info", {})
                 # 去掉 provider 前缀，只保留实际模型名
                 bare_model = model_name.split("/")[-1] if "/" in model_name else model_name
-                # 从 _model_modalities 获取模态分类
-                modality = self._model_modalities.get(bare_model, ["generative"])
+                # 从 _model_capabilities 获取能力分类
+                modality = self._model_capabilities.get(bare_model, ["text"])
                 result.append({
                     "id": bare_model,
                     "object": "model",
@@ -989,24 +1184,47 @@ class LiteLLMBridge:
         stop: Optional[Any] = None,
         fallback_chain: Optional[List[str]] = None,
         max_retries: Optional[int] = None,
-        pipeline_kind: str = "understanding",
+        extra_headers: Optional[Dict[str, str]] = None,
+        intent: str = "understanding",
+        model_hint: Optional[str] = None,
+        # 过渡别名:Task 6 之前 dispatcher 仍传 pipeline_kind=,Task 6 后移除。
+        pipeline_kind: Optional[str] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
         """流式发送聊天补全请求到下游 LLM。
 
-        支持 model=='auto':按 pipeline_kind 内部解析,首个 chunk 里 _meta 会带
+        支持按意图解析:按 intent 内部解析,首个 chunk 里 _meta 会带
         model_router 信息(客户端如需 SSE frame 里的选中模型可从此读)。
 
         Yields:
             每个 chunk 的字典（OpenAI 流式格式）。
         """
-        # ===== model=='auto' 末端解析 =====
-        if model == "auto":
-            resolved = await self._resolve_auto(messages, pipeline_kind)
+        # 过渡兼容:Task 6 之前 dispatcher 仍传 pipeline_kind= 而非 intent=。
+        # 把旧值映射到 intent; 显式 intent= 优先,仅当 intent 取默认值且 pipeline_kind 显式传入时采用 pipeline_kind。
+        _PIPELINE_KIND_TO_INTENT = {
+            "understanding": "understanding",
+            "generation": "generation:image",
+            "generation:video": "generation:video",
+        }
+        if pipeline_kind is not None and intent == "understanding":
+            intent = _PIPELINE_KIND_TO_INTENT.get(pipeline_kind, "understanding")
+
+        # ===== 按意图解析模型 =====
+        required_capability = _INTENT_TO_CAPABILITY.get(intent, "text")
+
+        explicit_model = model if (model and model != "auto") else None
+        auto_router_meta: Optional[Dict[str, Any]] = None
+        if explicit_model and self.is_model_registered(explicit_model) \
+                and required_capability in self._model_capabilities.get(explicit_model, []):
+            pass
+        else:
+            hint = model_hint or explicit_model
+            resolved = await self._resolve_by_intent(intent=intent, model_hint=hint)
             if "error" in resolved:
                 yield {"error": resolved["error"]}
                 return
             model = resolved["model"]
-            logger.info("bridge auto 流式解析: pipeline=%s → model=%s", pipeline_kind, model)
+            auto_router_meta = resolved.get("meta")
+            logger.info("bridge 意图流式解析: intent=%s → model=%s", intent, model)
 
         # 前置校验：检查模型是否已注册
         if not self.is_model_registered(model):
@@ -1021,6 +1239,78 @@ class LiteLLMBridge:
                     ),
                 }
             }
+            return
+
+        # ===== 按意图分发: image/video 走专门分支(不调 chat completions) =====
+        # 注意: completion_stream 也需要此分支,因为 Images/Video API 非流式,
+        # 直接走下游 acompletion 会错误地调 chat completions 端点。
+        if intent == "generation:image":
+            try:
+                prompt_text = self._extract_prompt_from_messages(messages)
+                img_result = await self._do_image_generation(
+                    prompt=prompt_text, model=model, extra_headers=extra_headers,
+                )
+                yield {
+                    "id": f"gen-img-{int(time.time())}",
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": model,
+                    "choices": [{
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "delta": {"role": "assistant", "content": img_result.get("choices", [{}])[0].get("message", {}).get("content", "")},
+                    }],
+                    "usage": img_result.get("usage", {}),
+                    "_meta": {"routed_to": {"model": model, "intent": intent}, "cost": 0.0, "model_router": auto_router_meta},
+                }
+            except Exception as exc:
+                logger.error("image generation failed in stream: %s", exc, exc_info=True)
+                yield {
+                    "id": f"gen-img-{int(time.time())}",
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": model,
+                    "choices": [{
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "delta": {"content": f"[Image generation error] {exc}"},
+                    }],
+                    "error": {"code": "image_generation_failed", "message": str(exc)},
+                }
+            return
+        if intent == "generation:video":
+            try:
+                vid_result = await self._do_video_generation(
+                    messages=messages, model=model, extra_headers=extra_headers,
+                )
+                content = vid_result.get("choices", [{}])[0].get("message", {}).get("content", "")
+                yield {
+                    "id": f"gen-vid-{int(time.time())}",
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": model,
+                    "choices": [{
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "delta": {"role": "assistant", "content": content},
+                    }],
+                    "usage": vid_result.get("usage", {}),
+                    "_meta": {"routed_to": {"model": model, "intent": intent}, "cost": 0.0, "model_router": auto_router_meta},
+                }
+            except Exception as exc:
+                logger.error("video generation failed in stream: %s", exc, exc_info=True)
+                yield {
+                    "id": f"gen-vid-{int(time.time())}",
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": model,
+                    "choices": [{
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "delta": {"content": f"[Video generation error] {exc}"},
+                    }],
+                    "error": {"code": "video_generation_failed", "message": str(exc)},
+                }
             return
 
         max_retries = max_retries or 3

@@ -499,6 +499,30 @@ async def lifespan(app: "FastAPI"):
     except Exception as exc:
         logger.warning("LiteLLM Bridge 初始化失败（部分功能不可用）: %s", exc)
 
+    # ---- IntentClassifier + ModelSelector wiring ----
+    # classify_request 调 intent_classifier.classify() 做意图预判(understanding |
+    # generation:image | generation:video)。model_selector 供 intent_classifier
+    # 选内部 LLM 调用模型。两者挂到 app.state,RequestDispatcher.__init__ 通过
+    # state.get("intent_classifier") 取用(见 openai_compat.py 的 _get_app_state)。
+    intent_classifier = None
+    model_selector = None
+    if litellm_bridge is not None:
+        try:
+            from aigateway_core.dispatch.intent_classifier import IntentClassifier
+            from aigateway_core.route.model_resolution.model_selector import ModelSelector
+            ic_cfg = config_manager.get("intent_classifier", {}) or {}
+            ms_cfg = config_manager.get("model_selector", {}) or {}
+            model_selector = ModelSelector(
+                bridge=litellm_bridge, config=ms_cfg,
+                default_model=ic_cfg.get("model", "agnes-2.0-flash"),
+            )
+            intent_classifier = IntentClassifier(
+                bridge=litellm_bridge, model_selector=model_selector, config=ic_cfg,
+            )
+            logger.info("IntentClassifier + ModelSelector 初始化完成")
+        except Exception as exc:
+            logger.warning("IntentClassifier 初始化失败: %s", exc)
+
     # 生成管道 wiring：AIDirectorStrategy 延迟绑定 litellm_bridge。
     # register_generation_optimization_plugins 在 bridge 建好前就跑了（在
     # _register_builtin_plugins 内），此处从 registry 取 strategy 单例注入 bridge，
@@ -510,6 +534,8 @@ async def lifespan(app: "FastAPI"):
                 strategy = ai_dir_reg.config.get("strategy")
                 if strategy is not None and hasattr(strategy, "_litellm_bridge"):
                     strategy._litellm_bridge = litellm_bridge
+                    if hasattr(strategy, "_model_selector") and model_selector is not None:
+                        strategy._model_selector = model_selector
                     logger.info("AIDirectorStrategy 已绑定 litellm_bridge（生成管道 wiring）")
         except Exception as exc:
             logger.warning("AIDirectorStrategy 绑定 litellm_bridge 失败: %s", exc)
@@ -562,6 +588,11 @@ async def lifespan(app: "FastAPI"):
     app.state.pii_detector_plugin = pii_detector_plugin
     app.state.model_router_resolver = model_router_resolver
     app.state.prompt_compress_plugin = prompt_compress_plugin
+
+    # Intent-driven routing (Task 9): RequestDispatcher.__init__ 通过
+    # state.get("intent_classifier") 取用,做 understanding|generation:image|generation:video 分流。
+    app.state.intent_classifier = intent_classifier
+    app.state.model_selector = model_selector
 
     # 初始化两条管道的 PipelineEngine（总分总架构的「分」）
     # understanding: pii/cache/semantic/model_router/compress/rag/conv
@@ -705,6 +736,8 @@ def _mount_routes(app: "FastAPI") -> None:
 
     # /v1/* — OpenAI 兼容接口（需要鉴权）
     app.include_router(openai_compat.router, prefix="/v1", tags=["OpenAI 兼容接口"])
+    from .video_routes import router as video_router
+    app.include_router(video_router, prefix="/v1", tags=["Video"])
 
     # /admin/* — 管理接口（需要管理员鉴权）
     app.include_router(admin_routes.router, prefix="/admin", tags=["管理接口"])

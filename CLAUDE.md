@@ -17,12 +17,15 @@ Three surfaces:
 Client → aigateway-api (FastAPI :8000)
          └── RequestDispatcher (dispatcher.py) — 总分总 orchestrator
              1. Shared prefix:    media_optimization → PII
-             2. classify_request: understanding | generation (by modality/intent, NOT model name)
+             2. classify_request (async): LLM intent prediction → understanding | generation:image | generation:video
              3. PipelineEngine[kind]:
                 - understanding: rag_retriever + conv_compressor (other 5 skipped, ran in prefix)
                 - generation:    ai_director → intent_evaluator → token_compressor
                                  → draft_generator → gen_model_router → cost_tracker
-             4. Quota check → LiteLLMBridge.completion() → response
+             4. Quota check → LiteLLMBridge._resolve_by_intent (capabilities pool filter + hint priority)
+                → LiteLLMBridge._do_image_generation(/images/generations) / _do_video_generation(/videos, async)
+                → LiteLLMBridge.completion() → response
+             5. GET /v1/videos/{id} polls video status
          Cache: L1 (in-process LRU) → L2 (Redis+LZ4) → L3 (Qdrant vector, cosine≥0.95)
          Auth: KeyStore (Redis-backed) via auth_middleware
 ```
@@ -31,7 +34,9 @@ Client → aigateway-api (FastAPI :8000)
 - Entry A (present): `/v1/chat/completions` — OpenAI JSON/SSE for machines (SDK/CLI/IDE).
 - Entry B (planned, spec `docs/superpowers/specs/2026-07-05-control-panel-chat-agent-design.md`): `/admin/agent/chat` — SSE for humans in Control Panel, adds AgentLoop (tool calling + HITL). Both share dispatcher / pipelines / LiteLLM exit.
 
-**auto model resolution** lives inside `LiteLLMBridge` (via injected `ModelRouterStrategy.set_auto_resolver`), not at dispatch entry — decision uses `pipeline_kind` and post-pipeline signals (PII/compress/RAG). `classify_request` only routes by modality.
+**Intent-driven routing**: `classify_request` is async, uses LLM intent prediction (not modality/model name). Returns `understanding|generation:image|generation:video`. `generation_intent` field removed; `model=='auto'` removed — client model used as hint instead. Model config uses `capabilities: [text,image,video]` multi-select (replaced `modality`); per-model `base_url` overridden. Bridge adds `_do_image_generation` (/images/generations, OpenAI Images API), `_do_video_generation` (/videos, async), `GET /v1/videos/{id}` polling. Intent prediction returns `{"generation":"...","hint":"..."}` JSON; predication/ai_director feeds hint through `ModelSelector` to select cheapest text model, explicitly passed — does NOT trigger smart routing. Polymorphic models (e.g. `agnes-2.0-flash` with `text,image,video`) selected by capability intersection with intent pool.
+
+**auto model resolution** lives inside `LiteLLMBridge` (via injected `ModelRouterStrategy.set_auto_resolver`), not at dispatch entry — decision uses `pipeline_kind` and post-pipeline signals (PII/compress/RAG). `classify_request` routes by LLM intent prediction.
 
 **Circuit breaking** is delegated to LiteLLM Router built-in cooldown (`allowed_fails` + `cooldown_time`). `ProviderCooldownTracker` mirrors state via `litellm._async_success/failure_callback` for `/metrics` and `/admin/metrics-json`. No custom breaker; no HALF-OPEN. Config keys `circuit_breaker.failure_threshold` / `recovery_timeout` are aliases.
 
@@ -57,7 +62,7 @@ aigateway-core/src/aigateway_core/  Shared library - runtime skeleton (prefix/di
     cache/              CacheManager L1->L2->L3, cache-key v2 (cache_keys/cache_manager/l3_semantic) + PromptCache/SemanticCache plugins
     media/              Media Optimization V2: plugin, mol, cache, pipelines/{image,video,audio,document}
     registration.py     _register_builtin_plugins (classic + rag/conv/media + gen-opt)
-  dispatch/             RequestDispatcher, PipelineEngine, PipelineContext, classify_request
+  dispatch/             RequestDispatcher, PipelineEngine, PipelineContext, classify_request (async, intent prediction)
   pipelines/
     understanding/      rag/ (RAGRetriever), conversation/ (ConvCompressor), compression/ (PromptCompress LLMLingua-2), code_rag/
     generation/         director/intent/token/draft/cost/routing_signals/ (6 plugins + strategies) + _common/ (config/models/metrics/exceptions/api_key_groups) + registration.py
@@ -139,7 +144,7 @@ Backfill: L2 hit → L1; L3 hit → L1 only (approximate); MISS → L1+L2 + asyn
 | `dispatch/dispatcher.py` | Request flow, classification, cache backfill (core). |
 | `prefix/cache/` | Cache-key gen, L1/L2/L3, rerankers, backfill. |
 | `prefix/pii/` + `shared/auth/` | PIIDetector, KeyStore. |
-| `route/bridge/litellm_bridge.py` | Multi-provider calls, fallback, cooldown, auto resolver. Cooldown reads `circuit_breaker:` section. |
+| `route/bridge/litellm_bridge.py` | Multi-provider calls, fallback, cooldown, auto resolver, intent-driven routing (`_resolve_by_intent`, `_do_image_generation`, `_do_video_generation`), video polling (`GET /v1/videos/{id}`). Cooldown reads `circuit_breaker:` section. |
 | `pipelines/generation/` | 6 gen plugins + strategies (+ `_common/`, `registration.py`). |
 | `prefix/media/` | Media Optimization V2. |
 | `control-panel/src/pages/` | 10 page components. |
@@ -213,8 +218,9 @@ python3 -m pytest tests/ --cov=aigateway_core --cov=aigateway_api
 
 - **Code RAG is now a separate subsystem** — Control Panel Knowledge page has a Code tab with async imports (folder/server_path/git/zip), dedicated `/admin/rag/code/*` routes, per-model `rag_code_*` Qdrant collections, and per-repo CodeGraph SQLite files under `/data/code_graphs`. Graph build uses the official `@colbymchenry/codegraph` CLI (`codegraph init` / `codegraph index`), not a Python `codegraph` API. Graph query has **strict/tolerant split**: import path calls `lookup_symbol_metadata_strict` (any SQLite/schema failure fails the whole import), retrieval calls the tolerant wrapper (never breaks the text-RAG chain). Retrieval also honors `code_rag_graph_hops` — a BFS over `edges.kind='calls'` fetches related-symbol chunks from the same collection.
 - **Control Panel "调用关系"** now opens an inline (non-modal) expandable call-graph panel below the repo table: file list → symbols (file:line copy) → recursive caller/callee tree with cycle guard. Uses existing `/admin/rag/code/{files,query,callers,callees}` endpoints.
+- **Intent-driven routing** — `classify_request` is now async, uses LLM intent prediction (not modality/model name). Returns `understanding|generation:image|generation:video`. `generation_intent` field removed; `model=='auto'` removed — client model acts as hint. Model config uses `capabilities: [text,image,video]` multi-select (replaced `modality`). Bridge adds `_do_image_generation` (/images/generations, OpenAI Images API), `_do_video_generation` (/videos, async), `GET /v1/videos/{id}` polling. Intent prediction returns `{"generation":"...","hint":"..."}` JSON; predication/ai_director feeds hint through `ModelSelector` to select cheapest text model, explicitly passed — does NOT trigger smart routing. Polymorphic models selected by capability intersection with intent pool. See `tests/test_generation_routing.py`.
 - **Understanding pipeline runs only 2 plugins in engine** — 7 registered, `dispatcher._skip_names` filters out 5 (pii/cache/semantic/compress/media, all already run in the shared prefix); engine executes `rag_retriever + conv_compressor` only. Generation pipeline sets no skip → all 6 gen-opt plugins run.
-- **model_router plugin is fully removed** — real routing lives in `LiteLLMBridge` auto resolver. `classify_request` only handles modality. Don't confuse with `gen_model_router` (different plugin, generation pipeline).
+- **model_router plugin is fully removed** — real routing lives in `LiteLLMBridge` auto resolver. `classify_request` routes by LLM intent prediction (not modality). Don't confuse with `gen_model_router` (different plugin, generation pipeline).
 - **`PIIDetector` / `PromptCompressPlugin` double-instantiated** — one in registry (skipped for understanding) + one on `app.state` (actually runs). Inline-integration artifact, not a bug.
 - **prompt_compress** — real LLMLingua-2 impl. `device: cpu|cuda`, `compression_ratio`, `target_token` in config.
 - **rag_retriever / conv_compressor** — default-enabled with local fallback (Qdrant needed only for full retrieval).

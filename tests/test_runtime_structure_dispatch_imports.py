@@ -1,3 +1,7 @@
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
 from aigateway_core.dispatch.classifier import classify_request
 from aigateway_core.dispatch.context import PipelineContext
 from aigateway_core.dispatch.pipeline_engine import PipelineEngine
@@ -28,12 +32,15 @@ def test_dispatch_modules_import_from_new_paths():
     assert engine.pipeline_kind == "understanding"
 
 
-def test_classify_request_prefers_generation_modalities():
+@pytest.mark.asyncio
+async def test_classify_request_prefers_generation_modalities():
     body = {
         "model": "image-gen",
         "messages": [{"role": "user", "content": "draw a cat"}],
     }
-    assert classify_request(body, DummyConfig()) == "generation"
+    ic = MagicMock()
+    ic.classify = AsyncMock(return_value={"generation": "image", "hint": "None"})
+    assert await classify_request(body, DummyConfig(), intent_classifier=ic) == "generation:image"
 
 
 from aigateway_core.dispatch.dispatcher import RequestDispatcher as CoreRequestDispatcher

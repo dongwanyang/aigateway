@@ -81,12 +81,6 @@ plugins:
         retrieve_threshold: 0.9   # 初筛最低相似度
         rerank_threshold: 0.85    # 精排接受阈值
 
-  - name: model_router       # 模型路由器（选择最优 provider）
-    enabled: true
-    depends_on: []
-    config:
-      strategy: quality      # 路由策略：quality | cost | speed
-
   - name: prompt_compress    # 提示词压缩（减少 token 消耗）
     enabled: true
     depends_on: ["semantic_cache"]
@@ -133,22 +127,17 @@ providers:
     retry_after: 1000        # 重试间隔（毫秒），实际使用递增退避
     model_grouper:           # 模型分组（一个提供商可有多组模型）
       - models:              # 模型列表（字典格式）
-          # 字典格式支持 modality/capability/base_url 标注:
-          #   modality:  列表，元素取值 llm(纯文本) | mllm(多模态理解) | generative(生成)
-          #              一个模型可同时属于多个模态，如 [llm, mllm]
-          #   capability: 0-100 能力评分（可选）
-          #   base_url:  API 基地址（可选）。若设置，覆盖 providers.<name>.base_url。
-          #              适用于同一提供商下不同模型走不同端点的场景
-          #              （如 Agnes 的文本模型与图片/视频生成模型使用不同网关）。
-          #              留空或省略时，继承 providers.<name>.base_url。
+          # 字典格式支持 capabilities 标注:
+          #   capabilities: 列表，元素取值 text(纯文本/多模态理解) | image(图片生成) | video(视频生成)
+          #                 一个模型可同时属于多个能力，如 [text, image, video]
+          #   base_url:    API 基地址（可选）。若设置，覆盖 providers.<name>.base_url。
+          #                留空或省略时，继承 providers.<name>.base_url。
           - name: agnes-2.0-flash
-            modality: [mllm]         # 多模态理解（文本+图片输入），不设 base_url → 继承提供商
+            capabilities: [text, image, video]   # 多模态理解 + 生成，继承提供商 base_url
           - name: agnes-image-2.1-flash
-            modality: [generative]   # 图片生成
-            base_url: https://image-api.agnes-ai.com/v1   # 示例：图片生成走独立端点
+            capabilities: [image]                # 图片生成
           - name: agnes-video-v2.0
-            modality: [generative]   # 视频生成
-            base_url: https://video-api.agnes-ai.com/v1   # 示例：视频走独立端点
+            capabilities: [video]                # 视频生成
         fallback_models: []  # 降级模型列表（主模型全部失败后尝试）
         pricing:             # 每个模型的定价（$/token）
           agnes-2.0-flash:
@@ -164,7 +153,7 @@ providers:
     model_grouper:
       - models:
           - name: deepseek-v4-flash
-            modality: [llm]          # 纯文本理解
+            capabilities: [text]      # 纯文本理解
         fallback_models: []
         pricing:
           deepseek-v4-flash:
@@ -414,3 +403,28 @@ generation_optimization:
       server_url: "http://localhost:8188"  # ComfyUI API 地址
       connect_timeout: 10    # 连接超时（秒）
       execution_timeout: 300 # 工作流执行超时（秒）
+
+# ==========================
+# 意图驱动路由（intent-driven routing）
+# ==========================
+# 意图分类器：对每个请求分类 understanding | generation，超时回退到启发式
+intent_classifier:
+  model: agnes-2.0-flash      # 分类使用的模型
+  timeout_seconds: 3          # 分类超时（秒），超时后走 fallback
+  fallback: heuristic         # 回退策略：heuristic（基于模态/关键词的启发式）
+
+# 模型选择器：在候选模型中按延迟/成本/成功率加权打分选最优
+model_selector:
+  health_check_interval: 60   # 健康检查间隔（秒）
+  latency_weight: 0.4         # 延迟权重
+  cost_weight: 0.2            # 成本权重
+  success_rate_weight: 0.4    # 成功率权重
+
+# 生成参数默认值（图片/视频生成路径）
+generation:
+  image:
+    default_size: "1024x1024" # 默认图片尺寸
+    response_format: "url"    # 返回格式：url | b64_json
+    quality: "auto"           # 质量：auto | high | medium | low
+  video:
+    poll_endpoint: /v1/videos/{id}  # 视频生成轮询端点（{id} 替换为任务 ID）

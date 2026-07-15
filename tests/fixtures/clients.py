@@ -61,7 +61,7 @@ def chat(
 ) -> httpx.Response:
     """POST /v1/chat/completions with a single-user-message body.
 
-    Additional body keys (generation_intent, stream, etc.) merged from **extra_body.
+    Additional body keys (stream, etc.) merged from **extra_body.
     Additional X-Request-ID header injected when trace_id is provided.
     """
     body = {

@@ -46,8 +46,6 @@ class ChatCompletionRequest(BaseModel):
     tool_choice: Optional[Any] = None
     stop: Optional[Any] = None
     user: Optional[str] = None
-    # 显式生成意图开关(classify_request 据此分流到 generation 管道)
-    generation_intent: Optional[bool] = False
 
 
 class EmbeddingRequest(BaseModel):
@@ -103,6 +101,10 @@ def _get_app_state() -> Dict[str, Any]:
         # 不执行),trace 事件里插件事件全部缺失但没有任何报错日志。
         "understanding_engine": getattr(s, "understanding_engine", None),
         "generation_engine": getattr(s, "generation_engine", None),
+        # Intent-driven routing (Task 9): classify_request 据此做
+        # understanding|generation:image|generation:video 分流。缺失则默认 understanding。
+        "intent_classifier": getattr(s, "intent_classifier", None),
+        "model_selector": getattr(s, "model_selector", None),
     }
 
 

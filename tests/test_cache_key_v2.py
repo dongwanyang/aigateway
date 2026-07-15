@@ -189,10 +189,19 @@ class TestGenerateCacheKey:
         assert k_group != k_private
 
     def test_pipeline_kind_isolation(self):
-        """understanding vs generation 严格隔离,防止跨管道结果污染。"""
+        """understanding vs generation 严格隔离,防止跨管道结果污染。
+
+        pipeline_kind 现为带媒介的 generation:image / generation:video
+        (Task 9 intent-driven-routing)。冒号在 SHA-256 拼接输入里是普通字符,
+        不同字面值必出不同 hash。
+        """
         k_u = self._key(pipeline_kind="understanding")
-        k_g = self._key(pipeline_kind="generation")
+        k_g = self._key(pipeline_kind="generation:image")
         assert k_u != k_g
+        # image / video 两种媒介互相隔离
+        k_img = self._key(pipeline_kind="generation:image")
+        k_vid = self._key(pipeline_kind="generation:video")
+        assert k_img != k_vid
 
     def test_group_isolation(self):
         """不同 group_id 生成不同 key。"""

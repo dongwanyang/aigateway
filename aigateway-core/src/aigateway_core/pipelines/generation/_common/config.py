@@ -64,8 +64,9 @@ class ModelRouterConfig:
         evaluation_timeout_seconds: 意图评估超时/秒 (默认: 2.0, 范围: 0.5-30.0)
         default_capability_score: 未注册模型的默认能力评分 (默认: 50, 范围: 0-100)
         model_capabilities: 模型能力评分映射 model_name -> score(0-100)
-        model_modalities: 模型模态分类映射 model_name -> ["llm"|"mllm"|"generative", ...]
-            一个模型可属于多个模态（列表元素）
+        model_modalities: 已废弃, 改用 providers.<p>.model_grouper[].models[].capabilities.
+            模型模态分类映射 model_name -> ["llm"|"mllm"|"generative", ...]
+            一个模型可属于多个模态（列表元素）。字段保留以免破坏 load, 但新代码应读 capabilities。
     """
 
     enabled: bool = True

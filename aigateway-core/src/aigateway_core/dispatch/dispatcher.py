@@ -154,6 +154,7 @@ class RequestDispatcher:
         self.litellm_bridge = state.get("litellm_bridge")
         self.metrics_collector = state.get("metrics_collector")
         self.config_manager = state.get("config_manager")
+        self.intent_classifier = state.get("intent_classifier")
 
     # ------------------------------------------------------------------
     # 公共入口
@@ -236,7 +237,9 @@ class RequestDispatcher:
 
         # ===== 分流(只看模态和显式意图,不看 body.model)=====
         # auto 请求最终选哪个模型由 bridge 决定,分流器不越权。
-        pipeline_kind = classify_request(body, self.config_manager)
+        pipeline_kind = await classify_request(
+            body, self.config_manager, intent_classifier=self.intent_classifier
+        )
         logger.info(
             "dispatch: pipeline_kind=%s, model=%s, stream=%s",
             pipeline_kind,
@@ -248,7 +251,7 @@ class RequestDispatcher:
 
         if pipeline_kind == "understanding":
             return await self._dispatch_understanding(body, request, engine, user_id, key_hash, prefix)
-        return await self._dispatch_generation(body, request, engine, user_id, key_hash, prefix)
+        return await self._dispatch_generation(body, request, engine, user_id, key_hash, prefix, pipeline_kind)
 
     # ------------------------------------------------------------------
     # 身份解析
@@ -479,6 +482,7 @@ class RequestDispatcher:
     async def _dispatch_generation(
         self, body: Any, request: Request, engine: Any,
         user_id: Optional[str], key_hash: Optional[str], prefix: Dict[str, Any],
+        pipeline_kind: str = "generation:image",
     ) -> JSONResponse:
         """生成管道：engine 插件链 → 配额 → LiteLLM（不查理解缓存）。
 
@@ -509,7 +513,7 @@ class RequestDispatcher:
                     request={"messages": body.messages, "model": body.model,
                              "stream": getattr(body, "stream", False)},
                     trace_id=request.state.trace_id,
-                    pipeline_kind="generation",
+                    pipeline_kind=pipeline_kind,
                     user_id=user_id,
                 )
                 ctx.extra["cache_scope"] = resolved_scope
@@ -584,7 +588,7 @@ class RequestDispatcher:
                 user_id, key_hash,
                 cache_key=None,  # 生成管道不回填
                 normalized_messages=None,
-                pipeline_kind="generation", group_id=group_id,
+                pipeline_kind=pipeline_kind, group_id=group_id,
             )
         return await self._call_llm_nonstream(
             body, request, litellm_bridge, plugin_trace, request_start_time,
@@ -592,7 +596,7 @@ class RequestDispatcher:
             cache_key=None,  # 生成管道不回填
             normalized_messages=None,
             pii_meta=pii_meta, router_meta=None, mol_meta=mol_meta, compress_meta=None,
-            pipeline_kind="generation", group_id=group_id,
+            pipeline_kind=pipeline_kind, group_id=group_id,
         )
 
     # ------------------------------------------------------------------
@@ -623,7 +627,17 @@ class RequestDispatcher:
             tracker = metrics_collector.track_request("/v1/chat/completions", method="POST")
             tracker.__enter__()
 
+        # Inject trace context for downstream LLM calls
+        from aigateway_core.shared.tracing import TracingManager
+        extra_headers: Dict[str, str] = {}
+        TracingManager.inject_trace_context(
+            headers=extra_headers,
+            trace_id=request.state.trace_id,
+            span_id=getattr(request.state, "request_id", request.state.trace_id),
+        )
+
         try:
+            hint = getattr(body, "_intent_hint", None)
             result = await litellm_bridge.completion(
                 messages=body.messages,
                 model=body.model,
@@ -636,7 +650,9 @@ class RequestDispatcher:
                 tools=body.tools,
                 tool_choice=body.tool_choice,
                 stop=body.stop,
-                pipeline_kind=pipeline_kind,
+                intent=pipeline_kind,
+                model_hint=hint,
+                extra_headers=extra_headers,
             )
         except Exception as exc:
             _llm_fail_ms = round((time.time() - request_start_time) * 1000, 2)
@@ -778,6 +794,17 @@ class RequestDispatcher:
         key_store = self.key_store
 
         llm_start = time.time()
+        hint = getattr(body, "_intent_hint", None)
+
+        # Inject trace context for downstream LLM calls
+        from aigateway_core.shared.tracing import TracingManager
+        extra_headers: Dict[str, str] = {}
+        TracingManager.inject_trace_context(
+            headers=extra_headers,
+            trace_id=request.state.trace_id,
+            span_id=getattr(request.state, "request_id", request.state.trace_id),
+        )
+
         completion_gen = litellm_bridge.completion_stream(
             messages=body.messages,
             model=body.model,
@@ -790,13 +817,15 @@ class RequestDispatcher:
             tools=body.tools,
             tool_choice=body.tool_choice,
             stop=body.stop,
-            pipeline_kind=pipeline_kind,
+            intent=pipeline_kind,
+            model_hint=hint,
+            extra_headers=extra_headers,
         )
 
         # 包装生成器：消费完后做配额扣减 + 缓存回填 + metrics（修正后行为）
         completion_gen = self._wrap_stream_full(
             completion_gen, metrics_collector, cache_manager, key_store,
-            body.model, user_id, key_hash, cache_key, normalized_messages, llm_start,
+            request, body.model, user_id, key_hash, cache_key, normalized_messages, llm_start,
             group_id,
         )
 
@@ -818,7 +847,7 @@ class RequestDispatcher:
         return create_sse_response(completion_gen, chat_id=f"chatcmpl-{uuid.uuid4().hex[:12]}")
 
     async def _wrap_stream_full(
-        self, gen, metrics_collector, cache_manager, key_store,
+        self, gen, metrics_collector, cache_manager, key_store, request,
         model, user_id, key_hash, cache_key, normalized_messages, llm_start,
         group_id="",
     ):
