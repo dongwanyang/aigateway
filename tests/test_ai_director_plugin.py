@@ -289,7 +289,8 @@ class TestAIDirectorPluginTracing:
         await engine.execute_ctx(ctx)
 
         events = [e for e in collector.events if e.kind == "plugin" and e.stage == "ai_director"]
-        assert len(events) == 1
+        # 2 events: PipelineEngine auto-instrument + plugin add_plugin_trace
+        assert len(events) == 2
         assert events[0].trace_id == "abc123trace"
         assert events[0].status == "ok"
         assert events[0].name == "ai_director.execute"

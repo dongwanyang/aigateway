@@ -199,6 +199,18 @@ class TokenCompressorPlugin:
                 },
             )
 
+            # 记录插件 trace（业务 metadata）
+            ctx.add_plugin_trace(
+                "token_compressor", duration_ms, "success",
+                payload={
+                    "total_original_tokens": total_original_tokens,
+                    "total_compressed_tokens": total_compressed_tokens,
+                    "total_savings": total_savings,
+                    "cache_hits": cache_hits,
+                    "compression_count": compression_count,
+                },
+            )
+
         except Exception as exc:
             duration_ms = (time.monotonic() - start_time) * 1000.0
 

@@ -155,6 +155,17 @@ class CostTrackerPlugin:
                 },
             )
 
+            # 记录插件 trace（业务 metadata）
+            ctx.add_plugin_trace(
+                "cost_tracker", duration_ms, "success",
+                payload={
+                    "total_saving_usd": record.total_saving_usd,
+                    "model_routing_saving_usd": record.model_routing_saving_usd,
+                    "token_compression_saving_usd": record.token_compression_saving_usd,
+                    "prompt_optimization_saving_usd": record.prompt_optimization_saving_usd,
+                },
+            )
+
         except Exception as exc:
             # 任何错误不阻断管线，记录零节省 (需求 7.5)
             duration_ms = (time.monotonic() - start_time) * 1000.0

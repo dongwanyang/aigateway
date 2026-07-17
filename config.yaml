@@ -277,13 +277,26 @@ code_rag:
   graph_db_dir: /data/code_graphs
 hot_reload: true
 debug:
-  frontend: false
-  entry: false
-  cache: false
-  bridge: false
-  plugins_enabled: false
+  frontend: true
+  entry: true
+  cache: true
+  bridge: true
+  plugins_enabled: true
   plugins:
-    enabled: false
+    enabled: true
+    per_plugin:
+      pii_detector: true
+      prompt_cache: true
+      semantic_cache: true
+      prompt_compress: false
+      rag_retriever: true
+      conv_compressor: true
+      ai_director: true
+      intent_evaluator: true
+      token_compressor: true
+      draft_generator: false
+      gen_model_router: false
+      cost_tracker: false
 media_optimization:
   enabled: true
   download_timeouts:
@@ -371,7 +384,7 @@ generation_optimization:
     enabled: true
   feature_cache: {}
   cost_tracking:
-    enabled: true
+    enabled: false
   prompt_templates: {}
   token_compressor:
     clip:
@@ -384,5 +397,5 @@ generation_optimization:
       server_url: http://localhost:8188
       connect_timeout: 10
       execution_timeout: 300
-    enabled: true
+    enabled: false
 debug_mode: true

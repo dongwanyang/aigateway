@@ -199,6 +199,15 @@ class QdrantClientManager:
             json=payload_body,
             headers=self._headers(),
         )
+        # 集合尚未创建(首次部署或被清空)时懒创建
+        if resp.status_code == 404:
+            logger.info("L3 集合 %s 不存在，自动创建", collection)
+            await self.upsert_collection(collection)
+            resp = await self._http.put(
+                f"/collections/{collection}/points",
+                json=payload_body,
+                headers=self._headers(),
+            )
         resp.raise_for_status()
         result = resp.json().get("result", {})
         logger.debug("Qdrant 存储成功，point_id=%s, operation=%s", point_id, result.get("operation"))

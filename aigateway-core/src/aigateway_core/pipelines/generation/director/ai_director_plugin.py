@@ -144,6 +144,17 @@ class AIDirectorPlugin:
                 },
             )
 
+            # 记录插件 trace（业务 metadata）
+            ctx.add_plugin_trace(
+                "ai_director", duration_ms, "success",
+                payload={
+                    "modality": modality,
+                    "template_used": result.template_used,
+                    "has_reference_images": bool(reference_images),
+                    "reference_image_count": len(reference_images),
+                },
+            )
+
         except Exception as exc:
             duration_ms = (time.monotonic() - start_time) * 1000.0
 

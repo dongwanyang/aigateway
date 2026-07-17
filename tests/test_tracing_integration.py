@@ -122,7 +122,8 @@ class TestTraceIdPropagation:
         await _run_via_engine(plugin, ctx)
 
         events = plugin_events(collector, "ai_director")
-        assert len(events) == 1
+        # 2 events: PipelineEngine auto-instrument + plugin add_plugin_trace
+        assert len(events) == 2
         assert events[0].trace_id == trace_id
         assert events[0].kind == "plugin"
         assert events[0].name == "ai_director.execute"
@@ -178,7 +179,8 @@ class TestTraceIdPropagation:
         await _run_via_engine(plugin, ctx)
 
         events = plugin_events(collector, "gen_model_router")
-        assert len(events) == 1
+        # 2 events: PipelineEngine auto-instrument + plugin add_plugin_trace
+        assert len(events) == 2
         assert events[0].trace_id == trace_id
         assert events[0].status == "ok"
 
@@ -390,7 +392,7 @@ class TestPluginResultsInContext:
         assert result["cost_usd"] == 0.001
         assert "duration_ms" in result
         # TraceEvent emitted by the PipelineEngine (auto-instrumentation)
-        assert len(plugin_events(collector, "ai_director")) == 1
+        assert len(plugin_events(collector, "ai_director")) == 2
 
     @pytest.mark.asyncio
     async def test_intent_evaluator_writes_complexity_score_to_context(self):
@@ -446,4 +448,4 @@ class TestPluginResultsInContext:
         assert result["complexity_score"] == 60
         assert result["estimated_cost"] == 0.05
         # TraceEvent emitted by the PipelineEngine (auto-instrumentation)
-        assert len(plugin_events(collector, "gen_model_router")) == 1
+        assert len(plugin_events(collector, "gen_model_router")) == 2

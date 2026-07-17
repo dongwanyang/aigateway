@@ -165,6 +165,16 @@ class DraftGeneratorPlugin:
                 },
             )
 
+            # 记录插件 trace（业务 metadata）
+            ctx.add_plugin_trace(
+                "draft_generator", duration_ms, "success",
+                payload={
+                    "applicable": True,
+                    "preview_count": len(draft_result.previews),
+                    "status": draft_result.status,
+                },
+            )
+
             # 草稿已生成，短路后续插件（gen_model_router、cost_tracker 等跳过）
             # 高清放大由用户确认后通过 /admin/draft/{id}/confirm 独立触发
             ctx.should_stop = True

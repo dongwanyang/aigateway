@@ -22,6 +22,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import time
 import uuid
 from typing import Any, Dict, Optional
@@ -89,6 +90,14 @@ def _resolve_cache_scope(request: Request, pii_meta: Optional[dict]) -> str:
     return "group"
 
 
+def _sanitize_exc(exc: BaseException, max_len: int = 200) -> str:
+    """脱敏异常字符串中的 URL 凭据后截断。"""
+    s = str(exc)
+    # 替换 URL 中的 user:pass@host 为 ***@***
+    s = re.sub(r'(?<=://)[^:@]+(?=@)', '***', s)
+    return s[:max_len]
+
+
 def _emit_stage(trace_id: str, stage: str, name: str, duration_ms: float,
                 status: str = "ok", payload: dict | None = None) -> None:
     """发一条 kind=stage 的 TraceEvent(若无 collector 则静默).
@@ -116,7 +125,7 @@ def _emit_stage(trace_id: str, stage: str, name: str, duration_ms: float,
 
 
 def _emit_plugin(trace_id: str, plugin_name: str, duration_ms: float,
-                 status: str = "ok") -> None:
+                 status: str = "ok", payload: dict | None = None) -> None:
     """发一条 kind=plugin 的 TraceEvent(_run_engine_filtered 用)."""
     from aigateway_core.shared.trace_event import TraceCollector, TraceEvent
     collector = TraceCollector.current()
@@ -129,6 +138,7 @@ def _emit_plugin(trace_id: str, plugin_name: str, duration_ms: float,
             name=f"{plugin_name}.execute",
             duration_ms=round(duration_ms, 2),
             status=status,
+            payload=payload,
         ))
 
 
@@ -362,6 +372,7 @@ class RequestDispatcher:
         # ===== 配额检查 =====
         key_store = self.key_store
         quota_start = time.time()
+        estimated_tokens = 0
         if key_hash and key_store:
             # ensure_ascii=False 保证 CJK/emoji 按真实字符长度计数,否则 Chinese
             # 字符会被展开成 \uXXXX 六字节序列,导致配额估算膨胀 ~6x
@@ -378,7 +389,8 @@ class RequestDispatcher:
                 plugin_trace.append({"plugin_name": "quota_check",
                                      "duration_ms": _qfail_ms,
                                      "status": "failed"})
-                _emit_stage(request.state.trace_id, "quota", "key_store.check_quota", _qfail_ms, "error")
+                _emit_stage(request.state.trace_id, "quota", "key_store.check_quota", _qfail_ms, "error",
+                            payload={"reason": fail_msg})
                 request.state.plugin_trace = plugin_trace
                 headers = {}
                 if retry_after and retry_after > 0:
@@ -402,7 +414,8 @@ class RequestDispatcher:
         plugin_trace.append({"plugin_name": "quota_check",
                              "duration_ms": _qok_ms,
                              "status": "success"})
-        _emit_stage(request.state.trace_id, "quota", "key_store.check_quota", _qok_ms, "ok")
+        _emit_stage(request.state.trace_id, "quota", "key_store.check_quota", _qok_ms, "ok",
+                    payload={"estimated_tokens": estimated_tokens})
 
         # ===== 跑理解管道 engine 插件链（rag_retriever / conv_compressor 等）=====
         # 注意：pii/cache/semantic/compress/media 已在
@@ -453,7 +466,8 @@ class RequestDispatcher:
             plugin_trace.append({"plugin_name": "prompt_compress",
                                  "duration_ms": _comp_skip_ms,
                                  "status": "skipped"})
-            _emit_stage(request.state.trace_id, "compress", "prompt_compress.compress", _comp_skip_ms, "skip")
+            _emit_stage(request.state.trace_id, "compress", "prompt_compress.compress", _comp_skip_ms, "skip",
+                        payload={"reason": "compression_ratio >= 1.0"})
 
         # ===== LiteLLM 出口 =====
         litellm_bridge = self.litellm_bridge
@@ -514,6 +528,7 @@ class RequestDispatcher:
         # 估算基于原始 messages(engine 可能改写 prompt，但配额本就是粗估 ÷4)。
         key_store = self.key_store
         quota_start = time.time()
+        estimated_tokens = 0
         if key_hash and key_store:
             # ensure_ascii=False:见 _dispatch_understanding 中的等价注释
             estimated_tokens = sum(len(json.dumps(m, ensure_ascii=False)) for m in body.messages) // 4
@@ -529,7 +544,8 @@ class RequestDispatcher:
                 plugin_trace.append({"plugin_name": "quota_check",
                                      "duration_ms": _qfail_ms,
                                      "status": "failed"})
-                _emit_stage(request.state.trace_id, "quota", "key_store.check_quota", _qfail_ms, "error")
+                _emit_stage(request.state.trace_id, "quota", "key_store.check_quota", _qfail_ms, "error",
+                            payload={"reason": fail_msg})
                 request.state.plugin_trace = plugin_trace
                 headers = {}
                 if retry_after and retry_after > 0:
@@ -553,7 +569,8 @@ class RequestDispatcher:
         plugin_trace.append({"plugin_name": "quota_check",
                              "duration_ms": _qok_ms,
                              "status": "success"})
-        _emit_stage(request.state.trace_id, "quota", "key_store.check_quota", _qok_ms, "ok")
+        _emit_stage(request.state.trace_id, "quota", "key_store.check_quota", _qok_ms, "ok",
+                    payload={"estimated_tokens": estimated_tokens})
 
         # 跑生成管道 engine 插件链（ai_director → ... → cost_tracker）
         ctx: Optional[PipelineContext] = None
@@ -587,7 +604,8 @@ class RequestDispatcher:
             draft_info = gen_opt.get("generation_optimization", {}).get("draft_generator", {})
             if draft_info.get("applicable") and draft_info.get("draft_id"):
                 draft_id = draft_info["draft_id"]
-                _emit_stage(request.state.trace_id, "draft", "draft_workflow.pending_confirmation", 0, "ok")
+                _emit_stage(request.state.trace_id, "draft", "draft_workflow.pending_confirmation", 0, "ok",
+                            payload={"draft_id": draft_id})
                 plugin_trace.append({"plugin_name": "draft_workflow",
                                      "duration_ms": 0,
                                      "status": "pending_confirmation"})
@@ -690,7 +708,8 @@ class RequestDispatcher:
             plugin_trace.append({"plugin_name": "llm_completion",
                                  "duration_ms": _llm_fail_ms,
                                  "status": "failed"})
-            _emit_stage(request.state.trace_id, "bridge", "litellm_bridge.completion", _llm_fail_ms, "error")
+            _emit_stage(request.state.trace_id, "bridge", "litellm_bridge.completion", _llm_fail_ms, "error",
+                        payload={"model": body.model, "reason": _sanitize_exc(exc, 200)})
             logger.error("LLM completion failed: %s", exc, exc_info=True)
             if tracker:
                 tracker.__exit__(type(exc), exc, exc.__traceback__)
@@ -704,7 +723,8 @@ class RequestDispatcher:
         plugin_trace.append({"plugin_name": "llm_completion",
                              "duration_ms": _llm_ok_ms,
                              "status": "success"})
-        _emit_stage(request.state.trace_id, "bridge", "litellm_bridge.completion", _llm_ok_ms, "ok")
+        _emit_stage(request.state.trace_id, "bridge", "litellm_bridge.completion", _llm_ok_ms, "ok",
+                    payload={"model": body.model})
 
         # bridge 返回错误
         if "error" in result and "data" not in result:
@@ -865,7 +885,8 @@ class RequestDispatcher:
         plugin_trace.append({"plugin_name": "llm_completion",
                              "duration_ms": _stream_ms,
                              "status": "success"})
-        _emit_stage(request.state.trace_id, "bridge", "litellm_bridge.completion_stream", _stream_ms, "ok")
+        _emit_stage(request.state.trace_id, "bridge", "litellm_bridge.completion_stream", _stream_ms, "ok",
+                    payload={"model": body.model, "stream": True})
         request.state.plugin_trace = plugin_trace
 
         if metrics_collector:
@@ -1109,7 +1130,8 @@ class RequestDispatcher:
                 ctx = await plugin.execute(ctx)
             except Exception as exc:
                 elapsed = (_time.monotonic() - pstart) * 1000
-                _emit_plugin(ctx.trace_id, plugin.name, elapsed, "error")
+                _emit_plugin(ctx.trace_id, plugin.name, elapsed, "error",
+                             payload={"reason": _sanitize_exc(exc, 500)})
                 logger.warning("插件 %s 执行失败（fail-open）: %s", plugin.name, exc)
                 continue
             elapsed = (_time.monotonic() - pstart) * 1000

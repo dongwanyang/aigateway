@@ -146,6 +146,18 @@ class GenModelRouterPlugin:
                 },
             )
 
+            # 记录插件 trace（业务 metadata）
+            ctx.add_plugin_trace(
+                "gen_model_router", duration_ms, "success",
+                payload={
+                    "selected_model": decision.selected_model,
+                    "selected_provider": decision.selected_provider,
+                    "reason": decision.reason,
+                    "complexity_score": decision.complexity_score,
+                    "estimated_cost": decision.estimated_cost,
+                },
+            )
+
         except ModelRoutingError as exc:
             # ModelRoutingError: 返回错误响应，标记管线停止
             duration_ms = (time.monotonic() - start_time) * 1000.0

@@ -353,7 +353,8 @@ class TestGenModelRouterPluginTracing:
         await engine.execute_ctx(ctx_with_intent_result)
 
         events = [e for e in collector.events if e.kind == "plugin" and e.stage == "gen_model_router"]
-        assert len(events) == 1
+        # 2 events: PipelineEngine auto-instrument + plugin add_plugin_trace
+        assert len(events) == 2
         assert events[0].trace_id == "routertrace789"
         assert events[0].status == "ok"
 

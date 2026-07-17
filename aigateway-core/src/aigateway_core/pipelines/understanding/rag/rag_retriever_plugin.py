@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
@@ -275,6 +276,7 @@ class RAGRetrieverPlugin:
             return ctx
 
         try:
+            start_time = time.monotonic()
             # 使用 LlamaIndex retriever 检索
             retriever = self._index.as_retriever(
                 similarity_top_k=self._config.top_k,
@@ -341,6 +343,17 @@ class RAGRetrieverPlugin:
                     len(retrieved_chunks),
                     len(code_hits),
                     ctx.request_id,
+                )
+
+                # 记录插件 trace（业务 metadata）
+                duration_ms = (time.monotonic() - start_time) * 1000.0
+                ctx.add_plugin_trace(
+                    "rag_retriever", duration_ms, "success",
+                    payload={
+                        "num_results": len(retrieved_chunks),
+                        "num_code": len(code_hits),
+                        "top_k": self._config.top_k,
+                    },
                 )
 
         except Exception as exc:

@@ -11,6 +11,7 @@ PipelineEngine — 异步插件管线引擎
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any, Dict, List, Protocol
 
@@ -24,6 +25,14 @@ logger = logging.getLogger(__name__)
 def _truncate(s: str, n: int = 500) -> str:
     """截断字符串用于 debug payload(避免 Redis hash 写入过大)."""
     return s if len(s) <= n else s[:n] + "..."
+
+
+def _sanitize_exc(exc: BaseException, max_len: int = 200) -> str:
+    """脱敏异常字符串中的 URL 凭据后截断。"""
+    s = str(exc)
+    # 替换 URL 中的 user:pass@host 为 ***@***
+    s = re.sub(r'(?<=://)[^:@]+(?=@)', '***', s)
+    return s[:max_len]
 
 
 class Plugin(Protocol):
@@ -89,8 +98,9 @@ class PipelineEngine:
                             stage=plugin.name,
                             kind="plugin",
                             name=f"{plugin.name}.skip",
-                            duration_ms=round(skipped_ms, 2),
+                            duration_ms=0.0,  # 被跳过，未实际执行
                             status="skip",
+                            payload={"reason": "should_stop"},
                         ))
                     logger.debug(
                         "插件 %s 被跳过 (should_stop=True, request_id=%s)",
@@ -116,6 +126,7 @@ class PipelineEngine:
                             name=f"{plugin_name}.execute",
                             duration_ms=round(elapsed_ms, 2),
                             status="error",
+                            payload={"reason": _sanitize_exc(exc, 500)},
                         ))
                     logger.error(
                         "插件 %s 执行失败: %s, request_id=%s",

@@ -277,7 +277,15 @@ class PipelineContext:
     def get_plugin_trace(self) -> list[dict[str, Any]]:
         return self.extra.get("_plugin_trace", [])  # type: ignore[no-any-return]
 
-    def add_plugin_trace(self, plugin_name: str, duration_ms: float, status: str) -> None:
+    def add_plugin_trace(self, plugin_name: str, duration_ms: float,
+                         status: str = "ok", payload: dict | None = None) -> None:
+        """插件执行完毕后由插件自身调用,补充一条 kind=plugin 事件。
+
+        PipelineEngine.execute_ctx 已自动为每个插件 emit 了 plugin 事件,
+        此方法供插件在需要携带额外 metadata 时调用(如 RAG 检索条数、
+        压缩比例、意图分类结果等)。
+        """
+        # 1) 同步更新 _plugin_trace 列表（向后兼容 request.state.plugin_trace / _meta）
         trace = self.get_plugin_trace()
         trace.append({
             "plugin_name": plugin_name,
@@ -286,26 +294,25 @@ class PipelineContext:
         })
         self.extra["_plugin_trace"] = trace
 
-        try:
-            from aigateway_core.shared.trace_event import TraceCollector, TraceEvent
-            import time as _time
-            collector = TraceCollector.current()
-            if collector:
-                norm_status = (
-                    "ok" if status == "success"
-                    else ("error" if status == "failed" else "skip")
-                )
-                collector.emit(TraceEvent(
-                    trace_id=self.trace_id,
-                    ts=_time.monotonic(),
-                    stage=plugin_name,
-                    kind="plugin",
-                    name=f"{plugin_name}.execute",
-                    duration_ms=round(duration_ms, 2),
-                    status=norm_status,
-                ))
-        except Exception:
-            pass
+        # 2) 发 TraceEvent（给 Redis trace 和 admin/trace 接口用）
+        import time as _time
+        from aigateway_core.shared.trace_event import TraceCollector, TraceEvent
+        collector = TraceCollector.current()
+        if collector:
+            norm_status = (
+                "ok" if status == "success"
+                else ("error" if status == "failed" else "skip")
+            )
+            collector.emit(TraceEvent(
+                trace_id=self.trace_id,
+                ts=_time.monotonic(),
+                stage=plugin_name,
+                kind="plugin",
+                name=f"{plugin_name}.execute",
+                duration_ms=round(duration_ms, 2),
+                status=norm_status,
+                payload=payload,
+            ))
 
     def to_dict(self) -> Dict[str, Any]:
         return {
