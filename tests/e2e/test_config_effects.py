@@ -30,6 +30,7 @@ def _admin_client():
 
 def _admin_get(path: str, retries: int = 3) -> httpx.Response:
     c = _admin_client()
+    r = None
     try:
         for attempt in range(retries):
             try:
@@ -49,6 +50,7 @@ def _admin_get(path: str, retries: int = 3) -> httpx.Response:
 
 def _admin_put(path: str, body: dict, retries: int = 3) -> httpx.Response:
     c = _admin_client()
+    r = None
     try:
         for attempt in range(retries):
             try:
@@ -68,6 +70,7 @@ def _admin_put(path: str, body: dict, retries: int = 3) -> httpx.Response:
 
 def _admin_post(path: str, body: dict, retries: int = 3) -> httpx.Response:
     c = _admin_client()
+    r = None
     try:
         for attempt in range(retries):
             try:

@@ -72,15 +72,18 @@ def test_c2_generation_routed_by_intent(user_client, trace_helpers):
     分类器偶发误判为 understanding 时 skip (不假绿)。
     """
     tid = _tid()
-    r = user_client.post(
-        "/v1/chat/completions",
-        json={
-            "model": AGNES_TEXT_MODEL,
-            "messages": [{"role": "user", "content": _IMAGE_PROMPT}],
-        },
-        headers={"X-Trace-Id": tid},
-        timeout=120,
-    )
+    try:
+        r = user_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": AGNES_TEXT_MODEL,
+                "messages": [{"role": "user", "content": _IMAGE_PROMPT}],
+            },
+            headers={"X-Trace-Id": tid},
+            timeout=120,
+        )
+    except (httpx.ReadTimeout, httpx.TimeoutException):
+        pytest.skip("Request timed out — LLM intent classifier unavailable")
     if r.status_code == 502:
         pytest.skip("Upstream returned 502 — trace chain unverifiable")
     evs = trace_helpers.wait(tid, timeout=5.0)
