@@ -216,9 +216,14 @@ class SQLiteStore:
     DEFAULT_GROUP_NAME = "default"
 
     def __init__(self, db_path: Optional[str] = None):
-        path = db_path or os.environ.get(
-            "AI_GATEWAY_AUTH_DB_PATH", "/app/data/auth.db"
-        )
+        path = db_path or os.environ.get("AI_GATEWAY_AUTH_DB_PATH")
+        if path is None:
+            # Docker 容器内使用 /app/data/auth.db（由 Docker volume 挂载）；
+            # 本地/TestClient 使用 /tmp/aigateway/auth.db（避免 /app 权限问题）。
+            if os.path.isdir("/app/data"):
+                path = "/app/data/auth.db"
+            else:
+                path = os.path.join(os.environ.get("TMPDIR", "/tmp"), "aigateway", "auth.db")
         self.db_path = path
         self.conn = _Conn(path)
         self._init_schema()
