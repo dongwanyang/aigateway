@@ -155,19 +155,9 @@ class CostTrackerPlugin:
                 },
             )
 
-            # 发 TraceEvent(成功)
-            from aigateway_core.pipelines.generation.registration import emit_plugin_event
-
-            emit_plugin_event(ctx, self.name, duration_ms, "ok")
-
         except Exception as exc:
             # 任何错误不阻断管线，记录零节省 (需求 7.5)
             duration_ms = (time.monotonic() - start_time) * 1000.0
-
-            # 发 TraceEvent(失败)
-            from aigateway_core.pipelines.generation.registration import emit_plugin_event
-
-            emit_plugin_event(ctx, self.name, duration_ms, "error")
 
             logger.warning(
                 "generation_optimization.cost_tracker.error",

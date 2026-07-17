@@ -6,6 +6,7 @@ last_success_time, cooldown_until}``. The brief's fictional ``is_healthy`` /
 ``get_stats`` returning ``success_rate``/``avg_latency_ms`` do NOT exist on the
 real class and are intentionally NOT used here.
 """
+import asyncio
 import os
 import sys
 from unittest.mock import MagicMock, AsyncMock
@@ -195,13 +196,12 @@ async def test_select_timeout_returns_default_model():
     """Timeout in health check should return default_model."""
     bridge = _make_bridge()
     cooldown = MagicMock()
-    # _select() calls get_all_status; make it hang past the timeout
-    async def slow_get_all_status(*a, **k):
+    # Override _select to hang past the timeout, triggering asyncio.wait_for timeout
+    async def slow_select(*a, **k):
         import asyncio
         await asyncio.sleep(10)
-        return {}
-    cooldown.get_all_status = MagicMock(side_effect=slow_get_all_status)
-    bridge._cooldown_tracker = cooldown
+        return "never"
     sel = ModelSelector(bridge=bridge, config={}, default_model="fallback-model", timeout_seconds=0.05)
+    sel._select = slow_select
     result = await sel.select_text_model()
     assert result == "fallback-model"

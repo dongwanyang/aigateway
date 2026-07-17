@@ -120,12 +120,7 @@ class DraftGeneratorPlugin:
                         "reason": "not_a_generation_request",
                     },
                 )
-                # 非生成请求视为 skip,仍发 TraceEvent 便于全链路观测
-                from aigateway_core.pipelines.generation.registration import (
-                    emit_plugin_event,
-                )
-
-                emit_plugin_event(ctx, self.name, duration_ms, "skip")
+                # 非生成请求视为 skip — PipelineEngine 自动埋点，无需手动 emit
                 return ctx
 
             # 从上下文构建 GenerationRequest
@@ -170,18 +165,12 @@ class DraftGeneratorPlugin:
                 },
             )
 
-            # 发 TraceEvent(成功)
-            from aigateway_core.pipelines.generation.registration import emit_plugin_event
-
-            emit_plugin_event(ctx, self.name, duration_ms, "ok")
+            # 草稿已生成，短路后续插件（gen_model_router、cost_tracker 等跳过）
+            # 高清放大由用户确认后通过 /admin/draft/{id}/confirm 独立触发
+            ctx.should_stop = True
 
         except Exception as exc:
             duration_ms = (time.monotonic() - start_time) * 1000.0
-
-            # 发 TraceEvent(失败)
-            from aigateway_core.pipelines.generation.registration import emit_plugin_event
-
-            emit_plugin_event(ctx, self.name, duration_ms, "error")
 
             logger.warning(
                 "generation_optimization.draft_generator.error",
@@ -225,6 +214,10 @@ class DraftGeneratorPlugin:
 
         # 检查请求中的 generation_mode 标志
         if ctx.request.get("generation_mode"):
+            return True
+
+        # Intent classifier 已判定为生成意图（通过 pipeline_kind）
+        if ctx.pipeline_kind in ("generation:image", "generation:video"):
             return True
 
         # 检查模型名中是否包含生成类关键词

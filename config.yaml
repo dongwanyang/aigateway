@@ -4,6 +4,20 @@ server:
   cors_origins:
   - http://localhost:3000
   - http://localhost:5173
+intent_classifier:
+  model: agnes-2.0-flash
+  timeout_seconds: 60
+model_selector:
+  health_check_interval: 60
+  latency_weight: 0.4
+  cost_weight: 0.2
+  success_rate_weight: 0.4
+generation:
+  image:
+    default_size: 2K
+    response_format: url
+  video:
+    poll_endpoint: /v1/videos/{id}
 auth:
   api_keys:
   - key: gw-rRIop4dpcyJJNUTJbHmHpr9Bj3M11s5o
@@ -52,10 +66,6 @@ plugins:
       retrieve_top_k: 5
       retrieve_threshold: 0.9
       rerank_threshold: 0.85
-- name: model_router
-  enabled: true
-  depends_on: []
-  config: {}
 - name: prompt_compress
   enabled: true
   depends_on:
@@ -99,16 +109,14 @@ providers:
     model_grouper:
     - models:
       - name: agnes-2.0-flash
-        modality:
-        - mllm
+        capabilities:
+        - text
       - name: agnes-image-2.1-flash
-        modality:
-        - generative
-        base_url: https://apihub.agnes-ai.com/v1/images/generations
+        capabilities:
+        - image
       - name: agnes-video-v2.0
-        modality:
-        - generative
-        base_url: https://apihub.agnes-ai.com/v1/videos
+        capabilities:
+        - video
       fallback_models: []
       pricing:
         agnes-2.0-flash:
@@ -129,8 +137,8 @@ providers:
     model_grouper:
     - models:
       - name: deepseek-v4-flash
-        modality:
-        - llm
+        capabilities:
+        - text
       fallback_models: []
       pricing:
         deepseek-v4-flash:
@@ -145,14 +153,14 @@ providers:
     model_grouper:
     - models:
       - name: glm-5.2
-        modality:
-        - llm
+        capabilities:
+        - text
       - name: deepseek-v4-pro
-        modality:
-        - llm
+        capabilities:
+        - text
       - name: kimi-k2.7-code
-        modality:
-        - llm
+        capabilities:
+        - text
       fallback_models: []
       pricing:
         glm-5.2:
@@ -269,10 +277,13 @@ code_rag:
   graph_db_dir: /data/code_graphs
 hot_reload: true
 debug:
-  bridge: true
-  plugins_enabled: true
+  frontend: false
+  entry: false
+  cache: false
+  bridge: false
+  plugins_enabled: false
   plugins:
-    enabled: true
+    enabled: false
 media_optimization:
   enabled: true
   download_timeouts:
@@ -357,13 +368,6 @@ generation_optimization:
       agnes-2.0-flash: 60
       agnes-image-2.1-flash: 80
       agnes-video-v2.0: 85
-    model_modalities:
-      agnes-2.0-flash:
-      - llm
-      agnes-image-2.1-flash:
-      - generative
-      agnes-video-v2.0:
-      - generative
     enabled: true
   feature_cache: {}
   cost_tracking:

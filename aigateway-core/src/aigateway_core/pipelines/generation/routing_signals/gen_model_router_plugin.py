@@ -146,19 +146,9 @@ class GenModelRouterPlugin:
                 },
             )
 
-            # 发 TraceEvent(成功)
-            from aigateway_core.pipelines.generation.registration import emit_plugin_event
-
-            emit_plugin_event(ctx, self.name, duration_ms, "ok")
-
         except ModelRoutingError as exc:
             # ModelRoutingError: 返回错误响应，标记管线停止
             duration_ms = (time.monotonic() - start_time) * 1000.0
-
-            # 发 TraceEvent(失败)
-            from aigateway_core.pipelines.generation.registration import emit_plugin_event
-
-            emit_plugin_event(ctx, self.name, duration_ms, "error")
 
             logger.error(
                 "generation_optimization.gen_model_router.routing_error",
@@ -184,11 +174,6 @@ class GenModelRouterPlugin:
             # 其他异常: 回退到 default_model，不阻断管线
             duration_ms = (time.monotonic() - start_time) * 1000.0
             default_model = self._config.model_router.default_model
-
-            # 发 TraceEvent(失败)
-            from aigateway_core.pipelines.generation.registration import emit_plugin_event
-
-            emit_plugin_event(ctx, self.name, duration_ms, "error")
 
             logger.warning(
                 "generation_optimization.gen_model_router.fallback",

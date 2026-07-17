@@ -34,17 +34,10 @@ _INTENT_TO_CAPABILITY = {
 
 def _emit_bridge_debug(start_monotonic: float, status: str,
                        payload: Optional[Dict[str, Any]] = None) -> None:
-    """若 bridge 维度 debug 开关开启,发一条 kind=debug TraceEvent."""
-    import time as _time
-    from aigateway_core.shared.trace_event import TraceCollector
-    collector = TraceCollector.current()
-    if collector is None:
-        return
-    collector.emit_debug(
-        stage="bridge", name="litellm_bridge.completion",
-        duration_ms=(_time.monotonic() - start_monotonic) * 1000,
-        status=status, dimension="bridge", payload=payload or {},
-    )
+    """Bridge 的 stage 事件已由 dispatcher._emit_stage 在 completion 路径发出,
+    不需要额外发 kind=debug 事件 —— 否则 trace 里同一操作出现两行(stage+debug)。
+    保留此 stub 以便后续需要时通过 stage 事件的 payload 字段查看 bridge 信息。
+    """
 
 
 class LiteLLMBridge:
@@ -623,13 +616,17 @@ class LiteLLMBridge:
             img_result = await self._do_image_generation(
                 prompt=prompt_text, model=model, extra_headers=extra_headers,
             )
-            return {"data": img_result, "_meta": {"routed_to": {"model": model, "intent": intent}, "cost": 0.0},
+            # Track usage from image gen response (prompt tokens only, no completion tokens)
+            request_cost = self._track_usage(model, img_result)
+            return {"data": img_result, "_meta": {"routed_to": {"model": model, "intent": intent}, "cost": request_cost},
                     "usage": img_result.get("usage", {})}
         if intent == "generation:video":
             vid_result = await self._do_video_generation(
                 messages=messages, model=model, extra_headers=extra_headers,
             )
-            return {"data": vid_result, "_meta": {"routed_to": {"model": model, "intent": intent}, "cost": 0.0},
+            # Track usage from video gen response (usually zero tokens)
+            request_cost = self._track_usage(model, vid_result)
+            return {"data": vid_result, "_meta": {"routed_to": {"model": model, "intent": intent}, "cost": request_cost},
                     "usage": {}}
 
         # 构建尝试模型列表：先尝试指定 model，再走 fallback
@@ -797,33 +794,37 @@ class LiteLLMBridge:
     ) -> Dict[str, Any]:
         """调 OpenAI Images API (/images/generations) 生成图片, 归一为 chat completions.
 
-        严格遵循 OpenAI Images API 格式: 请求体 model/prompt/n/size/quality/response_format 顶级参数.
+        请求体严格遵循 Agnes Image API 格式（兼容 OpenAI Images API 语义）:
+        - model / prompt / size 为顶级参数
+        - response_format 放入 extra_body（Agnes 要求）
+        - quality / n 非 Agnes 原生参数，忽略
         """
         import httpx
 
         gen_cfg = (self.config.get("generation", {}) or {}).get("image", {}) or {}
-        size = size or gen_cfg.get("default_size", "1024x1024")
+        size = size or gen_cfg.get("default_size", "2K")
         response_format = response_format or gen_cfg.get("response_format", "url")
-        quality = quality or gen_cfg.get("quality", "auto")
 
         base_url, api_key = self._get_model_endpoint(model)
         endpoint = f"{base_url.rstrip('/')}/images/generations"
 
-        body = {
+        # 构建符合 Agnes API 的请求体
+        body: Dict[str, Any] = {
             "model": model,
             "prompt": prompt,
-            "n": n,
             "size": size,
-            "quality": quality,
         }
+        if n > 1:
+            body["n"] = n
+        # response_format 必须放在 extra_body 中
         if response_format:
-            body["response_format"] = response_format
+            body["extra_body"] = {"response_format": response_format}
 
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         if extra_headers:
             headers.update(extra_headers)
 
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
             resp = await client.post(endpoint, headers=headers, json=body)
         resp.raise_for_status()
         payload = resp.json()
@@ -884,7 +885,7 @@ class LiteLLMBridge:
         if extra_headers:
             headers.update(extra_headers)
 
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
             resp = await client.post(endpoint, headers=headers, json=body)
         resp.raise_for_status()
         payload = resp.json()
@@ -905,18 +906,15 @@ class LiteLLMBridge:
         """轮询视频任务状态 (GET /videos/{id}), 对应 OpenAI Retrieve a video."""
         import httpx
 
-        # 找一个有 base_url 的 provider
-        providers = self.config.get("providers", {}) if isinstance(self.config, dict) else {}
-        base_url = ""
-        api_key = ""
-        for provider_cfg in providers.values():
-            if isinstance(provider_cfg, dict) and provider_cfg.get("base_url"):
-                base_url = provider_cfg["base_url"]
-                api_key = provider_cfg.get("api_key", "")
-                break
+        # 使用 _get_model_endpoint 找第一个已注册模型的端点（优先 per-model base_url）
+        base_url, api_key = self._get_model_endpoint(
+            self.get_registered_models()[0] if self.get_registered_models() else "unknown"
+        )
+        if not base_url:
+            return {"error": {"code": "no_provider", "message": "No configured provider found"}}
         endpoint = f"{base_url.rstrip('/')}/videos/{video_id}"
         headers = {"Authorization": f"Bearer {api_key}"}
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
             resp = await client.get(endpoint, headers=headers)
         resp.raise_for_status()
         return resp.json()
@@ -1115,18 +1113,22 @@ class LiteLLMBridge:
         return "unknown"
 
     def _get_model_endpoint(self, model: str) -> tuple[str, str]:
-        """返回 (base_url, api_key) 供 Images/Video API 直调."""
+        """返回 (base_url, api_key) 供 Images/Video API 直调.
+
+        per-model base_url 优先于 provider 级别（Agnes 图片/视频端点与 chat 不同）。
+        """
         bare = model.split("/")[-1] if "/" in model else model
         providers = self.config.get("providers", {}) if isinstance(self.config, dict) else {}
         for provider_cfg in providers.values():
             if not isinstance(provider_cfg, dict):
                 continue
             api_key = provider_cfg.get("api_key", "")
-            base_url = provider_cfg.get("base_url", "")
+            provider_base_url = provider_cfg.get("base_url", "")
             for group in provider_cfg.get("model_grouper", []) or []:
                 for m in (group.get("models", []) if isinstance(group, dict) else []):
                     if isinstance(m, dict) and m.get("name") == bare:
-                        return base_url, api_key
+                        # per-model base_url 覆盖 provider 级别
+                        return (m.get("base_url") or provider_base_url), api_key
         # fallback: 第一个有 base_url 的 provider
         for provider_cfg in providers.values():
             if isinstance(provider_cfg, dict) and provider_cfg.get("base_url"):
@@ -1250,6 +1252,7 @@ class LiteLLMBridge:
                 img_result = await self._do_image_generation(
                     prompt=prompt_text, model=model, extra_headers=extra_headers,
                 )
+                request_cost = self._track_usage(model, img_result)
                 yield {
                     "id": f"gen-img-{int(time.time())}",
                     "object": "chat.completion.chunk",
@@ -1261,7 +1264,7 @@ class LiteLLMBridge:
                         "delta": {"role": "assistant", "content": img_result.get("choices", [{}])[0].get("message", {}).get("content", "")},
                     }],
                     "usage": img_result.get("usage", {}),
-                    "_meta": {"routed_to": {"model": model, "intent": intent}, "cost": 0.0, "model_router": auto_router_meta},
+                    "_meta": {"routed_to": {"model": model, "intent": intent}, "cost": request_cost, "model_router": auto_router_meta},
                 }
             except Exception as exc:
                 logger.error("image generation failed in stream: %s", exc, exc_info=True)
@@ -1283,6 +1286,7 @@ class LiteLLMBridge:
                 vid_result = await self._do_video_generation(
                     messages=messages, model=model, extra_headers=extra_headers,
                 )
+                request_cost = self._track_usage(model, vid_result)
                 content = vid_result.get("choices", [{}])[0].get("message", {}).get("content", "")
                 yield {
                     "id": f"gen-vid-{int(time.time())}",
@@ -1295,7 +1299,7 @@ class LiteLLMBridge:
                         "delta": {"role": "assistant", "content": content},
                     }],
                     "usage": vid_result.get("usage", {}),
-                    "_meta": {"routed_to": {"model": model, "intent": intent}, "cost": 0.0, "model_router": auto_router_meta},
+                    "_meta": {"routed_to": {"model": model, "intent": intent}, "cost": request_cost, "model_router": auto_router_meta},
                 }
             except Exception as exc:
                 logger.error("video generation failed in stream: %s", exc, exc_info=True)
@@ -1340,6 +1344,12 @@ class LiteLLMBridge:
                     val = locals().get(key)
                     if val is not None:
                         params[key] = val
+
+                # user_id and extra_headers must survive retries (locals() list above omits them)
+                if user_id:
+                    params["user_id"] = user_id
+                if extra_headers:
+                    params["extra_headers"] = extra_headers
 
                 if self.router is None:
                     raise RuntimeError("LiteLLM Router not initialized")

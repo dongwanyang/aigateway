@@ -52,7 +52,8 @@ async def test_image_endpoint_path():
     assert captured["json"]["model"] == "agnes-2.0-flash"
     assert captured["json"]["prompt"] == "a cat"
     assert captured["json"]["size"] == "1024x1024"
-    assert captured["json"]["response_format"] == "url"
+    # response_format 放入 extra_body（Agnes 要求,非顶层字段）
+    assert captured["json"]["extra_body"]["response_format"] == "url"
     # 归一为 chat completions
     assert "choices" in result
     assert "https://img/x.png" in result["choices"][0]["message"]["content"]

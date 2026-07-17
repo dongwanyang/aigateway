@@ -124,14 +124,15 @@ def test_e2_engine_rebuild_on_reload(host_config):
         host_config.write(cfg)
         proc = subprocess.run(
             ["bash", "-lc",
-             "sudo docker logs $(sudo docker ps -qf name=aigateway-gateway-1) --since 15s 2>&1 | grep -iE 'pipeline.*(rebuil|reload|updated)' | head -5"],
+             "sudo docker logs $(sudo docker ps -qf name=aigateway-gateway-1) --since 15s 2>&1 | grep -iE '热重载|pipeline.*(rebuil|reload|updated)|重建' | head -5"],
             capture_output=True, text=True, timeout=10,
         )
         # docker logs 命令本身应成功
         assert proc.returncode == 0, f"docker logs command failed: {proc.stderr[:300]}"
-        # 日志里应能找到 pipeline rebuild/reload 标记;空输出说明 Watchdog 未拾起变更
+        # 日志里应能找到热重载/管道重建标记;空输出说明 Watchdog 未拾起变更
+        # 实际日志: "热重载回调完成：已同步 plugins.enabled 并重建两条管道 Engine"
         assert proc.stdout.strip(), \
-            "No pipeline rebuild/reload log line found — Watchdog did not pick up the config change"
+            "No config-reload log line found — Watchdog did not pick up the config change"
     finally:
         _admin_put("/admin/global-config", {"debug": {"entry": False}})
 

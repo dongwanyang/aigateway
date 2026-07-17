@@ -3,7 +3,7 @@ TokenCompressorPlugin — 视觉 Token 压缩插件封装
 ================================================
 
 将 TokenCompressorStrategy 封装为 PipelineEngine 插件，注册到 PluginRegistry。
-在 execute() 中通过 emit_plugin_event 发 TraceEvent,先查询 Feature Cache（命中则跳过压缩），
+在 execute() 中通过 PipelineEngine 自动埋点发 TraceEvent,先查询 Feature Cache（命中则跳过压缩），
 未命中则压缩后存入缓存，禁用时透传参考图不做修改。
 记录 token 节省到请求元数据。
 
@@ -129,12 +129,7 @@ class TokenCompressorPlugin:
                     "compression_count": 0,
                     "duration_ms": duration_ms,
                 }
-                # 无参考图视为 skip,仍发一条 TraceEvent 便于全链路观测
-                from aigateway_core.pipelines.generation.registration import (
-                    emit_plugin_event,
-                )
-
-                emit_plugin_event(ctx, self.name, duration_ms, "skip")
+                # 无参考图视为 skip — PipelineEngine 自动埋点，无需手动 emit
                 return ctx
 
             # 提取请求中的 character_id 和 owner_id
@@ -204,18 +199,8 @@ class TokenCompressorPlugin:
                 },
             )
 
-            # 发 TraceEvent(成功)
-            from aigateway_core.pipelines.generation.registration import emit_plugin_event
-
-            emit_plugin_event(ctx, self.name, duration_ms, "ok")
-
         except Exception as exc:
             duration_ms = (time.monotonic() - start_time) * 1000.0
-
-            # 发 TraceEvent(失败)
-            from aigateway_core.pipelines.generation.registration import emit_plugin_event
-
-            emit_plugin_event(ctx, self.name, duration_ms, "error")
 
             logger.warning(
                 "generation_optimization.token_compressor.error",

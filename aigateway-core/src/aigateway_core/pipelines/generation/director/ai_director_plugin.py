@@ -3,7 +3,7 @@ AIDirectorPlugin — AI 导演插件封装
 ===================================
 
 将 AIDirectorStrategy 封装为 PipelineEngine 插件，注册到 PluginRegistry。
-在 execute() 中通过 emit_plugin_event 发 TraceEvent(成功/失败两路),禁用时透传请求不做修改。
+在 execute() 中通过 PipelineEngine 自动埋点(成功/失败两路),禁用时透传请求不做修改。
 根据是否有参考图选择模态: 有参考图用 mllm 模型，无参考图用 llm 模型。
 
 需求: 1.7, 1.8, 2.10
@@ -75,7 +75,7 @@ class AIDirectorPlugin:
         3. 根据是否有参考图确定模态（mllm/llm）
         4. 调用 strategy.optimize_prompt() 执行优化
         5. 将结果写入 ctx.extra["generation_optimization"]["ai_director"]
-        6. 成功/失败两路各发一条 TraceEvent(emit_plugin_event)
+        6. PipelineEngine 自动埋点 TraceEvent(成功/失败两路)
 
         Args:
             ctx: 管线上下文
@@ -95,7 +95,7 @@ class AIDirectorPlugin:
             return ctx
 
         start_time = time.monotonic()
-
+        duration_ms = 0.0
         try:
             # 从请求中提取 prompt（最后一条 user message 的 content）
             prompt = self._extract_prompt(ctx)
@@ -144,18 +144,8 @@ class AIDirectorPlugin:
                 },
             )
 
-            # 发 TraceEvent(成功)
-            from aigateway_core.pipelines.generation.registration import emit_plugin_event
-
-            emit_plugin_event(ctx, self.name, duration_ms, "ok")
-
         except Exception as exc:
             duration_ms = (time.monotonic() - start_time) * 1000.0
-
-            # 发 TraceEvent(失败) — 旧路径调 mark_span_error,现统一走 TraceCollector
-            from aigateway_core.pipelines.generation.registration import emit_plugin_event
-
-            emit_plugin_event(ctx, self.name, duration_ms, "error")
 
             logger.warning(
                 "generation_optimization.ai_director.error",

@@ -11,6 +11,7 @@ Redis 可用时使用 Redis INCR + EXPIRE，不可用时降级为进程内计数
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections import defaultdict
 from typing import Any, Optional, Set, Tuple
@@ -20,6 +21,23 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from starlette.responses import JSONResponse
 
 logger = logging.getLogger(__name__)
+
+
+# 匹配 ID 形态段:纯数字、UUID、≥8 的纯十六进制、key_/grp_ 前缀、或 ≥16 字符的长串。
+# 用于从限流分桶中剔除资源 ID,使 /admin/api-keys/{id} 这类端点按 "api-keys" 共享窗口。
+_ID_PATTERNS = [
+    re.compile(r"^\d+$"),                        # 123
+    re.compile(r"^[0-9a-fA-F]{8,}$"),            # 十六进制(含 uuid 去连字符)
+    re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F-]+$"),  # uuid
+    re.compile(r"^(key_|grp_)[A-Za-z0-9]+$"),    # key_id / group_id 前缀
+]
+
+
+def _looks_like_id(segment: str) -> bool:
+    """段是否像资源 ID(而非静态端点段)。"""
+    if len(segment) >= 16:
+        return True
+    return any(p.match(segment) for p in _ID_PATTERNS)
 
 
 class RateLimiterMiddleware(BaseHTTPMiddleware):
@@ -73,7 +91,22 @@ class RateLimiterMiddleware(BaseHTTPMiddleware):
     def _check_in_memory(self, client_ip: str, path: str) -> Tuple[bool, int]:
         """进程内滑动窗口计数器。"""
         now = time.time()
-        key = f"{client_ip}:{path.split('/')[1] if '/' in path else path}"
+        # 按 (client_ip, 端点模板) 分桶。先剥离受保护前缀(如 "/admin"),
+        # 再取剩余 path 的「前两个非 ID 段」作为端点标识。这样:
+        #   - /admin/a 与 /admin/b 互不影响(修正旧实现 path.split('/')[1] 撞桶)
+        #   - ID 段被剔除,带参端点共享窗口:
+        #       /admin/api-keys/{id}      -> "api-keys"        (ID 在第 2 段, 剔除)
+        #       /admin/trace/{id}         -> "trace"
+        #       /admin/rag/code/repositories/{id}/callers -> "rag/code" (ID 在第 4 段)
+        #     攻击者轮换 document_id/key_id 无法绕过单端点配额。
+        #   - 文本 RAG(/admin/rag/documents)与代码 RAG(/admin/rag/code/*)是
+        #     不同子系统,各自独立窗口 —— 若不剥 /admin 前缀直接按前两段分桶,
+        #     两者会一起坍缩成 "admin/rag",代码 RAG 的频繁轮询会挤占文本 RAG 配额。
+        matched = next((p for p in self.protected_prefixes if path.startswith(p)), None)
+        rest = path[len(matched):].strip("/") if matched else path.strip("/")
+        static_segments = [p for p in rest.split("/") if p and not _looks_like_id(p)]
+        bucket = "/".join(static_segments[:2]) if static_segments else ""
+        key = f"{client_ip}:{bucket}"
         window_start = now - self.window_seconds
 
         # 清理过期记录

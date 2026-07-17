@@ -25,12 +25,10 @@ def user_client(admin_client, unique_prefix):
         "/admin/api-keys",
         json={
             "user_id": f"{unique_prefix}user",
-            "quotas": {
-                "daily_tokens": 1000000,
-                "monthly_cost": 50.0,
-                "rate_limit_rpm": 60,
-                "rate_limit_tpm": 100000,
-            },
+            "daily_tokens": 1000000,
+            "monthly_cost": 50.0,
+            "rate_limit_rpm": 60,
+            "rate_limit_tpm": 100000,
         },
     )
     if resp.status_code not in (200, 201):

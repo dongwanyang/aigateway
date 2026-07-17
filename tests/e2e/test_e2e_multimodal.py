@@ -23,12 +23,13 @@ import pytest
 _ORIGINAL_SYS_PATH = _sys.path.copy()
 
 # Temporarily add paths for imports used in this test file
-_sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
-_sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-api", "src"))
+# 文件位于 tests/e2e/,需上溯两级到 repo root。
+_sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "aigateway-core", "src"))
+_sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "aigateway-api", "src"))
 
 # 指向测试配置
 os.environ["AI_GATEWAY_CONFIG_PATH"] = os.path.join(
-    os.path.dirname(__file__), "..", "config.yaml"
+    os.path.dirname(__file__), "..", "..", "config.yaml"
 )
 
 

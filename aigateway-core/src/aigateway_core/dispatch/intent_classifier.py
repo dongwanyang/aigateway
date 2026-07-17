@@ -35,7 +35,7 @@ class IntentClassifier:
         self._bridge = bridge
         self._model_selector = model_selector
         self._config = config or {}
-        self._timeout = float(self._config.get("timeout_seconds", 3))
+        self._timeout = float(self._config.get("timeout_seconds", 60))
         self._default_model = self._config.get("model", "agnes-2.0-flash")
 
     async def classify(
@@ -132,19 +132,22 @@ class IntentClassifier:
             hint = "None"
         return {"generation": gen, "hint": str(hint)}
 
+    # 降级启发式用的生成意图关键词。仅当用户文本明确含生成动词时才判生成;
+    # 带图片/视频输入块不再直接判生成 —— "描述这张图"是理解(mllm),不是生成。
+    _IMAGE_GEN_KEYWORDS = ("画", "生成图", "生成一张", "生成图片", "draw", "generate image",
+                           "create image", "生成图像")
+    _VIDEO_GEN_KEYWORDS = ("生成视频", "生成一段视频", "generate video", "create video",
+                           "make a video")
+
     def _heuristic(self, messages: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """降级: 带图→image, 纯文本→understanding."""
-        for m in messages or []:
-            if not isinstance(m, dict):
-                continue
-            c = m.get("content")
-            if isinstance(c, list):
-                for b in c:
-                    if isinstance(b, dict) and b.get("type", "") in (
-                        "image_url", "input_image", "image", "video", "input_video",
-                    ):
-                        t = b.get("type", "")
-                        if t in ("video", "input_video"):
-                            return {"generation": "video", "hint": "None"}
-                        return {"generation": "image", "hint": "None"}
+        """降级启发式: 仅按最后一条 user 文本的生成关键词判定, 带图输入默认 understanding.
+
+        旧实现"带图→image"会把"描述这张图/图里有什么"这类 mllm 理解请求误判为生成,
+        错误路由到 _do_image_generation。图片/视频输入块本身不构成生成意图。
+        """
+        user_text = self._extract_last_user_text(messages).lower()
+        if any(kw in user_text for kw in self._VIDEO_GEN_KEYWORDS):
+            return {"generation": "video", "hint": "None"}
+        if any(kw in user_text for kw in self._IMAGE_GEN_KEYWORDS):
+            return {"generation": "image", "hint": "None"}
         return {"generation": "understanding", "hint": "None"}

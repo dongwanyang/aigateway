@@ -97,7 +97,8 @@ def _emit_stage(trace_id: str, stage: str, name: str, duration_ms: float,
     把事件镜像到 TraceCollector。旧的 plugin_trace.append 列表仍保留,
     供 request.state.plugin_trace 向后兼容(后续 Task 再统一收口)。
 
-    若 entry 维度 debug 开关开启,同时镜像一条 kind=debug 事件(payload 填充)。
+    payload 在 debug 开关开启时由调用方填充;不需要额外发 kind=debug 事件,
+    否则同一操作会在 trace 里出现两行(stage + debug)。
     """
     from aigateway_core.shared.trace_event import TraceCollector, TraceEvent
     collector = TraceCollector.current()
@@ -112,8 +113,6 @@ def _emit_stage(trace_id: str, stage: str, name: str, duration_ms: float,
             status=status,
             payload=payload,
         ))
-        # 若 entry 维度 debug 开,镜像 kind=debug 事件(payload 填充)
-        collector.emit_debug(stage, name, duration_ms, status, "entry", payload)
 
 
 def _emit_plugin(trace_id: str, plugin_name: str, duration_ms: float,
@@ -202,7 +201,8 @@ class RequestDispatcher:
             plugin_trace.append({"plugin_name": "media_optimization",
                                  "duration_ms": _mol_ms,
                                  "status": "success"})
-            _emit_stage(request.state.trace_id, "media", "media_optimizer.process", _mol_ms, "ok")
+            _emit_stage(request.state.trace_id, "media", "media_optimizer.process", _mol_ms, "ok",
+                        payload=mol_meta)
 
         # ===== 共用前置 2: PII Detection(生成管道也受此保护)=====
         pii_start = time.time()
@@ -212,7 +212,8 @@ class RequestDispatcher:
             plugin_trace.append({"plugin_name": "pii_detector",
                                  "duration_ms": _pii_ms,
                                  "status": "rejected"})
-            _emit_stage(request.state.trace_id, "pii", "pii_detector.sanitize", _pii_ms, "error")
+            _emit_stage(request.state.trace_id, "pii", "pii_detector.sanitize", _pii_ms, "error",
+                        payload={"reason": pii_result["error"].get("code", "pii_detected")})
             request.state.plugin_trace = plugin_trace
             await _record_request_log(request=request, method="POST", endpoint="/v1/chat/completions",
                                       status_code=403, duration_ms=0, model=body.model,
@@ -237,7 +238,7 @@ class RequestDispatcher:
 
         # ===== 分流(只看模态和显式意图,不看 body.model)=====
         # auto 请求最终选哪个模型由 bridge 决定,分流器不越权。
-        pipeline_kind = await classify_request(
+        pipeline_kind, intent_hint = await classify_request(
             body, self.config_manager, intent_classifier=self.intent_classifier
         )
         logger.info(
@@ -251,7 +252,7 @@ class RequestDispatcher:
 
         if pipeline_kind == "understanding":
             return await self._dispatch_understanding(body, request, engine, user_id, key_hash, prefix)
-        return await self._dispatch_generation(body, request, engine, user_id, key_hash, prefix, pipeline_kind)
+        return await self._dispatch_generation(body, request, engine, user_id, key_hash, prefix, pipeline_kind, intent_hint)
 
     # ------------------------------------------------------------------
     # 身份解析
@@ -483,6 +484,7 @@ class RequestDispatcher:
         self, body: Any, request: Request, engine: Any,
         user_id: Optional[str], key_hash: Optional[str], prefix: Dict[str, Any],
         pipeline_kind: str = "generation:image",
+        intent_hint: Optional[str] = None,
     ) -> JSONResponse:
         """生成管道：engine 插件链 → 配额 → LiteLLM（不查理解缓存）。
 
@@ -506,30 +508,10 @@ class RequestDispatcher:
 
         resolved_scope = _resolve_cache_scope(request, pii_meta)
 
-        # 跑生成管道 engine 插件链（ai_director → ... → cost_tracker）
-        if engine is not None:
-            try:
-                ctx = PipelineContext(
-                    request={"messages": body.messages, "model": body.model,
-                             "stream": getattr(body, "stream", False)},
-                    trace_id=request.state.trace_id,
-                    pipeline_kind=pipeline_kind,
-                    user_id=user_id,
-                )
-                ctx.extra["cache_scope"] = resolved_scope
-                ctx.extra["group_id"] = group_id
-                ctx.should_stream = getattr(body, "stream", False)
-                ctx = await engine.execute_ctx(ctx)
-                # 插件链可能改写 messages / model，回写
-                req = ctx.request
-                if isinstance(req, dict):
-                    body.messages = req.get("messages", body.messages)
-                    if req.get("model"):
-                        body.model = req["model"]
-            except Exception as exc:
-                logger.warning("生成管道 engine 执行异常（fail-open 继续）: %s", exc)
-
-        # 配额检查
+        # ===== 配额检查 =====
+        # 必须在 engine 执行之前做：草稿预览(draft_generator)会在 engine 内真实调用
+        # Agnes 出图、消耗 token，若先出图再检查配额则预览生成不计费、可被无限刷。
+        # 估算基于原始 messages(engine 可能改写 prompt，但配额本就是粗估 ÷4)。
         key_store = self.key_store
         quota_start = time.time()
         if key_hash and key_store:
@@ -573,6 +555,52 @@ class RequestDispatcher:
                              "status": "success"})
         _emit_stage(request.state.trace_id, "quota", "key_store.check_quota", _qok_ms, "ok")
 
+        # 跑生成管道 engine 插件链（ai_director → ... → cost_tracker）
+        ctx: Optional[PipelineContext] = None
+        if engine is not None:
+            try:
+                ctx = PipelineContext(
+                    request={"messages": body.messages, "model": body.model,
+                             "stream": getattr(body, "stream", False)},
+                    trace_id=request.state.trace_id,
+                    pipeline_kind=pipeline_kind,
+                    user_id=user_id,
+                )
+                ctx.extra["cache_scope"] = resolved_scope
+                ctx.extra["group_id"] = group_id
+                ctx.should_stream = getattr(body, "stream", False)
+                ctx = await engine.execute_ctx(ctx)
+                # 插件链可能改写 messages / model，回写
+                req = ctx.request
+                if isinstance(req, dict):
+                    body.messages = req.get("messages", body.messages)
+                    if req.get("model"):
+                        body.model = req["model"]
+            except Exception as exc:
+                logger.warning("生成管道 engine 执行异常（fail-open 继续）: %s", exc)
+                ctx = None  # fail-open: continue without engine results
+
+        # ===== Draft 确认门控：草稿已生成则返回 preview，等待用户确认后再 upscale =====
+        # 配额已在 engine 之前扣过，预览生成计费正确。
+        if ctx is not None:
+            gen_opt = getattr(ctx, 'extra', {}) or {}
+            draft_info = gen_opt.get("generation_optimization", {}).get("draft_generator", {})
+            if draft_info.get("applicable") and draft_info.get("draft_id"):
+                draft_id = draft_info["draft_id"]
+                _emit_stage(request.state.trace_id, "draft", "draft_workflow.pending_confirmation", 0, "ok")
+                plugin_trace.append({"plugin_name": "draft_workflow",
+                                     "duration_ms": 0,
+                                     "status": "pending_confirmation"})
+                request.state.plugin_trace = plugin_trace
+                return JSONResponse(content={
+                    "data": {
+                        "draft_id": draft_id,
+                        "preview_url": f"/admin/draft/{draft_id}/preview",
+                        "generation_params": draft_info.get("generation_params", {}),
+                    },
+                    "_meta": {"draft_pending_confirmation": True},
+                })
+
         # ===== LiteLLM 出口（生成管道直接调，不查缓存）=====
         # body.model 可能是 'auto',由 bridge 内部按 generation 模态解析。
         litellm_bridge = self.litellm_bridge
@@ -589,6 +617,7 @@ class RequestDispatcher:
                 cache_key=None,  # 生成管道不回填
                 normalized_messages=None,
                 pipeline_kind=pipeline_kind, group_id=group_id,
+                intent_hint=intent_hint,
             )
         return await self._call_llm_nonstream(
             body, request, litellm_bridge, plugin_trace, request_start_time,
@@ -597,6 +626,7 @@ class RequestDispatcher:
             normalized_messages=None,
             pii_meta=pii_meta, router_meta=None, mol_meta=mol_meta, compress_meta=None,
             pipeline_kind=pipeline_kind, group_id=group_id,
+            intent_hint=intent_hint,
         )
 
     # ------------------------------------------------------------------
@@ -609,6 +639,7 @@ class RequestDispatcher:
         pii_meta=None, router_meta=None, mol_meta=None, compress_meta=None,
         pipeline_kind: str = "understanding",
         group_id: str = "",
+        intent_hint: Optional[str] = None,
     ) -> JSONResponse:
         """非流式调 LiteLLM 出口 + 用量记录 + 缓存回填。
 
@@ -637,7 +668,7 @@ class RequestDispatcher:
         )
 
         try:
-            hint = getattr(body, "_intent_hint", None)
+            hint = intent_hint
             result = await litellm_bridge.completion(
                 messages=body.messages,
                 model=body.model,
@@ -773,6 +804,7 @@ class RequestDispatcher:
         user_id, key_hash, cache_key, normalized_messages,
         pipeline_kind: str = "understanding",
         group_id: str = "",
+        intent_hint: Optional[str] = None,
     ) -> JSONResponse:
         """流式调 LiteLLM 出口。
 
@@ -794,7 +826,7 @@ class RequestDispatcher:
         key_store = self.key_store
 
         llm_start = time.time()
-        hint = getattr(body, "_intent_hint", None)
+        hint = intent_hint
 
         # Inject trace context for downstream LLM calls
         from aigateway_core.shared.tracing import TracingManager

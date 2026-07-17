@@ -566,8 +566,8 @@ export default function Logs() {
                         <div style={{
                           position: 'absolute', left: 3, top: 12,
                           width: 18, height: 18, borderRadius: '50%',
-                          backgroundColor: evt.status === 'success' || evt.status === 'hit' ? kindColor
-                            : evt.status === 'miss' ? 'var(--color-warning, #f59e0b)'
+                          backgroundColor: evt.status === 'ok' ? kindColor
+                            : evt.status === 'skip' ? 'var(--color-text-quaternary)'
                             : 'var(--color-danger)',
                           border: '2px solid var(--color-bg-elevated)',
                           display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -585,10 +585,16 @@ export default function Logs() {
                           }}>
                             {kindLabel}
                           </span>
-                          <span className={`badge ${evt.status === 'success' || evt.status === 'hit' ? 'badge-success'
-                            : evt.status === 'miss' ? 'badge-warning'
+                          <span className={`badge ${evt.status === 'ok' ? 'badge-success'
+                            : evt.status === 'skip' ? ''
                             : 'badge-danger'}`}>
-                            {evt.status}
+                            {evt.kind === 'debug' ? (
+                              evt.status === 'ok' ? '调试' : evt.status
+                            ) : (
+                              evt.status === 'ok' ? '成功'
+                                : evt.status === 'skip' ? '跳过'
+                                : '错误'
+                            )}
                           </span>
                           <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--font-size-xs)', color: 'var(--color-text-tertiary)' }}>
                             {evt.duration_ms > 0 ? `${evt.duration_ms}ms` : '—'}

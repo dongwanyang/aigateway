@@ -1,6 +1,6 @@
 # Plugin & Debug Switch Integration Test Report
 
-Generated: 2026-07-15 06:11:44
+Generated: 2026-07-16 02:56:04
 
 
 ## Summary
@@ -12,4 +12,4 @@ Generated: 2026-07-15 06:11:44
 
 | Status | Details | Debug Found |
 |--------|---------|-------------|
-| PASS | **all_debug_events**: 4; **distinct_stages**: 3; **engine_present**: True; **conflicts_detected**: False; **duplicate_stages**: {} | N/A |
+| PASS | **all_debug_events**: 5; **distinct_stages**: 4; **engine_present**: True; **conflicts_detected**: False; **duplicate_stages**: {} | N/A |

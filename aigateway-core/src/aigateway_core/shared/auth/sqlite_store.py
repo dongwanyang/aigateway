@@ -1397,11 +1397,19 @@ class SQLiteStore:
         return self._row_to_dict(row)
 
     async def set_api_key(self, key_hash: str, data: Dict[str, Any]) -> None:
+        # 运行时计数器列只能由 check_quota / increment_usage 修改 —— 这里若传进来
+        # 会用旧快照覆盖并发的计数写入，静默回滚配额。调用方应只传要改的限制/元数据列。
+        _RUNTIME_COUNTER_COLS = {
+            "daily_tokens_used", "monthly_cost_used",
+            "rpm_window_start", "rpm_window_count",
+            "tpm_window_start", "tpm_window_count",
+            "last_used_at",
+        }
         # Build dynamic UPDATE
         fields = []
         values = []
         for k, v in data.items():
-            if k in ("key_hash", "key_id", "created_at"):
+            if k in ("key_hash", "key_id", "created_at") or k in _RUNTIME_COUNTER_COLS:
                 continue
             fields.append(f"{k}=?")
             # Convert bool to int

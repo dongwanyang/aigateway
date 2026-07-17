@@ -83,7 +83,7 @@ class RedisClientManager:
 
         if self.redis is not None:
             try:
-                await self.redis.close()
+                await self.redis.aclose()
             except Exception:
                 pass
             self.redis = None

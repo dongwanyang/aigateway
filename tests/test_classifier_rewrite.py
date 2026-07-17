@@ -19,35 +19,39 @@ class _Body:
 async def test_classify_image_intent():
     ic = MagicMock()
     ic.classify = AsyncMock(return_value={"generation": "image", "hint": "None"})
-    result = await classify_request(_Body(model="agnes-2.0-flash",
+    kind, hint = await classify_request(_Body(model="agnes-2.0-flash",
                                           messages=[{"role": "user", "content": "画一只猫"}]),
                                      MagicMock(), intent_classifier=ic)
-    assert result == "generation:image"
+    assert kind == "generation:image"
+    assert hint is None
 
 
 @pytest.mark.asyncio
 async def test_classify_video_intent():
     ic = MagicMock()
     ic.classify = AsyncMock(return_value={"generation": "video", "hint": "None"})
-    result = await classify_request(_Body(messages=[{"role": "user", "content": "生成视频"}]),
+    kind, hint = await classify_request(_Body(messages=[{"role": "user", "content": "生成视频"}]),
                                      MagicMock(), intent_classifier=ic)
-    assert result == "generation:video"
+    assert kind == "generation:video"
+    assert hint is None
 
 
 @pytest.mark.asyncio
 async def test_classify_understanding_intent():
     ic = MagicMock()
     ic.classify = AsyncMock(return_value={"generation": "understanding", "hint": "None"})
-    result = await classify_request(_Body(messages=[{"role": "user", "content": "你好"}]),
+    kind, hint = await classify_request(_Body(messages=[{"role": "user", "content": "你好"}]),
                                      MagicMock(), intent_classifier=ic)
-    assert result == "understanding"
+    assert kind == "understanding"
+    assert hint is None
 
 
 @pytest.mark.asyncio
 async def test_classify_no_intent_classifier_defaults_understanding():
-    result = await classify_request(_Body(messages=[{"role": "user", "content": "你好"}]),
+    kind, hint = await classify_request(_Body(messages=[{"role": "user", "content": "你好"}]),
                                      MagicMock(), intent_classifier=None)
-    assert result == "understanding"
+    assert kind == "understanding"
+    assert hint is None
 
 
 @pytest.mark.asyncio
@@ -55,18 +59,20 @@ async def test_classify_classifier_exception_defaults_understanding():
     """Classifier raising exception should fall back to understanding."""
     ic = MagicMock()
     ic.classify = AsyncMock(side_effect=RuntimeError("classifier down"))
-    result = await classify_request(_Body(messages=[{"role": "user", "content": "画图"}]),
+    kind, hint = await classify_request(_Body(messages=[{"role": "user", "content": "画图"}]),
                                      MagicMock(), intent_classifier=ic)
-    assert result == "understanding"
+    assert kind == "understanding"
+    assert hint is None
 
 
 @pytest.mark.asyncio
-async def test_classify_sets_intent_hint_on_body():
-    """When classifier returns valid result, body._intent_hint should be set."""
+async def test_classify_returns_intent_hint():
+    """When classifier returns a model hint, it is returned (not written to body)."""
     ic = MagicMock()
     ic.classify = AsyncMock(return_value={"generation": "image", "hint": "agnes-2.0-flash"})
     body = _Body(model="test", messages=[{"role": "user", "content": "画一只猫"}])
-    result = await classify_request(body, MagicMock(), intent_classifier=ic)
-    assert result == "generation:image"
-    assert hasattr(body, "_intent_hint")
-    assert body._intent_hint == "agnes-2.0-flash"
+    kind, hint = await classify_request(body, MagicMock(), intent_classifier=ic)
+    assert kind == "generation:image"
+    assert hint == "agnes-2.0-flash"
+    # body 不应被污染(不再 setattr _intent_hint)
+    assert not hasattr(body, "_intent_hint")

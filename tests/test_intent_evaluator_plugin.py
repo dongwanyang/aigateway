@@ -280,11 +280,11 @@ class TestIntentEvaluatorPluginErrorHandling:
 
 
 class TestIntentEvaluatorPluginTracing:
-    """Test plugin TraceEvent emission (post Task 7: span → emit_plugin_event)."""
+    """Test plugin TraceEvent emission (post Task 7: span → PipelineEngine auto-instrument)."""
 
     @pytest.mark.asyncio
     async def test_emits_plugin_trace_event(self, default_config, mock_strategy):
-        """Plugin emits a kind='plugin' TraceEvent on success."""
+        """PipelineEngine emits a kind='plugin' TraceEvent on plugin success."""
         from aigateway_core.shared.trace_event import TraceCollector
 
         plugin = IntentEvaluatorPlugin(strategy=mock_strategy, config=default_config)
@@ -294,7 +294,12 @@ class TestIntentEvaluatorPluginTracing:
         )
         collector = TraceCollector.start("trace123")
 
-        await plugin.execute(ctx)
+        # Gen-opt plugins no longer emit TraceEvents directly; PipelineEngine wraps execute().
+        from aigateway_core.dispatch.pipeline_engine import PipelineEngine
+        engine = PipelineEngine(registry=MagicMock(), pipeline_kind="generation")
+        engine._ordered_plugins = [plugin]
+        engine._initialized = True
+        await engine.execute_ctx(ctx)
 
         events = [e for e in collector.events if e.kind == "plugin" and e.stage == "intent_evaluator"]
         assert len(events) == 1

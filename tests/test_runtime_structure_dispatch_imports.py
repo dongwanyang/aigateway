@@ -40,7 +40,9 @@ async def test_classify_request_prefers_generation_modalities():
     }
     ic = MagicMock()
     ic.classify = AsyncMock(return_value={"generation": "image", "hint": "None"})
-    assert await classify_request(body, DummyConfig(), intent_classifier=ic) == "generation:image"
+    kind, hint = await classify_request(body, DummyConfig(), intent_classifier=ic)
+    assert kind == "generation:image"
+    assert hint is None
 
 
 from aigateway_core.dispatch.dispatcher import RequestDispatcher as CoreRequestDispatcher

@@ -7,7 +7,7 @@ classify_request 调 IntentClassifier(LLM 预判)输出带媒介 pipeline_kind:
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +16,7 @@ async def classify_request(
     body: Any,
     config_manager: Any,
     intent_classifier: Optional[Any] = None,
-) -> str:
+) -> Tuple[str, Optional[str]]:
     """把请求分类为 understanding | generation:image | generation:video.
 
     Args:
@@ -25,7 +25,9 @@ async def classify_request(
         intent_classifier: IntentClassifier 实例. None 时默认 understanding.
 
     Returns:
-        pipeline_kind 字符串.
+        (pipeline_kind, model_hint) 二元组。model_hint 为预判/客户端指定的
+        模型名(裸名)或 None,由 dispatcher 透传给 bridge。不写入 body,避免污染
+        入参 Pydantic 对象(否则 body 被序列化/缓存/日志会带上内部字段)。
     """
     messages = getattr(body, "messages", None)
     if messages is None and isinstance(body, dict):
@@ -33,7 +35,7 @@ async def classify_request(
 
     if intent_classifier is None:
         logger.debug("classify_request: 无 intent_classifier, 默认 understanding")
-        return "understanding"
+        return "understanding", None
 
     model = getattr(body, "model", None)
     if model is None and isinstance(body, dict):
@@ -43,19 +45,14 @@ async def classify_request(
         result = await intent_classifier.classify(messages=messages or [], body_model=model)
     except Exception as exc:
         logger.warning("classify_request: intent_classifier 异常 %s, 默认 understanding", exc)
-        return "understanding"
+        return "understanding", None
 
     generation = result.get("generation", "understanding")
     hint = result.get("hint", "None")
-
-    # 把 hint 存到 body 上, 供 dispatcher 传给 bridge 作 model_hint
-    try:
-        setattr(body, "_intent_hint", hint if hint != "None" else None)
-    except Exception:
-        pass
+    model_hint = hint if hint != "None" else None
 
     if generation == "image":
-        return "generation:image"
+        return "generation:image", model_hint
     if generation == "video":
-        return "generation:video"
-    return "understanding"
+        return "generation:video", model_hint
+    return "understanding", model_hint

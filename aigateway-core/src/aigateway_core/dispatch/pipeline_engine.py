@@ -136,15 +136,8 @@ class PipelineEngine:
                         name=f"{plugin_name}.execute",
                         duration_ms=round(elapsed_ms, 2),
                         status="ok",
-                    ))
-                    collector.emit_debug(
-                        stage=plugin_name,
-                        name=f"{plugin_name}.execute",
-                        duration_ms=elapsed_ms,
-                        status="ok",
-                        dimension="plugin",
                         payload={"input_summary": _truncate(str(ctx.request.get("messages", ""))[:500])},
-                    )
+                    ))
                 logger.debug(
                     "插件 %s 执行完毕: %.2fms, request_id=%s",
                     plugin_name,

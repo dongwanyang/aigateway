@@ -68,7 +68,12 @@ async def test_timeout_fallback_heuristic_text():
 
 
 @pytest.mark.asyncio
-async def test_timeout_fallback_heuristic_image_content():
+async def test_timeout_fallback_heuristic_image_input_is_understanding():
+    """带图片输入块(无生成关键词)降级为 understanding, 不是 image.
+
+    "描述这张图"这类 mllm 理解请求带图输入,不应误判为图片生成。
+    旧启发式"带图→image"会把这类请求错误路由到 _do_image_generation。
+    """
     bridge, sel = _mock_bridge()
     import asyncio as _a
     async def slow(*a, **k):
@@ -77,8 +82,23 @@ async def test_timeout_fallback_heuristic_image_content():
     ic = IntentClassifier(bridge=bridge, model_selector=sel, config={"timeout_seconds": 0.1})
     msgs = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "x"}}]}]
     result = await ic.classify(messages=msgs, body_model=None)
-    # 带图降级 -> image
+    assert result["generation"] == "understanding"
+
+
+@pytest.mark.asyncio
+async def test_timeout_fallback_heuristic_generation_keyword():
+    """用户文本含"画"等生成关键词时降级为 image."""
+    bridge, sel = _mock_bridge()
+    import asyncio as _a
+    async def slow(*a, **k):
+        await _a.sleep(5)
+    bridge.completion = AsyncMock(side_effect=slow)
+    ic = IntentClassifier(bridge=bridge, model_selector=sel, config={"timeout_seconds": 0.1})
+    result = await ic.classify(messages=[{"role": "user", "content": "画一只猫"}], body_model=None)
     assert result["generation"] == "image"
+
+    result_v = await ic.classify(messages=[{"role": "user", "content": "生成视频"}], body_model=None)
+    assert result_v["generation"] == "video"
 
 
 @pytest.mark.asyncio

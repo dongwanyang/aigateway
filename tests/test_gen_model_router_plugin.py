@@ -332,20 +332,25 @@ class TestGenModelRouterPluginErrorHandling:
 
 
 class TestGenModelRouterPluginTracing:
-    """Test plugin TraceEvent emission (post Task 7: span → emit_plugin_event)."""
+    """Test plugin TraceEvent emission (post Task 7: span → PipelineEngine auto-instrument)."""
 
     @pytest.mark.asyncio
     async def test_emits_plugin_trace_event(
         self, default_config, mock_strategy, ctx_with_intent_result
     ):
-        """Plugin emits a kind='plugin' TraceEvent on success."""
+        """PipelineEngine emits a kind='plugin' TraceEvent on plugin success."""
         from aigateway_core.shared.trace_event import TraceCollector
 
         plugin = GenModelRouterPlugin(strategy=mock_strategy, config=default_config)
         ctx_with_intent_result.trace_id = "routertrace789"
         collector = TraceCollector.start("routertrace789")
 
-        await plugin.execute(ctx_with_intent_result)
+        # Gen-opt plugins no longer emit TraceEvents directly; PipelineEngine wraps execute().
+        from aigateway_core.dispatch.pipeline_engine import PipelineEngine
+        engine = PipelineEngine(registry=MagicMock(), pipeline_kind="generation")
+        engine._ordered_plugins = [plugin]
+        engine._initialized = True
+        await engine.execute_ctx(ctx_with_intent_result)
 
         events = [e for e in collector.events if e.kind == "plugin" and e.stage == "gen_model_router"]
         assert len(events) == 1

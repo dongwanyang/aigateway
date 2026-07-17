@@ -182,11 +182,13 @@ docker compose down
 
 ### Testing
 ```bash
-python3 -m pytest tests/ -v --ignore=tests/test_template_routes.py   # flaky, skip
+python3 -m pytest tests/ -q                      # unit tests (e2e/ui auto-skipped)
 python3 -m pytest tests/test_cache_key_v2.py -v
 python3 -m pytest tests/ --cov=aigateway_core --cov=aigateway_api
+python3 -m pytest tests/e2e/                     # e2e: needs live gateway + ADMIN_KEY + Redis/Qdrant
+python3 -m pytest tests/ui/                      # UI e2e: needs gateway :8000 + panel :3000
 ```
-57 test files. No `conftest.py` / `pytest.ini`. Env uses `python3` (no `python` alias).
+62 unit test files + 8 e2e (`tests/e2e/`, incl. `test_plugin_debug_integration.py`, `test_e2e_multimodal.py`). `tests/conftest.py` gates e2e/ui: only runs when those paths are invoked explicitly (checks `AI_GATEWAY_ADMIN_KEY` + `GET /health`); `pytest tests/` auto-skips them via `pytest_collection_modifyitems` so a missing gateway never hangs the unit run. Env uses `python3` (no `python` alias).
 
 ### Config precedence (high → low)
 1. Real process env (docker-compose `environment:` / shell `export`)

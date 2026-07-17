@@ -42,8 +42,7 @@ from aigateway_core.shared.metrics import get_metrics_collector
 from aigateway_core.shared.plugin_registry import PluginRegistry
 from aigateway_core.shared.qdrant_client import QdrantClientManager
 from aigateway_core.shared.redis_client import RedisClientManager
-from aigateway_core.shared.auth.key_store import KeyStore
-from aigateway_core.shared.auth.group_store import GroupStore
+from aigateway_core.shared.auth.sqlite_store import SQLiteStore
 
 logger = logging.getLogger(__name__)
 
@@ -302,52 +301,48 @@ async def lifespan(app: "FastAPI"):
         logger.warning("Qdrant 连接失败，语义缓存功能不可用: %s", exc)
         qdrant_mgr = None  # type: ignore[assignment]
 
-    # 初始化 KeyStore
-    key_store: Optional[KeyStore] = None
-    if redis_mgr is not None:
-        key_store = KeyStore(redis=redis_mgr)
-        logger.info("KeyStore 初始化完成")
+    # 初始化 SQLite auth store (API Keys, Groups, Quotas)
+    sqlite_store: Optional[SQLiteStore] = None
+    try:
+        sqlite_store = SQLiteStore()
+        logger.info("SQLiteStore 初始化完成: %s", sqlite_store.db_path)
 
-        # 从 config.yaml 导入 API Key 到 Redis
+        # Seed from config.yaml if DB is empty
         auth_config = config_manager.get("auth", {})
         api_keys_config = auth_config.get("api_keys", [])
         if api_keys_config:
-            seeded = await key_store.seed_from_config(api_keys_config)
-            logger.info("已从 config.yaml 导入 %d 个 API Key 到 Redis", seeded)
+            seeded = await sqlite_store.seed_from_config(api_keys_config)
+            logger.info("已从 config.yaml 导入 %d 个 API Key 到 SQLite", seeded)
 
-    # 初始化 GroupStore + 默认组 + 迁移无组 Key
-    group_store: Optional[GroupStore] = None
-    if key_store is not None and redis_mgr is not None:
-        try:
-            group_store = GroupStore(redis=redis_mgr)
-            await group_store.ensure_default_group()
-            # auto-create groups from config seed (skip 'default' — already ensured)
-            for cfg_grp in (config_manager.get("auth", {}) or {}).get("groups", []) or []:
-                gname = (cfg_grp or {}).get("name") or ""
-                if gname and gname.lower() != "default":
-                    # Strip 'name' and 'quotas' nesting — config has flat fields
-                    if cfg_grp:
+        # Ensure default group + auto-create groups from config
+        if api_keys_config:
+            try:
+                await sqlite_store.ensure_default_group()
+                for cfg_grp in auth_config.get("groups", []) or []:
+                    gname = (cfg_grp or {}).get("name") or ""
+                    if gname and gname.lower() != "default":
                         quotas = dict(cfg_grp)
                         quotas.pop("name", None)
-                        quotas.pop("quotas", None)  # nested form not used in config
-                    else:
-                        quotas = {}
-                    try:
-                        await group_store.create_group(gname, quotas or None)
-                    except ValueError:
-                        pass  # already exists
-            # also auto-create groups referenced in config api_keys[].group
-            for cfg_key in (config_manager.get("auth", {}) or {}).get("api_keys", []) or []:
-                gname = (cfg_key or {}).get("group") or ""
-                if gname:
-                    try:
-                        await group_store.create_group(gname, {})
-                    except ValueError:
-                        pass  # already exists
-            await key_store.migrate_groups(group_store)
-            logger.info("GroupStore 初始化完成")
-        except Exception as exc:
-            logger.warning("GroupStore 初始化失败: %s", exc)
+                        quotas.pop("quotas", None)
+                        try:
+                            await sqlite_store.create_group(gname, quotas or None)
+                        except ValueError:
+                            pass
+                for cfg_key in api_keys_config:
+                    gname = (cfg_key or {}).get("group") or ""
+                    if gname:
+                        try:
+                            await sqlite_store.create_group(gname, {})
+                        except ValueError:
+                            pass
+                # Migrate groupless keys to default group
+                await sqlite_store.migrate_groups(sqlite_store)
+                logger.info("SQLiteStore 组初始化完成")
+            except Exception as exc:
+                logger.warning("SQLiteStore 组初始化失败: %s", exc)
+    except Exception as exc:
+        logger.error("SQLiteStore 初始化失败: %s", exc)
+        raise
 
     # 初始化 CacheManager
     cache_config = config_manager.get("plugins", [])
@@ -540,6 +535,28 @@ async def lifespan(app: "FastAPI"):
         except Exception as exc:
             logger.warning("AIDirectorStrategy 绑定 litellm_bridge 失败: %s", exc)
 
+    # DraftGeneratorStrategy：从 registry 取 strategy 单例，
+    # (1) 延迟绑定 litellm_bridge（用于低分辨率预览生成）—— 仅在 bridge 健康时；
+    # (2) 挂载到 app.state 供 admin routes（/admin/draft/*）查询。
+    # 注意：挂载 app.state 不能依赖 litellm_bridge —— bridge 初始化失败时
+    # strategy 依然存在于 registry，admin 草稿端点应仍可查询状态（只是预览生成降级）。
+    try:
+        draft_reg = plugin_registry._registrations.get("draft_generator")
+        if draft_reg is not None:
+            draft_strategy = draft_reg.config.get("strategy")
+            if draft_strategy is not None:
+                if litellm_bridge is not None and hasattr(draft_strategy, "_litellm_bridge"):
+                    draft_strategy._litellm_bridge = litellm_bridge
+                    logger.info("DraftGeneratorStrategy 已绑定 litellm_bridge")
+                # 两个路由文件用不同的属性名读取 strategy，都挂上以保持兼容：
+                # - admin_routes._get_draft_strategy 读 app.state.draft_strategy
+                # - draft_routes._get_draft_strategy 读 app.state.draft_generator_strategy
+                app.state.draft_strategy = draft_strategy
+                app.state.draft_generator_strategy = draft_strategy
+                logger.info("DraftGeneratorStrategy 已挂载到 app.state")
+    except Exception as exc:
+        logger.warning("DraftGeneratorStrategy 绑定/挂载失败: %s", exc)
+
     # 初始化 PromptTemplateManager
     prompt_template_manager = None
     try:
@@ -562,8 +579,9 @@ async def lifespan(app: "FastAPI"):
         logger.warning("PromptTemplateManager 初始化失败: %s", exc)
 
     # 挂载到 app.state，供 FastAPI 中间件/依赖注入使用
-    app.state.key_store = key_store
-    app.state.group_store = group_store
+    app.state.sqlite_store = sqlite_store
+    app.state.key_store = sqlite_store  # backward compat: admin_routes references key_store
+    app.state.group_store = sqlite_store  # backward compat: admin_routes references group_store
     app.state.config_manager = config_manager
 
     # 初始化 5 维度 Debug 开关(PR2 2026-07-05)。attach 到 ConfigManager.on_reload

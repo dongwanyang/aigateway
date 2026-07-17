@@ -42,22 +42,10 @@ L3_CLEANUP_INTERVAL = 3600     # clean expired vectors every hour
 
 def _emit_cache_debug(key: str, tier_hit: str, start_monotonic: float,
                       status: str = "ok") -> None:
-    """If the cache dimension debug switch is on, emit a kind=debug TraceEvent.
-
-    Called at each hit/MISS path in CacheManager.get; key is hashed and
-    truncated to avoid leaking prompt content.
+    """CacheManager.get 的 stage 事件已由 dispatcher 在 cache lookup 路径发出,
+    不需要额外发 kind=debug 事件 —— 否则 trace 里同一操作出现两行(stage+debug)。
+    保留此 stub 以便后续需要时通过 stage 事件的 payload 字段查看缓存信息。
     """
-    from aigateway_core.shared.trace_event import TraceCollector
-    import time as _time
-    collector = TraceCollector.current()
-    if collector is None:
-        return
-    collector.emit_debug(
-        stage="cache", name="cache_manager.get",
-        duration_ms=(_time.monotonic() - start_monotonic) * 1000,
-        status=status, dimension="cache",
-        payload={"key_hash": int(hashlib.sha256(str(key).encode()).hexdigest(), 16) % (10**8), "tier_hit": tier_hit},
-    )
 
 
 class CacheManager:

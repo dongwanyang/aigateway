@@ -83,7 +83,7 @@ class DraftWorkflowConfig:
 
     Attributes:
         enabled: 是否启用 Draft 工作流 (默认: True)
-        draft_resolution: 草图分辨率 (默认: (512, 512))
+        draft_resolution: 草图分辨率 (默认: (1024, 1024), Agnes Images API 最小支持 1K)
         default_target_resolution: 默认目标分辨率 (默认: (1920, 1080))
         max_target_resolution: 最大允许目标分辨率 (默认: (4096, 4096))
         max_regeneration_attempts: 最大重试次数 (默认: 5, 范围: 1-50)
@@ -94,10 +94,11 @@ class DraftWorkflowConfig:
         target_fps: 目标帧率 (默认: 60, 范围: 24-120)
         target_fps_range: 允许的目标帧率范围 (默认: (24, 120))
         upscale_algorithm: 放大算法名称 (默认: "real-esrgan")
+        draft_model: 草稿预览生成使用的图像模型 (默认: "agnes-image-2.1-flash")
     """
 
     enabled: bool = True
-    draft_resolution: Tuple[int, int] = (512, 512)
+    draft_resolution: Tuple[int, int] = (1024, 1024)
     default_target_resolution: Tuple[int, int] = (1920, 1080)
     max_target_resolution: Tuple[int, int] = (4096, 4096)
     max_regeneration_attempts: int = 5
@@ -108,6 +109,7 @@ class DraftWorkflowConfig:
     target_fps: int = 60
     target_fps_range: Tuple[int, int] = (24, 120)
     upscale_algorithm: str = "real-esrgan"
+    draft_model: str = "agnes-image-2.1-flash"
 
 
 @dataclass

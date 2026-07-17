@@ -59,6 +59,77 @@ class TestCheckInMemory:
         allowed, _ = limiter._check_in_memory("1.1.1.1", "/admin/b")
         assert allowed is True
 
+    def test_parameterized_paths_share_bucket(self):
+        """同一端点模板下的不同 ID 共享配额窗口 —— 防止攻击者轮换 ID 绕过限流。
+
+        以代码 RAG 调用关系端点为例(实际易触发: 控制面板展开调用树时每个节点
+        都会请求 callers/callees):
+          /admin/rag/code/repositories/{id}/callers
+          /admin/rag/code/repositories/{id}/callees
+        两者剥离 /admin 前缀后前两段均为 "rag/code",必须共享窗口;
+        否则攻击者轮换 document_id 即可无限制轮询。
+
+        第二个断言同时守护"前缀剥离":若不剥 /admin,文本 RAG 文档管理端点
+        /admin/rag/documents 也会坍缩进同一个 "admin/rag" 窗口而被挤占。
+        """
+        limiter = self._make_limiter(max_requests=2)
+        limiter._check_in_memory("1.1.1.1", "/admin/rag/code/repositories/abc/callers")
+        limiter._check_in_memory("1.1.1.1", "/admin/rag/code/repositories/abc/callers")
+        # 不同 repo ID、同一端点模板 → 应被拒绝(共享窗口 "rag/code" 已满)
+        allowed, _ = limiter._check_in_memory(
+            "1.1.1.1", "/admin/rag/code/repositories/def/callees"
+        )
+        assert allowed is False
+        # 文本 RAG(不同窗口 "rag/documents")不应被代码 RAG 的配额挤占 ——
+        # 此断言在不剥前缀的旧分桶下会失败(两者都坍缩为 "admin/rag")。
+        allowed_text, _ = limiter._check_in_memory(
+            "1.1.1.1", "/admin/rag/documents/xyz"
+        )
+        assert allowed_text is True
+
+    def test_distinct_endpoints_independent_under_parameterization(self):
+        """不同端点(即使都带参数)配额相互独立。"""
+        limiter = self._make_limiter(max_requests=2)
+        limiter._check_in_memory("1.1.1.1", "/admin/trace/abc")
+        limiter._check_in_memory("1.1.1.1", "/admin/trace/abc")
+        # /admin/api-keys/{id} 是不同端点,应仍可用
+        allowed, _ = limiter._check_in_memory("1.1.1.1", "/admin/api-keys/xyz")
+        assert allowed is True
+
+    def test_id_in_second_segment_shared_bucket(self):
+        """ID 在第 2 段的端点(key_id / trace_id)必须按端点名共享窗口。
+
+        回归守护: 旧实现 parts[:2] 把第 2 段(ID)纳入 bucket,
+        /admin/api-keys/key_aaa 与 /admin/api-keys/key_bbb 落不同桶,
+        攻击者轮换 key_id 即可绕过单端点 RPM 限制。
+        """
+        limiter = self._make_limiter(max_requests=2)
+        # 真实 key_id 形态(key_ 前缀); 不同 key_id 必须共享 "api-keys" 窗口
+        limiter._check_in_memory("1.1.1.1", "/admin/api-keys/key_aaa")
+        limiter._check_in_memory("1.1.1.1", "/admin/api-keys/key_bbb")
+        allowed, _ = limiter._check_in_memory("1.1.1.1", "/admin/api-keys/key_ccc")
+        assert allowed is False, "轮换 key_id 绕过了 /admin/api-keys 配额窗口"
+        # 32 位 hex trace_id 同理: 共享 "trace" 窗口
+        limiter2 = self._make_limiter(max_requests=2)
+        limiter2._check_in_memory("1.1.1.1", "/admin/trace/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        limiter2._check_in_memory("1.1.1.1", "/admin/trace/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        allowed2, _ = limiter2._check_in_memory("1.1.1.1", "/admin/trace/cccccccccccccccccccccccccccccccc")
+        assert allowed2 is False, "轮换 trace_id 绕过了 /admin/trace 配额窗口"
+
+    def test_text_rag_and_code_rag_separate_buckets(self):
+        """文本 RAG 与代码 RAG 是不同子系统,配额窗口必须独立。
+
+        回归守护: 若不先剥离 /admin 前缀直接按前两段分桶,两者会一起坍缩成
+        "admin/rag",代码 RAG 的频繁调用关系轮询会挤占文本 RAG 的文档管理配额。
+        """
+        limiter = self._make_limiter(max_requests=2)
+        # 填满代码 RAG 窗口
+        limiter._check_in_memory("1.1.1.1", "/admin/rag/code/tasks")
+        limiter._check_in_memory("1.1.1.1", "/admin/rag/code/tasks")
+        # 文本 RAG 文档管理(不同窗口 "rag/documents")应仍可用
+        allowed, _ = limiter._check_in_memory("1.1.1.1", "/admin/rag/documents")
+        assert allowed is True
+
     def test_window_expiry_clears_old_entries(self):
         limiter = self._make_limiter(max_requests=2, window_seconds=1)
         with pytest.MonkeyPatch.context() as mp:
