@@ -26,7 +26,7 @@ services:
     volumes:
       - ./config.yaml:/app/config.yaml
       - code_graphs_data:/data/code_graphs
-      - auth_db:/app/data
+      - ./data:/app/data
       - .:/workspace:ro
     depends_on:
       redis:
@@ -142,4 +142,3 @@ volumes:
   grafana-data:
   prometheus-data:
   code_graphs_data:            # Code RAG: 每仓库一份 CodeGraph SQLite 图谱库
-  auth_db:                     # Auth: SQLite 持久化存储
