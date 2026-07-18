@@ -285,6 +285,87 @@ export async function getMetricsJson(): Promise<ApiResponse<MetricsJsonData>> {
 }
 
 // ------------------------------------------------------------------
+// Admin: Cost Ledger (SQLite 持久化)
+// ------------------------------------------------------------------
+
+export interface LedgerRow {
+  id: number
+  trace_id: string
+  ts: string
+  ts_unix: number
+  user_id: string
+  group_id: string
+  model: string
+  provider: string
+  pipeline_kind: string
+  tokens_in: number
+  tokens_out: number
+  tokens_total: number
+  cost_usd: number
+  cached: number
+  stream: number
+  status: string
+}
+
+export interface CostSummary {
+  total: Record<string, number>
+  by_model: AggregateRow[]
+  by_user: AggregateRow[]
+  by_group: AggregateRow[]
+  by_day: AggregateDayRow[]
+}
+
+interface AggregateRow {
+  k: string
+  requests: number
+  tokens_in: number
+  tokens_out: number
+  tokens_total: number
+  cost_usd: number
+  cache_hits: number
+}
+
+interface AggregateDayRow {
+  k: string
+  requests: number
+  tokens_total: number
+  cost_usd: number
+}
+
+export async function getCostLedger(params?: {
+  limit?: number
+  offset?: number
+  start?: number | null
+  end?: number | null
+  user_id?: string | null
+  group_id?: string | null
+  model?: string | null
+}): Promise<LedgerRow[]> {
+  const headers = await ensureAuthHeaders()
+  const qs = new URLSearchParams()
+  if (params?.limit) qs.set('limit', String(params.limit))
+  if (params?.offset) qs.set('offset', String(params.offset))
+  if (params?.start !== undefined && params.start !== null) qs.set('start', String(params.start))
+  if (params?.end !== undefined && params.end !== null) qs.set('end', String(params.end))
+  if (params?.user_id) qs.set('user_id', params.user_id)
+  if (params?.group_id) qs.set('group_id', params.group_id)
+  if (params?.model) qs.set('model', params.model)
+  const url = `${API_BASE}/admin/costs/ledger${qs.toString() ? '?' + qs.toString() : ''}`
+  const res = await fetch(url, { headers })
+  if (!res.ok) throw new Error(`Failed to fetch cost ledger: ${res.status}`)
+  const body = await res.json()
+  return body.rows ?? []
+}
+
+export async function getCostSummary(days?: number): Promise<CostSummary> {
+  const headers = await ensureAuthHeaders()
+  const qs = days ? `?days=${days}` : ''
+  const res = await fetch(`${API_BASE}/admin/costs/summary${qs}`, { headers })
+  if (!res.ok) throw new Error(`Failed to fetch cost summary: ${res.status}`)
+  return res.json()
+}
+
+// ------------------------------------------------------------------
 // Admin: Plugins Config
 // ------------------------------------------------------------------
 

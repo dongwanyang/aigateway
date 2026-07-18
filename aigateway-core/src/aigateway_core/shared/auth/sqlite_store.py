@@ -98,6 +98,30 @@ CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+
+CREATE TABLE IF NOT EXISTS request_cost_ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trace_id TEXT DEFAULT '',
+    ts TEXT NOT NULL,
+    ts_unix INTEGER NOT NULL,
+    user_id TEXT DEFAULT '',
+    group_id TEXT DEFAULT '',
+    model TEXT DEFAULT '',
+    provider TEXT DEFAULT '',
+    pipeline_kind TEXT DEFAULT '',
+    tokens_in INTEGER DEFAULT 0,
+    tokens_out INTEGER DEFAULT 0,
+    tokens_total INTEGER DEFAULT 0,
+    cost_usd REAL DEFAULT 0.0,
+    cached INTEGER DEFAULT 0,
+    stream INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'ok'
+);
+
+CREATE INDEX IF NOT EXISTS idx_ledger_ts ON request_cost_ledger(ts_unix);
+CREATE INDEX IF NOT EXISTS idx_ledger_user ON request_cost_ledger(user_id);
+CREATE INDEX IF NOT EXISTS idx_ledger_group ON request_cost_ledger(group_id);
+CREATE INDEX IF NOT EXISTS idx_ledger_model ON request_cost_ledger(model);
 """
 
 
@@ -161,6 +185,8 @@ class _Conn:
         if getattr(self._local, "conn", None) is None:
             conn = sqlite3.connect(self.db_path, timeout=30)
             conn.execute("PRAGMA journal_mode=WAL")
+            # synchronous=NORMAL: WAL 模式下崩溃安全(仅可能丢最后几个事务),避免每次 commit fsync 阻塞事件循环
+            conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA foreign_keys=ON")
             conn.row_factory = sqlite3.Row
             self._local.conn = conn
@@ -1493,6 +1519,171 @@ class SQLiteStore:
                     sql, params = cmd
                     results.append(tx.execute(sql, params).rowcount)
         return results
+
+    # ── Cost ledger ───────────────────────────────────────────────
+
+    async def record_request_cost(
+        self,
+        *,
+        trace_id: str = "",
+        user_id: str = "",
+        group_id: str = "",
+        model: str = "",
+        provider: str = "",
+        pipeline_kind: str = "",
+        tokens_in: int = 0,
+        tokens_out: int = 0,
+        tokens_total: int = 0,
+        cost_usd: float = 0.0,
+        cached: bool = False,
+        stream: bool = False,
+        status: str = "ok",
+    ) -> None:
+        """Append a per-request cost record to the ledger.
+
+        Best-effort: failures are logged and swallowed so a ledger write
+        can never break the response path. Survives container rebuilds
+        because the DB file lives on a mounted volume.
+        """
+        try:
+            self.conn.execute(
+                """INSERT INTO request_cost_ledger
+                   (trace_id, ts, ts_unix, user_id, group_id, model, provider,
+                    pipeline_kind, tokens_in, tokens_out, tokens_total, cost_usd,
+                    cached, stream, status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    trace_id or "", _now_iso(), _now_unix(),
+                    user_id or "", group_id or "", model or "", provider or "",
+                    pipeline_kind or "",
+                    int(tokens_in or 0), int(tokens_out or 0), int(tokens_total or 0),
+                    float(cost_usd or 0.0),
+                    1 if cached else 0, 1 if stream else 0, status or "ok",
+                ),
+            )
+            self.conn.commit()
+        except Exception as exc:
+            logger.warning("record_request_cost 失败: %s", exc)
+
+    async def prune_ledger(self, keep_days: int = 90) -> int:
+        """Delete ledger rows older than keep_days. Returns deleted count."""
+        try:
+            cutoff = _now_unix() - keep_days * 86400
+            cur = self.conn.execute(
+                "DELETE FROM request_cost_ledger WHERE ts_unix < ?", (cutoff,)
+            )
+            self.conn.commit()
+            deleted = cur.rowcount or 0
+            if deleted:
+                logger.info("清理成本账本: 删除 %d 条 %d 天前的记录", deleted, keep_days)
+            return deleted
+        except Exception as exc:
+            logger.warning("prune_ledger 失败: %s", exc)
+            return 0
+
+    async def query_ledger(
+        self,
+        *,
+        limit: int = 200,
+        offset: int = 0,
+        start_unix: Optional[int] = None,
+        end_unix: Optional[int] = None,
+        user_id: Optional[str] = None,
+        group_id: Optional[str] = None,
+        model: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Query ledger rows, newest first."""
+        where: list[str] = []
+        params: list = []
+        if start_unix is not None:
+            where.append("ts_unix >= ?")
+            params.append(int(start_unix))
+        if end_unix is not None:
+            where.append("ts_unix <= ?")
+            params.append(int(end_unix))
+        if user_id:
+            where.append("user_id = ?")
+            params.append(user_id)
+        if group_id:
+            where.append("group_id = ?")
+            params.append(group_id)
+        if model:
+            where.append("model = ?")
+            params.append(model)
+        sql = "SELECT * FROM request_cost_ledger"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY ts_unix DESC LIMIT ? OFFSET ?"
+        params.append(int(limit))
+        params.append(int(offset))
+        try:
+            rows = self.conn.fetchall(sql, tuple(params))
+            return [dict(r) for r in rows]
+        except Exception as exc:
+            logger.warning("query_ledger 失败: %s", exc)
+            return []
+
+    async def ledger_summary(
+        self,
+        *,
+        start_unix: Optional[int] = None,
+        end_unix: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Aggregate cost/token stats grouped by model/user/group/day."""
+        where: list[str] = []
+        params: list = []
+        if start_unix is not None:
+            where.append("ts_unix >= ?")
+            params.append(int(start_unix))
+        if end_unix is not None:
+            where.append("ts_unix <= ?")
+            params.append(int(end_unix))
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
+
+        def _agg(group_cols: str) -> str:
+            return (
+                f"SELECT {group_cols} AS k, COUNT(*) AS requests, "
+                "COALESCE(SUM(tokens_in),0) AS tokens_in, "
+                "COALESCE(SUM(tokens_out),0) AS tokens_out, "
+                "COALESCE(SUM(tokens_total),0) AS tokens_total, "
+                "COALESCE(SUM(cost_usd),0) AS cost_usd, "
+                "COALESCE(SUM(CASE WHEN cached=1 THEN 1 ELSE 0 END),0) AS cache_hits "
+                f"FROM request_cost_ledger{clause} "
+                f"GROUP BY {group_cols} ORDER BY cost_usd DESC"
+            )
+
+        try:
+            total_row = self.conn.fetchone(
+                "SELECT COUNT(*) AS requests, "
+                "COALESCE(SUM(tokens_in),0) AS tokens_in, "
+                "COALESCE(SUM(tokens_out),0) AS tokens_out, "
+                "COALESCE(SUM(tokens_total),0) AS tokens_total, "
+                "COALESCE(SUM(cost_usd),0) AS cost_usd, "
+                "COALESCE(SUM(CASE WHEN cached=1 THEN 1 ELSE 0 END),0) AS cache_hits "
+                f"FROM request_cost_ledger{clause}",
+                tuple(params),
+            )
+            by_model = [dict(r) for r in self.conn.fetchall(_agg("model"), tuple(params))]
+            by_user = [dict(r) for r in self.conn.fetchall(_agg("user_id"), tuple(params))]
+            by_group = [dict(r) for r in self.conn.fetchall(_agg("group_id"), tuple(params))]
+            day_rows = self.conn.fetchall(
+                "SELECT substr(ts,1,10) AS k, COUNT(*) AS requests, "
+                "COALESCE(SUM(tokens_total),0) AS tokens_total, "
+                "COALESCE(SUM(cost_usd),0) AS cost_usd "
+                f"FROM request_cost_ledger{clause} "
+                "GROUP BY substr(ts,1,10) ORDER BY k ASC",
+                tuple(params),
+            )
+            return {
+                "total": dict(total_row) if total_row else {},
+                "by_model": by_model,
+                "by_user": by_user,
+                "by_group": by_group,
+                "by_day": [dict(r) for r in day_rows],
+            }
+        except Exception as exc:
+            logger.warning("ledger_summary 失败: %s", exc)
+            return {"total": {}, "by_model": [], "by_user": [], "by_group": [], "by_day": []}
 
     # ── Cleanup ───────────────────────────────────────────────────
 

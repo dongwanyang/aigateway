@@ -138,8 +138,12 @@ class ConvCompressorPlugin:
 
         max_history = self._config.max_history
 
-        # 消息数未达阈值，无需压缩
+        # 消息数未达阈值，无需压缩——记一条 skip trace
         if len(messages) <= max_history:
+            ctx.add_plugin_trace(
+                "conv_compressor", 0.0, "skipped",
+                payload={"reason": "messages <= max_history", "message_count": len(messages)},
+            )
             return ctx
 
         # 需要压缩

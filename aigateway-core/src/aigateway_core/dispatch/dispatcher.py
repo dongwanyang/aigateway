@@ -93,21 +93,21 @@ def _resolve_cache_scope(request: Request, pii_meta: Optional[dict]) -> str:
 def _sanitize_exc(exc: BaseException, max_len: int = 200) -> str:
     """脱敏异常字符串中的 URL 凭据后截断。"""
     s = str(exc)
-    # 替换 URL 中的 user:pass@host 为 ***@***
-    s = re.sub(r'(?<=://)[^:@]+(?=@)', '***', s)
+    # 替换 URL 中的 user:pass@host 为 ***@host(用 [^/@]+ 跨过 user:pass 直到 @)
+    s = re.sub(r'(?<=://)[^/@]+(?=@)', '***', s)
     return s[:max_len]
 
 
 def _emit_stage(trace_id: str, stage: str, name: str, duration_ms: float,
-                status: str = "ok", payload: dict | None = None) -> None:
+                status: str = "ok", payload: dict | None = None,
+                dimension: str | None = None) -> None:
     """发一条 kind=stage 的 TraceEvent(若无 collector 则静默).
 
-    dispatcher 的内联埋点(共用前置/cache/quota/compress/bridge)用此 helper
-    把事件镜像到 TraceCollector。旧的 plugin_trace.append 列表仍保留,
-    供 request.state.plugin_trace 向后兼容(后续 Task 再统一收口)。
+    kind=stage 事件只记耗时+状态(无 payload),debug 关闭时也显示。
+    业务 payload 通过 emit_debug 发,仅当对应 dimension 的 debug 开关开启时入库。
+    dimension 映射:media/pii/quota→entry, cache/compress→cache, bridge/draft→bridge。
 
-    payload 在 debug 开关开启时由调用方填充;不需要额外发 kind=debug 事件,
-    否则同一操作会在 trace 里出现两行(stage + debug)。
+    旧的 plugin_trace.append 列表仍保留,供 request.state.plugin_trace 向后兼容。
     """
     from aigateway_core.shared.trace_event import TraceCollector, TraceEvent
     collector = TraceCollector.current()
@@ -120,13 +120,25 @@ def _emit_stage(trace_id: str, stage: str, name: str, duration_ms: float,
             name=name,
             duration_ms=round(duration_ms, 2),
             status=status,
-            payload=payload,
+            payload=None,
         ))
+        # payload 走 debug 维度(仅对应开关开启时入库)
+        if payload and dimension:
+            collector.emit_debug(
+                stage=stage, name=name,
+                duration_ms=duration_ms, status=status,
+                dimension=dimension, payload=payload,
+            )
 
 
 def _emit_plugin(trace_id: str, plugin_name: str, duration_ms: float,
-                 status: str = "ok", payload: dict | None = None) -> None:
-    """发一条 kind=plugin 的 TraceEvent(_run_engine_filtered 用)."""
+                 status: str = "ok") -> None:
+    """发一条 kind=plugin 的 TraceEvent(_run_engine_filtered 用).
+
+    kind=plugin 事件只记耗时+状态(无 payload),debug 关闭时也显示。
+    业务 payload 由插件通过 ctx.add_plugin_trace() → emit_debug 发,
+    或调用方通过 _emit_plugin_debug 显式发。
+    """
     from aigateway_core.shared.trace_event import TraceCollector, TraceEvent
     collector = TraceCollector.current()
     if collector:
@@ -138,8 +150,21 @@ def _emit_plugin(trace_id: str, plugin_name: str, duration_ms: float,
             name=f"{plugin_name}.execute",
             duration_ms=round(duration_ms, 2),
             status=status,
-            payload=payload,
+            payload=None,
         ))
+
+
+def _emit_plugin_debug(trace_id: str, plugin_name: str, duration_ms: float,
+                       status: str, payload: dict | None) -> None:
+    """发一条 kind=debug 的 TraceEvent,仅当插件 debug 开关开启时入库."""
+    from aigateway_core.shared.trace_event import TraceCollector
+    collector = TraceCollector.current()
+    if collector:
+        collector.emit_debug(
+            stage=plugin_name, name=f"{plugin_name}.execute",
+            duration_ms=duration_ms, status=status,
+            dimension="plugin", payload=payload,
+        )
 
 
 # ------------------------------------------------------------------
@@ -212,7 +237,7 @@ class RequestDispatcher:
                                  "duration_ms": _mol_ms,
                                  "status": "success"})
             _emit_stage(request.state.trace_id, "media", "media_optimizer.process", _mol_ms, "ok",
-                        payload=mol_meta)
+                        payload=mol_meta, dimension="entry")
 
         # ===== 共用前置 2: PII Detection(生成管道也受此保护)=====
         pii_start = time.time()
@@ -223,7 +248,7 @@ class RequestDispatcher:
                                  "duration_ms": _pii_ms,
                                  "status": "rejected"})
             _emit_stage(request.state.trace_id, "pii", "pii_detector.sanitize", _pii_ms, "error",
-                        payload={"reason": pii_result["error"].get("code", "pii_detected")})
+                        payload={"reason": pii_result["error"].get("code", "pii_detected")}, dimension="entry")
             request.state.plugin_trace = plugin_trace
             await _record_request_log(request=request, method="POST", endpoint="/v1/chat/completions",
                                       status_code=403, duration_ms=0, model=body.model,
@@ -236,7 +261,7 @@ class RequestDispatcher:
             plugin_trace.append({"plugin_name": "pii_detector",
                                  "duration_ms": _pii_ok_ms,
                                  "status": "success", **pii_meta})
-            _emit_stage(request.state.trace_id, "pii", "pii_detector.sanitize", _pii_ok_ms, "ok", payload=pii_meta)
+            _emit_stage(request.state.trace_id, "pii", "pii_detector.sanitize", _pii_ok_ms, "ok", payload=pii_meta, dimension="entry")
 
         # 前置结果打包传给下游管道(auto 解析已下沉到 bridge,不传 router_meta)
         prefix = {
@@ -350,7 +375,7 @@ class RequestDispatcher:
                              "duration_ms": _cache_ms,
                              "status": "success"})
         _emit_stage(request.state.trace_id, "cache", f"{cache_plugin_name}.lookup", _cache_ms, "ok",
-                    payload={"hit_tier": hit_tier} if hit_tier else None)
+                    payload={"hit_tier": hit_tier} if hit_tier else None, dimension="cache")
 
         # 缓存指标:命中按 tier 分标签,未命中单独计数。/metrics 输出:
         # gateway_cache_hits_total{tier="L1|L2|L3"} 与 gateway_cache_misses_total
@@ -367,6 +392,8 @@ class RequestDispatcher:
             return await self._handle_cache_hit(
                 body, request, cached, hit_tier, plugin_trace, request_start_time,
                 pii_meta, router_meta, mol_meta, user_id,
+                key_store=self.key_store, group_id=group_id, key_hash=key_hash,
+                pipeline_kind="understanding",
             )
 
         # ===== 配额检查 =====
@@ -390,7 +417,7 @@ class RequestDispatcher:
                                      "duration_ms": _qfail_ms,
                                      "status": "failed"})
                 _emit_stage(request.state.trace_id, "quota", "key_store.check_quota", _qfail_ms, "error",
-                            payload={"reason": fail_msg})
+                            payload={"reason": fail_msg}, dimension="entry")
                 request.state.plugin_trace = plugin_trace
                 headers = {}
                 if retry_after and retry_after > 0:
@@ -415,7 +442,7 @@ class RequestDispatcher:
                              "duration_ms": _qok_ms,
                              "status": "success"})
         _emit_stage(request.state.trace_id, "quota", "key_store.check_quota", _qok_ms, "ok",
-                    payload={"estimated_tokens": estimated_tokens})
+                    payload={"estimated_tokens": estimated_tokens}, dimension="entry")
 
         # ===== 跑理解管道 engine 插件链（rag_retriever / conv_compressor 等）=====
         # 注意：pii/cache/semantic/compress/media 已在
@@ -460,14 +487,14 @@ class RequestDispatcher:
             plugin_trace.append({"plugin_name": "prompt_compress",
                                  "duration_ms": _comp_ms,
                                  "status": "success", **compress_meta})
-            _emit_stage(request.state.trace_id, "compress", "prompt_compress.compress", _comp_ms, "ok", payload=compress_meta)
+            _emit_stage(request.state.trace_id, "compress", "prompt_compress.compress", _comp_ms, "ok", payload=compress_meta, dimension="cache")
         else:
             _comp_skip_ms = round((time.time() - compress_start) * 1000, 2)
             plugin_trace.append({"plugin_name": "prompt_compress",
                                  "duration_ms": _comp_skip_ms,
                                  "status": "skipped"})
             _emit_stage(request.state.trace_id, "compress", "prompt_compress.compress", _comp_skip_ms, "skip",
-                        payload={"reason": "compression_ratio >= 1.0"})
+                        payload={"reason": "compression_ratio >= 1.0"}, dimension="cache")
 
         # ===== LiteLLM 出口 =====
         litellm_bridge = self.litellm_bridge
@@ -545,7 +572,7 @@ class RequestDispatcher:
                                      "duration_ms": _qfail_ms,
                                      "status": "failed"})
                 _emit_stage(request.state.trace_id, "quota", "key_store.check_quota", _qfail_ms, "error",
-                            payload={"reason": fail_msg})
+                            payload={"reason": fail_msg}, dimension="entry")
                 request.state.plugin_trace = plugin_trace
                 headers = {}
                 if retry_after and retry_after > 0:
@@ -570,7 +597,7 @@ class RequestDispatcher:
                              "duration_ms": _qok_ms,
                              "status": "success"})
         _emit_stage(request.state.trace_id, "quota", "key_store.check_quota", _qok_ms, "ok",
-                    payload={"estimated_tokens": estimated_tokens})
+                    payload={"estimated_tokens": estimated_tokens}, dimension="entry")
 
         # 跑生成管道 engine 插件链（ai_director → ... → cost_tracker）
         ctx: Optional[PipelineContext] = None
@@ -605,7 +632,7 @@ class RequestDispatcher:
             if draft_info.get("applicable") and draft_info.get("draft_id"):
                 draft_id = draft_info["draft_id"]
                 _emit_stage(request.state.trace_id, "draft", "draft_workflow.pending_confirmation", 0, "ok",
-                            payload={"draft_id": draft_id})
+                            payload={"draft_id": draft_id}, dimension="bridge")
                 plugin_trace.append({"plugin_name": "draft_workflow",
                                      "duration_ms": 0,
                                      "status": "pending_confirmation"})
@@ -709,7 +736,7 @@ class RequestDispatcher:
                                  "duration_ms": _llm_fail_ms,
                                  "status": "failed"})
             _emit_stage(request.state.trace_id, "bridge", "litellm_bridge.completion", _llm_fail_ms, "error",
-                        payload={"model": body.model, "reason": _sanitize_exc(exc, 200)})
+                        payload={"model": body.model, "reason": _sanitize_exc(exc, 200)}, dimension="bridge")
             logger.error("LLM completion failed: %s", exc, exc_info=True)
             if tracker:
                 tracker.__exit__(type(exc), exc, exc.__traceback__)
@@ -724,7 +751,7 @@ class RequestDispatcher:
                              "duration_ms": _llm_ok_ms,
                              "status": "success"})
         _emit_stage(request.state.trace_id, "bridge", "litellm_bridge.completion", _llm_ok_ms, "ok",
-                    payload={"model": body.model})
+                    payload={"model": body.model}, dimension="bridge")
 
         # bridge 返回错误
         if "error" in result and "data" not in result:
@@ -762,16 +789,34 @@ class RequestDispatcher:
             except Exception as exc:
                 logger.warning("increment_usage 失败: %s", exc)
 
+        # 成本计算对 metrics/账本共用,放在 if metrics_collector 之外避免 NameError
+        final_cost = cost if cost > 0 else _estimate_cost(body.model, tt)
         if metrics_collector:
             if pt > 0:
                 metrics_collector.record_tokens(pt, "prompt")
             if ct > 0:
                 metrics_collector.record_tokens(ct, "completion")
-            final_cost = cost if cost > 0 else _estimate_cost(body.model, tt)
             if tt > 0 and final_cost > 0:
                 metrics_collector.record_cost(
                     final_cost, model=body.model, user_id=user_id or "", group_id=group_id,
                 )
+
+        # 成本账本落 SQLite（跨重建持久化）
+        if key_store and hasattr(key_store, "record_request_cost"):
+            try:
+                _rmeta = result.get("_meta", {}) if isinstance(result, dict) else {}
+                _provider = (_rmeta.get("routed_to", {}) or {}).get("provider", "")
+                await key_store.record_request_cost(
+                    trace_id=getattr(request.state, "trace_id", ""),
+                    user_id=user_id or "", group_id=group_id or "",
+                    model=body.model, provider=_provider,
+                    pipeline_kind=pipeline_kind,
+                    tokens_in=pt, tokens_out=ct, tokens_total=tt,
+                    cost_usd=final_cost if (tt > 0 and final_cost > 0) else 0.0,
+                    cached=False, stream=False, status="ok",
+                )
+            except Exception as exc:
+                logger.warning("成本账本写入失败: %s", exc)
 
         # 缓存回填（生成管道 cache_key=None 不回填）
         if cache_key and cache_manager:
@@ -878,7 +923,7 @@ class RequestDispatcher:
         completion_gen = self._wrap_stream_full(
             completion_gen, metrics_collector, cache_manager, key_store,
             request, body.model, user_id, key_hash, cache_key, normalized_messages, llm_start,
-            group_id,
+            group_id, pipeline_kind,
         )
 
         _stream_ms = round((time.time() - llm_start) * 1000, 2)
@@ -886,7 +931,7 @@ class RequestDispatcher:
                              "duration_ms": _stream_ms,
                              "status": "success"})
         _emit_stage(request.state.trace_id, "bridge", "litellm_bridge.completion_stream", _stream_ms, "ok",
-                    payload={"model": body.model, "stream": True})
+                    payload={"model": body.model, "stream": True}, dimension="bridge")
         request.state.plugin_trace = plugin_trace
 
         if metrics_collector:
@@ -902,7 +947,7 @@ class RequestDispatcher:
     async def _wrap_stream_full(
         self, gen, metrics_collector, cache_manager, key_store, request,
         model, user_id, key_hash, cache_key, normalized_messages, llm_start,
-        group_id="",
+        group_id="", pipeline_kind="understanding",
     ):
         """流式包装器:透传 chunk + 末尾做配额/缓存/metrics。
 
@@ -918,11 +963,26 @@ class RequestDispatcher:
         # 累积每个 choice 的 content / role / tool_calls，用于组装非流式格式
         accum: Dict[int, Dict[str, Any]] = {}
         client_disconnected = False
+        _stream_provider = ""  # 从 image/video 流的首个 _meta chunk 提取
+        _stream_bridge_cost = 0.0  # 从末块 _meta.cost 提取(bridge 用 config.yaml 定价算的真实成本)
         try:
             async for chunk in gen:
                 last_chunk = chunk
                 # 累积 delta 到 accum（供缓存回填使用）
                 if isinstance(chunk, dict):
+                    if not _stream_provider:
+                        try:
+                            _rt = (chunk.get("_meta", {}) or {}).get("routed_to", {})
+                            _stream_provider = (_rt or {}).get("provider", "")
+                        except Exception:
+                            pass
+                    # 提取 bridge 末块成本(优先于 _estimate_cost 的内置表估算)
+                    try:
+                        _mc = (chunk.get("_meta", {}) or {}).get("cost", 0.0)
+                        if _mc:
+                            _stream_bridge_cost = float(_mc)
+                    except Exception:
+                        pass
                     for choice in chunk.get("choices", []) or []:
                         if not isinstance(choice, dict):
                             continue
@@ -961,17 +1021,32 @@ class RequestDispatcher:
         if not usage:
             return
 
-        # metrics
+        # metrics — 优先用 bridge 末块真实成本(与非流式路径一致),否则内置表估算
+        final_cost = _stream_bridge_cost if _stream_bridge_cost > 0 else _estimate_cost(model, tt)
         if metrics_collector:
             if pt > 0:
                 metrics_collector.record_tokens(pt, "prompt")
             if ct > 0:
                 metrics_collector.record_tokens(ct, "completion")
-            final_cost = _estimate_cost(model, tt)
             if tt > 0 and final_cost > 0:
                 metrics_collector.record_cost(
                     final_cost, model=model, user_id=user_id or "", group_id=group_id,
                 )
+
+        # 成本账本落 SQLite（跨重建持久化）
+        if key_store and hasattr(key_store, "record_request_cost"):
+            try:
+                await key_store.record_request_cost(
+                    trace_id=getattr(request.state, "trace_id", ""),
+                    user_id=user_id or "", group_id=group_id or "",
+                    model=model, provider=_stream_provider,
+                    pipeline_kind=pipeline_kind,
+                    tokens_in=pt, tokens_out=ct, tokens_total=tt,
+                    cost_usd=final_cost if (tt > 0 and final_cost > 0) else 0.0,
+                    cached=False, stream=True, status="ok",
+                )
+            except Exception as exc:
+                logger.warning("流式成本账本写入失败: %s", exc)
 
         # 配额扣减（修正点：原流式不扣）
         if key_hash and key_store and tt > 0:
@@ -1040,6 +1115,7 @@ class RequestDispatcher:
     async def _handle_cache_hit(
         self, body, request, cached, hit_tier, plugin_trace, request_start_time,
         pii_meta, router_meta, mol_meta, user_id,
+        *, key_store=None, group_id: str = "", key_hash: str = "", pipeline_kind: str = "understanding",
     ) -> JSONResponse:
         """缓存命中：非流式直接返回，流式走 simulate_stream_from_cache。"""
         from aigateway_api.openai_compat import _record_request_log
@@ -1057,6 +1133,7 @@ class RequestDispatcher:
                 # 打点,这里不再重复打(否则会双倍计数)。仅记录请求 + 节省 token。
                 metrics_collector.record_request("POST", "/v1/chat/completions", "200")
                 metrics_collector.record_duration("/v1/chat/completions", 0.001)
+            saved = 0
             try:
                 resp_data = json.loads(cached["value"])
                 saved = resp_data.get("usage", {}).get("total_tokens", 0)
@@ -1068,14 +1145,18 @@ class RequestDispatcher:
             await _record_request_log(request=request, method="POST", endpoint="/v1/chat/completions",
                                       status_code=200, duration_ms=0,
                                       model=body.model, cache_hit=True, cache_tier=hit_tier)
+            await self._record_cache_hit_ledger(
+                key_store, request, body.model, user_id, group_id, saved, stream=True,
+                pipeline_kind=pipeline_kind,
+            )
             return create_sse_response(stream_gen, chat_id=chat_id)
 
         # 非流式
         response_data = json.loads(cached["value"])
+        saved = response_data.get("usage", {}).get("total_tokens", 0)
         if metrics_collector:
             # 注:inc_cache_hits 已在 _dispatch_understanding 缓存查找块统一
             # 打点,这里不再重复打(否则会双倍计数)。
-            saved = response_data.get("usage", {}).get("total_tokens", 0)
             if saved > 0:
                 metrics_collector.record_tokens_saved(saved)
             metrics_collector.record_request("POST", "/v1/chat/completions", "200")
@@ -1085,6 +1166,10 @@ class RequestDispatcher:
         await _record_request_log(request=request, method="POST", endpoint="/v1/chat/completions",
                                   status_code=200, duration_ms=cache_duration_ms,
                                   model=body.model, cache_hit=True, cache_tier=hit_tier)
+        await self._record_cache_hit_ledger(
+            key_store, request, body.model, user_id, group_id, saved, stream=False,
+            pipeline_kind=pipeline_kind,
+        )
 
         meta = {
             "cache_hit": True,
@@ -1099,6 +1184,30 @@ class RequestDispatcher:
             content={"data": response_data, "message": "success", "_meta": meta},
             status_code=200,
         )
+
+    async def _record_cache_hit_ledger(
+        self, key_store, request, model, user_id, group_id, _saved_tokens, *, stream: bool,
+        pipeline_kind: str = "understanding",
+    ) -> None:
+        """缓存命中也写一笔账本（cost=0），让成本分析能看到缓存命中数。
+
+        tokens_total 记 0(缓存命中不消耗 token);节省的 token 数由 cache_hits 计数体现,
+        避免与真实用量混入 SUM(tokens_total) 导致前端"tokens"虚高。
+        _saved_tokens 参数保留以兼容调用方,实际不再写入(真实用量为 0)。
+        """
+        if not key_store or not hasattr(key_store, "record_request_cost"):
+            return
+        try:
+            await key_store.record_request_cost(
+                trace_id=getattr(request.state, "trace_id", ""),
+                user_id=user_id or "", group_id=group_id or "",
+                model=model, provider="cache",
+                pipeline_kind=pipeline_kind,
+                tokens_in=0, tokens_out=0, tokens_total=0,
+                cost_usd=0.0, cached=True, stream=stream, status="ok",
+            )
+        except Exception as exc:
+            logger.warning("缓存命中账本写入失败: %s", exc)
 
     # ------------------------------------------------------------------
     # 辅助
@@ -1130,10 +1239,13 @@ class RequestDispatcher:
                 ctx = await plugin.execute(ctx)
             except Exception as exc:
                 elapsed = (_time.monotonic() - pstart) * 1000
-                _emit_plugin(ctx.trace_id, plugin.name, elapsed, "error",
-                             payload={"reason": _sanitize_exc(exc, 500)})
+                # error 事件:耗时+状态始终显示,错误原因走 debug 维度
+                _emit_plugin(ctx.trace_id, plugin.name, elapsed, "error")
+                _emit_plugin_debug(ctx.trace_id, plugin.name, elapsed, "error",
+                                   {"reason": _sanitize_exc(exc, 500)})
                 logger.warning("插件 %s 执行失败（fail-open）: %s", plugin.name, exc)
                 continue
+            # ok 事件:耗时+状态始终显示(无 payload)
             elapsed = (_time.monotonic() - pstart) * 1000
             _emit_plugin(ctx.trace_id, plugin.name, elapsed, "ok")
         return ctx

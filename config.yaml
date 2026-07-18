@@ -294,9 +294,10 @@ debug:
       ai_director: true
       intent_evaluator: true
       token_compressor: true
-      draft_generator: false
+      draft_generator: true
       gen_model_router: false
-      cost_tracker: false
+      cost_tracker: true
+      media_optimizer: true
 media_optimization:
   enabled: true
   download_timeouts:
@@ -384,7 +385,7 @@ generation_optimization:
     enabled: true
   feature_cache: {}
   cost_tracking:
-    enabled: false
+    enabled: true
   prompt_templates: {}
   token_compressor:
     clip:
@@ -397,5 +398,5 @@ generation_optimization:
       server_url: http://localhost:8188
       connect_timeout: 10
       execution_timeout: 300
-    enabled: false
+    enabled: true
 debug_mode: true

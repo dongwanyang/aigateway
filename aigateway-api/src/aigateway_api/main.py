@@ -584,6 +584,12 @@ async def lifespan(app: "FastAPI"):
     app.state.group_store = sqlite_store  # backward compat: admin_routes references group_store
     app.state.config_manager = config_manager
 
+    # 启动时清理一次成本账本（保留 90 天），避免无限增长
+    try:
+        await sqlite_store.prune_ledger(keep_days=90)
+    except Exception as exc:
+        logger.warning("启动清理成本账本失败: %s", exc)
+
     # 初始化 5 维度 Debug 开关(PR2 2026-07-05)。attach 到 ConfigManager.on_reload
     # 后,后续 config.yaml 变更自动 atomic swap;首次加载在 attach 内完成。
     from aigateway_core.shared.debug_config import init_debug_config_watcher

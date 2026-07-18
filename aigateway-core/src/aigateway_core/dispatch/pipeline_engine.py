@@ -89,9 +89,9 @@ class PipelineEngine:
         try:
             for plugin in self._ordered_plugins:
                 if ctx.should_stop:
-                    skipped_ms = (time.monotonic() - pipeline_start) * 1000
                     collector = TraceCollector.current()
                     if collector:
+                        # kind=plugin 事件只记耗时+状态(无 payload,debug 关闭也显示)
                         collector.emit(TraceEvent(
                             trace_id=ctx.trace_id,
                             ts=time.monotonic(),
@@ -100,8 +100,14 @@ class PipelineEngine:
                             name=f"{plugin.name}.skip",
                             duration_ms=0.0,  # 被跳过，未实际执行
                             status="skip",
-                            payload={"reason": "should_stop"},
+                            payload=None,
                         ))
+                        # skip 原因走 debug 维度(仅 debug 开启时显示)
+                        collector.emit_debug(
+                            stage=plugin.name, name=f"{plugin.name}.skip",
+                            duration_ms=0.0, status="skip", dimension="plugin",
+                            payload={"reason": "should_stop"},
+                        )
                     logger.debug(
                         "插件 %s 被跳过 (should_stop=True, request_id=%s)",
                         plugin.name,
@@ -118,6 +124,7 @@ class PipelineEngine:
                     elapsed_ms = (time.monotonic() - plugin_start) * 1000
                     collector = TraceCollector.current()
                     if collector:
+                        # error 事件:耗时+状态始终显示,错误原因走 debug 维度
                         collector.emit(TraceEvent(
                             trace_id=ctx.trace_id,
                             ts=time.monotonic(),
@@ -126,8 +133,14 @@ class PipelineEngine:
                             name=f"{plugin_name}.execute",
                             duration_ms=round(elapsed_ms, 2),
                             status="error",
-                            payload={"reason": _sanitize_exc(exc, 500)},
+                            payload=None,
                         ))
+                        collector.emit_debug(
+                            stage=plugin_name, name=f"{plugin_name}.execute",
+                            duration_ms=round(elapsed_ms, 2), status="error",
+                            dimension="plugin",
+                            payload={"reason": _sanitize_exc(exc, 500)},
+                        )
                     logger.error(
                         "插件 %s 执行失败: %s, request_id=%s",
                         plugin_name,
@@ -139,6 +152,7 @@ class PipelineEngine:
                 elapsed_ms = (time.monotonic() - plugin_start) * 1000
                 collector = TraceCollector.current()
                 if collector:
+                    # ok 事件:耗时+状态始终显示,无 payload
                     collector.emit(TraceEvent(
                         trace_id=ctx.trace_id,
                         ts=time.monotonic(),
@@ -147,7 +161,7 @@ class PipelineEngine:
                         name=f"{plugin_name}.execute",
                         duration_ms=round(elapsed_ms, 2),
                         status="ok",
-                        payload={"input_summary": _truncate(str(ctx.request.get("messages", ""))[:500])},
+                        payload=None,
                     ))
                 logger.debug(
                     "插件 %s 执行完毕: %.2fms, request_id=%s",

@@ -279,11 +279,15 @@ class PipelineContext:
 
     def add_plugin_trace(self, plugin_name: str, duration_ms: float,
                          status: str = "ok", payload: dict | None = None) -> None:
-        """插件执行完毕后由插件自身调用,补充一条 kind=plugin 事件。
+        """插件执行完毕后由插件自身调用,补充业务 metadata 到 trace。
 
-        PipelineEngine.execute_ctx 已自动为每个插件 emit 了 plugin 事件,
-        此方法供插件在需要携带额外 metadata 时调用(如 RAG 检索条数、
-        压缩比例、意图分类结果等)。
+        设计:
+        - kind=plugin 事件(耗时+状态)由 PipelineEngine / _run_engine_filtered
+          自动 emit,debug 关闭时也会显示在时间线。
+        - 本方法只发 kind=debug 事件携带业务 payload,仅当对应插件的 debug
+          开关开启时才入库(debug 关闭时静默丢弃,时间线不显示 payload)。
+
+        这样:debug 关闭 → 时间线只有耗时/状态;debug 开启 → 额外显示 payload。
         """
         # 1) 同步更新 _plugin_trace 列表（向后兼容 request.state.plugin_trace / _meta）
         trace = self.get_plugin_trace()
@@ -294,25 +298,22 @@ class PipelineContext:
         })
         self.extra["_plugin_trace"] = trace
 
-        # 2) 发 TraceEvent（给 Redis trace 和 admin/trace 接口用）
-        import time as _time
-        from aigateway_core.shared.trace_event import TraceCollector, TraceEvent
+        # 2) 发 kind=debug 事件(仅 debug 开启时入库)
+        from aigateway_core.shared.trace_event import TraceCollector
         collector = TraceCollector.current()
-        if collector:
+        if collector and payload:
             norm_status = (
                 "ok" if status == "success"
                 else ("error" if status == "failed" else "skip")
             )
-            collector.emit(TraceEvent(
-                trace_id=self.trace_id,
-                ts=_time.monotonic(),
+            collector.emit_debug(
                 stage=plugin_name,
-                kind="plugin",
                 name=f"{plugin_name}.execute",
-                duration_ms=round(duration_ms, 2),
+                duration_ms=duration_ms,
                 status=norm_status,
+                dimension="plugin",
                 payload=payload,
-            ))
+            )
 
     def to_dict(self) -> Dict[str, Any]:
         return {

@@ -195,12 +195,16 @@ export default function KnowledgeCodeTab() {
     try {
       const backendTasks = await listCodeImportTasks()
       const backendMap = new Map(backendTasks.map(t => [t.task_id, t]))
+      const backendIds = new Set(backendTasks.map(t => t.task_id))
 
       setTasks(prev => {
-        // 用后端状态覆盖本地任务, 后端不存在的保留本地(交由 pollTask 单独判真伪)
+        // 用后端状态覆盖本地任务; 后端不存在的本地任务:
+        //   - 终态任务 → 丢弃(幽灵残留)
+        //   - 非终态任务 → 保留,交由 pollTask 单独判真伪(避免后端列表瞬时缺失误删正在跑的任务)
         const merged = prev
           .filter(pt => !dismissedTaskIdsRef.current.has(pt.task_id))
           .map(pt => backendMap.get(pt.task_id) ?? pt)
+          .filter(pt => backendIds.has(pt.task_id) || !TERMINAL_STATUS.includes(pt.status))
         const mergedIds = new Set(merged.map(t => t.task_id))
         // 只补回后端非终态任务,避免把用户已 dismiss 的旧终态任务重新拉回
         for (const bt of backendTasks) {

@@ -2774,3 +2774,78 @@ async def reject_draft(
         "max_attempts": new_draft.max_attempts,
         "preview_url": f"/admin/draft/{new_draft.draft_id}/preview",
     }
+
+
+# ------------------------------------------------------------------
+# 成本账本（SQLite 持久化，跨容器重建不丢）
+# ------------------------------------------------------------------
+
+# prune 节流:避免每次 /costs/summary(15s 轮询)都触发 DELETE 写事务
+_LAST_LEDGER_PRUNE_TS: float = 0.0
+_LEDGER_PRUNE_INTERVAL_SEC: float = 3600.0  # 至多每小时清理一次
+
+@router.get("/costs/ledger")
+async def get_cost_ledger(
+    limit: int = Query(200, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    start: Optional[int] = Query(None, description="起始 unix 时间戳（含）"),
+    end: Optional[int] = Query(None, description="截止 unix 时间戳（含）"),
+    user_id: Optional[str] = Query(None),
+    group_id: Optional[str] = Query(None),
+    model: Optional[str] = Query(None),
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+    """返回成本账本明细（每笔请求一行，SQLite 持久化）。"""
+    from .app_state import get_state
+    key_store = getattr(get_state(), "key_store")
+    if key_store is None or not hasattr(key_store, "query_ledger"):
+        raise HTTPException(
+            status_code=503,
+            detail={"error": {"code": "ledger_unavailable", "message": "cost ledger not initialized"}},
+        )
+    rows = await key_store.query_ledger(
+        limit=limit, offset=offset,
+        start_unix=start, end_unix=end,
+        user_id=user_id, group_id=group_id, model=model,
+    )
+    return {"rows": rows, "limit": limit, "offset": offset}
+
+
+@router.get("/costs/summary")
+async def get_cost_summary(
+    days: Optional[int] = Query(None, ge=1, le=365, description="最近 N 天（与 start 二选一）"),
+    start: Optional[int] = Query(None, description="起始 unix 时间戳（含）"),
+    end: Optional[int] = Query(None, description="截止 unix 时间戳（含）"),
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+    """返回成本汇总（按 model/user/group/day 聚合，SQLite 持久化）。
+
+    每次调用顺带 best-effort 清理 90 天前的账本行，避免无限增长。
+    """
+    from .app_state import get_state
+    key_store = getattr(get_state(), "key_store")
+    if key_store is None or not hasattr(key_store, "ledger_summary"):
+        raise HTTPException(
+            status_code=503,
+            detail={"error": {"code": "ledger_unavailable", "message": "cost ledger not initialized"}},
+        )
+    # best-effort 清理旧账本(节流:至多每小时一次,避免轮询时反复写)
+    # 节流:check-then-assign 依赖 prune_ledger 内部不 await(同步执行完毕才让出事件循环),
+    # 单 worker 下因此不会有两个协程同时通过判断。若日后 prune_ledger 改为含 await 的异步实现,
+    # 需改用 asyncio.Lock 保护这段临界区。
+    global _LAST_LEDGER_PRUNE_TS
+    import time as _time
+    now = _time.monotonic()
+    try:
+        if hasattr(key_store, "prune_ledger") and (now - _LAST_LEDGER_PRUNE_TS) >= _LEDGER_PRUNE_INTERVAL_SEC:
+            await key_store.prune_ledger(keep_days=90)
+            _LAST_LEDGER_PRUNE_TS = now
+    except Exception as exc:
+        logger.debug("prune_ledger skipped: %s", exc)
+
+    start_unix = start
+    end_unix = end
+    if start_unix is None and days:
+        end_unix = end_unix or int(datetime.now(timezone.utc).timestamp())
+        start_unix = end_unix - days * 86400
+    return await key_store.ledger_summary(start_unix=start_unix, end_unix=end_unix)

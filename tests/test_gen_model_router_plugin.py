@@ -338,25 +338,41 @@ class TestGenModelRouterPluginTracing:
     async def test_emits_plugin_trace_event(
         self, default_config, mock_strategy, ctx_with_intent_result
     ):
-        """PipelineEngine emits a kind='plugin' TraceEvent on plugin success."""
+        """Engine emits kind='plugin' (always, no payload); plugin emits kind='debug' (gated by debug switch)."""
         from aigateway_core.shared.trace_event import TraceCollector
+        from aigateway_core.shared.debug_config import DebugConfig
 
         plugin = GenModelRouterPlugin(strategy=mock_strategy, config=default_config)
+
+        # --- debug OFF: only engine's kind=plugin event fires, no payload ---
         ctx_with_intent_result.trace_id = "routertrace789"
         collector = TraceCollector.start("routertrace789")
 
-        # Gen-opt plugins no longer emit TraceEvents directly; PipelineEngine wraps execute().
         from aigateway_core.dispatch.pipeline_engine import PipelineEngine
         engine = PipelineEngine(registry=MagicMock(), pipeline_kind="generation")
         engine._ordered_plugins = [plugin]
         engine._initialized = True
         await engine.execute_ctx(ctx_with_intent_result)
 
-        events = [e for e in collector.events if e.kind == "plugin" and e.stage == "gen_model_router"]
-        # 2 events: PipelineEngine auto-instrument + plugin add_plugin_trace
-        assert len(events) == 2
-        assert events[0].trace_id == "routertrace789"
-        assert events[0].status == "ok"
+        plugin_events = [e for e in collector.events if e.kind == "plugin" and e.stage == "gen_model_router"]
+        assert len(plugin_events) == 1
+        assert plugin_events[0].trace_id == "routertrace789"
+        assert plugin_events[0].status == "ok"
+        assert plugin_events[0].payload is None
+        # debug switch off -> plugin's kind=debug event suppressed
+        assert [e for e in collector.events if e.kind == "debug"] == []
+
+        # --- debug ON: plugin's add_plugin_trace emits an extra kind=debug event with payload ---
+        dbg_cfg = DebugConfig(plugins_enabled=True, per_plugin={"gen_model_router": True})
+        with patch("aigateway_core.shared.debug_config.get_debug_config", return_value=dbg_cfg):
+            collector = TraceCollector.start("routertrace789")
+            await engine.execute_ctx(ctx_with_intent_result)
+
+        plugin_events = [e for e in collector.events if e.kind == "plugin" and e.stage == "gen_model_router"]
+        assert len(plugin_events) == 1
+        debug_events = [e for e in collector.events if e.kind == "debug" and e.stage == "gen_model_router"]
+        assert len(debug_events) == 1
+        assert debug_events[0].payload is not None
 
     @pytest.mark.asyncio
     async def test_writes_routing_attributes_to_context(
