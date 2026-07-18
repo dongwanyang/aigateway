@@ -23,6 +23,9 @@ export default function Costs() {
   // Ref 让 Prometheus 兜底 effect 读到最新值而不必把 state 放进依赖数组(否则每 15s 轮询都会重建 interval)
   const totalsRef = useRef({ cost: 0, req: 0 })
   totalsRef.current = { cost: totalCost, req: totalRequests }
+  // 账本是否已提供日级趋势。Prometheus 趋势仅在账本无日级数据时兜底,
+  // 否则 rebuild 后 Prometheus 计数器重置,increase() 给出 0/负值会覆盖账本正确趋势。
+  const ledgerHasDaysRef = useRef(false)
 
   // Primary: SQLite ledger (persists across container rebuilds)
   useEffect(() => {
@@ -60,17 +63,16 @@ export default function Costs() {
             if (key) dayMap[key] = parseFloat(String(d.cost_usd ?? 0))
           }
           // 仅当账本有日级行时才覆盖趋势图,避免空账本每 15s 写入 7 个 0 覆盖 Prometheus 数据
+          ledgerHasDaysRef.current = dayRows.length > 0
           if (dayRows.length > 0) {
             const today = new Date()
             const history: { date: string; cost: number }[] = []
             for (let i = 6; i >= 0; i--) {
               const dt = new Date(today)
-              dt.setDate(dt.getDate() - i)
-              // SQL returns YYYY-MM-DD keys — match that format
-              const y = dt.getFullYear()
-              const m = String(dt.getMonth() + 1).padStart(2, '0')
-              const d = String(dt.getDate()).padStart(2, '0')
-              const key = `${y}-${m}-${d}`
+              dt.setUTCDate(dt.getUTCDate() - i)
+              // Backend _now_iso() is UTC; substr(ts,1,10) yields UTC YYYY-MM-DD.
+              // Build keys in UTC to match, else non-UTC users see a 1-day shift.
+              const key = dt.toISOString().slice(0, 10)
               history.push({ date: key, cost: Math.round((dayMap[key] ?? 0) * 100) / 100 })
             }
             setCostHistory(history)
@@ -112,25 +114,21 @@ export default function Costs() {
             const ts = parseInt(v.timestamp, 10)
             const val = parseFloat(v.value)
             if (!Number.isFinite(val)) continue
-            const date = new Date(ts * 1000)
-            const y = date.getFullYear()
-            const m = String(date.getMonth() + 1).padStart(2, '0')
-            const d = String(date.getDate()).padStart(2, '0')
-            const key = `${y}-${m}-${d}`
+            // Prometheus timestamps are UTC unix seconds; bucket by UTC date
+            const key = new Date(ts * 1000).toISOString().slice(0, 10)
             dayCosts[key] = (dayCosts[key] || 0) + val
           }
         }
 
         if (!cancelled) {
+          // 账本已提供日级趋势时,Prometheus 不覆盖(rebuild 后计数器重置,increase() 失真)
+          if (ledgerHasDaysRef.current) return
           const today = new Date()
           const history: { date: string; cost: number }[] = []
           for (let i = 6; i >= 0; i--) {
             const dt = new Date(today)
-            dt.setDate(dt.getDate() - i)
-            const y = dt.getFullYear()
-            const m = String(dt.getMonth() + 1).padStart(2, '0')
-            const d = String(dt.getDate()).padStart(2, '0')
-            const key = `${y}-${m}-${d}`
+            dt.setUTCDate(dt.getUTCDate() - i)
+            const key = dt.toISOString().slice(0, 10)
             history.push({
               date: key,
               cost: Math.round((dayCosts[key] || 0) * 100) / 100,
