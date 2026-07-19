@@ -70,7 +70,7 @@ aigateway-core/src/aigateway_core/  Shared library - runtime skeleton (prefix/di
   shared/               config, tracing, trace_event, exceptions, plugin_registry, logger, metrics, debug_config, redis_client, qdrant_client, integration_configs, auth/key_store, auth/group_store
 
 aigateway-cli/src/aigateway_cli/    __main__, chat, run, session
-control-panel/src/                  App.tsx (routes), api/client.ts, pages/ (9), components/, hooks/
+control-panel/src/                  App.tsx (routes), api/client.ts, pages/ (10, incl. /chat), components/ (incl. chat/), hooks/
 ```
 
 ## Cache Key v2 (2026-07-06)
@@ -229,7 +229,7 @@ python3 -m pytest tests/ui/                      # UI e2e: needs gateway :8000 +
 - **TokenCompressorStrategy** — deterministic hash-vector placeholder; real CLIP/ViT segmentation is a TODO.
 - **`GenerationPipeline` (`prefix/media/generation.py`) is orphaned** — 0 prod references. Gen path is the 6-plugin chain.
 - **AIDirectorStrategy late-binds bridge** — registration runs before bridge exists; `main.py` injects `_litellm_bridge` post-init.
-- **Dead frontend code** — `hooks/useAuth.ts`, `hooks/usePoll.ts` have 0 imports. Six API client fns (`createChatCompletion*`, `listModels`, `createEmbeddings`, `getQuota`, `getMetricsJson`) are reserved for Entry B.
+- **Dead frontend code** — `hooks/useAuth.ts`, `hooks/usePoll.ts` have 0 imports. Five API client fns (`createChatCompletion` non-stream, `listModels`, `createEmbeddings`, `getQuota`, `getMetricsJson`) are reserved for Entry B. `createChatCompletionStream` + new `getVideoStatus` now used by the `/chat` page (聊天窗 MVP).
 - **Implicit frontend auth** — no login page or Auth provider. `ensureAuthHeaders()` pulls key from localStorage silently; unset key → blank pages (except Plugins/Overview which handle it).
 - **Config writes must be atomic** — admin endpoints (`update_plugins_config`, `set_plugin_debug`, `update_global_config`) write `config.yaml` via `_atomic_write_yaml` (tempfile + `os.replace`). The Watchdog `load()` reads the file *without* `fcntl.flock`, so the old `open(w)+yaml.dump` (truncate-then-write) let it read a half-written file → `DebugConfigWatcher`/`PluginRegistry` got stale state. Never revert to non-atomic writes here.
 - **`plugins_enabled` flat ↔ nested** — `DebugConfig.from_dict` prefers nested `debug.plugins.enabled` over flat `debug.plugins_enabled`. `update_global_config` normalizes both forms before persisting so the control panel's flat `toggleDebugDimension('plugins_enabled')` takes effect. New debug writers must set both (or go through `update_global_config`).

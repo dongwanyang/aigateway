@@ -1,9 +1,10 @@
-import { LayoutDashboard, Puzzle, DollarSign, Shield, Database, FileText, Sun, Moon, BookOpen, Settings, Bot } from 'lucide-react'
+import { LayoutDashboard, Puzzle, DollarSign, Shield, Database, FileText, Sun, Moon, BookOpen, Settings, Bot, MessageSquare } from 'lucide-react'
 import { Link, useLocation } from 'react-router-dom'
 import { useTheme } from '@/hooks/useTheme'
 
 const navItems = [
   { path: '/', label: '概览', icon: LayoutDashboard },
+  { path: '/chat', label: '聊天', icon: MessageSquare },
   { path: '/models', label: '模型配置', icon: Bot },
   { path: '/plugins', label: '插件管理', icon: Puzzle },
   { path: '/costs', label: '成本分析', icon: DollarSign },
@@ -18,57 +19,64 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   const location = useLocation()
   const { toggleTheme, isDark } = useTheme()
 
+  // /chat 是全屏独立页面,不渲染侧栏和顶栏。
+  const isChat = location.pathname === '/chat'
+
   return (
     <div className="min-h-screen" style={{ backgroundColor: 'var(--color-bg-base)', color: 'var(--color-text-primary)' }}>
       {/* 顶部导航栏 */}
-      <header
-        className="fixed top-0 left-0 right-0 z-50 flex items-center justify-between px-6"
-        style={{ height: 'var(--nav-height)', backgroundColor: 'var(--color-bg-elevated)', borderBottom: '1px solid var(--color-border)' }}
-      >
-        <h1 className="text-lg font-semibold">AI Gateway Control Panel</h1>
-        <button
-          onClick={toggleTheme}
-          className="flex items-center gap-2 px-3 py-1.5 rounded-md cursor-pointer text-sm transition-colors"
-          style={{ color: 'var(--color-text-secondary)', backgroundColor: 'var(--color-bg-overlay)' }}
-          title={isDark ? '切换到亮色主题' : '切换到暗色主题'}
+      {!isChat && (
+        <header
+          className="fixed top-0 left-0 right-0 z-50 flex items-center justify-between px-6"
+          style={{ height: 'var(--nav-height)', backgroundColor: 'var(--color-bg-elevated)', borderBottom: '1px solid var(--color-border)' }}
         >
-          {isDark ? <Sun size={16} /> : <Moon size={16} />}
-          <span>{isDark ? '亮色' : '暗色'}</span>
-        </button>
-      </header>
+          <h1 className="text-lg font-semibold">AI Gateway Control Panel</h1>
+          <button
+            onClick={toggleTheme}
+            className="flex items-center gap-2 px-3 py-1.5 rounded-md cursor-pointer text-sm transition-colors"
+            style={{ color: 'var(--color-text-secondary)', backgroundColor: 'var(--color-bg-overlay)' }}
+            title={isDark ? '切换到亮色主题' : '切换到暗色主题'}
+          >
+            {isDark ? <Sun size={16} /> : <Moon size={16} />}
+            <span>{isDark ? '亮色' : '暗色'}</span>
+          </button>
+        </header>
+      )}
 
       {/* 侧边栏 */}
-      <aside
-        className="fixed top-[56px] left-0 bottom-0 z-40 flex flex-col"
-        style={{ width: 'var(--sidebar-width)', backgroundColor: 'var(--color-bg-elevated)', borderRight: '1px solid var(--color-border)' }}
-      >
-        <nav className="flex-1 py-4">
-          {navItems.map(item => {
-            const Icon = item.icon
-            const isActive = location.pathname === item.path
-            return (
-              <Link
-                key={item.path}
-                to={item.path}
-                className="flex items-center gap-3 px-4 py-2.5 text-sm transition-colors cursor-pointer"
-                style={{
-                  color: isActive ? 'var(--color-text-inverse)' : 'var(--color-text-secondary)',
-                  backgroundColor: isActive ? 'var(--color-primary)' : 'transparent',
-                }}
-              >
-                <Icon size={18} />
-                {item.label}
-              </Link>
-            )
-          })}
-        </nav>
-      </aside>
+      {!isChat && (
+        <aside
+          className="fixed top-[56px] left-0 bottom-0 z-40 flex flex-col"
+          style={{ width: 'var(--sidebar-width)', backgroundColor: 'var(--color-bg-elevated)', borderRight: '1px solid var(--color-border)' }}
+        >
+          <nav className="flex-1 py-4">
+            {navItems.map(item => {
+              const Icon = item.icon
+              const isActive = location.pathname === item.path
+              return (
+                <Link
+                  key={item.path}
+                  to={item.path}
+                  className="flex items-center gap-3 px-4 py-2.5 text-sm transition-colors cursor-pointer"
+                  style={{
+                    color: isActive ? 'var(--color-text-inverse)' : 'var(--color-text-secondary)',
+                    backgroundColor: isActive ? 'var(--color-primary)' : 'transparent',
+                  }}
+                >
+                  <Icon size={18} />
+                  {item.label}
+                </Link>
+              )
+            })}
+          </nav>
+        </aside>
+      )}
 
       {/* 主内容区 */}
       <main
-        style={{ marginTop: '56px', marginLeft: 'var(--sidebar-width)', padding: '24px' }}
+        style={{ marginTop: isChat ? 0 : '56px', marginLeft: isChat ? 0 : 'var(--sidebar-width)', padding: isChat ? '24px' : undefined }}
       >
-        <div style={{ maxWidth: '1440px' }}>
+        <div style={{ maxWidth: isChat ? undefined : '1440px' }}>
           {children}
         </div>
       </main>

@@ -442,3 +442,26 @@ export interface AssignGroupRequest {
   group_id: string
   cache_scope?: CacheScope
 }
+
+// ------------------------------------------------------------------
+// Chat 页面本地类型(聊天窗 MVP)
+// ------------------------------------------------------------------
+
+/** 聊天页单条消息(区别于 OpenAI wire 类型 ChatMessage) */
+export interface ChatPageMessage {
+  id: string
+  role: 'user' | 'assistant'
+  content: string
+  intent?: 'understanding' | 'generation:image' | 'generation:video' | null
+  model?: string
+  error?: boolean
+  ts: number
+}
+
+/** GET /v1/videos/{id} 返回的上游视频任务状态(passthrough) */
+export interface VideoStatusResponse {
+  id?: string
+  status?: string  // 'queued' | 'in_progress' | 'succeeded' | 'failed' | ...
+  video?: { url?: string }
+  error?: { code?: string; message?: string }
+}

@@ -9,7 +9,6 @@ import type {
   ApiError,
   ChatCompletionRequest,
   ChatCompletionData,
-  ChatCompletionChunkData,
   ModelListData,
   EmbeddingRequest,
   EmbeddingListData,
@@ -26,6 +25,7 @@ import type {
   UpdateGroupRequest,
   AssignGroupRequest,
   CacheScope,
+  VideoStatusResponse,
 } from '@/types'
 
 // ------------------------------------------------------------------
@@ -101,14 +101,23 @@ export async function createChatCompletion(
   })
 }
 
+/**
+ * POST /v1/chat/completions (stream=true) —— 返回原始字节流。
+ *
+ * 返回 `ReadableStream<Uint8Array>`(fetch res.body 的真实类型),由调用方用
+ * TextDecoder 自行解析 SSE 帧。`signal` 透传给底层 fetch,使调用方能真正取消
+ * 上游请求(否则只 abort 读循环、fetch 仍跑到结束,白扣 token / 配额)。
+ */
 export async function createChatCompletionStream(
   body: ChatCompletionRequest,
-): Promise<ReadableStream<ChatCompletionChunkData>> {
+  signal?: AbortSignal,
+): Promise<ReadableStream<Uint8Array>> {
   const headers = await ensureAuthHeaders()
   const res = await fetch(`${API_BASE}/v1/chat/completions`, {
     method: 'POST',
     headers: { ...headers, 'Accept': 'text/event-stream' },
     body: JSON.stringify({ ...body, stream: true }),
+    signal,
   })
 
   if (!res.ok) {
@@ -122,7 +131,22 @@ export async function createChatCompletionStream(
     throw new Error(errorMsg)
   }
 
-  return res.body as unknown as ReadableStream<ChatCompletionChunkData>
+  if (!res.body) {
+    throw new Error('Streaming response has no body')
+  }
+  return res.body
+}
+
+/** GET /v1/videos/{id} —— 轮询视频生成任务状态(passthrough 上游 JSON)。 */
+export async function getVideoStatus(videoId: string): Promise<VideoStatusResponse> {
+  const headers = await ensureAuthHeaders()
+  const res = await fetch(`${API_BASE}/v1/videos/${encodeURIComponent(videoId)}`, {
+    headers,
+  })
+  if (!res.ok) {
+    throw new Error(`视频状态查询失败: HTTP ${res.status}`)
+  }
+  return (await res.json()) as VideoStatusResponse
 }
 
 // ------------------------------------------------------------------
