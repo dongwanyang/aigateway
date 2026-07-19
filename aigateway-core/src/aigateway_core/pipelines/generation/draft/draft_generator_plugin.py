@@ -150,6 +150,9 @@ class DraftGeneratorPlugin:
                 "expires_at": draft_result.expires_at,
                 "status": draft_result.status,
                 "generation_params": draft_result.generation_params,
+                # 预览实际调用的模型(配置项 draft_model,默认 agnes-image-2.1-flash),
+                # 供 dispatcher 写日志/账本时记录真实模型而非客户端的 auto。
+                "draft_model": getattr(self._config.draft_workflow, "draft_model", "agnes-image-2.1-flash"),
                 "duration_ms": duration_ms,
             }
 

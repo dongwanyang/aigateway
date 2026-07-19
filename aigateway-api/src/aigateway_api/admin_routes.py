@@ -2714,6 +2714,7 @@ async def get_draft_preview(
 @router.post("/draft/{draft_id}/confirm")
 async def confirm_draft(
     draft_id: str,
+    request: Request,
     _auth: Dict[str, Any] = Depends(authenticate_admin),
 ):
     """确认草稿 → 触发高清放大 → 返回最终结果.
@@ -2738,6 +2739,19 @@ async def confirm_draft(
         content_url = f"data:image/png;base64,{b64}"
     else:
         content_url = str(output_data)[:500]
+
+    # 记录确认(放大)请求日志,让图片/视频的最终出图也能出现在前端 Logs 页。
+    # 确认是独立 admin 路由(不经 dispatcher),原来完全无日志。model 记放大算法名
+    # (SUPIR/RealESRGAN_x4plus),这是实际执行的"模型";endpoint 标注为 draft 确认路径。
+    try:
+        from .openai_compat import _record_request_log
+        await _record_request_log(
+            request=request, method="POST", endpoint=f"/admin/draft/{draft_id}/confirm",
+            status_code=200, duration_ms=float(upscale_result.duration_ms or 0),
+            model=upscale_result.algorithm_used or "upscale", cache_hit=False, cache_tier=None,
+        )
+    except Exception as exc:
+        logger.warning("草稿确认请求日志写入失败: %s", exc)
 
     return {
         "draft_id": draft_id,

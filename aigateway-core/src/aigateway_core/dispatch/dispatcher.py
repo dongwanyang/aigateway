@@ -98,6 +98,46 @@ def _sanitize_exc(exc: BaseException, max_len: int = 200) -> str:
     return s[:max_len]
 
 
+def _resolve_logged_model(body_model: str, bridge_result: Optional[dict]) -> str:
+    """从 bridge 结果中提取真正解析后的模型名,用于日志/账本/缓存回填。
+
+    客户端可能传 `auto`,bridge 内部按意图解析为具体模型。日志若记 `auto`
+    会让前端"模型"列显示 auto 而非实际模型。优先级:
+    1. bridge_result["_meta"]["routed_to"]["model"]  (图像/视频/非流式文本)
+    2. bridge_result["data"]["model"]                 (响应体 OpenAI model 字段)
+    3. body_model                                       (兜底,保持原行为)
+    """
+    if bridge_result:
+        meta = bridge_result.get("_meta") or {}
+        routed = (meta.get("routed_to") or {}) if isinstance(meta, dict) else {}
+        m = routed.get("model") if isinstance(routed, dict) else None
+        if not m:
+            data = bridge_result.get("data") or {}
+            m = data.get("model") if isinstance(data, dict) else None
+        if m and m != "auto":
+            return m
+    return body_model or "auto"
+
+
+def _resolve_stream_logged_model(chunk: Any) -> str:
+    """从流式 chunk 中提取真正解析后的模型名,找不到返回空串。
+
+    文本流: LiteLLM chunk 带 OpenAI `model` 字段(已是具体模型)。
+    图像/视频流: chunk 带 `_meta.routed_to.model`。
+    返回空串表示该 chunk 未携带模型信息,调用方自行回退。
+    """
+    if not isinstance(chunk, dict):
+        return ""
+    meta = chunk.get("_meta") or {}
+    routed = (meta.get("routed_to") or {}) if isinstance(meta, dict) else {}
+    m = routed.get("model") if isinstance(routed, dict) else None
+    if not m:
+        m = chunk.get("model")
+    if m and m != "auto":
+        return m
+    return ""
+
+
 def _emit_stage(trace_id: str, stage: str, name: str, duration_ms: float,
                 status: str = "ok", payload: dict | None = None,
                 dimension: str | None = None) -> None:
@@ -637,6 +677,33 @@ class RequestDispatcher:
                                      "duration_ms": 0,
                                      "status": "pending_confirmation"})
                 request.state.plugin_trace = plugin_trace
+                # 草稿预览阶段也要记日志/账本,否则图片/视频请求在前端 Logs 页不显示。
+                # body.model 仍是 'auto'(bridge 尚未在出口解析),但预览实际用的是
+                # draft_info["draft_model"](配置项,默认 agnes-image-2.1-flash),日志记它
+                # 以避免前端"模型"列显示 auto;账本 cost=0(预览计费已在配额预扣里)。
+                draft_model = draft_info.get("draft_model") or body.model
+                draft_duration_ms = round((time.time() - request_start_time) * 1000, 1)
+                try:
+                    await _record_request_log(
+                        request=request, method="POST", endpoint="/v1/chat/completions",
+                        status_code=200, duration_ms=draft_duration_ms,
+                        model=draft_model, cache_hit=False, cache_tier=None,
+                    )
+                except Exception as exc:
+                    logger.warning("草稿预览请求日志写入失败: %s", exc)
+                if key_store and hasattr(key_store, "record_request_cost"):
+                    try:
+                        await key_store.record_request_cost(
+                            trace_id=getattr(request.state, "trace_id", ""),
+                            user_id=user_id or "", group_id=group_id or "",
+                            model=draft_model, provider="draft",
+                            pipeline_kind=pipeline_kind,
+                            tokens_in=0, tokens_out=0, tokens_total=0,
+                            cost_usd=0.0, cached=False, stream=False,
+                            status="pending_confirmation",
+                        )
+                    except Exception as exc:
+                        logger.warning("草稿预览账本写入失败: %s", exc)
                 return JSONResponse(content={
                     "data": {
                         "draft_id": draft_id,
@@ -751,7 +818,7 @@ class RequestDispatcher:
                              "duration_ms": _llm_ok_ms,
                              "status": "success"})
         _emit_stage(request.state.trace_id, "bridge", "litellm_bridge.completion", _llm_ok_ms, "ok",
-                    payload={"model": body.model}, dimension="bridge")
+                    payload={"model": _resolve_logged_model(body.model, result)}, dimension="bridge")
 
         # bridge 返回错误
         if "error" in result and "data" not in result:
@@ -777,10 +844,14 @@ class RequestDispatcher:
         tt = usage.get("total_tokens", 0)
         cost = result.get("_meta", {}).get("cost", 0.0)
 
+        # 解析真实模型(客户端可能传 auto,bridge 已解析为具体模型)。
+        # 统一用于配额/metrics/账本/缓存回填/日志,避免 auto 渗透到前端"模型"列与缓存值。
+        logged_model = _resolve_logged_model(body.model, result)
+
         if key_hash and key_store:
             try:
                 await key_store.increment_usage(
-                    key_hash, tokens=tt, cost=cost, model=body.model,
+                    key_hash, tokens=tt, cost=cost, model=logged_model,
                     tokens_in=pt, tokens_out=ct,
                     _lua_already_incr=getattr(request.state, "_lua_quota_reserved", False),
                     _reserved_tokens=getattr(request.state, "_lua_reserved_tokens", 0),
@@ -790,7 +861,7 @@ class RequestDispatcher:
                 logger.warning("increment_usage 失败: %s", exc)
 
         # 成本计算对 metrics/账本共用,放在 if metrics_collector 之外避免 NameError
-        final_cost = cost if cost > 0 else _estimate_cost(body.model, tt)
+        final_cost = cost if cost > 0 else _estimate_cost(logged_model, tt)
         if metrics_collector:
             if pt > 0:
                 metrics_collector.record_tokens(pt, "prompt")
@@ -798,7 +869,7 @@ class RequestDispatcher:
                 metrics_collector.record_tokens(ct, "completion")
             if tt > 0 and final_cost > 0:
                 metrics_collector.record_cost(
-                    final_cost, model=body.model, user_id=user_id or "", group_id=group_id,
+                    final_cost, model=logged_model, user_id=user_id or "", group_id=group_id,
                 )
 
         # 成本账本落 SQLite（跨重建持久化）
@@ -809,7 +880,7 @@ class RequestDispatcher:
                 await key_store.record_request_cost(
                     trace_id=getattr(request.state, "trace_id", ""),
                     user_id=user_id or "", group_id=group_id or "",
-                    model=body.model, provider=_provider,
+                    model=logged_model, provider=_provider,
                     pipeline_kind=pipeline_kind,
                     tokens_in=pt, tokens_out=ct, tokens_total=tt,
                     cost_usd=final_cost if (tt > 0 and final_cost > 0) else 0.0,
@@ -832,7 +903,7 @@ class RequestDispatcher:
                     from aigateway_core.prefix.cache.l3_semantic import _safe_l3_backfill
                     _l3_backfill_task = asyncio.create_task(_safe_l3_backfill(
                         cache_manager, cache_key, value_str,
-                        normalized_messages, body.model, user_id or "", tt,
+                        normalized_messages, logged_model, user_id or "", tt,
                     ))
                     _l3_backfill_task.add_done_callback(
                         lambda t: logger.warning("L3 异步回填异常: %s", t.exception())
@@ -845,7 +916,7 @@ class RequestDispatcher:
         request.state.plugin_trace = plugin_trace
         await _record_request_log(request=request, method="POST", endpoint="/v1/chat/completions",
                                   status_code=200, duration_ms=total_duration_ms,
-                                  model=body.model, cache_hit=False, cache_tier=None)
+                                  model=logged_model, cache_hit=False, cache_tier=None)
 
         meta = dict(result.get("_meta", {}))
         # bridge 已在 result["_meta"]["model_router"] 里写好了 auto 解析结果(如有);
@@ -883,7 +954,6 @@ class RequestDispatcher:
         pipeline_kind: 传给 bridge,body.model=='auto' 时按此选候选池模态。
         """
         from aigateway_core.route.metrics.costing import _estimate_cost
-        from aigateway_api.openai_compat import _record_request_log
         from aigateway_api.streaming import create_sse_response
 
         metrics_collector = self.metrics_collector
@@ -939,9 +1009,8 @@ class RequestDispatcher:
             metrics_collector.record_request("POST", "/v1/chat/completions", "200")
             metrics_collector.record_duration("/v1/chat/completions", stream_start_duration)
 
-        await _record_request_log(request=request, method="POST", endpoint="/v1/chat/completions",
-                                  status_code=200, duration_ms=0,
-                                  model=body.model, cache_hit=False, cache_tier=None)
+        # 注:请求日志(_record_request_log)在 _wrap_stream_full 流结束后写,
+        # 此时真实模型已从 chunk 提取,可记录解析后的模型而非客户端的 auto。
         return create_sse_response(completion_gen, chat_id=f"chatcmpl-{uuid.uuid4().hex[:12]}")
 
     async def _wrap_stream_full(
@@ -965,6 +1034,7 @@ class RequestDispatcher:
         client_disconnected = False
         _stream_provider = ""  # 从 image/video 流的首个 _meta chunk 提取
         _stream_bridge_cost = 0.0  # 从末块 _meta.cost 提取(bridge 用 config.yaml 定价算的真实成本)
+        _stream_model = ""  # 从 chunk 提取的真实模型(文本流带 OpenAI model 字段,图像/视频带 _meta.routed_to.model)
         try:
             async for chunk in gen:
                 last_chunk = chunk
@@ -976,6 +1046,10 @@ class RequestDispatcher:
                             _stream_provider = (_rt or {}).get("provider", "")
                         except Exception:
                             pass
+                    # 提取真实模型(首个携带模型信息的 chunk),供日志/账本/缓存回填使用,
+                    # 避免把客户端的 'auto' 写入日志/账本/缓存值。
+                    if not _stream_model:
+                        _stream_model = _resolve_stream_logged_model(chunk)
                     # 提取 bridge 末块成本(优先于 _estimate_cost 的内置表估算)
                     try:
                         _mc = (chunk.get("_meta", {}) or {}).get("cost", 0.0)
@@ -1012,17 +1086,46 @@ class RequestDispatcher:
                     await aclose()
                 except Exception:
                     pass
+        except Exception as exc:
+            # 上游生成器或累积逻辑抛出非 CancelledError 异常时,也要保证
+            # 后续配额/metrics/日志落地(否则失败流式请求无日志,无法在前端排查)。
+            # 缓存回填由下方 client_disconnected 同样跳过(部分流不应入库)。
+            # 异常在此处被吞掉(不 re-raise):已 yield 的部分 chunk 已送达客户端,
+            # 后续 post-stream 处理运行后生成器正常结束,SSE 以 [DONE] 收尾,
+            # 客户端看到的是截断但干净的流;失败仅体现在服务端日志与请求日志里。
+            logger.warning("流式生成异常,跳过缓存回填但保留日志/账本: %s", exc)
+            client_disconnected = True
+            aclose = getattr(gen, "aclose", None)
+            if aclose is not None:
+                try:
+                    await aclose()
+                except Exception:
+                    pass
 
         usage = last_chunk.get("usage", {}) if isinstance(last_chunk, dict) else {}
         pt = usage.get("prompt_tokens", 0)
         ct = usage.get("completion_tokens", 0)
         tt = usage.get("total_tokens", 0)
 
+        # 真实模型:优先用从 chunk 提取的 _stream_model,否则回退到传入的 model(可能 auto)。
+        # 统一用于 metrics/账本/缓存回填/日志,避免 auto 渗透到前端"模型"列与缓存值。
+        logged_model = _stream_model or model
+
+        # 流式日志:在流结束后写(此时真实模型已知)。原实现是在流开始前写并记 body.model(auto),
+        # 改到此处可记录解析后的模型。即使 usage 缺失(提前 return)也补记,保证日志不丢。
+        try:
+            from aigateway_api.openai_compat import _record_request_log
+            await _record_request_log(request=request, method="POST", endpoint="/v1/chat/completions",
+                                      status_code=200, duration_ms=0,
+                                      model=logged_model, cache_hit=False, cache_tier=None)
+        except Exception as exc:
+            logger.warning("流式请求日志写入失败: %s", exc)
+
         if not usage:
             return
 
         # metrics — 优先用 bridge 末块真实成本(与非流式路径一致),否则内置表估算
-        final_cost = _stream_bridge_cost if _stream_bridge_cost > 0 else _estimate_cost(model, tt)
+        final_cost = _stream_bridge_cost if _stream_bridge_cost > 0 else _estimate_cost(logged_model, tt)
         if metrics_collector:
             if pt > 0:
                 metrics_collector.record_tokens(pt, "prompt")
@@ -1030,7 +1133,7 @@ class RequestDispatcher:
                 metrics_collector.record_tokens(ct, "completion")
             if tt > 0 and final_cost > 0:
                 metrics_collector.record_cost(
-                    final_cost, model=model, user_id=user_id or "", group_id=group_id,
+                    final_cost, model=logged_model, user_id=user_id or "", group_id=group_id,
                 )
 
         # 成本账本落 SQLite（跨重建持久化）
@@ -1039,7 +1142,7 @@ class RequestDispatcher:
                 await key_store.record_request_cost(
                     trace_id=getattr(request.state, "trace_id", ""),
                     user_id=user_id or "", group_id=group_id or "",
-                    model=model, provider=_stream_provider,
+                    model=logged_model, provider=_stream_provider,
                     pipeline_kind=pipeline_kind,
                     tokens_in=pt, tokens_out=ct, tokens_total=tt,
                     cost_usd=final_cost if (tt > 0 and final_cost > 0) else 0.0,
@@ -1052,8 +1155,8 @@ class RequestDispatcher:
         if key_hash and key_store and tt > 0:
             try:
                 await key_store.increment_usage(
-                    key_hash, tokens=tt, cost=_estimate_cost(model, tt),
-                    model=model, tokens_in=pt, tokens_out=ct,
+                    key_hash, tokens=tt, cost=_estimate_cost(logged_model, tt),
+                    model=logged_model, tokens_in=pt, tokens_out=ct,
                     _lua_already_incr=getattr(request.state, "_lua_quota_reserved", False),
                     _reserved_tokens=getattr(request.state, "_lua_reserved_tokens", 0),
                     _reserved_cost=getattr(request.state, "_lua_reserved_cost", 0.0),
@@ -1087,7 +1190,7 @@ class RequestDispatcher:
                 value_str = json.dumps({
                     "choices": choices_out,
                     "usage": usage,
-                    "model": model,
+                    "model": logged_model,
                 }, ensure_ascii=False)
                 cache_manager.l1_set(cache_key, value_str)
                 try:
@@ -1099,7 +1202,7 @@ class RequestDispatcher:
                     from aigateway_core.prefix.cache.l3_semantic import _safe_l3_backfill
                     _l3_backfill_task = asyncio.create_task(_safe_l3_backfill(
                         cache_manager, cache_key, value_str,
-                        normalized_messages, model, user_id or "", tt,
+                        normalized_messages, logged_model, user_id or "", tt,
                     ))
                     _l3_backfill_task.add_done_callback(
                         lambda t: logger.warning("L3 异步回填异常: %s", t.exception())
@@ -1134,19 +1237,24 @@ class RequestDispatcher:
                 metrics_collector.record_request("POST", "/v1/chat/completions", "200")
                 metrics_collector.record_duration("/v1/chat/completions", 0.001)
             saved = 0
+            cached_model = body.model
             try:
                 resp_data = json.loads(cached["value"])
                 saved = resp_data.get("usage", {}).get("total_tokens", 0)
                 if saved > 0 and metrics_collector:
                     metrics_collector.record_tokens_saved(saved)
+                # 缓存值写回填时记录的是真实模型(非 auto),日志/账本沿用,避免前端显示 auto
+                _cm = resp_data.get("model")
+                if _cm and _cm != "auto":
+                    cached_model = _cm
             except (json.JSONDecodeError, AttributeError):
                 pass
             request.state.plugin_trace = plugin_trace
             await _record_request_log(request=request, method="POST", endpoint="/v1/chat/completions",
                                       status_code=200, duration_ms=0,
-                                      model=body.model, cache_hit=True, cache_tier=hit_tier)
+                                      model=cached_model, cache_hit=True, cache_tier=hit_tier)
             await self._record_cache_hit_ledger(
-                key_store, request, body.model, user_id, group_id, saved, stream=True,
+                key_store, request, cached_model, user_id, group_id, saved, stream=True,
                 pipeline_kind=pipeline_kind,
             )
             return create_sse_response(stream_gen, chat_id=chat_id)
@@ -1154,6 +1262,11 @@ class RequestDispatcher:
         # 非流式
         response_data = json.loads(cached["value"])
         saved = response_data.get("usage", {}).get("total_tokens", 0)
+        # 缓存值写回填时记录的是真实模型(非 auto),日志/账本/routed_to 沿用,避免前端显示 auto
+        cached_model = body.model
+        _cm = response_data.get("model")
+        if _cm and _cm != "auto":
+            cached_model = _cm
         if metrics_collector:
             # 注:inc_cache_hits 已在 _dispatch_understanding 缓存查找块统一
             # 打点,这里不再重复打(否则会双倍计数)。
@@ -1165,16 +1278,16 @@ class RequestDispatcher:
         request.state.plugin_trace = plugin_trace
         await _record_request_log(request=request, method="POST", endpoint="/v1/chat/completions",
                                   status_code=200, duration_ms=cache_duration_ms,
-                                  model=body.model, cache_hit=True, cache_tier=hit_tier)
+                                  model=cached_model, cache_hit=True, cache_tier=hit_tier)
         await self._record_cache_hit_ledger(
-            key_store, request, body.model, user_id, group_id, saved, stream=False,
+            key_store, request, cached_model, user_id, group_id, saved, stream=False,
             pipeline_kind=pipeline_kind,
         )
 
         meta = {
             "cache_hit": True,
             "cache_tier": hit_tier,
-            "routed_to": {"provider": "cache", "model": body.model, "tier": hit_tier},
+            "routed_to": {"provider": "cache", "model": cached_model, "tier": hit_tier},
         }
         if pii_meta:
             meta["pii_detector"] = pii_meta
