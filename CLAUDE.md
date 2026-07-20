@@ -2,6 +2,13 @@
 
 Guidance for Claude Code when working in this repo. Keep terse — see rule "Trim CLAUDE.md" below.
 
+/browse #浏览器QA测试
+/qa #系统化测试修复
+/ship #发布工作流
+
+code-review #完成后验证
+
+
 ## Project Overview
 
 AI Gateway: OpenAI-compatible proxy in front of LLM providers. Adds token optimization, tiered caching, model routing, PII scrubbing, cost tracking. Clients only change `OPENAI_BASE_URL`.

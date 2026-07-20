@@ -2863,3 +2863,20 @@ async def get_cost_summary(
         end_unix = end_unix or int(datetime.now(timezone.utc).timestamp())
         start_unix = end_unix - days * 86400
     return await key_store.ledger_summary(start_unix=start_unix, end_unix=end_unix)
+
+
+@router.get("/chat/tasks")
+async def list_chat_tasks(
+    task_type: Optional[str] = Query(None, description="任务类型过滤 (video|draft)"),
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+    """返回未完成任务列表（视频生成、草稿等）。"""
+    from .app_state import get_state
+    task_tracker = getattr(get_state(), "task_tracker", None)
+    if task_tracker is None or not hasattr(task_tracker, "list_active"):
+        raise HTTPException(
+            status_code=503,
+            detail={"error": {"code": "task_tracker_unavailable", "message": "TaskTracker not initialized"}},
+        )
+    tasks = await task_tracker.list_active(task_type=task_type)
+    return {"tasks": tasks}

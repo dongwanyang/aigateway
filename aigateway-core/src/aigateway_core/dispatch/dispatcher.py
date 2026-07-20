@@ -229,6 +229,7 @@ class RequestDispatcher:
         self.metrics_collector = state.get("metrics_collector")
         self.config_manager = state.get("config_manager")
         self.intent_classifier = state.get("intent_classifier")
+        self.task_tracker = state.get("task_tracker")
 
     # ------------------------------------------------------------------
     # 公共入口
@@ -859,6 +860,27 @@ class RequestDispatcher:
                 )
             except Exception as exc:
                 logger.warning("increment_usage 失败: %s", exc)
+
+        # 视频生成: bridge 返回 video_id 时, 在 TaskTracker 注册异步任务,
+        # 供前端通过 GET /admin/chat/tasks 查询未完成视频轮询。
+        if self.task_tracker is not None:
+            meta = result.get("_meta") or {}
+            video_id = meta.get("video_id") if isinstance(meta, dict) else None
+            if video_id:
+                try:
+                    await self.task_tracker.register(
+                        task_type="video",
+                        task_id=str(video_id),
+                        metadata={
+                            "model": logged_model,
+                            "user_id": user_id or "",
+                            "group_id": group_id or "",
+                            "trace_id": getattr(request.state, "trace_id", ""),
+                            "pipeline_kind": pipeline_kind,
+                        },
+                    )
+                except Exception as exc:
+                    logger.warning("task_tracker.register 失败: %s", exc)
 
         # 成本计算对 metrics/账本共用,放在 if metrics_collector 之外避免 NameError
         final_cost = cost if cost > 0 else _estimate_cost(logged_model, tt)

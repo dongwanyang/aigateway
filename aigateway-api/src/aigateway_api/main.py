@@ -588,16 +588,6 @@ async def lifespan(app: "FastAPI"):
     except Exception as exc:
         logger.warning("TaskTracker 初始化失败: %s", exc)
 
-    # 初始化 TaskTracker（用于视频/草稿等异步任务的持久化追踪）
-    task_tracker = None
-    try:
-        from .task_tracker import TaskTracker
-        task_tracker = TaskTracker(redis_client=redis_mgr)
-        app.state.task_tracker = task_tracker
-        logger.info("TaskTracker 初始化完成")
-    except Exception as exc:
-        logger.warning("TaskTracker 初始化失败: %s", exc)
-
     # 挂载到 app.state，供 FastAPI 中间件/依赖注入使用
     app.state.sqlite_store = sqlite_store
     app.state.key_store = sqlite_store  # backward compat: admin_routes references key_store

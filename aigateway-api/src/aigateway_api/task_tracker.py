@@ -213,12 +213,18 @@ class TaskTracker:
                         continue
             return tasks
         else:
-            # 内存模式：过滤 memory_store
-            return [
-                json.loads(v)
-                for v in self._memory_store.values()
-                if task_type is None or task_type in v
-            ]
+            # 内存模式：解析 JSON 后按 task_type 字段过滤。
+            # 不能用 `task_type in v`(v 是 JSON 字符串)——那是子串匹配,
+            # 会把 metadata 里提到 "video" 的 draft 任务误归入 video 过滤结果。
+            result: list[Dict[str, Any]] = []
+            for v in self._memory_store.values():
+                try:
+                    t = json.loads(v)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if task_type is None or t.get("task_type") == task_type:
+                    result.append(t)
+            return result
 
     async def delete(self, task_type: str, task_id: str) -> None:
         """删除任务记录。

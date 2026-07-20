@@ -1289,6 +1289,7 @@ class LiteLLMBridge:
                 )
                 request_cost = self._track_usage(model, vid_result)
                 content = vid_result.get("choices", [{}])[0].get("message", {}).get("content", "")
+                video_id = vid_result.get("_meta", {}).get("video_id", "")
                 yield {
                     "id": f"gen-vid-{int(time.time())}",
                     "object": "chat.completion.chunk",
@@ -1300,7 +1301,7 @@ class LiteLLMBridge:
                         "delta": {"role": "assistant", "content": content},
                     }],
                     "usage": vid_result.get("usage", {}),
-                    "_meta": {"routed_to": {"model": model, "intent": intent}, "cost": request_cost, "model_router": auto_router_meta},
+                    "_meta": {"routed_to": {"model": model, "intent": intent}, "cost": request_cost, "model_router": auto_router_meta, "video_id": video_id},
                 }
             except Exception as exc:
                 logger.error("video generation failed in stream: %s", exc, exc_info=True)

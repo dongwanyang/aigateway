@@ -760,10 +760,12 @@ class SQLiteStore:
         tokens: int,
         cost: float,
     ) -> Tuple[bool, Optional[str], int]:
-        """Atomic check+reserve via transaction.
+        """Atomic check+reserve via conditional UPDATE.
 
         Checks RPM/TPM/daily/monthly for both key and group levels.
-        Bumps counters atomically inside a transaction.
+        Reserves counters atomically using UPDATE...WHERE <limit not exceeded>
+        with a rowcount check — concurrent requests that both pass the snapshot
+        check will lose the UPDATE race and be rejected, preventing quota bypass.
         """
         row = self._api_key_row(key_hash)
         if not row:
@@ -772,15 +774,14 @@ class SQLiteStore:
         data = self._row_to_dict(row)
         group_id = data.get("group_id") or ""
         now_unix = _now_unix()
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        month = datetime.now(timezone.utc).strftime("%Y-%m")
 
-        # Check key-level
+        # Snapshot-level pre-check (fast reject without opening a transaction).
+        # The authoritative check is the conditional UPDATE below; this only
+        # avoids the transaction for requests clearly over limit.
         ok, reason, retry = self._check_key_dims(data, tokens, cost, now_unix)
         if not ok:
             return False, reason, retry
 
-        # Check group-level
         if group_id:
             g_row = self.conn.fetchone(
                 "SELECT * FROM groups WHERE group_id=?", (group_id,)
@@ -791,64 +792,116 @@ class SQLiteStore:
                 if not gok:
                     return False, f"Group {greason}", gretry
 
-        # All checks passed — bump counters atomically
+        # Atomic reserve via conditional UPDATE.
+        # Re-reads current counters INSIDE the transaction and only applies the
+        # increment if no limit would be exceeded. rowcount==0 means a concurrent
+        # request won the reservation (or the window rolled over) — reject.
         with self.conn.transaction() as tx:
-            # Key-level: RPM window reset + increment
-            rpm_ws = int(data.get("rpm_window_start", 0))
-            rpm_wc = int(data.get("rpm_window_count", 0))
-            if now_unix - rpm_ws >= 60:
-                rpm_ws = now_unix
-                rpm_wc = 1
-            else:
-                rpm_wc += 1
-            tpm_ws = int(data.get("tpm_window_start", 0))
-            tpm_wc = int(data.get("tpm_window_count", 0))
-            if now_unix - tpm_ws >= 60:
-                tpm_ws = now_unix
-                tpm_wc = tokens
-            else:
-                tpm_wc += tokens
+            # Re-read key row inside the transaction for the authoritative check.
+            cur_row = tx.execute(
+                "SELECT * FROM api_keys WHERE key_hash=?", (key_hash,)
+            ).fetchone()
+            if cur_row is None:
+                return False, "API Key does not exist", 0
+            cur = dict(cur_row)
 
-            daily_used = int(data.get("daily_tokens_used", 0)) + tokens
-            monthly_used = round(float(data.get("monthly_cost_used", 0.0)) + cost, 4)
+            # Recompute windowed counters against the in-transaction snapshot.
+            rpm_ws = int(cur.get("rpm_window_start", 0))
+            rpm_wc = int(cur.get("rpm_window_count", 0))
+            if now_unix - rpm_ws >= 60:
+                new_rpm_ws = now_unix
+                new_rpm_wc = 1
+            else:
+                new_rpm_ws = rpm_ws
+                new_rpm_wc = rpm_wc + 1
+
+            tpm_ws = int(cur.get("tpm_window_start", 0))
+            tpm_wc = int(cur.get("tpm_window_count", 0))
+            if now_unix - tpm_ws >= 60:
+                new_tpm_ws = now_unix
+                new_tpm_wc = tokens
+            else:
+                new_tpm_ws = tpm_ws
+                new_tpm_wc = tpm_wc + tokens
+
+            rpm_limit = int(cur.get("rate_limit_rpm", SQLiteStore.DEFAULT_RATE_LIMIT_RPM))
+            tpm_limit = int(cur.get("rate_limit_tpm", SQLiteStore.DEFAULT_RATE_LIMIT_TPM))
+            daily_limit = int(cur.get("daily_tokens_limit", SQLiteStore.DEFAULT_DAILY_TOKENS))
+            monthly_limit = float(cur.get("monthly_cost_limit", SQLiteStore.DEFAULT_MONTHLY_COST))
+
+            # Conditional UPDATE: only applies if all four dims stay within limits.
+            # WHERE clause guards against the race where a concurrent request
+            # already bumped counters past the limit between our snapshot read and
+            # this UPDATE.
+            new_daily = int(cur.get("daily_tokens_used", 0)) + tokens
+            new_monthly = round(float(cur.get("monthly_cost_used", 0.0)) + cost, 4)
+
+            if new_rpm_wc > rpm_limit or new_tpm_wc > tpm_limit or new_daily > daily_limit or new_monthly > monthly_limit:
+                # Lost the race or window rolled — recompute a precise reason.
+                if new_rpm_wc > rpm_limit:
+                    return False, f"RPM limit exceeded: {new_rpm_wc}/{rpm_limit}", new_rpm_ws + 60 - now_unix
+                if new_tpm_wc > tpm_limit:
+                    return False, f"TPM limit exceeded: {new_tpm_wc}/{tpm_limit}", new_tpm_ws + 60 - now_unix
+                if new_daily > daily_limit:
+                    return False, f"Daily token limit exceeded: {int(cur.get('daily_tokens_used', 0))}/{daily_limit}", 0
+                return False, f"Monthly cost limit exceeded: ${float(cur.get('monthly_cost_used', 0.0)):.2f}/${monthly_limit:.2f}", 0
 
             tx.execute(
                 """UPDATE api_keys SET rpm_window_start=?, rpm_window_count=?,
                    tpm_window_start=?, tpm_window_count=?,
                    daily_tokens_used=?, monthly_cost_used=?
                    WHERE key_hash=?""",
-                (rpm_ws, rpm_wc, tpm_ws, tpm_wc, daily_used, monthly_used, key_hash),
+                (new_rpm_ws, new_rpm_wc, new_tpm_ws, new_tpm_wc, new_daily, new_monthly, key_hash),
             )
 
-            # Group-level bumps
+            # Group-level: same conditional pattern.
             if group_id:
                 g_row2 = tx.execute(
                     "SELECT * FROM groups WHERE group_id=?", (group_id,)
                 ).fetchone()
-                if g_row2:
+                if g_row2 is not None:
                     gd = dict(g_row2)
                     grpm_ws = int(gd.get("rpm_window_start", 0))
                     grpm_wc = int(gd.get("rpm_window_count", 0))
                     if now_unix - grpm_ws >= 60:
-                        grpm_ws = now_unix
-                        grpm_wc = 1
+                        new_grpm_ws = now_unix
+                        new_grpm_wc = 1
                     else:
-                        grpm_wc += 1
+                        new_grpm_ws = grpm_ws
+                        new_grpm_wc = grpm_wc + 1
+
                     gtpm_ws = int(gd.get("tpm_window_start", 0))
                     gtpm_wc = int(gd.get("tpm_window_count", 0))
                     if now_unix - gtpm_ws >= 60:
-                        gtpm_ws = now_unix
-                        gtpm_wc = tokens
+                        new_gtpm_ws = now_unix
+                        new_gtpm_wc = tokens
                     else:
-                        gtpm_wc += tokens
-                    gdaily_used = int(gd.get("daily_tokens_used", 0)) + tokens
-                    gmonthly_used = round(float(gd.get("monthly_cost_used", 0.0)) + cost, 4)
+                        new_gtpm_ws = gtpm_ws
+                        new_gtpm_wc = gtpm_wc + tokens
+
+                    grpm_limit = int(gd.get("rate_limit_rpm", SQLiteStore.DEFAULT_RATE_LIMIT_RPM))
+                    gtpm_limit = int(gd.get("rate_limit_tpm", SQLiteStore.DEFAULT_RATE_LIMIT_TPM))
+                    gdaily_limit = int(gd.get("daily_tokens_limit", SQLiteStore.DEFAULT_DAILY_TOKENS))
+                    gmonthly_limit = float(gd.get("monthly_cost_limit", SQLiteStore.DEFAULT_MONTHLY_COST))
+
+                    new_gdaily = int(gd.get("daily_tokens_used", 0)) + tokens
+                    new_gmonthly = round(float(gd.get("monthly_cost_used", 0.0)) + cost, 4)
+
+                    if new_grpm_wc > grpm_limit or new_gtpm_wc > gtpm_limit or new_gdaily > gdaily_limit or new_gmonthly > gmonthly_limit:
+                        if new_grpm_wc > grpm_limit:
+                            return False, f"Group RPM limit exceeded: {new_grpm_wc}/{grpm_limit}", new_grpm_ws + 60 - now_unix
+                        if new_gtpm_wc > gtpm_limit:
+                            return False, f"Group TPM limit exceeded: {new_gtpm_wc}/{gtpm_limit}", new_gtpm_ws + 60 - now_unix
+                        if new_gdaily > gdaily_limit:
+                            return False, f"Group daily token limit exceeded: {int(gd.get('daily_tokens_used', 0))}/{gdaily_limit}", 0
+                        return False, f"Group monthly cost limit exceeded: ${float(gd.get('monthly_cost_used', 0.0)):.2f}/${gmonthly_limit:.2f}", 0
+
                     tx.execute(
                         """UPDATE groups SET rpm_window_start=?, rpm_window_count=?,
                            tpm_window_start=?, tpm_window_count=?,
                            daily_tokens_used=?, monthly_cost_used=?
                            WHERE group_id=?""",
-                        (grpm_ws, grpm_wc, gtpm_ws, gtpm_wc, gdaily_used, gmonthly_used, group_id),
+                        (new_grpm_ws, new_grpm_wc, new_gtpm_ws, new_gtpm_wc, new_gdaily, new_gmonthly, group_id),
                     )
 
         return True, None, 0

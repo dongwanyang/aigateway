@@ -6,16 +6,21 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
 from .app_state import get_state
+from .auth_middleware import authenticate
 
 router = APIRouter()
 
 
 @router.get("/videos/{video_id}")
-async def retrieve_video(video_id: str, request: Request) -> JSONResponse:
+async def retrieve_video(
+    video_id: str,
+    request: Request,
+    _auth: Dict[str, Any] = Depends(authenticate),
+) -> JSONResponse:
     """轮询视频任务状态."""
     state = get_state()
     bridge = getattr(state, "litellm_bridge", None)
