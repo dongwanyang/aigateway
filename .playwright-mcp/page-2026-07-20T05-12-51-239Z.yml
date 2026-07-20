@@ -1,0 +1,88 @@
+- generic [ref=f1e3]:
+  - banner [ref=f1e4]:
+    - heading "AI Gateway Control Panel" [level=1] [ref=f1e5]
+    - button "亮色" [ref=f1e6] [cursor=pointer]
+  - complementary [ref=f1e14]:
+    - navigation [ref=f1e15]:
+      - link "概览" [ref=f1e16] [cursor=pointer]:
+        - /url: /
+      - link "聊天" [ref=f1e22] [cursor=pointer]:
+        - /url: /chat
+      - link "模型配置" [ref=f1e25] [cursor=pointer]:
+        - /url: /models
+      - link "插件管理" [ref=f1e29] [cursor=pointer]:
+        - /url: /plugins
+      - link "成本分析" [ref=f1e32] [cursor=pointer]:
+        - /url: /costs
+      - link "配额管理" [ref=f1e35] [cursor=pointer]:
+        - /url: /quotas
+      - link "缓存监控" [ref=f1e38] [cursor=pointer]:
+        - /url: /cache
+      - link "请求日志" [ref=f1e43] [cursor=pointer]:
+        - /url: /logs
+      - link "知识库" [ref=f1e47] [cursor=pointer]:
+        - /url: /knowledge
+      - link "系统配置" [ref=f1e50] [cursor=pointer]:
+        - /url: /config
+  - main [ref=f1e54]:
+    - generic [ref=f1e56]:
+      - generic [ref=f1e57]:
+        - button "新对话" [active] [ref=f1e59] [cursor=pointer]
+        - generic [ref=f1e61]:
+          - generic [ref=f1e193] [cursor=pointer]:
+            - generic [ref=f1e196]:
+              - generic [ref=f1e197]: 新对话
+              - generic [ref=f1e198]: 刚刚
+            - button "删除会话" [ref=f1e199]
+          - generic [ref=f1e62] [cursor=pointer]:
+            - generic [ref=f1e65]:
+              - generic [ref=f1e66]: 画一只可爱的龙猫
+              - generic [ref=f1e67]: 2 分钟前
+            - button "删除会话" [ref=f1e68]
+          - generic [ref=f1e72] [cursor=pointer]:
+            - generic [ref=f1e75]:
+              - generic [ref=f1e76]: 请详细介绍一下量子计算的基本原理,要很长
+              - generic [ref=f1e77]: 4 小时前
+            - button "删除会话" [ref=f1e78]
+          - generic [ref=f1e82] [cursor=pointer]:
+            - generic [ref=f1e85]:
+              - generic [ref=f1e86]: 画一只柯基犬
+              - generic [ref=f1e87]: 9 小时前
+            - button "删除会话" [ref=f1e88]
+          - generic [ref=f1e92] [cursor=pointer]:
+            - generic [ref=f1e95]:
+              - generic [ref=f1e96]: 画一只柴犬
+              - generic [ref=f1e97]: 28 分钟前
+            - button "删除会话" [ref=f1e98]
+          - generic [ref=f1e102] [cursor=pointer]:
+            - generic [ref=f1e105]:
+              - generic [ref=f1e106]: 画一只可爱的白色小兔子,草地背景
+              - generic [ref=f1e107]: 10 小时前
+            - button "删除会话" [ref=f1e108]
+          - generic [ref=f1e112] [cursor=pointer]:
+            - generic [ref=f1e115]:
+              - generic [ref=f1e116]: 画一只白色兔子
+              - generic [ref=f1e117]: 11 小时前
+            - button "删除会话" [ref=f1e118]
+          - generic [ref=f1e122] [cursor=pointer]:
+            - generic [ref=f1e125]:
+              - generic [ref=f1e126]: 新对话
+              - generic [ref=f1e127]: 11 小时前
+            - button "删除会话" [ref=f1e128]
+          - generic [ref=f1e132] [cursor=pointer]:
+            - generic [ref=f1e135]:
+              - generic [ref=f1e136]: 新对话
+              - generic [ref=f1e137]: 11 小时前
+            - button "删除会话" [ref=f1e138]
+          - generic [ref=f1e142] [cursor=pointer]:
+            - generic [ref=f1e145]:
+              - generic [ref=f1e146]: 画一只可爱的橘猫
+              - generic [ref=f1e147]: 11 小时前
+            - button "删除会话" [ref=f1e148]
+      - generic [ref=f1e152]:
+        - generic [ref=f1e153]:
+          - heading "新对话" [level=2] [ref=f1e203]
+          - button "清空" [disabled] [ref=f1e155]
+        - generic [ref=f1e186]:
+          - textbox "输入消息,Enter 发送 / Shift+Enter 换行" [ref=f1e187]
+          - button "发送" [disabled] [ref=f1e188]

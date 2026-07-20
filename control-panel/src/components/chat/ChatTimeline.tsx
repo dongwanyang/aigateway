@@ -6,9 +6,12 @@ interface ChatTimelineProps {
   messages: ChatPageMessage[]
   streaming: boolean
   streamingId: string | null
+  pendingAssistantId: string | null
+  onConfirmDraft?: (msgId: string) => void
+  onRejectDraft?: (msgId: string) => void
 }
 
-export default function ChatTimeline({ messages, streaming, streamingId }: ChatTimelineProps) {
+export default function ChatTimeline({ messages, streaming, streamingId, pendingAssistantId, onConfirmDraft, onRejectDraft }: ChatTimelineProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   // 用户是否贴近底部(距底 < 120px 视为"在底部")。只有贴近底部时才自动跟随,
@@ -41,6 +44,9 @@ export default function ChatTimeline({ messages, streaming, streamingId }: ChatT
           key={m.id}
           msg={m}
           isStreaming={streaming && m.id === streamingId}
+          pendingAssistantId={pendingAssistantId}
+          onConfirmDraft={onConfirmDraft}
+          onRejectDraft={onRejectDraft}
         />
       ))}
       <div ref={bottomRef} />

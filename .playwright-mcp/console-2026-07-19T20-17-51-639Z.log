@@ -1,0 +1,2 @@
+[30391393ms] [ERROR] Failed to load resource: the server responded with a status of 400 (Bad Request) @ http://localhost:3000/aigateway/admin/draft/0aa39fe8a14c49f6bc538bc6ee6d1432/reject:0
+[30392514ms] [ERROR] Failed to load resource: the server responded with a status of 400 (Bad Request) @ http://localhost:3000/aigateway/admin/draft/0aa39fe8a14c49f6bc538bc6ee6d1432/reject:0

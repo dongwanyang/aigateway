@@ -447,7 +447,7 @@ export interface AssignGroupRequest {
 // Chat 页面本地类型(聊天窗 MVP)
 // ------------------------------------------------------------------
 
-/** 聊天页单条消息(区别于 OpenAI wire 类型 ChatMessage) */
+/** 聊天页单条消息(v2:加 incomplete + draft + videoId) */
 export interface ChatPageMessage {
   id: string
   role: 'user' | 'assistant'
@@ -455,7 +455,38 @@ export interface ChatPageMessage {
   intent?: 'understanding' | 'generation:image' | 'generation:video' | null
   model?: string
   error?: boolean
+  /** 流式中断标记(刷新/离开/abort)。刷新续传据此判断是否重发。 */
+  incomplete?: boolean
+  /** 草稿消息附加状态(仅 generation 意图的助手消息) */
+  draft?: ChatDraftState
+  /** 视频生成任务 ID，用于刷新后轮询恢复（不持久化 data URL） */
+  videoId?: string
   ts: number
+}
+
+/** 草稿状态(挂在助手消息上)。previewDataUrl/resultDataUrl 不持久化(见 spec §6)。 */
+export interface ChatDraftState {
+  draftId: string
+  previewUrl: string            // "/admin/draft/{id}/preview"
+  mediaType: 'image' | 'video'
+  status: 'pending' | 'confirming' | 'confirmed' | 'rejecting' | 'rejected' | 'expired' | 'error'
+  /** 渲染时懒加载的预览图 data URL(不持久化) */
+  previewDataUrl?: string
+  /** confirm 后的高清图 data URL(不持久化) */
+  resultDataUrl?: string
+  /** 刷新后 resultDataUrl 丢失且后端无重取接口 → 标记为降级预览,避免"已确认·高清图已生成"误导 */
+  resultLost?: boolean
+  /** 确认/拒绝失败时的错误信息 */
+  errorMessage?: string
+}
+
+/** 聊天会话(v2 多会话) */
+export interface ChatSession {
+  id: string
+  title: string                 // 首条用户消息前 20 字,或"新对话"
+  messages: ChatPageMessage[]
+  createdAt: number
+  updatedAt: number
 }
 
 /** GET /v1/videos/{id} 返回的上游视频任务状态(passthrough) */

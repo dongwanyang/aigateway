@@ -900,6 +900,7 @@ class LiteLLMBridge:
                 }
             ],
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            "_meta": {"video_id": video_id},
         }
 
     async def retrieve_video(self, video_id: str) -> Dict[str, Any]:

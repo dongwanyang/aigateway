@@ -102,16 +102,28 @@ export async function createChatCompletion(
 }
 
 /**
- * POST /v1/chat/completions (stream=true) —— 返回原始字节流。
+ * POST /v1/chat/completions (stream=true) —— 按 content-type 分流返回。
  *
- * 返回 `ReadableStream<Uint8Array>`(fetch res.body 的真实类型),由调用方用
- * TextDecoder 自行解析 SSE 帧。`signal` 透传给底层 fetch,使调用方能真正取消
- * 上游请求(否则只 abort 读循环、fetch 仍跑到结束,白扣 token / 配额)。
+ * 后端对 understanding 意图返回 text/event-stream(逐 token);对 generation
+ * 意图命中草稿门控时直接返回 application/json(`draft_pending_confirmation`)。
+ * 调用方据 kind 分流:stream 走 SSE 解析,draft 直接消费草稿元数据。
+ *
+ * `signal` 透传给底层 fetch,使调用方能真正取消上游请求。
  */
-export async function createChatCompletionStream(
+export type ChatResponse =
+  | { kind: 'stream'; body: ReadableStream<Uint8Array> }
+  | {
+      kind: 'draft'
+      draftId: string
+      previewUrl: string
+      mediaType: 'image' | 'video'
+      generationParams: Record<string, unknown>
+    }
+
+export async function requestChatCompletion(
   body: ChatCompletionRequest,
   signal?: AbortSignal,
-): Promise<ReadableStream<Uint8Array>> {
+): Promise<ChatResponse> {
   const headers = await ensureAuthHeaders()
   const res = await fetch(`${API_BASE}/v1/chat/completions`, {
     method: 'POST',
@@ -123,18 +135,166 @@ export async function createChatCompletionStream(
   if (!res.ok) {
     let errorMsg = `HTTP ${res.status}`
     try {
-      const body = (await res.json()) as ApiError
-      errorMsg = body.error?.message || errorMsg
+      const errBody = (await res.json()) as ApiError
+      errorMsg = errBody.error?.message || errorMsg
     } catch {
       // Non-JSON error response (e.g. HTML nginx page); use status code
     }
     throw new Error(errorMsg)
   }
 
+  const contentType = res.headers.get('content-type') ?? ''
+
+  // 草稿门控:application/json + draft_pending_confirmation
+  if (contentType.includes('application/json')) {
+    const json = (await res.json()) as {
+      data?: { draft_id?: string; preview_url?: string; generation_params?: { media_type?: string } & Record<string, unknown> }
+      _meta?: { draft_pending_confirmation?: boolean }
+    }
+    const draftId = json.data?.draft_id
+    const previewUrl = json.data?.preview_url
+    if (!draftId || !previewUrl) {
+      throw new Error('草稿响应缺少 draft_id / preview_url')
+    }
+    const mediaTypeRaw = json.data?.generation_params?.media_type
+    const mediaType: 'image' | 'video' = mediaTypeRaw === 'video' ? 'video' : 'image'
+    return {
+      kind: 'draft',
+      draftId,
+      previewUrl,
+      mediaType,
+      generationParams: json.data?.generation_params ?? {},
+    }
+  }
+
+  // 流式 understanding
   if (!res.body) {
     throw new Error('Streaming response has no body')
   }
-  return res.body
+  return { kind: 'stream', body: res.body }
+}
+
+// ------------------------------------------------------------------
+// Draft-to-HiRes 工作流(/admin/draft/*,authenticate_admin,前端 admin key 可用)
+// ------------------------------------------------------------------
+
+/** GET /admin/draft/{id}/preview —— 草稿预览图(base64 data URL)。 */
+export async function getDraftPreview(
+  draftId: string,
+): Promise<{ previewDataUrl: string; previewCount: number }> {
+  const headers = await ensureAuthHeaders()
+  const res = await fetch(`${API_BASE}/admin/draft/${encodeURIComponent(draftId)}/preview`, {
+    headers,
+  })
+  if (!res.ok) {
+    let code = `HTTP ${res.status}`
+    try {
+      const b = (await res.json()) as { error?: { code?: string; message?: string } }
+      code = b.error?.code || b.error?.message || code
+    } catch {
+      // ignore
+    }
+    throw new Error(code)
+  }
+  const json = (await res.json()) as { preview_data_url?: string; preview_count?: number }
+  if (!json.preview_data_url) throw new Error('preview 响应缺少 preview_data_url')
+  return { previewDataUrl: json.preview_data_url, previewCount: json.preview_count ?? 1 }
+}
+
+/** POST /admin/draft/{id}/confirm —— 确认 → 高清放大 → 返回最终图 data URL。 */
+export async function confirmDraft(
+  draftId: string,
+): Promise<{ upscaledUrl: string; targetResolution: [number, number]; algorithm: string }> {
+  const headers = await ensureAuthHeaders()
+  const res = await fetch(`${API_BASE}/admin/draft/${encodeURIComponent(draftId)}/confirm`, {
+    method: 'POST',
+    headers,
+  })
+  if (!res.ok) {
+    let code = `HTTP ${res.status}`
+    try {
+      const b = (await res.json()) as { error?: { code?: string; message?: string } }
+      code = b.error?.code || b.error?.message || code
+    } catch {
+      // ignore
+    }
+    throw new Error(code)
+  }
+  const json = (await res.json()) as {
+    upscaled_url?: string
+    target_resolution?: [number, number]
+    algorithm?: string
+  }
+  if (!json.upscaled_url) throw new Error('confirm 响应缺少 upscaled_url')
+  return {
+    upscaledUrl: json.upscaled_url,
+    targetResolution: json.target_resolution ?? [0, 0],
+    algorithm: json.algorithm ?? 'upscale',
+  }
+}
+
+/** POST /admin/draft/{id}/reject —— 拒绝 → 重新生成新草稿。 */
+export async function rejectDraft(
+  draftId: string,
+): Promise<{ newDraftId: string; previewUrl: string; attemptNumber: number; maxAttempts: number }> {
+  const headers = await ensureAuthHeaders()
+  const res = await fetch(`${API_BASE}/admin/draft/${encodeURIComponent(draftId)}/reject`, {
+    method: 'POST',
+    headers,
+  })
+  if (!res.ok) {
+    let code = `HTTP ${res.status}`
+    try {
+      const b = (await res.json()) as { error?: { code?: string; message?: string } }
+      code = b.error?.code || b.error?.message || code
+    } catch {
+      // ignore
+    }
+    throw new Error(code)
+  }
+  const json = (await res.json()) as {
+    new_draft_id?: string
+    preview_url?: string
+    attempt_number?: number
+    max_attempts?: number
+  }
+  if (!json.new_draft_id || !json.preview_url) throw new Error('reject 响应缺少 new_draft_id / preview_url')
+  return {
+    newDraftId: json.new_draft_id,
+    previewUrl: json.preview_url,
+    attemptNumber: json.attempt_number ?? 1,
+    maxAttempts: json.max_attempts ?? 5,
+  }
+}
+
+/** GET /admin/draft/{id} —— 查草稿状态(刷新后判断是否过期)。 */
+export async function getDraftStatus(
+  draftId: string,
+): Promise<{ status: string; expiresAt: number; attemptNumber: number; maxAttempts: number }> {
+  const headers = await ensureAuthHeaders()
+  const res = await fetch(`${API_BASE}/admin/draft/${encodeURIComponent(draftId)}`, { headers })
+  if (!res.ok) {
+    let code = `HTTP ${res.status}`
+    try {
+      const b = (await res.json()) as { error?: { code?: string; message?: string } }
+      code = b.error?.code || b.error?.message || code
+    } catch {
+      // ignore
+    }
+    throw new Error(code)
+  }
+  const json = (await res.json()) as {
+    status?: string
+    expires_at?: number
+    attempt_number?: number
+    max_attempts?: number
+  }
+  return {
+    status: json.status ?? 'unknown',
+    expiresAt: json.expires_at ?? 0,
+    attemptNumber: json.attempt_number ?? 1,
+    maxAttempts: json.max_attempts ?? 5,
+  }
 }
 
 /** GET /v1/videos/{id} —— 轮询视频生成任务状态(passthrough 上游 JSON)。 */

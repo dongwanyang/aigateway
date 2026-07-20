@@ -1,0 +1,102 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - heading "AI Gateway Control Panel" [level=1] [ref=e5]
+    - button "亮色" [ref=e6] [cursor=pointer]
+  - complementary [ref=e14]:
+    - navigation [ref=e15]:
+      - link "概览" [ref=e16] [cursor=pointer]:
+        - /url: /
+      - link "聊天" [ref=e22] [cursor=pointer]:
+        - /url: /chat
+      - link "模型配置" [ref=e25] [cursor=pointer]:
+        - /url: /models
+      - link "插件管理" [ref=e29] [cursor=pointer]:
+        - /url: /plugins
+      - link "成本分析" [ref=e32] [cursor=pointer]:
+        - /url: /costs
+      - link "配额管理" [ref=e35] [cursor=pointer]:
+        - /url: /quotas
+      - link "缓存监控" [ref=e38] [cursor=pointer]:
+        - /url: /cache
+      - link "请求日志" [ref=e43] [cursor=pointer]:
+        - /url: /logs
+      - link "知识库" [ref=e47] [cursor=pointer]:
+        - /url: /knowledge
+      - link "系统配置" [ref=e50] [cursor=pointer]:
+        - /url: /config
+  - main [ref=e54]:
+    - generic [ref=e56]:
+      - generic [ref=e57]:
+        - button "新对话" [ref=e59] [cursor=pointer]
+        - generic [ref=e61]:
+          - generic [ref=e62] [cursor=pointer]:
+            - generic [ref=e65]:
+              - generic [ref=e66]: 你好
+              - generic [ref=e67]: 4 小时前
+            - button "删除会话" [ref=e68]
+          - generic [ref=e72] [cursor=pointer]:
+            - generic [ref=e75]:
+              - generic [ref=e76]: 画一只可爱的龙猫
+              - generic [ref=e77]: 刚刚
+            - button "删除会话" [ref=e78]
+          - generic [ref=e82] [cursor=pointer]:
+            - generic [ref=e85]:
+              - generic [ref=e86]: 请详细介绍一下量子计算的基本原理,要很长
+              - generic [ref=e87]: 9 小时前
+            - button "删除会话" [ref=e88]
+          - generic [ref=e92] [cursor=pointer]:
+            - generic [ref=e95]:
+              - generic [ref=e96]: 画一只柯基犬
+              - generic [ref=e97]: 14 小时前
+            - button "删除会话" [ref=e98]
+          - generic [ref=e102] [cursor=pointer]:
+            - generic [ref=e105]:
+              - generic [ref=e106]: 画一只柴犬
+              - generic [ref=e107]: 5 小时前
+            - button "删除会话" [ref=e108]
+          - generic [ref=e112] [cursor=pointer]:
+            - generic [ref=e115]:
+              - generic [ref=e116]: 画一只可爱的白色小兔子,草地背景
+              - generic [ref=e117]: 15 小时前
+            - button "删除会话" [ref=e118]
+          - generic [ref=e122] [cursor=pointer]:
+            - generic [ref=e125]:
+              - generic [ref=e126]: 画一只白色兔子
+              - generic [ref=e127]: 16 小时前
+            - button "删除会话" [ref=e128]
+          - generic [ref=e132] [cursor=pointer]:
+            - generic [ref=e135]:
+              - generic [ref=e136]: 新对话
+              - generic [ref=e137]: 16 小时前
+            - button "删除会话" [ref=e138]
+          - generic [ref=e142] [cursor=pointer]:
+            - generic [ref=e145]:
+              - generic [ref=e146]: 新对话
+              - generic [ref=e147]: 16 小时前
+            - button "删除会话" [ref=e148]
+          - generic [ref=e152] [cursor=pointer]:
+            - generic [ref=e155]:
+              - generic [ref=e156]: 画一只可爱的橘猫
+              - generic [ref=e157]: 16 小时前
+            - button "删除会话" [ref=e158]
+      - generic [ref=e162]:
+        - generic [ref=e163]:
+          - heading "画一只可爱的龙猫" [level=2] [ref=e164]
+          - button "清空" [disabled] [ref=e165]
+        - generic [ref=e170]:
+          - paragraph [ref=e173]: 画一只可爱的龙猫
+          - generic [ref=e175]:
+            - generic [ref=e176]:
+              - generic [ref=e177]: 🎨
+              - generic [ref=e178]: 图片
+              - generic [ref=e179]: · draft
+            - generic [ref=e180]:
+              - generic [ref=e181]: 草稿已过期:HTTP 404
+              - generic [ref=e184]:
+                - button "确认放大" [ref=e185] [cursor=pointer]
+                - button "重新生成" [ref=e188] [cursor=pointer]
+          - paragraph [ref=e196]: 请详细推导一下勾股定理
+          - generic "正在思考" [ref=e199]
+        - generic [ref=e204]:
+          - textbox "输入消息,Enter 发送 / Shift+Enter 换行" [ref=e205]
+          - button "停止" [ref=e206] [cursor=pointer]
