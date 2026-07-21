@@ -28,3 +28,16 @@
 
 ### Tests
 - Added 30 new unit tests covering stream/non-stream image and video intents, extra_headers propagation, `ModelSelector.get_health`, video processing states, and concurrent quota race conditions.
+
+### Security
+- `authenticate_admin` middleware now requires explicit `is_admin=True` flag — closes auth bypass where any valid API key could access admin endpoints.
+- `create_api_key` no longer returns the raw API key in the response body (shown only once at creation time).
+- `reject_draft` endpoint now fails-closed when draft ownership metadata is missing (matching `confirm_draft` behavior).
+- API key hashing uses full SHA-256 (64-char hexdigest) instead of truncated 16-char prefix, reducing birthday-bound collision risk.
+- Rate limiter bucketing uses structured ID patterns (digits/hex/UUID/key-prefix/base64url) instead of bare length check, preventing long static endpoint names from being misclassified as IDs and collapsing distinct endpoints into shared buckets.
+- SSRF guard in draft image fetcher now disables httpx auto-redirects and validates redirect targets, preventing DNS rebinding and redirect-based bypass to cloud metadata endpoints. IPv4-mapped IPv6 addresses (`::ffff:x.x.x.x`) are now checked.
+
+### Reliability
+- SQLite auth store uses per-thread connections via `threading.local()` for safe `asyncio.to_thread()` usage on the validate hot path; quota operations (check_quota/increment_usage) deliberately stay on the event loop with a single shared connection for TOCTOU-safe atomic conditional UPDATEs.
+- Added performance indexes for `key_prefix`, `user_id+status`, `group_id`, `quota_records`, and `group_members` columns.
+- Fixed `migrate_groups()` call in main.py lifespan — was missing required `group_store` argument, which would crash on startup.
