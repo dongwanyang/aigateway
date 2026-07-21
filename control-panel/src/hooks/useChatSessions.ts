@@ -488,14 +488,59 @@ export function useChatSessions(): UseChatSessions {
     }
   }, [streaming, activeId, patchActiveMessages, patchMessage])
 
-  // 刷新续传:mount 时检测 active 会话末尾,未完成则重发;并补拉所有草稿的预览图。
+  // sendRef:resume effect 通过它调用 send,而不把 send 放进 effect 依赖数组。
+  // 否则 send 依赖 streaming,setStreaming(true) 时 send 引用变化 → effect 重跑 →
+  // 在 send 刚追加的空 assistant 占位上误判为"中断占位"并 slice 掉 → 草稿响应回来
+  // patchMessage(assistantId) 找不到消息 → 草稿丢失(ISSUE-002)。
+  const sendRef = useRef(send)
+  useEffect(() => { sendRef.current = send }, [send])
+
+  // 刷新续传:mount 或切换会话时检测 active 会话末尾,未完成则重发;并补拉所有草稿的预览图。
   // 用模块级 resumedSessionIds 防御 StrictMode 双 mount(见该 Set 注释)。
+  //
+  // 关键:依赖只列 [activeId],不列 sessions。否则用户正常 send 一条消息时 sessions 变化 →
+  // effect 重跑(因 send 第 333 行 delete 了 resumedSessionIds)→ 看到 send 刚追加的空 assistant
+  // 占位(last.role==='assistant' 且 !content && !draft)→ slice 掉它 + 试图续传。占位被删后,
+  // 原 send 的草稿响应回来 patchMessage(assistantId) 找不到消息 → 草稿永不渲染。
+  // 通过 sessionsRef 读取最新快照,既拿到当前消息又不在 sessions 变化时重触发。
   useEffect(() => {
     if (!activeId || resumedSessionIds.has(activeId)) return
-    const s = sessions.find(x => x.id === activeId)
+    const s = sessionsRef.current.find(x => x.id === activeId)
     if (!s || s.messages.length === 0) return
     // 有内容需处理才标记;空会话不标(否则 clearActive 后同会话再发+刷新会被永久阻塞续传)。
     resumedSessionIds.add(activeId)
+
+    // 2) 先补拉所有草稿消息的预览图(data URL 不持久化,刷新后全丢)
+    //    pending/confirming/rejecting → 降级 pending;confirmed → 保留状态;
+    //    error/expired → 不动。若草稿已被后端回收 → 标记 expired。
+    for (const m of s.messages) {
+      if (m.role !== 'assistant' || !m.draft) continue
+      const st = m.draft.status
+      if (st === 'pending' || st === 'confirming' || st === 'rejecting') {
+        patchMessage(m.id, mm => mm.draft
+          ? { ...mm, draft: { ...mm.draft, status: 'pending', previewDataUrl: undefined, errorMessage: undefined } }
+          : mm)
+      } else if (st === 'confirmed') {
+        // 高清图 data URL 不持久化,刷新后丢失;后端无重取接口 → 标记 resultLost,
+        // DraftCard 据此显示"已确认(刷新后仅预览)"而非误导性的"高清图已生成"。
+        patchMessage(m.id, mm => mm.draft
+          ? { ...mm, draft: { ...mm.draft, previewDataUrl: undefined, resultDataUrl: undefined, resultLost: true } }
+          : mm)
+      } else {
+        continue // error/expired 不补拉
+      }
+      void getDraftPreview(m.draft.draftId).then(
+        ({ previewDataUrl }) => patchMessage(m.id, mm => mm.draft
+          ? { ...mm, draft: { ...mm.draft, previewDataUrl } }
+          : mm),
+        (e: unknown) => {
+          const code = e instanceof Error ? e.message : '预览加载失败'
+          patchMessage(m.id, mm => mm.draft
+            ? { ...mm, draft: { ...mm.draft, status: 'expired', errorMessage: code } }
+            : mm)
+        },
+      )
+    }
 
     // 检查是否有活跃的异步任务（视频/草稿），如果有则跳过续传
     const hasActiveAsyncTaskInLastMsg = s.messages.length > 0 && hasActiveAsyncTask(s.messages[s.messages.length - 1])
@@ -528,42 +573,11 @@ export function useChatSessions(): UseChatSessions {
       }
     }
 
-    // 2) 补拉所有草稿消息的预览图(data URL 不持久化,刷新后全丢)
-    //    pending/confirming/rejecting → 降级 pending;confirmed → 保留状态;
-    //    error/expired → 不动。若草稿已被后端回收 → 标记 expired。
-    for (const m of s.messages) {
-      if (m.role !== 'assistant' || !m.draft) continue
-      const st = m.draft.status
-      if (st === 'pending' || st === 'confirming' || st === 'rejecting') {
-        patchMessage(m.id, mm => mm.draft
-          ? { ...mm, draft: { ...mm.draft, status: 'pending', previewDataUrl: undefined, errorMessage: undefined } }
-          : mm)
-      } else if (st === 'confirmed') {
-        // 高清图 data URL 不持久化,刷新后丢失;后端无重取接口 → 标记 resultLost,
-        // DraftCard 据此显示"已确认(刷新后仅预览)"而非误导性的"高清图已生成"。
-        patchMessage(m.id, mm => mm.draft
-          ? { ...mm, draft: { ...mm.draft, previewDataUrl: undefined, resultDataUrl: undefined, resultLost: true } }
-          : mm)
-      } else {
-        continue // error/expired 不补拉
-      }
-      void getDraftPreview(m.draft.draftId).then(
-        ({ previewDataUrl }) => patchMessage(m.id, mm => mm.draft
-          ? { ...mm, draft: { ...mm.draft, previewDataUrl } }
-          : mm),
-        (e: unknown) => {
-          const code = e instanceof Error ? e.message : '预览加载失败'
-          patchMessage(m.id, mm => mm.draft
-            ? { ...mm, draft: { ...mm.draft, status: 'expired', errorMessage: code } }
-            : mm)
-        },
-      )
-    }
-
     if (needResumeSend && resumeText) {
-      void send(resumeText, { resume: true, dropLastAssistant })
+      void sendRef.current(resumeText, { resume: true, dropLastAssistant })
     }
-  }, [sessions, activeId, send, patchActiveMessages, patchMessage])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeId])
 
   const confirmDraftMsg = useCallback(async (msgId: string) => {
     const s = sessions.find(x => x.id === activeId)
@@ -671,7 +685,7 @@ export function useChatSessions(): UseChatSessions {
   useEffect(() => {
     if (!activeId) return
 
-    const s = sessions.find(x => x.id === activeId)
+    const s = sessionsRef.current.find(x => x.id === activeId)
     if (!s) return
 
     // 查找所有有活跃视频任务的助手消息
@@ -684,7 +698,8 @@ export function useChatSessions(): UseChatSessions {
         pollVideoStatus(msg.videoId, msg.id)
       }
     })
-  }, [activeId, resumePollingKey, sessions, pollVideoStatus])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeId, resumePollingKey, pollVideoStatus])
 
   /** 组件卸载时清理所有轮询。 */
   useEffect(() => {
