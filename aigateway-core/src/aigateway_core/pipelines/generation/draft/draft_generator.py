@@ -1153,10 +1153,11 @@ class DraftGeneratorStrategy:
         width, height = config.draft_resolution
         previews: list[bytes] = []
         for i in range(num_keyframes):
+            # NOTE: prompt content intentionally omitted to prevent PII/secrets leakage
+            # through preview image bytes returned to any caller.
             placeholder = (
                 f"DRAFT_PREVIEW:video_keyframe:{width}x{height}:"
                 f"frame={i}/{num_keyframes}:"
-                f"prompt={request.prompt[:50]}:"
                 f"id={request.request_id}"
             ).encode("utf-8")
             previews.append(placeholder)
