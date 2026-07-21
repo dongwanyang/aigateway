@@ -23,6 +23,7 @@ import sqlite3
 import string
 import threading
 import uuid
+import asyncio
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -99,6 +100,13 @@ CREATE TABLE IF NOT EXISTS meta (
     value TEXT
 );
 
+-- Performance indexes for frequently queried columns
+CREATE INDEX IF NOT EXISTS idx_api_keys_prefix ON api_keys(key_prefix);
+CREATE INDEX IF NOT EXISTS idx_api_keys_user_active ON api_keys(user_id, status);
+CREATE INDEX IF NOT EXISTS idx_api_keys_group_id ON api_keys(group_id);
+CREATE INDEX IF NOT EXISTS idx_quota_records_entity ON quota_records(entity_type, entity_id);
+CREATE INDEX IF NOT EXISTS idx_group_members_key ON group_members(key_hash);
+
 CREATE TABLE IF NOT EXISTS request_cost_ledger (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     trace_id TEXT DEFAULT '',
@@ -137,7 +145,7 @@ def _now_unix() -> int:
 
 def _hash_key(key_value: str) -> str:
     import hashlib
-    return hashlib.sha256(key_value.encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha256(key_value.encode("utf-8")).hexdigest()
 
 
 def _prefix_key(key_value: str) -> str:
@@ -270,6 +278,18 @@ class SQLiteStore:
 
     # ── Internal helpers ──────────────────────────────────────────
 
+    async def _db(self, fn):
+        """Run a synchronous callable off the event loop via a thread.
+
+        Used for read-heavy hot-path operations (e.g. validate's lookup + last
+        -used update). NOT used for check_quota/increment_usage: those rely on
+        a single shared SQLite connection for TOCTOU-safe atomic conditional
+        UPDATEs, and threading would give each call its own connection (via
+        threading.local) and break quota race-safety (see
+        tests/test_sqlite_quota_race.py).
+        """
+        return await asyncio.to_thread(fn)
+
     def _row_to_dict(self, row: sqlite3.Row | None) -> dict[str, Any] | None:
         if row is None:
             return None
@@ -369,13 +389,17 @@ class SQLiteStore:
     async def validate(self, key: str) -> Optional[dict[str, Any]]:
         """Validate API Key. Auto-reseed from config if empty."""
         key_hash = _hash_key(key)
-        row = self._api_key_row(key_hash)
+
+        def _lookup():
+            return self._api_key_row(key_hash)
+
+        row = await self._db(_lookup)
 
         if row is None:
             # Try auto-reseed
             seeded = await self._try_auto_reseed()
             if seeded:
-                row = self._api_key_row(key_hash)
+                row = await self._db(lambda: self._api_key_row(key_hash))
 
         if row is None:
             logger.warning("API Key hash=%s 未找到", key_hash)
@@ -395,17 +419,25 @@ class SQLiteStore:
         # Update last_used_at
         now = _now_iso()
         data["last_used_at"] = now
-        self.conn.execute(
-            "UPDATE api_keys SET last_used_at=? WHERE key_hash=?",
-            (now, key_hash),
-        )
-        self.conn.commit()
+
+        def _update():
+            self.conn.execute(
+                "UPDATE api_keys SET last_used_at=? WHERE key_hash=?",
+                (now, key_hash),
+            )
+            self.conn.commit()
+
+        await self._db(_update)
         return data
 
     async def _try_auto_reseed(self) -> bool:
         """If no keys exist, seed from config.yaml."""
-        row = self.conn.fetchone("SELECT 1 FROM api_keys LIMIT 1")
-        if row:
+        def _check_empty():
+            row = self.conn.fetchone("SELECT 1 FROM api_keys LIMIT 1")
+            return row is not None
+
+        exists = await self._db(_check_empty)
+        if exists:
             return False
         try:
             from aigateway_api.app_state import get_state
@@ -1487,11 +1519,22 @@ class SQLiteStore:
             "tpm_window_start", "tpm_window_count",
             "last_used_at",
         }
+        # Allowlist of writable structural/metadata columns. Column names are
+        # interpolated into the SQL string (sqlite3 doesn't support parameterized
+        # identifiers), so an explicit allowlist is the injection guard.
+        _WRITABLE_COLS = {
+            "key_id", "key_prefix", "user_id", "status", "group_id",
+            "cache_scope", "daily_tokens_limit", "monthly_cost_limit",
+            "rate_limit_rpm", "rate_limit_tpm", "is_admin",
+        }
         # Build dynamic UPDATE
         fields = []
         values = []
         for k, v in data.items():
             if k in ("key_hash", "key_id", "created_at") or k in _RUNTIME_COUNTER_COLS:
+                continue
+            if k not in _WRITABLE_COLS:
+                logger.warning("set_api_key rejecting unknown column: %s", k)
                 continue
             fields.append(f"{k}=?")
             # Convert bool to int

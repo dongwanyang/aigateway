@@ -336,7 +336,7 @@ async def lifespan(app: "FastAPI"):
                         except ValueError:
                             pass
                 # Migrate groupless keys to default group
-                await sqlite_store.migrate_groups(sqlite_store)
+                await sqlite_store.migrate_groups(group_store)
                 logger.info("SQLiteStore 组初始化完成")
             except Exception as exc:
                 logger.warning("SQLiteStore 组初始化失败: %s", exc)
@@ -371,6 +371,22 @@ async def lifespan(app: "FastAPI"):
     if qdrant_mgr is not None:
         cache_manager.set_qdrant_client(qdrant_mgr)
     logger.info("CacheManager 初始化完成")
+
+    # 初始化 L2 BM25 RediSearch 索引 (失败仅 WARNING，降级为无缓存)
+    cache_section = config_manager.get("cache", {}) or {}
+    l2_cfg = cache_section.get("l2", {}) if isinstance(cache_section, dict) else {}
+    l2_bm25_cfg = l2_cfg.get("bm25", {}) if isinstance(l2_cfg, dict) else {}
+    l2_bm25_enabled = bool(l2_bm25_cfg.get("enabled", True))
+    if l2_bm25_enabled and redis_mgr is not None:
+        try:
+            from aigateway_core.prefix.cache.l2_search import ensure_index as l2_ensure_index
+            l2_ready = await l2_ensure_index(redis_mgr.redis)
+            if l2_ready:
+                logger.info("L2 BM25 RediSearch 索引就绪")
+            else:
+                logger.warning("L2 BM25 RediSearch 索引不可用，L2 缓存将降级")
+        except Exception as exc:
+            logger.warning("L2 BM25 索引初始化失败，L2 缓存将降级: %s", exc)
 
     # 启动 L3 清理调度器
     from aigateway_core.prefix.cache.cache_manager import L3CleanupScheduler
