@@ -26,14 +26,25 @@ async def retrieve_video(
     bridge = getattr(state, "litellm_bridge", None)
     if bridge is None:
         return JSONResponse(
-            content={"error": {"code": "internal_error", "message": "LiteLLM bridge not initialized"}},
-            status_code=500,
+            content={"error": {"code": "bridge_unavailable", "message": "LiteLLM bridge not initialized"}},
+            status_code=503,
         )
     try:
         result: Dict[str, Any] = await bridge.retrieve_video(video_id)
         return JSONResponse(content=result)
     except Exception as exc:
+        # 生产环境不暴露 provider 内部错误细节，仅 debug 模式下透传。
+        from aigateway_core.shared.debug_config import DebugConfig
+        from aigateway_core.shared.trace_event import TraceCollector
+        debug_detail = False
+        try:
+            collector = TraceCollector.current()
+            if collector is not None:
+                debug_detail = collector.get_debug_dimension("bridge") is True
+        except Exception:
+            pass
+        message = str(exc) if debug_detail else "Video retrieval failed"
         return JSONResponse(
-            content={"error": {"code": "video_retrieve_failed", "message": str(exc)}},
+            content={"error": {"code": "video_retrieve_failed", "message": message}},
             status_code=502,
         )

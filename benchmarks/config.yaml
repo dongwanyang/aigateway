@@ -1,0 +1,42 @@
+# Benchmark suite configuration
+# Each scenario specifies model, adapter module, and optional settings.
+
+scenarios:
+  text_qa:
+    adapter: benchmarks.scenarios.text_qa
+    model: deepseek-v4-flash
+    concurrency: 1
+    do_judge: true
+
+  long_conversation:
+    adapter: benchmarks.scenarios.long_conversation
+    model: deepseek-v4-flash
+    concurrency: 1
+    do_judge: true
+
+  multimedia_gen:
+    adapter: benchmarks.scenarios.multimedia_gen
+    image_model: agnes-image-2.1-flash
+    video_model: agnes-video-2.1
+    concurrency: 1
+    do_judge: false
+    opt_in: true  # Only run with --with-media flag
+
+# Per-model pricing (USD per 1M tokens)
+pricing:
+  deepseek-v4-flash: [0.5, 2.0]
+  agnes-image-2.1-flash: [0.0, 0.15]
+  agnes-video-2.1: [0.0, 0.5]
+
+# Judge configuration
+judge:
+  model: deepseek-v4-flash
+  api_url: https://api.deepseek.com/v1/chat/completions
+  max_retries: 2
+
+# Gateway configuration
+gateway:
+  base_url: http://localhost:8000
+  admin_key_env: AI_GATEWAY_ADMIN_KEY
+  restart_timeout: 30
+  health_timeout: 60

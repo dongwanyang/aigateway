@@ -209,7 +209,10 @@ cache:
   l2:
     max_value_bytes: 512000
     default_ttl: 3600
-    compression_level: 9
+    bm25:                    # Redis Stack RediSearch BM25 近似匹配
+      enabled: true
+      min_score: 1.5         # BM25 分数阈值，低于此值视为 miss（需按实际语料调参）
+      top_k: 5
   l3:
     min_token_count: 100
     default_ttl: 86400
@@ -281,9 +284,9 @@ debug:
   entry: true
   cache: true
   bridge: true
-  plugins_enabled: true
+  plugins_enabled: false
   plugins:
-    enabled: true
+    enabled: false
     per_plugin:
       pii_detector: true
       prompt_cache: true

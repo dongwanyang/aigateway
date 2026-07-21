@@ -1,0 +1,91 @@
+name: Benchmark Regression
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'benchmarks/**'
+      - 'aigateway-core/src/**'
+      - 'aigateway-api/src/**'
+  workflow_dispatch:
+    inputs:
+      with_media:
+        description: 'Include multimedia scenario (slow)'
+        type: boolean
+        default: false
+      scenarios:
+        description: 'Comma-separated scenario names (default: text_qa,long_conversation)'
+        type: string
+        default: 'text_qa,long_conversation'
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      AI_GATEWAY_ADMIN_KEY: ${{ secrets.AI_GATEWAY_ADMIN_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+      REDIS_HOST: localhost
+      AI_GATEWAY_ENV: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -e aigateway-core
+          pip install -e aigateway-api
+          pip install -e aigateway-cli
+
+      - name: Start services
+        run: |
+          docker compose up -d redis qdrant
+          sleep 5
+
+      - name: Start gateway
+        run: |
+          uvicorn src.aigateway_api.main:create_app --factory --host 0.0.0.0 --port 8000 &
+          # Wait for healthy
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8000/health && break
+            sleep 2
+          done
+
+      - name: Run benchmark (text only)
+        if: github.event_name == 'pull_request'
+        run: |
+          python benchmarks/benchmark.py \
+            --scenarios ${{ github.event.inputs.scenarios || 'text_qa,long_conversation' }} \
+            --judge \
+            --concurrency 1
+
+      - name: Run benchmark (with media)
+        if: github.event_name == 'workflow_dispatch' && inputs.with_media
+        run: |
+          python benchmarks/benchmark.py \
+            --scenarios ${{ github.event.inputs.scenarios }},multimedia_gen \
+            --with-media \
+            --judge \
+            --concurrency 1
+
+      - name: Check drift against expected results
+        run: |
+          python benchmarks/compare_to_expected.py \
+            --current benchmarks/reports/report-$(date +%Y-%m-%d).md
+
+      - name: Upload report artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-report
+          path: benchmarks/reports/report-*.md

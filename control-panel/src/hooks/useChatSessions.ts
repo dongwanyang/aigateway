@@ -636,11 +636,12 @@ export function useChatSessions(): UseChatSessions {
 
         if (terminalStatus) {
           pollingVideoIds.delete(videoId)
-          if (status.status === 'succeeded' && status.video?.url) {
+          const video = status.video
+          if (status.status === 'succeeded' && video?.url) {
             // 视频生成成功，更新消息内容
             patchMessage(msgId, m => ({
               ...m,
-              content: `Video generated successfully. URL: ${status.video.url}`,
+              content: `Video generated successfully. URL: ${video.url}`,
               intent: 'generation:video',
               model: 'video',
             }))

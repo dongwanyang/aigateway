@@ -2,11 +2,16 @@
 
 Guidance for Claude Code when working in this repo. Keep terse — see rule "Trim CLAUDE.md" below.
 
-/browse #浏览器QA测试
-/qa #系统化测试修复
-/ship #发布工作流
+## gstack 角色路由
+- 当需要产品决策、范围判断时，使用 /office-hours 或 /plan-ceo-review
+- 当需要架构审查时，使用 /plan-eng-review
+- 当代码准备合并前，使用 /review 进行代码审查
+- 当需要端到端测试时，使用 /qa
+- 当准备发布时，使用 /ship
 
-code-review #完成后验证
+- 用 gstack 做前期决策：/office-hours → /plan-ceo-review → /plan-eng-review → /plan-design-review，确保方向正确
+- 用 Superpowers 做中期执行：Brainstorm → Plan → TDD → Subagent → Review → Finalize，确保代码质量
+- 回到 gstack 做后期验证：/qa（真实浏览器测试）→ /cso（安全审计）→ /ship（发布）→ /retro（复盘）
 
 
 ## Project Overview

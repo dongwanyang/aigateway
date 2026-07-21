@@ -209,10 +209,13 @@ cache:
     max_entries: 1000        # 最大条目数（LRU 淘汰）
     max_value_bytes: 102400  # 单条最大字节数（100KB），超过不进 L1
 
-  l2:                        # L2 Redis 分布式缓存
+  l2:                        # L2 Redis Stack RediSearch BM25 近似匹配
     max_value_bytes: 512000  # 单条最大字节数（500KB），超过不进 L2
     default_ttl: 3600        # 默认 TTL（秒），默认 1 小时
-    compression_level: 9     # LZ4 压缩级别（1-12，越高压缩比越大但越慢）
+    bm25:                    # RediSearch BM25 全文检索配置
+      enabled: true          # 是否启用 BM25 近似匹配
+      min_score: 1.5         # BM25 分数阈值，低于此值视为 miss（需按实际语料调参）
+      top_k: 5               # 返回 top-K 候选
 
   l3:                        # L3 Qdrant 向量语义缓存
     min_token_count: 100     # 最低 token 数阈值（低于此值不写入 L3）

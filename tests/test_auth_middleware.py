@@ -241,13 +241,15 @@ class TestAuthenticateAdmin:
         from aigateway_api.auth_middleware import authenticate_admin
 
         key_store = AsyncMock()
-        key_store.validate = AsyncMock(return_value={"key_id": "admin-key", "user_id": "admin"})
+        key_store.validate = AsyncMock(return_value={"key_id": "admin-key", "user_id": "admin", "is_admin": True})
         request_mock = MagicMock()
         request_mock.headers = {"authorization": "Bearer admin-key", "x-api-key": ""}
         request_mock.app.state.key_store = key_store
 
         result = await authenticate_admin(request_mock)
-        assert result == {"key_id": "admin-key", "user_id": "admin"}
+        assert result["key_id"] == "admin-key"
+        assert result["user_id"] == "admin"
+        assert result["is_admin"] is True
 
     @pytest.mark.asyncio
     async def test_admin_missing_key_raises_401(self):

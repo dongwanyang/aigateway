@@ -443,7 +443,11 @@ async def create_api_key(
         logger.error("Failed to create API key: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Failed to create API key"}})
 
-    return {"data": result, "message": "success"}
+    # Remove raw key from response to prevent exposure via logs/proxies
+    safe_result = {k: v for k, v in result.items() if k != "key"}
+    safe_result["warning"] = "API key shown only once at creation time. Copy it now."
+
+    return {"data": safe_result, "message": "success"}
 
 
 # ------------------------------------------------------------------
@@ -2738,24 +2742,24 @@ async def confirm_draft(
         draft_group_id = draft_metadata.get('group_id', '')
 
         # Check if authenticated admin owns this draft
-        auth_user_id = _auth.get('user_id', '') if isinstance(_auth, dict) else ''
-        auth_group_id = _auth.get('group_id', '') if isinstance(_auth, dict) else ''
+        if not isinstance(_auth, dict):
+            raise HTTPException(status_code=403, detail={"error": {"code": "forbidden", "message": "Invalid authentication"}})
+        auth_user_id = _auth.get('user_id', '')
+        auth_group_id = _auth.get('group_id', '')
 
+        # Fail closed: if we cannot verify ownership, deny access
+        if not draft_user_id and not draft_group_id:
+            logger.warning("Draft %s has no owner metadata; denying confirm", draft_id)
+            raise HTTPException(status_code=403, detail={"error": {"code": "forbidden", "message": "Draft has no owner metadata"}})
         if draft_user_id and auth_user_id and draft_user_id != auth_user_id:
-            raise HTTPException(
-                status_code=403,
-                detail={"error": {"code": "forbidden", "message": "Only draft owner can confirm"}}
-            )
+            raise HTTPException(status_code=403, detail={"error": {"code": "forbidden", "message": "Only draft owner can confirm"}})
         if draft_group_id and auth_group_id and draft_group_id != auth_group_id:
-            raise HTTPException(
-                status_code=403,
-                detail={"error": {"code": "forbidden", "message": "Only draft owner can confirm"}}
-            )
+            raise HTTPException(status_code=403, detail={"error": {"code": "forbidden", "message": "Only draft owner can confirm"}})
     except HTTPException:
         raise
     except Exception as exc:
-        logger.warning("Draft ownership check failed: %s", exc)
-        # If we can't verify ownership, allow admin action (defensive fallback)
+        logger.error("Draft ownership check failed: %s", exc)
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Ownership verification failed"}})
 
     try:
         upscale_result = await strategy.confirm_draft(draft_id)
@@ -2832,12 +2836,17 @@ async def reject_draft(
                 status_code=403,
                 detail={"error": {"code": "forbidden", "message": "Only draft owner can reject"}}
             )
+        # Fail-closed: if draft has no owner metadata, deny action
+        if not draft_user_id and not draft_group_id:
+            raise HTTPException(
+                status_code=403,
+                detail={"error": {"code": "forbidden", "message": "Draft ownership metadata missing"}}
+            )
     except HTTPException:
         raise
     except Exception as exc:
-        logger.warning("Draft ownership check failed: %s", exc)
-        # If we can't verify ownership, allow admin action (defensive fallback)
-
+        logger.error("Draft ownership check failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Failed to verify draft ownership"}})
     try:
         new_draft = await strategy.reject_draft(draft_id)
     except Exception as exc:

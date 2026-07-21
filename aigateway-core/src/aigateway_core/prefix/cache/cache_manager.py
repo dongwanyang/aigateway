@@ -5,7 +5,7 @@ Moved from ``aigateway_core.caching`` as part of the 总分总 runtime split
 
 Three-tier cache:
 - L1: in-process LRUCache (cachetools)
-- L2: Redis String (LZ4 compression)
+- L2: Redis Stack RediSearch BM25 (approximate prompt matching)
 - L3: Qdrant vector similarity search
 
 Backfill strategy:
@@ -18,13 +18,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import lz4.frame
 import threading
 import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from cachetools import LRUCache
 
+from . import l2_search
 from .cache_keys import _bucket_max_tokens, _bucket_temperature, _model_family
 
 logger = logging.getLogger(__name__)
@@ -52,7 +52,7 @@ class CacheManager:
     """Three-tier cache manager.
 
     L1 — in-process LRUCache (cachetools)
-    L2 — Redis String (LZ4 compression)
+    L2 — Redis Stack RediSearch BM25 (approximate prompt matching)
     L3 — Qdrant vector similarity search
 
     Capacity protection:
@@ -94,8 +94,8 @@ class CacheManager:
         self.l2_max_value_bytes = l2_max_value_bytes
         self.l3_min_token_count = l3_min_token_count
 
-        # L2 and L3 clients (externally injected, to avoid circular deps)
-        self._redis_client: Any = None  # RedisClientManager
+        # Clients (externally injected, to avoid circular deps)
+        self._redis_client: Any = None  # RedisClientManager (for L2 BM25)
         self._qdrant_client: Any = None  # QdrantClientManager
 
     def set_redis_client(self, client: Any) -> None:
@@ -144,68 +144,70 @@ class CacheManager:
             logger.debug("L1 缓存写入: key=%s", key[:16])
 
     # ------------------------------------------------------------------
-    # L2: Redis KV cache (LZ4 compression)
+    # L2: Redis Stack RediSearch BM25 (approximate prompt matching)
     # ------------------------------------------------------------------
 
-    def _compress(self, data: str) -> bytes:
-        """Compress data with LZ4.
-
-        DB_SCHEMA §3: L2 cache uses LZ4 compression
-        """
-        return lz4.frame.compress(
-            data.encode("utf-8"),
-            compression_level=9,
-            store_size=False,
-        )
-
-    def _decompress(self, data: bytes) -> str:
-        """Decompress LZ4-compressed data."""
-        return lz4.frame.decompress(data).decode("utf-8")
-
-    async def l2_get(self, key: str) -> Optional[str]:
-        """Read from L2 Redis cache.
-
-        DB_SCHEMA §3: Key format aigateway:cache:v2:{cache_key_hash}
-        (v1 prefix deprecated; v2 adds pipeline_kind / model_family /
-         parameter bucketing / cache_scope layering — see generate_cache_key docs)
+    async def l2_search_get(
+        self,
+        normalized_prompt: str,
+        pipeline_kind: str,
+        model_family: str,
+        cache_scope: str,
+        scope_id: str,
+        top_k: int = l2_search.L2_DEFAULT_TOP_K,
+        min_score: float = l2_search.L2_DEFAULT_MIN_SCORE,
+    ) -> Optional[str]:
+        """L2 BM25 查询: 按相似 prompt 检索缓存响应.
 
         Args:
-            key: cache key (SHA-256 hash).
+            normalized_prompt: JSON 序列化的 messages 数组.
+            pipeline_kind / model_family / cache_scope / scope_id: 过滤维度.
+            top_k: RediSearch 返回上限.
+            min_score: BM25 分数阈值.
 
         Returns:
-            Response JSON string, None if miss.
+            命中的响应 JSON 字符串; 未命中返回 None.
         """
         if self._redis_client is None:
             logger.warning("L2 缓存: Redis 客户端未初始化")
             return None
 
-        redis_key = f"aigateway:cache:v2:{key}"
-        raw = await self._redis_client.redis.get(redis_key)
-        if raw is None:
-            logger.debug("L2 缓存未命中: key=%s", key[:16])
+        result = await l2_search.search(
+            self._redis_client.redis,
+            normalized_prompt=normalized_prompt,
+            pipeline_kind=pipeline_kind,
+            model_family=model_family,
+            cache_scope=cache_scope,
+            scope_id=scope_id,
+            top_k=top_k,
+            min_score=min_score,
+        )
+        if result is None:
             return None
-
-        try:
-            decompressed = self._decompress(raw)
-            logger.debug("L2 缓存命中: key=%s", key[:16])
-            return decompressed
-        except Exception as exc:
-            logger.error("L2 缓存解压失败: key=%s, error=%s", key[:16], exc)
+        # result 是 response_json 字段（直接存在 Hash 中）
+        value = result.get("response_json", "")
+        if not value:
             return None
+        logger.debug("L2 BM25 命中: score=%.4f key=%s", result.get("score", 0), normalized_prompt[:16])
+        return value
 
-    async def l2_set(self, key: str, value: str, ttl: Optional[int] = None) -> None:
-        """Write to L2 Redis cache, with large-object filter.
+    async def l2_search_store(
+        self,
+        key: str,
+        value: str,
+        meta: Dict[str, Any],
+        ttl: Optional[int] = None,
+    ) -> None:
+        """写入 L2 BM25 缓存索引项.
 
-        DB_SCHEMA §3:
-        - Key format: aigateway:cache:v2:{cache_key_hash}
-          (v1 deprecated, see generate_cache_key docs)
-        - TTL default 3600 seconds, set by prompt_cache.config.ttl
-        - Compression: LZ4
+        将 response_json 和过滤维度写入 RediSearch 索引 Hash，同时设置 TTL.
 
         Args:
-            key: cache key (SHA-256 hash).
+            key: cache key hash (用于日志/调试).
             value: full OpenAI-format response JSON string.
-            ttl: time-to-live (seconds), defaults to l2_default_ttl.
+            meta: 含 normalized_prompt / pipeline_kind / model_family /
+                cache_scope / scope_id.
+            ttl: TTL 秒数，默认 l2_default_ttl.
         """
         if self._redis_client is None:
             logger.warning("L2 缓存: Redis 客户端未初始化")
@@ -216,13 +218,21 @@ class CacheManager:
             logger.debug("L2 跳过: value 过大 (%d bytes > %d)", value_size, self.l2_max_value_bytes)
             return
 
-        ttl = ttl or self.l2_default_ttl
-        redis_key = f"aigateway:cache:v2:{key}"
-
-        compressed = self._compress(value)
-
-        await self._redis_client.redis.set(redis_key, compressed, ex=ttl)
-        logger.debug("L2 缓存写入: key=%s ttl=%ds", key[:16], ttl)
+        try:
+            await l2_search.store(
+                client=self._redis_client.redis,
+                key=key,
+                value=value,
+                normalized_prompt=meta.get("normalized_prompt", ""),
+                pipeline_kind=meta.get("pipeline_kind", "understanding"),
+                model_family=meta.get("model_family", ""),
+                cache_scope=meta.get("cache_scope", "group"),
+                scope_id=meta.get("scope_id", ""),
+                ttl_seconds=ttl or self.l2_default_ttl,
+            )
+            logger.debug("L2 BM25 写入: key=%s ttl=%ds", key[:16], ttl or self.l2_default_ttl)
+        except Exception as exc:
+            logger.warning("L2 BM25 写入失败: %s", exc)
 
     # ------------------------------------------------------------------
     # L3: Qdrant vector cache
@@ -371,8 +381,9 @@ class CacheManager:
         user_id: str,
         token_count: int,
         compute_embedding_fn: Optional[Callable[[str], Awaitable[List[float]]]] = None,
+        meta: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """All-miss backfill: L1 + L2 sync, L3 conditional async.
+        """All-miss backfill: L1 + L2 BM25, L3 conditional async.
 
         Args:
             key: cache key.
@@ -382,11 +393,14 @@ class CacheManager:
             user_id: user ID.
             token_count: request token count.
             compute_embedding_fn: async function to compute embedding.
+            meta: L2 BM25 索引元数据 (normalized_prompt / pipeline_kind /
+                model_family / cache_scope / scope_id).
         """
         # L1 backfill (with large-object filter)
         self.l1_set(key, response_json)
-        # L2 backfill (with large-object filter + TTL)
-        await self.l2_set(key, response_json)
+        # L2 BM25 backfill (with large-object filter + TTL)
+        if meta:
+            await self.l2_search_store(key, response_json, meta)
 
         # L3 backfill: only for high-token requests (save embedding compute)
         if compute_embedding_fn is not None and token_count >= self.l3_min_token_count:
@@ -507,8 +521,9 @@ class CacheManager:
                 other kwargs included sorted by key (forward-compatible tests).
 
         Returns:
-            64-hex-char SHA-256 hash string. Prefix is prepended by l2_set/l2_get
-            as `aigateway:cache:v2:`.
+            64-hex-char SHA-256 hash string. Used as cache key for L1 and
+            for L2 BM25 index entry identification (Redis Stack Hash key is
+            ``aigateway:cache:v2search:{key}``).
         """
         # Bucket sampling params
         temperature = params.pop("temperature", None)
@@ -578,13 +593,23 @@ class CacheManager:
             _emit_cache_debug(key, "L1", _start, "ok")
             return {"hit_tier": "L1", "value": cached, "meta": params}
 
-        # L2 query
-        l2_value = await self.l2_get(key)
-        if l2_value is not None:
-            # L2 hit → backfill L1
-            await self.backfill_on_l2_hit(key, l2_value)
-            _emit_cache_debug(key, "L2", _start, "ok")
-            return {"hit_tier": "L2", "value": l2_value, "meta": params}
+        # L2 BM25 查询 (纯近似匹配，无精确哈希快路径)
+        l2_search_meta = params.get("l2_search")
+        if isinstance(l2_search_meta, dict) and l2_search_meta.get("normalized_prompt"):
+            l2_value = await self.l2_search_get(
+                normalized_prompt=l2_search_meta["normalized_prompt"],
+                pipeline_kind=l2_search_meta.get("pipeline_kind", "understanding"),
+                model_family=l2_search_meta.get("model_family", ""),
+                cache_scope=l2_search_meta.get("cache_scope", "group"),
+                scope_id=l2_search_meta.get("scope_id", ""),
+                top_k=l2_search_meta.get("top_k", l2_search.L2_DEFAULT_TOP_K),
+                min_score=l2_search_meta.get("min_score", l2_search.L2_DEFAULT_MIN_SCORE),
+            )
+            if l2_value is not None:
+                # L2 hit → backfill L1
+                await self.backfill_on_l2_hit(key, l2_value)
+                _emit_cache_debug(key, "L2", _start, "ok")
+                return {"hit_tier": "L2", "value": l2_value, "meta": params}
 
         # L3 query (semantic cache, needs vector computed first)
         if "vector" in params:
@@ -610,6 +635,18 @@ class CacheManager:
                 token_count = extra.get("token_count", 0)
                 compute_embedding_fn = extra.get("compute_embedding_fn")
 
+                # 构造 L2 BM25 元数据（从 params 中取）
+                l2_meta = None
+                l2_search_meta = params.get("l2_search")
+                if isinstance(l2_search_meta, dict) and l2_search_meta.get("normalized_prompt"):
+                    l2_meta = {
+                        "normalized_prompt": l2_search_meta["normalized_prompt"],
+                        "pipeline_kind": l2_search_meta.get("pipeline_kind", "understanding"),
+                        "model_family": l2_search_meta.get("model_family", ""),
+                        "cache_scope": l2_search_meta.get("cache_scope", "group"),
+                        "scope_id": l2_search_meta.get("scope_id", ""),
+                    }
+
                 await self.backfill_on_miss(
                     key=key,
                     response_json=value_str,
@@ -618,6 +655,7 @@ class CacheManager:
                     user_id=params.get("user_id", ""),
                     token_count=token_count,
                     compute_embedding_fn=compute_embedding_fn,
+                    meta=l2_meta,
                 )
                 _emit_cache_debug(key, "MISS", _start, "ok")
                 return {"hit_tier": "MISS", "value": value_str, "meta": extra}

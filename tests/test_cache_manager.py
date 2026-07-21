@@ -162,67 +162,92 @@ class TestL1Cache:
 
 
 # ==================================================================
-# L2 缓存测试 (mocked Redis)
+# L2 缓存测试 (BM25 RediSearch, mocked)
 # ==================================================================
 
 
 class TestL2Cache:
     def setup_method(self):
         self.cm = CacheManager()
-        self.mock_redis = AsyncMock()
-        self.mock_redis.get = AsyncMock(return_value=None)
-        self.cm.set_redis_client(type("Obj", (), {"redis": self.mock_redis})())
+        # Mock redis client with ft() method for RediSearch
+        self.mock_redis_client = MagicMock()
+        self.mock_redis_client.redis = AsyncMock()
+        self.cm.set_redis_client(self.mock_redis_client)
 
     @pytest.mark.asyncio
-    async def test_l2_miss_without_redis(self):
+    async def test_l2_search_get_without_redis(self):
         cm = CacheManager()
-        result = await cm.l2_get("any")
+        result = await cm.l2_search_get(
+            normalized_prompt='[{"content":"test"}]',
+            pipeline_kind="understanding",
+            model_family="gpt-4o",
+            cache_scope="group",
+            scope_id="",
+        )
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_l2_set_without_redis(self):
+    async def test_l2_search_store_without_redis(self):
         cm = CacheManager()
-        await cm.l2_set("key", "value")
-        # Verify the value was NOT stored in L1 (l2_set doesn't backfill L1)
-        assert cm.l1_get("key") is None
+        await cm.l2_search_store("key", "value", meta={})
+        assert cm._redis_client is None
 
     @pytest.mark.asyncio
-    async def test_l2_get_returns_none_when_no_redis(self):
-        cm = CacheManager()
-        result = await cm.l2_get("key")
-        assert result is None
-
-    @pytest.mark.asyncio
-    async def test_l2_roundtrip(self):
-        """L2 写入后应能读出（LZ4 压缩/解压往返）。"""
+    async def test_l2_search_store_with_meta(self):
+        """L2 BM25 写入应调用 l2_search.store."""
         value = '{"data": "test_value"}'
-        compressed = self.cm._compress(value)
+        meta = {
+            "normalized_prompt": '[{"role":"user","content":"test prompt"}]',
+            "pipeline_kind": "understanding",
+            "model_family": "gpt-4o",
+            "cache_scope": "group",
+            "scope_id": "user1",
+        }
+        with patch("aigateway_core.prefix.cache.l2_search.store") as mock_store:
+            mock_store.return_value = None
+            await self.cm.l2_search_store("test-key", value, meta)
+            mock_store.assert_called_once()
 
-        self.mock_redis.get = AsyncMock(return_value=compressed)
-        result = await self.cm.l2_get("test-key")
-        assert result == value
+    @pytest.mark.asyncio
+    async def test_l2_search_get_returns_none_on_miss(self):
+        """L2 BM25 查询 miss 时返回 None."""
+        with patch("aigateway_core.prefix.cache.l2_search.search") as mock_search:
+            mock_search.return_value = None
+            result = await self.cm.l2_search_get(
+                normalized_prompt='[{"content":"test"}]',
+                pipeline_kind="understanding",
+                model_family="gpt-4o",
+                cache_scope="group",
+                scope_id="",
+            )
+            assert result is None
+
+    @pytest.mark.asyncio
+    async def test_l2_search_get_returns_value_on_hit(self):
+        """L2 BM25 查询 hit 时返回 response_json."""
+        with patch("aigateway_core.prefix.cache.l2_search.search") as mock_search:
+            mock_search.return_value = {
+                "id": "doc-1",
+                "score": 2.5,
+                "response_json": '{"choices": [...]}',
+            }
+            result = await self.cm.l2_search_get(
+                normalized_prompt='[{"content":"test"}]',
+                pipeline_kind="understanding",
+                model_family="gpt-4o",
+                cache_scope="group",
+                scope_id="",
+            )
+            assert result == '{"choices": [...]}'
 
     @pytest.mark.asyncio
     async def test_l2_large_object_skipped(self):
+        """超过 L2_MAX_VALUE_BYTES 的条目应被跳过."""
         big = "x" * (L2_MAX_VALUE_BYTES + 1)
-        await self.cm.l2_set("big", big)
-        # Should not call redis.set for oversized objects
-        self.mock_redis.set.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_l2_decompress_failure_returns_none(self):
-        self.mock_redis.get = AsyncMock(return_value=b"corrupted-data")
-        result = await self.cm.l2_get("key")
-        assert result is None
-
-    @pytest.mark.asyncio
-    async def test_l2_set_with_ttl(self):
-        value = "ttl-test"
-        self.mock_redis.set = AsyncMock(return_value=None)
-        await self.cm.l2_set("ttl-key", value, ttl=1800)
-        self.mock_redis.set.assert_called_once()
-        call_args = self.mock_redis.set.call_args
-        assert call_args[1]["ex"] == 1800 or call_args[0][2] == 1800
+        meta = {"normalized_prompt": '[{"content":"test"}]'}
+        with patch("aigateway_core.prefix.cache.l2_search.store") as mock_store:
+            await self.cm.l2_search_store("big", big, meta)
+            mock_store.assert_not_called()
 
 
 # ==================================================================
@@ -395,16 +420,30 @@ class TestCacheGet:
 
     @pytest.mark.asyncio
     async def test_get_l2_hit_backfills_l1(self):
+        """L2 BM25 命中后应回填 L1."""
         mock_redis = AsyncMock()
-        compressed = self.cm._compress("l2-value")
-        mock_redis.get = AsyncMock(return_value=compressed)
         self.cm.set_redis_client(type("Obj", (), {"redis": mock_redis})())
 
-        result = await self.cm.get("l2key")
-        assert result is not None
-        assert result["hit_tier"] == "L2"
-        # L1 should now have the value too
-        assert self.cm.l1_get("l2key") == "l2-value"
+        with patch("aigateway_core.prefix.cache.l2_search.search") as mock_search:
+            mock_search.return_value = {
+                "id": "doc-1",
+                "score": 2.5,
+                "response_json": '{"choices": [...]}',
+            }
+            result = await self.cm.get(
+                "l2key",
+                l2_search={
+                    "normalized_prompt": '[{"role":"user","content":"test prompt"}]',
+                    "pipeline_kind": "understanding",
+                    "model_family": "gpt-4o",
+                    "cache_scope": "group",
+                    "scope_id": "",
+                },
+            )
+            assert result is not None
+            assert result["hit_tier"] == "L2"
+            # L1 should now have the value too
+            assert self.cm.l1_get("l2key") == '{"choices": [...]}'
 
     @pytest.mark.asyncio
     async def test_get_miss_calls_value_fn(self):
