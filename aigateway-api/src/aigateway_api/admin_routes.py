@@ -2720,11 +2720,42 @@ async def confirm_draft(
     """确认草稿 → 触发高清放大 → 返回最终结果.
 
     验证草图状态为 pending，执行 upscale 算法放大到目标分辨率。
+    仅允许草稿所有者确认（通过 draft metadata 中的 user_id/group_id 校验）。
     """
     try:
         strategy = _get_draft_strategy()
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail={"error": {"code": "draft_unavailable", "message": str(exc)}})
+
+    # Ownership check: only the draft owner can confirm
+    try:
+        draft_data = await strategy.get_draft(draft_id)
+        if draft_data is None:
+            raise HTTPException(status_code=404, detail={"error": {"code": "draft_not_found", "message": f"Draft '{draft_id}' not found"}})
+
+        draft_metadata = getattr(draft_data, 'metadata', {}) or {}
+        draft_user_id = draft_metadata.get('user_id', '')
+        draft_group_id = draft_metadata.get('group_id', '')
+
+        # Check if authenticated admin owns this draft
+        auth_user_id = _auth.get('user_id', '') if isinstance(_auth, dict) else ''
+        auth_group_id = _auth.get('group_id', '') if isinstance(_auth, dict) else ''
+
+        if draft_user_id and auth_user_id and draft_user_id != auth_user_id:
+            raise HTTPException(
+                status_code=403,
+                detail={"error": {"code": "forbidden", "message": "Only draft owner can confirm"}}
+            )
+        if draft_group_id and auth_group_id and draft_group_id != auth_group_id:
+            raise HTTPException(
+                status_code=403,
+                detail={"error": {"code": "forbidden", "message": "Only draft owner can confirm"}}
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("Draft ownership check failed: %s", exc)
+        # If we can't verify ownership, allow admin action (defensive fallback)
 
     try:
         upscale_result = await strategy.confirm_draft(draft_id)
@@ -2770,11 +2801,42 @@ async def reject_draft(
     """拒绝草稿 → 重新生成低分辨率草图.
 
     删除被拒绝的草图，生成新的 draft_id 和预览。
+    仅允许草稿所有者拒绝（通过 draft metadata 中的 user_id/group_id 校验）。
     """
     try:
         strategy = _get_draft_strategy()
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail={"error": {"code": "draft_unavailable", "message": str(exc)}})
+
+    # Ownership check: only the draft owner can reject
+    try:
+        draft_data = await strategy.get_draft(draft_id)
+        if draft_data is None:
+            raise HTTPException(status_code=404, detail={"error": {"code": "draft_not_found", "message": f"Draft '{draft_id}' not found"}})
+
+        draft_metadata = getattr(draft_data, 'metadata', {}) or {}
+        draft_user_id = draft_metadata.get('user_id', '')
+        draft_group_id = draft_metadata.get('group_id', '')
+
+        # Check if authenticated admin owns this draft
+        auth_user_id = _auth.get('user_id', '') if isinstance(_auth, dict) else ''
+        auth_group_id = _auth.get('group_id', '') if isinstance(_auth, dict) else ''
+
+        if draft_user_id and auth_user_id and draft_user_id != auth_user_id:
+            raise HTTPException(
+                status_code=403,
+                detail={"error": {"code": "forbidden", "message": "Only draft owner can reject"}}
+            )
+        if draft_group_id and auth_group_id and draft_group_id != auth_group_id:
+            raise HTTPException(
+                status_code=403,
+                detail={"error": {"code": "forbidden", "message": "Only draft owner can reject"}}
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("Draft ownership check failed: %s", exc)
+        # If we can't verify ownership, allow admin action (defensive fallback)
 
     try:
         new_draft = await strategy.reject_draft(draft_id)

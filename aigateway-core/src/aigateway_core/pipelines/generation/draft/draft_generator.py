@@ -1110,9 +1110,10 @@ class DraftGeneratorStrategy:
 
         # Placeholder: generate a minimal PNG-like header + content indicator
         # In production, this calls the actual generation model at draft resolution
+        # NOTE: prompt content intentionally omitted to prevent PII/secrets leakage
+        # through preview image bytes returned to any caller.
         placeholder = (
             f"DRAFT_PREVIEW:image:{width}x{height}:"
-            f"prompt={request.prompt[:50]}:"
             f"id={request.request_id}"
         ).encode("utf-8")
         return placeholder

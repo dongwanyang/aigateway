@@ -196,21 +196,25 @@ class TaskTracker:
         Returns:
             活跃任务列表
         """
-        # 扫描所有匹配前缀的 key
-        pattern = f"{_TASK_KEY_PREFIX}:{task_type}:*" if task_type else f"{_TASK_KEY_PREFIX}:*:*"
-
         if self._redis_client is not None:
-            keys = await self._redis_client.keys(pattern)
+            # Use SCAN instead of KEYS to avoid blocking the event loop.
+            # KEYS pattern is O(N) over all keys and blocks the single uvicorn worker.
+            pattern = f"{_TASK_KEY_PREFIX}:{task_type}:*" if task_type else f"{_TASK_KEY_PREFIX}:*:*"
             tasks = []
-            for key in keys:
-                raw = await self._redis_client.get(key)
-                if raw:
-                    if isinstance(raw, bytes):
-                        raw = raw.decode("utf-8")
-                    try:
-                        tasks.append(json.loads(raw))
-                    except (json.JSONDecodeError, TypeError):
-                        continue
+            cursor = "0"
+            while True:
+                cursor, keys = await self._redis_client.scan(cursor=cursor, match=pattern, count=100)
+                for key in keys:
+                    raw = await self._redis_client.get(key)
+                    if raw:
+                        if isinstance(raw, bytes):
+                            raw = raw.decode("utf-8")
+                        try:
+                            tasks.append(json.loads(raw))
+                        except (json.JSONDecodeError, TypeError):
+                            continue
+                if cursor == "0":
+                    break
             return tasks
         else:
             # 内存模式：解析 JSON 后按 task_type 字段过滤。
