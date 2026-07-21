@@ -41,7 +41,7 @@ import yaml
 from starlette.testclient import TestClient
 
 # Paths
-REPO_ROOT = Path(__file__).parent.parent.resolve()
+REPO_ROOT = Path(__file__).parent.parent.parent.resolve()
 CONFIG_PATH = REPO_ROOT / "config.yaml"
 BACKUP_PATH = REPO_ROOT / "config.yaml.test-bak"
 REPORT_PATH = REPO_ROOT / "docs" / "test" / "plugin_debug_test_report.md"
@@ -58,6 +58,7 @@ HEADERS = {"Authorization": f"Bearer {ADMIN_KEY}"}
 # previous "gpt-4o" was never registered → every request 404'd before reaching
 # the pipeline, so no debug events were ever emitted.
 CHAT_MODEL = "agnes-2.0-flash"
+
 
 # Base chat request template
 CHAT_REQUEST = {

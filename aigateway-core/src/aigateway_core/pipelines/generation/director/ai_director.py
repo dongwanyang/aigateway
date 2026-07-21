@@ -90,6 +90,7 @@ class AIDirectorStrategy:
         litellm_bridge: Any = None,
         rewrite_prompt: Optional[str] = None,
         expand_prompt: Optional[str] = None,
+        model_selector: Any = None,
     ) -> None:
         """初始化 AI Director 策略.
 
@@ -99,11 +100,15 @@ class AIDirectorStrategy:
                 optimize_prompt 将直接返回原始 prompt。
             rewrite_prompt: 自定义改写系统提示词（可选，默认使用内置模板）
             expand_prompt: 自定义扩展系统提示词（可选，默认使用内置模板）
+            model_selector: ModelSelector 实例（可选），用于选择内部 LLM 调用模型。
+                如果提供，_do_optimize 会调用 selector.select_text_model() 而非
+                固定使用 config.rewrite_model。
         """
         self._config = config
         self._litellm_bridge = litellm_bridge
         self._rewrite_prompt = rewrite_prompt or self.DEFAULT_REWRITE_PROMPT
         self._expand_prompt = expand_prompt or self.DEFAULT_EXPAND_PROMPT
+        self._model_selector = model_selector
 
     async def optimize_prompt(
         self,
@@ -243,13 +248,22 @@ class AIDirectorStrategy:
             span_id=ctx.request_id,
         )
 
-        # Call the low-cost text model via litellm_bridge
+        # Decide which model to use for the internal bridge call
+        rewrite_model = config.rewrite_model
+        if self._model_selector is not None:
+            try:
+                rewrite_model = await self._model_selector.select_text_model()
+            except Exception as exc:
+                logger.warning(
+                    "ai_director: model_selector failed %s, falling back to config.rewrite_model", exc
+                )
         response = await self._litellm_bridge.completion(
             messages=messages,
-            model=config.rewrite_model,
+            model=rewrite_model,
             temperature=0.7,
             max_tokens=config.max_prompt_length,
             extra_headers=extra_headers,
+            intent="understanding",
         )
 
         # Extract the optimized prompt from the response
@@ -271,7 +285,7 @@ class AIDirectorStrategy:
         return PromptOptimizationResult(
             optimized_prompt=optimized_text,
             original_prompt=prompt,
-            model_used=config.rewrite_model,
+            model_used=rewrite_model,
             cost_usd=cost_usd,
         )
 

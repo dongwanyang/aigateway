@@ -10,6 +10,7 @@ import Cache from '@/pages/Cache'
 import Logs from '@/pages/Logs'
 import Knowledge from '@/pages/Knowledge'
 import Config from '@/pages/Config'
+import Chat from '@/pages/Chat'
 import { ThemeProvider } from '@/hooks/useTheme'
 
 export default function App() {
@@ -27,6 +28,7 @@ export default function App() {
             <Route path="/logs" element={<PageErrorBoundary><Logs /></PageErrorBoundary>} />
             <Route path="/knowledge" element={<PageErrorBoundary><Knowledge /></PageErrorBoundary>} />
             <Route path="/config" element={<PageErrorBoundary><Config /></PageErrorBoundary>} />
+            <Route path="/chat" element={<PageErrorBoundary><Chat /></PageErrorBoundary>} />
           </Routes>
         </Layout>
       </BrowserRouter>

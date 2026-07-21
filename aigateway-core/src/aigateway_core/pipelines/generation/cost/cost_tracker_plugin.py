@@ -155,19 +155,20 @@ class CostTrackerPlugin:
                 },
             )
 
-            # 发 TraceEvent(成功)
-            from aigateway_core.pipelines.generation.registration import emit_plugin_event
-
-            emit_plugin_event(ctx, self.name, duration_ms, "ok")
+            # 记录插件 trace（业务 metadata）
+            ctx.add_plugin_trace(
+                "cost_tracker", duration_ms, "success",
+                payload={
+                    "total_saving_usd": record.total_saving_usd,
+                    "model_routing_saving_usd": record.model_routing_saving_usd,
+                    "token_compression_saving_usd": record.token_compression_saving_usd,
+                    "prompt_optimization_saving_usd": record.prompt_optimization_saving_usd,
+                },
+            )
 
         except Exception as exc:
             # 任何错误不阻断管线，记录零节省 (需求 7.5)
             duration_ms = (time.monotonic() - start_time) * 1000.0
-
-            # 发 TraceEvent(失败)
-            from aigateway_core.pipelines.generation.registration import emit_plugin_event
-
-            emit_plugin_event(ctx, self.name, duration_ms, "error")
 
             logger.warning(
                 "generation_optimization.cost_tracker.error",

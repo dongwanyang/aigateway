@@ -42,8 +42,7 @@ from aigateway_core.shared.metrics import get_metrics_collector
 from aigateway_core.shared.plugin_registry import PluginRegistry
 from aigateway_core.shared.qdrant_client import QdrantClientManager
 from aigateway_core.shared.redis_client import RedisClientManager
-from aigateway_core.shared.auth.key_store import KeyStore
-from aigateway_core.shared.auth.group_store import GroupStore
+from aigateway_core.shared.auth.sqlite_store import SQLiteStore
 
 logger = logging.getLogger(__name__)
 
@@ -302,52 +301,48 @@ async def lifespan(app: "FastAPI"):
         logger.warning("Qdrant 连接失败，语义缓存功能不可用: %s", exc)
         qdrant_mgr = None  # type: ignore[assignment]
 
-    # 初始化 KeyStore
-    key_store: Optional[KeyStore] = None
-    if redis_mgr is not None:
-        key_store = KeyStore(redis=redis_mgr)
-        logger.info("KeyStore 初始化完成")
+    # 初始化 SQLite auth store (API Keys, Groups, Quotas)
+    sqlite_store: Optional[SQLiteStore] = None
+    try:
+        sqlite_store = SQLiteStore()
+        logger.info("SQLiteStore 初始化完成: %s", sqlite_store.db_path)
 
-        # 从 config.yaml 导入 API Key 到 Redis
+        # Seed from config.yaml if DB is empty
         auth_config = config_manager.get("auth", {})
         api_keys_config = auth_config.get("api_keys", [])
         if api_keys_config:
-            seeded = await key_store.seed_from_config(api_keys_config)
-            logger.info("已从 config.yaml 导入 %d 个 API Key 到 Redis", seeded)
+            seeded = await sqlite_store.seed_from_config(api_keys_config)
+            logger.info("已从 config.yaml 导入 %d 个 API Key 到 SQLite", seeded)
 
-    # 初始化 GroupStore + 默认组 + 迁移无组 Key
-    group_store: Optional[GroupStore] = None
-    if key_store is not None and redis_mgr is not None:
-        try:
-            group_store = GroupStore(redis=redis_mgr)
-            await group_store.ensure_default_group()
-            # auto-create groups from config seed (skip 'default' — already ensured)
-            for cfg_grp in (config_manager.get("auth", {}) or {}).get("groups", []) or []:
-                gname = (cfg_grp or {}).get("name") or ""
-                if gname and gname.lower() != "default":
-                    # Strip 'name' and 'quotas' nesting — config has flat fields
-                    if cfg_grp:
+        # Ensure default group + auto-create groups from config
+        if api_keys_config:
+            try:
+                await sqlite_store.ensure_default_group()
+                for cfg_grp in auth_config.get("groups", []) or []:
+                    gname = (cfg_grp or {}).get("name") or ""
+                    if gname and gname.lower() != "default":
                         quotas = dict(cfg_grp)
                         quotas.pop("name", None)
-                        quotas.pop("quotas", None)  # nested form not used in config
-                    else:
-                        quotas = {}
-                    try:
-                        await group_store.create_group(gname, quotas or None)
-                    except ValueError:
-                        pass  # already exists
-            # also auto-create groups referenced in config api_keys[].group
-            for cfg_key in (config_manager.get("auth", {}) or {}).get("api_keys", []) or []:
-                gname = (cfg_key or {}).get("group") or ""
-                if gname:
-                    try:
-                        await group_store.create_group(gname, {})
-                    except ValueError:
-                        pass  # already exists
-            await key_store.migrate_groups(group_store)
-            logger.info("GroupStore 初始化完成")
-        except Exception as exc:
-            logger.warning("GroupStore 初始化失败: %s", exc)
+                        quotas.pop("quotas", None)
+                        try:
+                            await sqlite_store.create_group(gname, quotas or None)
+                        except ValueError:
+                            pass
+                for cfg_key in api_keys_config:
+                    gname = (cfg_key or {}).get("group") or ""
+                    if gname:
+                        try:
+                            await sqlite_store.create_group(gname, {})
+                        except ValueError:
+                            pass
+                # Migrate groupless keys to default group
+                await sqlite_store.migrate_groups(sqlite_store)
+                logger.info("SQLiteStore 组初始化完成")
+            except Exception as exc:
+                logger.warning("SQLiteStore 组初始化失败: %s", exc)
+    except Exception as exc:
+        logger.error("SQLiteStore 初始化失败: %s", exc)
+        raise
 
     # 初始化 CacheManager
     cache_config = config_manager.get("plugins", [])
@@ -499,6 +494,30 @@ async def lifespan(app: "FastAPI"):
     except Exception as exc:
         logger.warning("LiteLLM Bridge 初始化失败（部分功能不可用）: %s", exc)
 
+    # ---- IntentClassifier + ModelSelector wiring ----
+    # classify_request 调 intent_classifier.classify() 做意图预判(understanding |
+    # generation:image | generation:video)。model_selector 供 intent_classifier
+    # 选内部 LLM 调用模型。两者挂到 app.state,RequestDispatcher.__init__ 通过
+    # state.get("intent_classifier") 取用(见 openai_compat.py 的 _get_app_state)。
+    intent_classifier = None
+    model_selector = None
+    if litellm_bridge is not None:
+        try:
+            from aigateway_core.dispatch.intent_classifier import IntentClassifier
+            from aigateway_core.route.model_resolution.model_selector import ModelSelector
+            ic_cfg = config_manager.get("intent_classifier", {}) or {}
+            ms_cfg = config_manager.get("model_selector", {}) or {}
+            model_selector = ModelSelector(
+                bridge=litellm_bridge, config=ms_cfg,
+                default_model=ic_cfg.get("model", "agnes-2.0-flash"),
+            )
+            intent_classifier = IntentClassifier(
+                bridge=litellm_bridge, model_selector=model_selector, config=ic_cfg,
+            )
+            logger.info("IntentClassifier + ModelSelector 初始化完成")
+        except Exception as exc:
+            logger.warning("IntentClassifier 初始化失败: %s", exc)
+
     # 生成管道 wiring：AIDirectorStrategy 延迟绑定 litellm_bridge。
     # register_generation_optimization_plugins 在 bridge 建好前就跑了（在
     # _register_builtin_plugins 内），此处从 registry 取 strategy 单例注入 bridge，
@@ -510,9 +529,33 @@ async def lifespan(app: "FastAPI"):
                 strategy = ai_dir_reg.config.get("strategy")
                 if strategy is not None and hasattr(strategy, "_litellm_bridge"):
                     strategy._litellm_bridge = litellm_bridge
+                    if hasattr(strategy, "_model_selector") and model_selector is not None:
+                        strategy._model_selector = model_selector
                     logger.info("AIDirectorStrategy 已绑定 litellm_bridge（生成管道 wiring）")
         except Exception as exc:
             logger.warning("AIDirectorStrategy 绑定 litellm_bridge 失败: %s", exc)
+
+    # DraftGeneratorStrategy：从 registry 取 strategy 单例，
+    # (1) 延迟绑定 litellm_bridge（用于低分辨率预览生成）—— 仅在 bridge 健康时；
+    # (2) 挂载到 app.state 供 admin routes（/admin/draft/*）查询。
+    # 注意：挂载 app.state 不能依赖 litellm_bridge —— bridge 初始化失败时
+    # strategy 依然存在于 registry，admin 草稿端点应仍可查询状态（只是预览生成降级）。
+    try:
+        draft_reg = plugin_registry._registrations.get("draft_generator")
+        if draft_reg is not None:
+            draft_strategy = draft_reg.config.get("strategy")
+            if draft_strategy is not None:
+                if litellm_bridge is not None and hasattr(draft_strategy, "_litellm_bridge"):
+                    draft_strategy._litellm_bridge = litellm_bridge
+                    logger.info("DraftGeneratorStrategy 已绑定 litellm_bridge")
+                # 两个路由文件用不同的属性名读取 strategy，都挂上以保持兼容：
+                # - admin_routes._get_draft_strategy 读 app.state.draft_strategy
+                # - draft_routes._get_draft_strategy 读 app.state.draft_generator_strategy
+                app.state.draft_strategy = draft_strategy
+                app.state.draft_generator_strategy = draft_strategy
+                logger.info("DraftGeneratorStrategy 已挂载到 app.state")
+    except Exception as exc:
+        logger.warning("DraftGeneratorStrategy 绑定/挂载失败: %s", exc)
 
     # 初始化 PromptTemplateManager
     prompt_template_manager = None
@@ -535,10 +578,27 @@ async def lifespan(app: "FastAPI"):
     except Exception as exc:
         logger.warning("PromptTemplateManager 初始化失败: %s", exc)
 
+    # 初始化 TaskTracker（用于视频/草稿等异步任务的持久化追踪）
+    task_tracker = None
+    try:
+        from .task_tracker import TaskTracker
+        task_tracker = TaskTracker(redis_client=redis_mgr)
+        app.state.task_tracker = task_tracker
+        logger.info("TaskTracker 初始化完成")
+    except Exception as exc:
+        logger.warning("TaskTracker 初始化失败: %s", exc)
+
     # 挂载到 app.state，供 FastAPI 中间件/依赖注入使用
-    app.state.key_store = key_store
-    app.state.group_store = group_store
+    app.state.sqlite_store = sqlite_store
+    app.state.key_store = sqlite_store  # backward compat: admin_routes references key_store
+    app.state.group_store = sqlite_store  # backward compat: admin_routes references group_store
     app.state.config_manager = config_manager
+
+    # 启动时清理一次成本账本（保留 90 天），避免无限增长
+    try:
+        await sqlite_store.prune_ledger(keep_days=90)
+    except Exception as exc:
+        logger.warning("启动清理成本账本失败: %s", exc)
 
     # 初始化 5 维度 Debug 开关(PR2 2026-07-05)。attach 到 ConfigManager.on_reload
     # 后,后续 config.yaml 变更自动 atomic swap;首次加载在 attach 内完成。
@@ -562,6 +622,11 @@ async def lifespan(app: "FastAPI"):
     app.state.pii_detector_plugin = pii_detector_plugin
     app.state.model_router_resolver = model_router_resolver
     app.state.prompt_compress_plugin = prompt_compress_plugin
+
+    # Intent-driven routing (Task 9): RequestDispatcher.__init__ 通过
+    # state.get("intent_classifier") 取用,做 understanding|generation:image|generation:video 分流。
+    app.state.intent_classifier = intent_classifier
+    app.state.model_selector = model_selector
 
     # 初始化两条管道的 PipelineEngine（总分总架构的「分」）
     # understanding: pii/cache/semantic/model_router/compress/rag/conv
@@ -705,6 +770,8 @@ def _mount_routes(app: "FastAPI") -> None:
 
     # /v1/* — OpenAI 兼容接口（需要鉴权）
     app.include_router(openai_compat.router, prefix="/v1", tags=["OpenAI 兼容接口"])
+    from .video_routes import router as video_router
+    app.include_router(video_router, prefix="/v1", tags=["Video"])
 
     # /admin/* — 管理接口（需要管理员鉴权）
     app.include_router(admin_routes.router, prefix="/admin", tags=["管理接口"])

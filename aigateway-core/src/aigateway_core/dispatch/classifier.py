@@ -1,72 +1,58 @@
+"""请求分类 —— 意图驱动路由.
+
+classify_request 调 IntentClassifier(LLM 预判)输出带媒介 pipeline_kind:
+"understanding" | "generation:image" | "generation:video".
+取消 generation_intent 字段、模型名推断、auto 魔法字符串。
+"""
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 
-def _has_multimodal_content(messages: list) -> bool:
-    """messages 是否含 list 类型 content（多模态：图片/音频/视频）。"""
-    for message in messages or []:
-        if isinstance(message, dict) and isinstance(message.get("content"), list):
-            return True
-    return False
+async def classify_request(
+    body: Any,
+    config_manager: Any,
+    intent_classifier: Optional[Any] = None,
+) -> Tuple[str, Optional[str]]:
+    """把请求分类为 understanding | generation:image | generation:video.
 
+    Args:
+        body: ChatCompletionRequest(有 .model/.messages 属性)或 dict.
+        config_manager: 配置管理器(保留参数, 当前未用).
+        intent_classifier: IntentClassifier 实例. None 时默认 understanding.
 
-def _content_modality_hint(messages: list) -> Optional[str]:
-    """从多模态 content 推断模态倾向。"""
-    for message in messages or []:
-        if not isinstance(message, dict):
-            continue
-        content = message.get("content")
-        if not isinstance(content, list):
-            continue
-        for block in content:
-            if isinstance(block, dict):
-                block_type = block.get("type", "")
-                if block_type in ("image_url", "input_image", "image"):
-                    return "generation"
-                if block_type in ("input_audio", "audio"):
-                    return "generation"
-                if block_type in ("video", "input_video"):
-                    return "generation"
-    return None
+    Returns:
+        (pipeline_kind, model_hint) 二元组。model_hint 为预判/客户端指定的
+        模型名(裸名)或 None,由 dispatcher 透传给 bridge。不写入 body,避免污染
+        入参 Pydantic 对象(否则 body 被序列化/缓存/日志会带上内部字段)。
+    """
+    messages = getattr(body, "messages", None)
+    if messages is None and isinstance(body, dict):
+        messages = body.get("messages")
 
+    if intent_classifier is None:
+        logger.debug("classify_request: 无 intent_classifier, 默认 understanding")
+        return "understanding", None
 
-def classify_request(body: Any, config_manager: Any) -> str:
-    """把请求分类为 understanding | generation。"""
-    model = getattr(body, "model", None) or (body.get("model") if isinstance(body, dict) else None)
-    messages = getattr(body, "messages", None) or (body.get("messages") if isinstance(body, dict) else None)
-    generation_intent = getattr(body, "generation_intent", None)
-    if generation_intent is None and isinstance(body, dict):
-        generation_intent = body.get("generation_intent")
+    model = getattr(body, "model", None)
+    if model is None and isinstance(body, dict):
+        model = body.get("model")
 
-    if generation_intent is True:
-        return "generation"
+    try:
+        result = await intent_classifier.classify(messages=messages or [], body_model=model)
+    except Exception as exc:
+        logger.warning("classify_request: intent_classifier 异常 %s, 默认 understanding", exc)
+        return "understanding", None
 
-    if messages and _content_modality_hint(messages) == "generation":
-        return "generation"
+    generation = result.get("generation", "understanding")
+    hint = result.get("hint", "None")
+    model_hint = hint if hint != "None" else None
 
-    if model and model != "auto" and config_manager is not None:
-        try:
-            providers = config_manager.get("providers", {}) or {}
-            for provider in providers.values():
-                if not isinstance(provider, dict):
-                    continue
-                for group in provider.get("model_grouper", []) or []:
-                    if not isinstance(group, dict):
-                        continue
-                    for configured_model in group.get("models", []) or []:
-                        if isinstance(configured_model, dict) and configured_model.get("name") == model:
-                            modalities = configured_model.get("modalities") or configured_model.get("modality")
-                            if modalities:
-                                if isinstance(modalities, str):
-                                    modalities = [modalities]
-                                if "generative" in modalities or "image" in modalities or "video" in modalities:
-                                    return "generation"
-                            return "understanding"
-        except Exception as exc:
-            logger.warning("classify_request 模型推断异常: %s", exc)
-
-    return "understanding"
+    if generation == "image":
+        return "generation:image", model_hint
+    if generation == "video":
+        return "generation:video", model_hint
+    return "understanding", model_hint

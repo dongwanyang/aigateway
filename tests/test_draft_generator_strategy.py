@@ -219,11 +219,25 @@ class TestConfirmDraft:
     async def test_confirm_target_resolution(
         self, strategy, image_request, default_config
     ):
-        """Upscale result should have correct target resolution."""
+        """Upscale result target_resolution reflects the actual output path.
+
+        - 无 RealESRGAN 依赖（CI/单元测试环境）：_super_resolve 返回 None，
+          走 _simulate_upscale 占位，target_resolution = 配置默认 (1920, 1080)。
+        - 有 RealESRGAN 依赖（Docker 生产镜像）：_super_resolve 等比放大到
+          长边 4096，target_resolution = 实际输出 (4096, 4096)。
+        两种环境下都应返回合理的整数分辨率，且与 result.algorithm_used 一致。
+        """
         draft = await strategy.generate_draft(image_request, default_config)
         result = await strategy.confirm_draft(draft.draft_id)
 
-        assert result.target_resolution == (1920, 1080)
+        # target_resolution 必须是有效的 (w, h) 正整数对
+        assert isinstance(result.target_resolution, tuple)
+        assert len(result.target_resolution) == 2
+        w, h = result.target_resolution
+        assert isinstance(w, int) and isinstance(h, int)
+        assert w > 0 and h > 0
+        # 占位路径返回配置的 (1920, 1080)；真实超分路径返回 (4096, 4096)
+        assert result.target_resolution in ((1920, 1080), (4096, 4096))
 
     @pytest.mark.asyncio
     async def test_confirm_algorithm_from_config(

@@ -2,13 +2,63 @@ import { useEffect, useState, useCallback, useMemo, memo, Fragment } from 'react
 import { Search, Filter, Trash2, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, X, Bug, Activity, Clock } from 'lucide-react'
 import Card from '@/components/Card'
 import { getRequestLogs, deleteAllLogs, batchDeleteLogs, getTraceDetail } from '@/api/client'
-import type { LogEntry, TraceDetail } from '@/api/client'
+import type { LogEntry, TraceDetail, TraceEvent } from '@/api/client'
 
 const statusColor = (status: number) => {
   if (status >= 200 && status < 300) return 'badge-success'
   if (status === 429) return 'badge-warning'
   if (status >= 400) return 'badge-danger'
   return 'badge-neutral'
+}
+
+/** 合并后的事件:同一 stage 的 stage/plugin 事件(耗时+状态)与 debug 事件(payload)合并为一行. */
+interface MergedEvent {
+  stage: string
+  kind: string            // 主事件 kind: 'stage' | 'plugin' | 'debug'
+  name: string
+  duration_ms: number
+  status: string          // 取 stage/plugin 事件的 status(执行层视角)
+  payload?: Record<string, unknown> | null
+  hasDebug: boolean       // 是否有配套 debug 事件(控制"调试"标记)
+}
+
+/**
+ * 把 events 按 stage 分组合并,保留首次出现顺序。
+ *
+ * debug 开启时同一 stage 会产生两条事件:
+ *   - kind=stage/plugin:耗时+状态(始终显示)
+ *   - kind=debug:业务 payload(仅 debug 开启)
+ * 合并为一行,主体用 stage/plugin 的耗时+状态,payload 折叠附下。
+ */
+function mergeEvents(events: TraceEvent[]): MergedEvent[] {
+  const order: string[] = []
+  const groups = new Map<string, { primary?: TraceEvent; debug?: TraceEvent }>()
+  for (const e of events) {
+    const stage = e.stage
+    if (!groups.has(stage)) {
+      groups.set(stage, {})
+      order.push(stage)
+    }
+    const g = groups.get(stage)!
+    if (e.kind === 'debug') {
+      if (!g.debug) g.debug = e
+    } else if (e.kind === 'stage' || e.kind === 'plugin') {
+      if (!g.primary) g.primary = e
+    }
+  }
+  return order.map(stage => {
+    const g = groups.get(stage)!
+    const primary = g.primary ?? g.debug!
+    return {
+      stage,
+      kind: primary.kind,
+      name: primary.name,
+      duration_ms: primary.duration_ms,
+      status: primary.status,
+      payload: g.debug?.payload,
+      hasDebug: !!g.debug,
+    }
+  })
 }
 
 // -----------------------------------------------------------------------------
@@ -321,6 +371,9 @@ export default function Logs() {
 
   const formatTime = (ts: number) => new Date(ts * 1000).toLocaleString()
 
+  // 合并同 stage 的 stage/plugin 事件与 debug 事件,debug 开启时每阶段只显示一行
+  const mergedEvents = traceDetail ? mergeEvents(traceDetail.events) : []
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between flex-wrap gap-3">
@@ -536,9 +589,9 @@ export default function Logs() {
 
             <div style={{ marginBottom: 16 }}>
               <h4 className="font-semibold mb-3" style={{ fontSize: 'var(--font-size-sm)' }}>
-                全链路事件 <span style={{ color: 'var(--color-text-tertiary)' }}>({traceDetail.events.length})</span>
+                全链路事件 <span style={{ color: 'var(--color-text-tertiary)' }}>({mergedEvents.length})</span>
               </h4>
-              {traceDetail.events.length === 0 ? (
+              {mergedEvents.length === 0 ? (
                 <div style={{ color: 'var(--color-text-tertiary)', fontSize: 'var(--font-size-sm)', padding: '12px 0' }}>
                   暂无事件数据（旧请求或未启用 TraceCollector）
                 </div>
@@ -548,7 +601,7 @@ export default function Logs() {
                     position: 'absolute', left: 11, top: 6, bottom: 6,
                     width: 2, backgroundColor: 'var(--color-border)',
                   }} />
-                  {traceDetail.events.map((evt, i) => {
+                  {mergedEvents.map((evt, i) => {
                     const kindColor = evt.kind === 'plugin' ? 'var(--color-primary)'
                       : evt.kind === 'stage' ? 'var(--color-success)'
                       : evt.kind === 'debug' ? 'var(--color-warning, #f59e0b)'
@@ -566,8 +619,8 @@ export default function Logs() {
                         <div style={{
                           position: 'absolute', left: 3, top: 12,
                           width: 18, height: 18, borderRadius: '50%',
-                          backgroundColor: evt.status === 'success' || evt.status === 'hit' ? kindColor
-                            : evt.status === 'miss' ? 'var(--color-warning, #f59e0b)'
+                          backgroundColor: evt.status === 'ok' ? kindColor
+                            : evt.status === 'skip' ? 'var(--color-text-quaternary)'
                             : 'var(--color-danger)',
                           border: '2px solid var(--color-bg-elevated)',
                           display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -585,10 +638,21 @@ export default function Logs() {
                           }}>
                             {kindLabel}
                           </span>
-                          <span className={`badge ${evt.status === 'success' || evt.status === 'hit' ? 'badge-success'
-                            : evt.status === 'miss' ? 'badge-warning'
+                          {evt.hasDebug && (
+                            <span className="badge" style={{
+                              backgroundColor: 'var(--color-warning, #f59e0b)22',
+                              color: 'var(--color-warning, #f59e0b)',
+                              fontSize: 'var(--font-size-xs)',
+                            }}>
+                              调试
+                            </span>
+                          )}
+                          <span className={`badge ${evt.status === 'ok' ? 'badge-success'
+                            : evt.status === 'skip' ? ''
                             : 'badge-danger'}`}>
-                            {evt.status}
+                            {evt.status === 'ok' ? '成功'
+                              : evt.status === 'skip' ? '跳过'
+                              : '错误'}
                           </span>
                           <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--font-size-xs)', color: 'var(--color-text-tertiary)' }}>
                             {evt.duration_ms > 0 ? `${evt.duration_ms}ms` : '—'}
@@ -599,7 +663,7 @@ export default function Logs() {
                             </span>
                           )}
                         </div>
-                        {evt.kind === 'debug' && evt.payload && (
+                        {evt.payload && (
                           <details style={{ marginTop: 4, fontSize: 'var(--font-size-xs)', fontFamily: 'var(--font-mono)' }}>
                             <summary style={{ cursor: 'pointer', color: 'var(--color-text-tertiary)' }}>payload</summary>
                             <pre style={{

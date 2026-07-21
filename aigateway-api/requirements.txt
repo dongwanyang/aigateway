@@ -55,6 +55,13 @@ pymupdf
 python-docx
 beautifulsoup4
 
+# --- 渐进式生成: 像素级超分辨率放大(RealESRGAN)---
+# realesrgan 依赖 basicsr; torch/cv2/numpy 已具备(见 Dockerfile 与上方声明)。
+# 权重 RealESRGAN_x4plus.pth(~64MB)由 Dockerfile 预下载到 /app/weights/,
+# 避免运行时从 GitHub 下载(容器内 SSL 握手可能失败)。
+realesrgan
+basicsr
+
 # --- Embedding / 语义缓存(transformers,torch 在 Dockerfile 单独装)---
 transformers>=4.51.0
 sentence-transformers

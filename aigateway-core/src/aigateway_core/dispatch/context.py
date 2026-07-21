@@ -277,7 +277,19 @@ class PipelineContext:
     def get_plugin_trace(self) -> list[dict[str, Any]]:
         return self.extra.get("_plugin_trace", [])  # type: ignore[no-any-return]
 
-    def add_plugin_trace(self, plugin_name: str, duration_ms: float, status: str) -> None:
+    def add_plugin_trace(self, plugin_name: str, duration_ms: float,
+                         status: str = "ok", payload: dict | None = None) -> None:
+        """插件执行完毕后由插件自身调用,补充业务 metadata 到 trace。
+
+        设计:
+        - kind=plugin 事件(耗时+状态)由 PipelineEngine / _run_engine_filtered
+          自动 emit,debug 关闭时也会显示在时间线。
+        - 本方法只发 kind=debug 事件携带业务 payload,仅当对应插件的 debug
+          开关开启时才入库(debug 关闭时静默丢弃,时间线不显示 payload)。
+
+        这样:debug 关闭 → 时间线只有耗时/状态;debug 开启 → 额外显示 payload。
+        """
+        # 1) 同步更新 _plugin_trace 列表（向后兼容 request.state.plugin_trace / _meta）
         trace = self.get_plugin_trace()
         trace.append({
             "plugin_name": plugin_name,
@@ -286,26 +298,22 @@ class PipelineContext:
         })
         self.extra["_plugin_trace"] = trace
 
-        try:
-            from aigateway_core.shared.trace_event import TraceCollector, TraceEvent
-            import time as _time
-            collector = TraceCollector.current()
-            if collector:
-                norm_status = (
-                    "ok" if status == "success"
-                    else ("error" if status == "failed" else "skip")
-                )
-                collector.emit(TraceEvent(
-                    trace_id=self.trace_id,
-                    ts=_time.monotonic(),
-                    stage=plugin_name,
-                    kind="plugin",
-                    name=f"{plugin_name}.execute",
-                    duration_ms=round(duration_ms, 2),
-                    status=norm_status,
-                ))
-        except Exception:
-            pass
+        # 2) 发 kind=debug 事件(仅 debug 开启时入库)
+        from aigateway_core.shared.trace_event import TraceCollector
+        collector = TraceCollector.current()
+        if collector and payload:
+            norm_status = (
+                "ok" if status == "success"
+                else ("error" if status == "failed" else "skip")
+            )
+            collector.emit_debug(
+                stage=plugin_name,
+                name=f"{plugin_name}.execute",
+                duration_ms=duration_ms,
+                status=norm_status,
+                dimension="plugin",
+                payload=payload,
+            )
 
     def to_dict(self) -> Dict[str, Any]:
         return {

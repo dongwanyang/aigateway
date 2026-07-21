@@ -48,3 +48,5 @@ repomix-output.md
 /*.lock
 .CodeBuddy/
 project-tasks/
+data/
+.gstack/

@@ -3,7 +3,7 @@ Draft Generator Strategy — 渐进式生成工作流核心逻辑
 ===================================================
 
 管理 Draft-to-HiRes 工作流：
-1. 生成低分辨率草图（图片 512x512 / 视频关键帧）
+1. 生成低分辨率草图（图片默认 1024x1024 / 视频关键帧）
 2. 确认后触发 Upscaler 放大到目标分辨率
 3. 拒绝后重新生成（不缓存被拒绝的草图，立即释放资源）
 4. 重试次数限制，耗尽后返回错误并保留最近草图
@@ -20,8 +20,11 @@ import base64
 import json
 import logging
 import math
+import os
+import threading
 import time
 import uuid
+from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
 from aigateway_core.pipelines.generation._common.config import DraftWorkflowConfig
@@ -42,6 +45,18 @@ _DRAFT_KEY_PREFIX = "aigateway:draft"
 
 # Default negative prompt for image generation
 _DEFAULT_NEGATIVE_PROMPT = "ugly, blurry, low quality, distorted, deformed"
+
+
+@dataclass
+class _SuperResolveResult:
+    """像素级超分辨率结果（内部类型）.
+
+    携带放大后的图片字节和真实输出尺寸（等比放大后可能与请求的
+    target_resolution 不同），供调用方校正 UpscaleResult.target_resolution。
+    """
+
+    output_bytes: bytes
+    output_resolution: Optional[Tuple[int, int]] = None
 
 
 class DraftGeneratorStrategy:
@@ -77,6 +92,15 @@ class DraftGeneratorStrategy:
         self._redis_client = redis_client
         self._comfyui_config = comfyui_config or ComfyUIConfig()
         self._comfyui_available: bool = False
+        # litellm_bridge 延迟绑定（由 main.py 注入），用于低分辨率预览生成
+        self._litellm_bridge: Any = None
+        # 超分模型懒加载锁：避免并发 confirm 同时构造 RealESRGANer（~64MB 权重重复加载）
+        self._sr_model: Any = None
+        self._sr_model_lock = asyncio.Lock()
+        # 超分推理串行锁：PyTorch module.forward() 非线程安全，并发 enhance 会竞态
+        # 共享张量导致输出损坏或崩溃。enhance 在线程池执行，故用 threading.Lock
+        # （而非 asyncio.Lock）保护线程内的临界区。
+        self._sr_infer_lock = threading.Lock()
         # In-memory fallback when no Redis client is provided (for testing)
         self._memory_store: Dict[str, str] = {}
 
@@ -88,7 +112,7 @@ class DraftGeneratorStrategy:
     ) -> DraftResult:
         """生成低分辨率草图/关键帧.
 
-        图片请求: 生成 512x512 预览（单张）
+        图片请求: 生成低分辨率预览（单张，默认 1024x1024）
         视频请求: 按时间间隔动态生成关键帧
             - 默认每 5 秒一帧，最少 2 帧（首末帧）
             - 用户可显式指定 keyframe_count 覆盖
@@ -126,7 +150,7 @@ class DraftGeneratorStrategy:
                 request, config, num_keyframes
             )
         else:
-            # Image: single 512x512 preview
+            # Image: single low-res preview (config.draft_resolution)
             previews = [await self._generate_image_preview_with_comfyui(request, config)]
 
         # Build generation params snapshot
@@ -204,24 +228,37 @@ class DraftGeneratorStrategy:
         ttl_remaining = max(1, int(draft.expires_at - time.time()))
         await self._store_draft(draft, ttl_remaining)
 
-        # Simulate upscale to target resolution
+        # Upscale to target resolution via pixel-level super-resolution
         target_resolution = self._get_target_resolution(draft)
         start_time = time.monotonic()
 
-        # Try ComfyUI upscale first, fall back to placeholder
-        comfyui_result = await self._upscale_with_comfyui(draft, target_resolution)
-        if comfyui_result is not None:
-            output_data = comfyui_result
+        # Try pixel-level super-resolution (RealESRGAN) first
+        sr_result = await self._super_resolve(draft, target_resolution)
+        if sr_result is not None:
+            output_data = sr_result.output_bytes
+            # 超分按等比放大到长边 4096，实际输出尺寸可能与 target_resolution 不同，
+            # 用真实输出尺寸覆盖，避免 UpscaleResult.target_resolution 撒谎。
+            actual_resolution = sr_result.output_resolution or target_resolution
+            algorithm_used = "real-esrgan"
         else:
-            output_data = self._simulate_upscale(draft, target_resolution)
+            # Fallback to ComfyUI upscale
+            comfyui_result = await self._upscale_with_comfyui(draft, target_resolution)
+            if comfyui_result is not None:
+                output_data = comfyui_result
+                actual_resolution = target_resolution
+                algorithm_used = "comfyui"
+            else:
+                output_data = self._simulate_upscale(draft, target_resolution)
+                actual_resolution = target_resolution
+                algorithm_used = self._config.upscale_algorithm
 
         duration_ms = (time.monotonic() - start_time) * 1000.0
 
         result = UpscaleResult(
             draft_id=draft_id,
             output_data=output_data,
-            target_resolution=target_resolution,
-            algorithm_used=self._config.upscale_algorithm,
+            target_resolution=actual_resolution,
+            algorithm_used=algorithm_used,
             duration_ms=duration_ms,
         )
 
@@ -229,8 +266,8 @@ class DraftGeneratorStrategy:
             "generation_optimization.draft_generator.draft_confirmed",
             extra={
                 "draft_id": draft_id,
-                "target_resolution": target_resolution,
-                "algorithm": self._config.upscale_algorithm,
+                "target_resolution": actual_resolution,
+                "algorithm": algorithm_used,
                 "duration_ms": duration_ms,
             },
         )
@@ -573,8 +610,9 @@ class DraftGeneratorStrategy:
         target_width, target_height = target_resolution
 
         # Choose upscale model based on scale factor
-        # Draft is always 512x512, so compute scale
-        scale_factor = max(target_width / 512, target_height / 512)
+        # 草稿分辨率由 config.draft_resolution 决定（默认 1024×1024）
+        draft_w, draft_h = self._config.draft_resolution
+        scale_factor = max(target_width / draft_w, target_height / draft_h)
         if scale_factor > 4.0:
             upscale_model = "SUPIR"
         else:
@@ -749,8 +787,8 @@ class DraftGeneratorStrategy:
                     "ComfyUI 图片预览生成失败，回退到占位实现: %s", exc
                 )
 
-        # Fallback to placeholder
-        return self._generate_image_preview(request, config)
+        # Fallback: 优先用 Agnes(litellm_bridge)生成真实低分辨率预览，否则占位
+        return await self._generate_image_preview(request, config)
 
     async def _generate_video_previews_with_comfyui(
         self,
@@ -836,6 +874,151 @@ class DraftGeneratorStrategy:
             return None
 
     # ===================================================================
+    # 内部方法 — 像素级超分辨率
+    # ===================================================================
+
+    def _build_sr_model(self, model_path: str) -> Any:
+        """同步构造 RealESRGANer（含 ~64MB 权重加载）。
+
+        预期由 run_in_executor 调用，不在事件循环线程执行。返回构造好的
+        RealESRGANer，或权重/依赖缺失时返回 None。
+        """
+        try:
+            import torch
+            from realesrgan import RealESRGANer
+            from basicsr.archs.rrdbnet_arch import RRDBNet
+        except ImportError as exc:
+            logger.warning("RealESRGAN 依赖未就绪，跳过超分: %s", exc)
+            return None
+        # RealESRGAN_x4plus 对应 RRDBNet(x4) 架构
+        device = torch.device('cuda') if torch.cuda.is_available() else 'cpu'
+        model = RRDBNet(
+            num_in_ch=3,
+            num_out_ch=3,
+            num_feat=64,
+            num_block=23,
+            num_grow_ch=32,
+            scale=4,
+        )
+        return RealESRGANer(
+            scale=4,  # RealESRGAN 默认 4x 放大
+            model_path=model_path,
+            model=model,
+            half=torch.cuda.is_available(),  # FP16 加速(仅 GPU)
+            device=device,
+            tile=512,  # 分块推理, 降低显存峰值
+            tile_pad=10,
+        )
+
+    async def _super_resolve(
+        self,
+        draft: DraftResult,
+        target_resolution: Tuple[int, int],
+    ) -> Optional[_SuperResolveResult]:
+        """像素级超分辨率放大.
+
+        使用 RealESRGAN (RRDBNet x4) 将草稿图片等比放大到长边 4096，
+        不调用 LLM API，只消耗本地计算资源。等比放大保持长宽比、不裁剪。
+
+        Args:
+            draft: 已确认的草图结果
+            target_resolution: 请求的目标分辨率（仅用于日志/回退参考；
+                超分实际按等比放大到长边 4096，输出尺寸由真实源图决定）
+
+        Returns:
+            _SuperResolveResult（含输出字节和真实输出尺寸），失败返回 None
+        """
+        if not draft.previews:
+            return None
+
+        draft_data = draft.previews[0]
+
+        try:
+            import cv2
+            import numpy as np
+            import torch
+            from realesrgan import RealESRGANer
+            from basicsr.archs.rrdbnet_arch import RRDBNet
+        except ImportError as exc:
+            # realesrgan/basicsr/cv2/torch 任一缺失（或 basicsr 的 functional_tensor
+            # 兼容补丁未生效）都会在此暴露。warning 而非 debug，避免超分静默失效。
+            logger.warning("RealESRGAN 依赖未就绪，跳过超分: %s", exc)
+            return None
+
+        # 先解码图片拿到真实尺寸（Agnes 可能不严格遵循请求的 size）
+        try:
+            img_array = cv2.imdecode(
+                np.frombuffer(draft_data, np.uint8),
+                cv2.IMREAD_COLOR,
+            )
+        except Exception as exc:
+            logger.warning("草稿图片解码失败，跳过超分: %s", exc)
+            return None
+        if img_array is None:
+            logger.warning("草稿图片解码为空（数据非有效图片），跳过超分")
+            return None
+
+        src_h, src_w = img_array.shape[0], img_array.shape[1]
+        # 等比放大到长边 4096（保持长宽比，不裁剪）
+        # outscale 是相对原始输入的总缩放因子（RealESRGANer.enhance 内部
+        # cv2.resize 到 w_input*outscale），故 scale_factor = 4096 / 源长边。
+        sr_target = 4096
+        scale_factor = sr_target / max(src_w, src_h)
+
+        try:
+            # 权重路径: Dockerfile 预下载到 /app/weights/RealESRGAN_x4plus.pth
+            # 本地开发环境回退到包内置 weights 目录或环境变量指定路径
+            model_path = os.environ.get(
+                "RealESRGAN_MODEL_PATH",
+                "/app/weights/RealESRGAN_x4plus.pth",
+            )
+            if not os.path.isfile(model_path):
+                try:
+                    from realesrgan import ROOT_DIR
+                    model_path = os.path.join(ROOT_DIR, "weights", "RealESRGAN_x4plus.pth")
+                except Exception:
+                    pass
+            if not os.path.isfile(model_path):
+                logger.warning("RealESRGAN 权重未找到，跳过超分: %s", model_path)
+                return None
+
+            # 加锁懒加载超分模型，避免并发 confirm 重复构造 RealESRGANer
+            if self._sr_model is None:
+                async with self._sr_model_lock:
+                    if self._sr_model is None:
+                        # 模型构造 + ~64MB 权重加载是同步重 I/O/CPU，
+                        # 卸载到线程池避免阻塞单 worker uvicorn 事件循环。
+                        loop = asyncio.get_running_loop()
+                        built = await loop.run_in_executor(
+                            None, lambda: self._build_sr_model(model_path)
+                        )
+                        if built is None:
+                            return None
+                        self._sr_model = built
+
+            # enhance 是同步重计算（CPU 上 1024→4096 数秒到数十秒），
+            # 卸载到线程池避免阻塞单 worker uvicorn 事件循环。
+            # PyTorch module.forward() 非线程安全：并发 enhance 会竞态共享张量，
+            # 故用 _sr_infer_lock 串行化推理（在线程内加锁，保护真正的临界区）。
+            def _do_enhance():
+                with self._sr_infer_lock:
+                    return self._sr_model.enhance(img_array, outscale=scale_factor)
+
+            loop = asyncio.get_running_loop()
+            output, _ = await loop.run_in_executor(None, _do_enhance)
+
+            _, encoded = cv2.imencode('.png', output)
+            out_h, out_w = output.shape[0], output.shape[1]
+            return _SuperResolveResult(
+                output_bytes=encoded.tobytes(),
+                output_resolution=(out_w, out_h),
+            )
+
+        except Exception as exc:
+            logger.warning("超分失败: %s", exc)
+            return None
+
+    # ===================================================================
     # 内部方法 — 关键帧计算
     # ===================================================================
 
@@ -886,15 +1069,15 @@ class DraftGeneratorStrategy:
     # 内部方法 — 预览生成（占位实现）
     # ===================================================================
 
-    def _generate_image_preview(
+    async def _generate_image_preview(
         self,
         request: GenerationRequest,
         config: DraftWorkflowConfig,
     ) -> bytes:
-        """生成图片预览占位数据.
+        """生成图片预览数据.
 
-        如果 ComfyUI 可用，实际预览由 generate_draft 中的 ComfyUI 流程处理。
-        此方法提供 fallback 占位数据。
+        如果 litellm_bridge 已绑定（Agnes），通过 Agnes Images API 生成低分辨率预览（1K）。
+        否则回退到占位数据。
 
         Args:
             request: 生成请求
@@ -904,14 +1087,50 @@ class DraftGeneratorStrategy:
             预览图的 bytes 数据
         """
         width, height = config.draft_resolution
+        # 草稿预览模型从配置读取（generation_optimization.draft_workflow.draft_model），
+        # 避免硬编码模型名导致重命名/下线时静默回退占位。
+        draft_model = getattr(config, "draft_model", "agnes-image-2.1-flash")
+
+        # 优先使用 litellm_bridge 调 Agnes 生成真实低分辨率预览
+        if self._litellm_bridge is not None:
+            try:
+                result = await self._litellm_bridge._do_image_generation(
+                    prompt=request.prompt,
+                    model=draft_model,
+                    size=f"{width}x{height}",
+                    response_format="url",
+                )
+                # _do_image_generation 归一为 chat completions 格式:
+                # choices[0].message.content = URL 或 b64_json
+                url = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+                if url:
+                    return await self._fetch_image_bytes(url)
+            except Exception as exc:
+                logger.warning("Agnes 低分辨率预览生成失败，回退到占位: %s", exc)
+
         # Placeholder: generate a minimal PNG-like header + content indicator
         # In production, this calls the actual generation model at draft resolution
+        # NOTE: prompt content intentionally omitted to prevent PII/secrets leakage
+        # through preview image bytes returned to any caller.
         placeholder = (
             f"DRAFT_PREVIEW:image:{width}x{height}:"
-            f"prompt={request.prompt[:50]}:"
             f"id={request.request_id}"
         ).encode("utf-8")
         return placeholder
+
+    async def _fetch_image_bytes(self, url: str) -> bytes:
+        """下载图片并返回 bytes.
+
+        仅处理 http(s) URL；若 content 是 b64_json（response_format 改动导致），
+        返回空串触发上层回退占位，而不是把 base64 字符串当 URL 去请求。
+        """
+        if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+            raise ValueError(f"非 HTTP 图片内容，无法下载: {str(url)[:40]!r}")
+        import httpx
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            return resp.content
 
     def _generate_keyframe_previews(
         self,
@@ -921,7 +1140,7 @@ class DraftGeneratorStrategy:
     ) -> list[bytes]:
         """生成视频关键帧预览占位数据.
 
-        每帧都是 512x512 的占位图像数据。
+        每帧都是草稿分辨率的占位图像数据。
 
         Args:
             request: 生成请求
@@ -934,10 +1153,11 @@ class DraftGeneratorStrategy:
         width, height = config.draft_resolution
         previews: list[bytes] = []
         for i in range(num_keyframes):
+            # NOTE: prompt content intentionally omitted to prevent PII/secrets leakage
+            # through preview image bytes returned to any caller.
             placeholder = (
                 f"DRAFT_PREVIEW:video_keyframe:{width}x{height}:"
                 f"frame={i}/{num_keyframes}:"
-                f"prompt={request.prompt[:50]}:"
                 f"id={request.request_id}"
             ).encode("utf-8")
             previews.append(placeholder)

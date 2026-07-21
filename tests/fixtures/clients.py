@@ -25,12 +25,10 @@ def user_client(admin_client, unique_prefix):
         "/admin/api-keys",
         json={
             "user_id": f"{unique_prefix}user",
-            "quotas": {
-                "daily_tokens": 1000000,
-                "monthly_cost": 50.0,
-                "rate_limit_rpm": 60,
-                "rate_limit_tpm": 100000,
-            },
+            "daily_tokens": 1000000,
+            "monthly_cost": 50.0,
+            "rate_limit_rpm": 60,
+            "rate_limit_tpm": 100000,
         },
     )
     if resp.status_code not in (200, 201):
@@ -61,7 +59,7 @@ def chat(
 ) -> httpx.Response:
     """POST /v1/chat/completions with a single-user-message body.
 
-    Additional body keys (generation_intent, stream, etc.) merged from **extra_body.
+    Additional body keys (stream, etc.) merged from **extra_body.
     Additional X-Request-ID header injected when trace_id is provided.
     """
     body = {

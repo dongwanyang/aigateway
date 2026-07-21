@@ -252,7 +252,7 @@ class UpdateQuotaRequest(BaseModel):
 
 
 def _get_keystore_and_metrics(request: Request) -> tuple[Any, Any]:
-    """从 app.state 获取 KeyStore 和 MetricsCollector。"""
+    """从 app.state 获取 SQLiteStore 和 MetricsCollector。"""
     from .app_state import get_state
     return getattr(get_state(), "key_store"), getattr(get_state(), "metrics_collector")
 
@@ -345,12 +345,11 @@ async def list_api_keys(
 ):
     """列出所有 API Key 及其配额使用情况。"""
     key_store, metrics = _get_keystore_and_metrics(request)
-    redis_mgr = key_store.redis
 
-    if redis_mgr is None or redis_mgr.redis is None:
-        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Redis connection required for key management"}})
+    if key_store is None:
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Auth store not initialized"}})
 
-    # Auto-reseed: 如果 Redis 中没有 API Key，自动从 config.yaml 重新导入
+    # Auto-reseed: 如果 SQLite 中没有 API Key，自动从 config.yaml 重新导入
     from .app_state import get_state
     config_manager = getattr(get_state(), "config_manager")
     if config_manager:
@@ -358,47 +357,34 @@ async def list_api_keys(
         keys_config = auth_config.get("api_keys", [])
         await key_store.ensure_seeded(keys_config)
 
-    # 扫描所有 API Key
-    cursor = 0
-    all_keys: List[Dict[str, Any]] = []
-    while True:
-        cursor, keys = await redis_mgr.redis.scan(
-            cursor, match="aigateway:key:*", count=100
-        )
-        for raw_key in keys:
-            key_str = raw_key.decode() if isinstance(raw_key, bytes) else raw_key
-            kh = key_str.split(":")[-1]
-            data = await redis_mgr.get_api_key(kh)
-            if data and data.get("status") == "active":
-                data["_key_hash"] = kh
-                all_keys.append(data)
-        if cursor == 0:
-            break
+    # Query all active keys from SQLite
+    rows = key_store.conn.fetchall(
+        "SELECT * FROM api_keys WHERE status='active' ORDER BY created_at DESC"
+    )
+    all_keys = [dict(r) for r in rows]
 
-    # 分页
+    # Pagination
     total = len(all_keys)
     start = (page - 1) * page_size
     end = start + page_size
     paginated = all_keys[start:end]
 
-    # Resolve group_name for each key (one lookup per distinct group_id)
+    # Resolve group_name for each key
     s = get_state()
-    group_store = getattr(s, "group_store", None)
     group_name_cache: Dict[str, Optional[str]] = {}
     items: List[Dict[str, Any]] = []
     for k in paginated:
         gid = k.get("group_id", "") or ""
         if gid and gid not in group_name_cache:
             gname: Optional[str] = None
-            if group_store is not None:
-                try:
-                    gdata = await group_store.get_group(gid)
-                    if gdata:
-                        gname = gdata.get("name")
-                except Exception:
-                    gname = None
+            try:
+                gdata = await key_store.get_group(gid)
+                if gdata:
+                    gname = gdata.get("name")
+            except Exception:
+                gname = None
             group_name_cache[gid] = gname
-        items.append(_format_quota_item(k, k.get("_key_hash", ""), group_name_cache.get(gid)))
+        items.append(_format_quota_item(k, k.get("key_hash", ""), group_name_cache.get(gid)))
 
     return {
         "data": {
@@ -511,10 +497,9 @@ async def update_api_key_quota(
     仅更新请求中包含的字段（非 None 字段），其余保持不变。
     """
     key_store, _ = _get_keystore_and_metrics(request)
-    redis_mgr = key_store.redis
 
-    if redis_mgr is None or redis_mgr.redis is None:
-        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Redis not connected"}})
+    if key_store is None:
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Auth store not initialized"}})
 
     if not key_id.startswith("key_"):
         raise HTTPException(status_code=400, detail={"error": {"code": "validation_error", "message": "Invalid key_id format"}})
@@ -525,7 +510,7 @@ async def update_api_key_quota(
         raise HTTPException(status_code=404, detail={"error": {"code": "not_found", "message": f"API key '{key_id}' not found"}})
 
     kh = key_hashes[0]
-    data = await redis_mgr.get_api_key(kh)
+    data = await key_store.get_api_key(kh)
     if not data:
         raise HTTPException(status_code=404, detail={"error": {"code": "not_found", "message": f"API key '{key_id}' not found"}})
 
@@ -543,19 +528,10 @@ async def update_api_key_quota(
     if not updated_fields:
         raise HTTPException(status_code=400, detail={"error": {"code": "validation_error", "message": "No fields to update"}})
 
-    # 合并到现有数据并写回 Redis
-    data.update(updated_fields)
-    await redis_mgr.set_api_key(kh, data)
-
-    # 通过 Pub/Sub 广播配额变更事件（多实例同步）
-    try:
-        pub_msg = key_store._build_pubsub_message(
-            "quota_updated", key_id, data.get("user_id", ""),
-            updated_fields=updated_fields,
-        )
-        await redis_mgr.publish(key_store.PUBSUB_CHANNEL, pub_msg)
-    except Exception as exc:
-        logger.warning("Failed to publish quota update event: %s", exc)
+    # 仅写回被改字段（限制列），不传完整 data —— 否则 set_api_key 的全字段
+    # UPDATE 会用旧快照覆盖并发的 increment_usage 写入的运行时计数器
+    # (daily_tokens_used / rpm_window_count / tpm_window_count / monthly_cost_used)。
+    await key_store.set_api_key(kh, updated_fields)
 
     logger.info("API Key 配额已更新: key_id=%s, fields=%s", key_id, list(updated_fields.keys()))
 
@@ -616,22 +592,16 @@ async def get_metrics_json(
     except Exception as exc:
         logger.warning("Failed to collect Prometheus metrics: %s", exc)
 
-    # 收集 KeyStore 聚合数据
-    key_stats: Dict[str, Any] = {"total_keys": 0, "total_daily_tokens_used": 0, "total_monthly_cost_used": 0.0, "total_requests": 0}
-    if key_store and key_store.redis and key_store.redis.redis:
-        cursor = 0
-        while True:
-            cursor, keys = await key_store.redis.redis.scan(cursor, match="aigateway:key:*", count=100)
-            for raw_key in keys:
-                kh = raw_key.decode().split(":")[-1] if isinstance(raw_key, bytes) else raw_key.split(":")[-1]
-                data = await key_store.redis.get_api_key(kh)
-                if data:
-                    key_stats["total_keys"] += 1
-                    key_stats["total_daily_tokens_used"] += int(data.get("daily_tokens_used", 0))
-                    key_stats["total_monthly_cost_used"] += float(data.get("monthly_cost_used", 0))
-                    key_stats["total_requests"] += int(data.get("request_count", 0))
-            if cursor == 0:
-                break
+    # 收集 KeyStore 聚合数据 (SQLite)
+    key_stats: Dict[str, Any] = {"total_keys": 0, "total_daily_tokens_used": 0, "total_monthly_cost_used": 0.0}
+    if key_store:
+        rows = key_store.conn.fetchall(
+            "SELECT daily_tokens_used, monthly_cost_used FROM api_keys WHERE status='active'"
+        )
+        for r in rows:
+            key_stats["total_keys"] += 1
+            key_stats["total_daily_tokens_used"] += int(r["daily_tokens_used"])
+            key_stats["total_monthly_cost_used"] += float(r["monthly_cost_used"])
 
     # 熔断器状态(从 litellm bridge tracker 读)
     cb_states: Dict[str, Any] = {}
@@ -877,10 +847,9 @@ async def get_quota(
 
     """查询指定 API Key 的详细配额状态。"""
     key_store, _ = _get_keystore_and_metrics(request)
-    redis_mgr = key_store.redis
 
-    if redis_mgr is None or redis_mgr.redis is None:
-        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Redis not connected"}})
+    if key_store is None:
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Auth store not initialized"}})
 
     # 通过 key_id 查找 key_hash
     key_hashes = await key_store._find_key_hashes_by_id(key_id)
@@ -888,7 +857,7 @@ async def get_quota(
         raise HTTPException(status_code=404, detail={"error": {"code": "not_found", "message": f"API key '{key_id}' not found"}})
 
     kh = key_hashes[0]
-    data = await redis_mgr.get_api_key(kh)
+    data = await key_store.get_api_key(kh)
     if not data:
         raise HTTPException(status_code=404, detail={"error": {"code": "not_found", "message": f"API key '{key_id}' not found"}})
 
@@ -2551,11 +2520,9 @@ async def assign_key_to_group(
 ):
     """将 API Key 分配到用户组（迁移用量计数器）。"""
     key_store, _ = _get_keystore_and_metrics(request)
-    from .app_state import get_state
-    gs = getattr(get_state(), "group_store", None)
-    if gs is None:
-        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "GroupStore not initialized"}})
-    redis_mgr = key_store.redis
+
+    if key_store is None:
+        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Auth store not initialized"}})
 
     if not key_id.startswith("key_"):
         raise HTTPException(status_code=400, detail={"error": {"code": "validation_error", "message": "Invalid key_id format"}})
@@ -2566,18 +2533,17 @@ async def assign_key_to_group(
 
     kh = key_hashes[0]
 
-    # Validate target group exists
     # Validate target group exists and is not the default group
     if body.group_id == "grp-default":
         raise HTTPException(status_code=400, detail={"error": {"code": "validation_error", "message": "Cannot assign key to default group"}})
     if not body.group_id.startswith("grp-"):
         raise HTTPException(status_code=400, detail={"error": {"code": "validation_error", "message": "group_id must start with grp-"}})
-    group_data = await gs.get_group(body.group_id)
+    group_data = await key_store.get_group(body.group_id)
     if not group_data:
         raise HTTPException(status_code=404, detail={"error": {"code": "not_found", "message": f"Group {body.group_id} not found"}})
 
     try:
-        await gs.assign_key_to_group(kh, body.group_id)
+        await key_store.assign_key_to_group(kh, body.group_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"error": {"code": "validation_error", "message": str(exc)}})
 
@@ -2585,10 +2551,8 @@ async def assign_key_to_group(
     if body.cache_scope:
         if body.cache_scope not in ("private", "group", "public"):
             raise HTTPException(status_code=400, detail={"error": {"code": "validation_error", "message": "cache_scope must be private/group/public"}})
-        key_data = await redis_mgr.get_api_key(kh)
-        if key_data:
-            key_data["cache_scope"] = body.cache_scope
-            await redis_mgr.set_api_key(kh, key_data)
+        # 只写 cache_scope 一列，避免全字段 UPDATE 覆盖运行时计数器
+        await key_store.set_api_key(kh, {"cache_scope": body.cache_scope})
 
     return {"message": "assigned", "data": {"key_id": key_id, "group_id": body.group_id}}
 
@@ -2650,3 +2614,331 @@ async def prometheus_query_range(
         raise HTTPException(status_code=exc.response.status_code, detail={"error": {"code": "prometheus_error", "message": str(exc)}})
     except Exception as exc:
         raise HTTPException(status_code=502, detail={"error": {"code": "prometheus_unreachable", "message": f"Cannot reach Prometheus: {exc}"}})
+
+
+# ==================================================================
+# Draft-to-HiRes 工作流管理接口
+# ==================================================================
+
+def _get_draft_strategy():
+    """从 app.state 获取 DraftGeneratorStrategy 实例."""
+    from aigateway_api.app_state import get_state
+    s = get_state()
+    # 优先使用直接挂载的 draft_strategy
+    strategy = getattr(s, "draft_strategy", None)
+    if strategy is not None:
+        return strategy
+    # 回退：通过 plugin_registry 查找
+    registry = getattr(s, "plugin_registry", None)
+    if registry:
+        try:
+            plugin = registry.get("draft_generator")
+            if plugin and hasattr(plugin, "_strategy"):
+                return plugin._strategy
+        except Exception:
+            pass
+    raise RuntimeError("DraftGeneratorStrategy 不可用 — 生成优化层未初始化")
+
+
+@router.get("/draft/{draft_id}")
+async def get_draft_status(
+    draft_id: str,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+    """查询草稿状态与元信息.
+
+    Returns:
+        {"draft_id": ..., "status": "pending"|"confirmed"|"rejected"|"expired",
+         "generation_params": {...}, "attempt_number": N, "max_attempts": M}
+    """
+    try:
+        strategy = _get_draft_strategy()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail={"error": {"code": "draft_unavailable", "message": str(exc)}})
+
+    draft = await strategy.get_draft(draft_id)
+    if draft is None:
+        raise HTTPException(status_code=404, detail={"error": {"code": "draft_not_found", "message": f"Draft {draft_id} not found or expired"}})
+
+    return {
+        "draft_id": draft.draft_id,
+        "status": draft.status,
+        "preview_count": len(draft.previews),
+        "generation_params": draft.generation_params,
+        "attempt_number": draft.attempt_number,
+        "max_attempts": draft.max_attempts,
+        "created_at": draft.created_at,
+        "expires_at": draft.expires_at,
+    }
+
+
+@router.get("/draft/{draft_id}/preview")
+async def get_draft_preview(
+    draft_id: str,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+    """获取草稿预览图（base64 data URL）.
+
+    将 Redis 中存储的预览 bytes 转换为前端可直接渲染的 data URL。
+    """
+    try:
+        strategy = _get_draft_strategy()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail={"error": {"code": "draft_unavailable", "message": str(exc)}})
+
+    draft = await strategy.get_draft(draft_id)
+    if draft is None:
+        raise HTTPException(status_code=404, detail={"error": {"code": "draft_not_found", "message": f"Draft {draft_id} not found or expired"}})
+    if not draft.previews:
+        raise HTTPException(status_code=404, detail={"error": {"code": "no_preview", "message": "No preview images available"}})
+
+    import base64
+    b64 = base64.b64encode(draft.previews[0]).decode("ascii")
+    # 尝试检测图片格式
+    first_bytes = draft.previews[0][:4]
+    mime_type = "image/png"  # default
+    if first_bytes[:3] == b'\xff\xd8\xff':
+        mime_type = "image/jpeg"
+    elif first_bytes[:4] == b'\x89PNG':
+        mime_type = "image/png"
+    elif first_bytes[:4] == b'RIFF':
+        mime_type = "image/webp"
+
+    return {
+        "draft_id": draft_id,
+        "preview_data_url": f"data:{mime_type};base64,{b64}",
+        "preview_count": len(draft.previews),
+    }
+
+
+@router.post("/draft/{draft_id}/confirm")
+async def confirm_draft(
+    draft_id: str,
+    request: Request,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+    """确认草稿 → 触发高清放大 → 返回最终结果.
+
+    验证草图状态为 pending，执行 upscale 算法放大到目标分辨率。
+    仅允许草稿所有者确认（通过 draft metadata 中的 user_id/group_id 校验）。
+    """
+    try:
+        strategy = _get_draft_strategy()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail={"error": {"code": "draft_unavailable", "message": str(exc)}})
+
+    # Ownership check: only the draft owner can confirm
+    try:
+        draft_data = await strategy.get_draft(draft_id)
+        if draft_data is None:
+            raise HTTPException(status_code=404, detail={"error": {"code": "draft_not_found", "message": f"Draft '{draft_id}' not found"}})
+
+        draft_metadata = getattr(draft_data, 'metadata', {}) or {}
+        draft_user_id = draft_metadata.get('user_id', '')
+        draft_group_id = draft_metadata.get('group_id', '')
+
+        # Check if authenticated admin owns this draft
+        auth_user_id = _auth.get('user_id', '') if isinstance(_auth, dict) else ''
+        auth_group_id = _auth.get('group_id', '') if isinstance(_auth, dict) else ''
+
+        if draft_user_id and auth_user_id and draft_user_id != auth_user_id:
+            raise HTTPException(
+                status_code=403,
+                detail={"error": {"code": "forbidden", "message": "Only draft owner can confirm"}}
+            )
+        if draft_group_id and auth_group_id and draft_group_id != auth_group_id:
+            raise HTTPException(
+                status_code=403,
+                detail={"error": {"code": "forbidden", "message": "Only draft owner can confirm"}}
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("Draft ownership check failed: %s", exc)
+        # If we can't verify ownership, allow admin action (defensive fallback)
+
+    try:
+        upscale_result = await strategy.confirm_draft(draft_id)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail={"error": {"code": "draft_confirm_failed", "message": str(exc)}})
+
+    output_data = upscale_result.output_data
+    # 如果输出是 bytes，转为 base64 data URL
+    if isinstance(output_data, bytes):
+        import base64
+        b64 = base64.b64encode(output_data).decode("ascii")
+        content_url = f"data:image/png;base64,{b64}"
+    else:
+        content_url = str(output_data)[:500]
+
+    # 记录确认(放大)请求日志,让图片/视频的最终出图也能出现在前端 Logs 页。
+    # 确认是独立 admin 路由(不经 dispatcher),原来完全无日志。model 记放大算法名
+    # (SUPIR/RealESRGAN_x4plus),这是实际执行的"模型";endpoint 标注为 draft 确认路径。
+    try:
+        from .openai_compat import _record_request_log
+        await _record_request_log(
+            request=request, method="POST", endpoint=f"/admin/draft/{draft_id}/confirm",
+            status_code=200, duration_ms=float(upscale_result.duration_ms or 0),
+            model=upscale_result.algorithm_used or "upscale", cache_hit=False, cache_tier=None,
+        )
+    except Exception as exc:
+        logger.warning("草稿确认请求日志写入失败: %s", exc)
+
+    return {
+        "draft_id": draft_id,
+        "upscaled_url": content_url,
+        "target_resolution": list(upscale_result.target_resolution),
+        "algorithm": upscale_result.algorithm_used,
+        "duration_ms": upscale_result.duration_ms,
+    }
+
+
+@router.post("/draft/{draft_id}/reject")
+async def reject_draft(
+    draft_id: str,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+    """拒绝草稿 → 重新生成低分辨率草图.
+
+    删除被拒绝的草图，生成新的 draft_id 和预览。
+    仅允许草稿所有者拒绝（通过 draft metadata 中的 user_id/group_id 校验）。
+    """
+    try:
+        strategy = _get_draft_strategy()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail={"error": {"code": "draft_unavailable", "message": str(exc)}})
+
+    # Ownership check: only the draft owner can reject
+    try:
+        draft_data = await strategy.get_draft(draft_id)
+        if draft_data is None:
+            raise HTTPException(status_code=404, detail={"error": {"code": "draft_not_found", "message": f"Draft '{draft_id}' not found"}})
+
+        draft_metadata = getattr(draft_data, 'metadata', {}) or {}
+        draft_user_id = draft_metadata.get('user_id', '')
+        draft_group_id = draft_metadata.get('group_id', '')
+
+        # Check if authenticated admin owns this draft
+        auth_user_id = _auth.get('user_id', '') if isinstance(_auth, dict) else ''
+        auth_group_id = _auth.get('group_id', '') if isinstance(_auth, dict) else ''
+
+        if draft_user_id and auth_user_id and draft_user_id != auth_user_id:
+            raise HTTPException(
+                status_code=403,
+                detail={"error": {"code": "forbidden", "message": "Only draft owner can reject"}}
+            )
+        if draft_group_id and auth_group_id and draft_group_id != auth_group_id:
+            raise HTTPException(
+                status_code=403,
+                detail={"error": {"code": "forbidden", "message": "Only draft owner can reject"}}
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("Draft ownership check failed: %s", exc)
+        # If we can't verify ownership, allow admin action (defensive fallback)
+
+    try:
+        new_draft = await strategy.reject_draft(draft_id)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail={"error": {"code": "draft_reject_failed", "message": str(exc)}})
+
+    return {
+        "previous_draft_id": draft_id,
+        "new_draft_id": new_draft.draft_id,
+        "attempt_number": new_draft.attempt_number,
+        "max_attempts": new_draft.max_attempts,
+        "preview_url": f"/admin/draft/{new_draft.draft_id}/preview",
+    }
+
+
+# ------------------------------------------------------------------
+# 成本账本（SQLite 持久化，跨容器重建不丢）
+# ------------------------------------------------------------------
+
+# prune 节流:避免每次 /costs/summary(15s 轮询)都触发 DELETE 写事务
+_LAST_LEDGER_PRUNE_TS: float = 0.0
+_LEDGER_PRUNE_INTERVAL_SEC: float = 3600.0  # 至多每小时清理一次
+
+@router.get("/costs/ledger")
+async def get_cost_ledger(
+    limit: int = Query(200, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    start: Optional[int] = Query(None, description="起始 unix 时间戳（含）"),
+    end: Optional[int] = Query(None, description="截止 unix 时间戳（含）"),
+    user_id: Optional[str] = Query(None),
+    group_id: Optional[str] = Query(None),
+    model: Optional[str] = Query(None),
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+    """返回成本账本明细（每笔请求一行，SQLite 持久化）。"""
+    from .app_state import get_state
+    key_store = getattr(get_state(), "key_store")
+    if key_store is None or not hasattr(key_store, "query_ledger"):
+        raise HTTPException(
+            status_code=503,
+            detail={"error": {"code": "ledger_unavailable", "message": "cost ledger not initialized"}},
+        )
+    rows = await key_store.query_ledger(
+        limit=limit, offset=offset,
+        start_unix=start, end_unix=end,
+        user_id=user_id, group_id=group_id, model=model,
+    )
+    return {"rows": rows, "limit": limit, "offset": offset}
+
+
+@router.get("/costs/summary")
+async def get_cost_summary(
+    days: Optional[int] = Query(None, ge=1, le=365, description="最近 N 天（与 start 二选一）"),
+    start: Optional[int] = Query(None, description="起始 unix 时间戳（含）"),
+    end: Optional[int] = Query(None, description="截止 unix 时间戳（含）"),
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+    """返回成本汇总（按 model/user/group/day 聚合，SQLite 持久化）。
+
+    每次调用顺带 best-effort 清理 90 天前的账本行，避免无限增长。
+    """
+    from .app_state import get_state
+    key_store = getattr(get_state(), "key_store")
+    if key_store is None or not hasattr(key_store, "ledger_summary"):
+        raise HTTPException(
+            status_code=503,
+            detail={"error": {"code": "ledger_unavailable", "message": "cost ledger not initialized"}},
+        )
+    # best-effort 清理旧账本(节流:至多每小时一次,避免轮询时反复写)
+    # 节流:check-then-assign 依赖 prune_ledger 内部不 await(同步执行完毕才让出事件循环),
+    # 单 worker 下因此不会有两个协程同时通过判断。若日后 prune_ledger 改为含 await 的异步实现,
+    # 需改用 asyncio.Lock 保护这段临界区。
+    global _LAST_LEDGER_PRUNE_TS
+    import time as _time
+    now = _time.monotonic()
+    try:
+        if hasattr(key_store, "prune_ledger") and (now - _LAST_LEDGER_PRUNE_TS) >= _LEDGER_PRUNE_INTERVAL_SEC:
+            await key_store.prune_ledger(keep_days=90)
+            _LAST_LEDGER_PRUNE_TS = now
+    except Exception as exc:
+        logger.debug("prune_ledger skipped: %s", exc)
+
+    start_unix = start
+    end_unix = end
+    if start_unix is None and days:
+        end_unix = end_unix or int(datetime.now(timezone.utc).timestamp())
+        start_unix = end_unix - days * 86400
+    return await key_store.ledger_summary(start_unix=start_unix, end_unix=end_unix)
+
+
+@router.get("/chat/tasks")
+async def list_chat_tasks(
+    task_type: Optional[str] = Query(None, description="任务类型过滤 (video|draft)"),
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+    """返回未完成任务列表（视频生成、草稿等）。"""
+    from .app_state import get_state
+    task_tracker = getattr(get_state(), "task_tracker", None)
+    if task_tracker is None or not hasattr(task_tracker, "list_active"):
+        raise HTTPException(
+            status_code=503,
+            detail={"error": {"code": "task_tracker_unavailable", "message": "TaskTracker not initialized"}},
+        )
+    tasks = await task_tracker.list_active(task_type=task_type)
+    return {"tasks": tasks}

@@ -3,7 +3,7 @@ IntentEvaluatorPlugin — 意图评估插件封装
 ==========================================
 
 将 IntentEvaluatorStrategy 封装为 PipelineEngine 插件，注册到 PluginRegistry。
-在 execute() 中通过 emit_plugin_event 发 TraceEvent,记录 complexity_score，禁用时透传请求不做修改。
+在 execute() 中通过 PipelineEngine 自动埋点发 TraceEvent,记录 complexity_score，禁用时透传请求不做修改。
 评估失败时使用默认分数并记录日志。
 
 需求: 2.7, 2.8, 1.8
@@ -141,18 +141,8 @@ class IntentEvaluatorPlugin:
                 },
             )
 
-            # 发 TraceEvent(成功)
-            from aigateway_core.pipelines.generation.registration import emit_plugin_event
-
-            emit_plugin_event(ctx, self.name, duration_ms, "ok")
-
         except Exception as exc:
             duration_ms = (time.monotonic() - start_time) * 1000.0
-
-            # 发 TraceEvent(失败)
-            from aigateway_core.pipelines.generation.registration import emit_plugin_event
-
-            emit_plugin_event(ctx, self.name, duration_ms, "error")
 
             logger.warning(
                 "generation_optimization.intent_evaluator.error",

@@ -109,6 +109,23 @@ class TestAIDirectorStrategyOptimizePrompt:
         assert result.duration_ms > 0
 
     @pytest.mark.asyncio
+    async def test_uses_model_selector_when_provided(self, default_config, pipeline_ctx, mock_bridge):
+        """When model_selector is provided, use it to select the model instead of config.rewrite_model."""
+        from aigateway_core.pipelines.generation.director.ai_director import AIDirectorStrategy
+
+        selector = MagicMock()
+        selector.select_text_model = AsyncMock(return_value="deepseek-v4-flash")
+        strat = AIDirectorStrategy(
+            config=default_config, litellm_bridge=mock_bridge, model_selector=selector
+        )
+        await strat.optimize_prompt(
+            "a cat", [], default_config, pipeline_ctx
+        )
+        call_kwargs = mock_bridge.completion.call_args.kwargs
+        assert call_kwargs["model"] == "deepseek-v4-flash"
+        assert call_kwargs["intent"] == "understanding"
+
+    @pytest.mark.asyncio
     async def test_output_truncated_to_max_length(self, default_config, pipeline_ctx):
         """Output exceeding max_prompt_length should be truncated."""
         # Configure a very short max_prompt_length

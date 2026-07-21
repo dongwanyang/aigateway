@@ -232,7 +232,7 @@ class PromptTemplateManager:
 
         logger.info(
             "prompt_template.created",
-            extra={"owner_id": owner_id, "name": name},
+            extra={"owner_id": owner_id, "template_name": name},
         )
         return template
 
@@ -370,7 +370,7 @@ class PromptTemplateManager:
 
         logger.info(
             "prompt_template.updated",
-            extra={"owner_id": owner_id, "name": name},
+            extra={"owner_id": owner_id, "template_name": name},
         )
         return updated_template
 
@@ -403,7 +403,7 @@ class PromptTemplateManager:
 
         logger.info(
             "prompt_template.deleted",
-            extra={"owner_id": owner_id, "name": name},
+            extra={"owner_id": owner_id, "template_name": name},
         )
         return True
 

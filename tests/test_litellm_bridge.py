@@ -165,28 +165,31 @@ class TestCompletionModelNotFound:
 
     @pytest.mark.asyncio
     async def test_unregistered_model_returns_error(self):
-        """请求未注册模型应返回 model_not_found 错误。"""
+        """请求未注册模型 + 无匹配能力池应返回错误。
+
+        新语义: 未注册的显式模型作 hint 被忽略, 转池解析;
+        若池也无满足 intent 所需能力的模型 -> no_model_for_intent。
+        """
         result = await self.bridge.completion(
             messages=[{"role": "user", "content": "hello"}],
             model="deepseek-chat",
+            intent="generation:video",  # 仅注册了 text 模型 gpt-4o, video 池为空
         )
 
         assert "error" in result
-        assert result["error"]["code"] == "model_not_found"
-        assert "deepseek-chat" in result["error"]["message"]
-        assert "gpt-4o" in result["error"]["message"]
+        assert result["error"]["code"] == "no_model_for_intent"
 
     @pytest.mark.asyncio
     async def test_unregistered_qwen_returns_error(self):
-        """请求千问模型未注册时应返回清晰错误。"""
+        """请求千问模型未注册 + 无匹配能力池应返回错误。"""
         result = await self.bridge.completion(
             messages=[{"role": "user", "content": "你好"}],
             model="qwen-turbo",
+            intent="generation:video",
         )
 
         assert "error" in result
-        assert result["error"]["code"] == "model_not_found"
-        assert "qwen-turbo" in result["error"]["message"]
+        assert result["error"]["code"] == "no_model_for_intent"
 
     @pytest.mark.asyncio
     async def test_registered_model_does_not_return_model_not_found(self):
@@ -205,8 +208,8 @@ class TestCompletionModelNotFound:
             model="gpt-4o",
         )
 
-        assert "error" not in result or "data" in result
         assert "data" in result
+        assert "choices" in result["data"]
 
 
 # ==================================================================
@@ -230,18 +233,18 @@ class TestCompletionStreamModelNotFound:
 
     @pytest.mark.asyncio
     async def test_stream_unregistered_model_yields_error(self):
-        """流式请求未注册模型应 yield model_not_found 错误。"""
+        """流式请求未注册模型 + 无匹配能力池应 yield 错误。"""
         chunks = []
         async for chunk in self.bridge.completion_stream(
             messages=[{"role": "user", "content": "hello"}],
             model="deepseek-chat",
+            intent="generation:video",
         ):
             chunks.append(chunk)
 
         assert len(chunks) == 1
         assert "error" in chunks[0]
-        assert chunks[0]["error"]["code"] == "model_not_found"
-        assert "deepseek-chat" in chunks[0]["error"]["message"]
+        assert chunks[0]["error"]["code"] == "no_model_for_intent"
 
 
 # ==================================================================
@@ -474,3 +477,74 @@ class TestPerModelBaseUrl:
         # 有 per-model base_url 的模型走 openai/ 前缀
         custom_entry = next(m for m in model_list if m["model_name"] == "openai/custom-endpoint")
         assert custom_entry["litellm_params"]["base_url"] == "https://custom.com/v1"
+
+
+# ==================================================================
+# capabilities pool + intent-based resolution Tests
+# ==================================================================
+
+
+class TestCapabilitiesPool:
+    """capabilities 多选 + 按意图过滤候选池."""
+
+    def _bridge_with_caps(self):
+        models_config = {
+            "agnes": {
+                "api_key": "k",
+                "base_url": "https://apihub.agnes-ai.com/v1",
+                "model_grouper": [
+                    {
+                        "models": [
+                            {"name": "agnes-2.0-flash", "capabilities": ["text", "image", "video"]},
+                            {"name": "agnes-image-2.1-flash", "capabilities": ["image"]},
+                            {"name": "deepseek-v4-flash", "capabilities": ["text"]},
+                        ],
+                        "fallback_models": [],
+                        "pricing": {},
+                    }
+                ],
+            }
+        }
+        return _create_bridge_with_models(models_config)
+
+    def test_capabilities_recorded(self):
+        bridge = self._bridge_with_caps()
+        assert "text" in bridge._model_capabilities["agnes-2.0-flash"]
+        assert bridge._model_capabilities["agnes-image-2.1-flash"] == ["image"]
+
+    @pytest.mark.asyncio
+    async def test_resolve_by_intent_image_pools_image_models(self):
+        bridge = self._bridge_with_caps()
+        resolved = await bridge._resolve_by_intent(intent="generation:image", model_hint=None)
+        assert "error" not in resolved
+        assert resolved["model"] in ("agnes-2.0-flash", "agnes-image-2.1-flash")
+
+    @pytest.mark.asyncio
+    async def test_resolve_by_intent_hint_in_pool_preferred(self):
+        bridge = self._bridge_with_caps()
+        resolved = await bridge._resolve_by_intent(
+            intent="generation:image", model_hint="agnes-2.0-flash"
+        )
+        assert resolved["model"] == "agnes-2.0-flash"
+
+    @pytest.mark.asyncio
+    async def test_resolve_by_intent_hint_not_in_pool_ignored(self):
+        bridge = self._bridge_with_caps()
+        # hint 是 text 模型, 但意图是 image -> 忽略 hint, 选 image 池
+        resolved = await bridge._resolve_by_intent(
+            intent="generation:image", model_hint="deepseek-v4-flash"
+        )
+        assert resolved["model"] in ("agnes-2.0-flash", "agnes-image-2.1-flash")
+
+    @pytest.mark.asyncio
+    async def test_resolve_by_intent_empty_pool_returns_error(self):
+        bridge = self._bridge_with_caps()
+        # 无 video-only 外的… 实际 agnes-2.0-flash 含 video, 改成移除它
+        bridge._model_capabilities = {
+            "agnes-2.0-flash": ["text", "image"],
+            "agnes-image-2.1-flash": ["image"],
+            "deepseek-v4-flash": ["text"],
+        }
+        resolved = await bridge._resolve_by_intent(intent="generation:video", model_hint=None)
+        assert "error" in resolved
+        assert resolved["error"]["code"] == "no_model_for_intent"

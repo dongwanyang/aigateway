@@ -5,6 +5,7 @@
 """
 import os
 import sys
+import tempfile
 import pytest
 import httpx
 
@@ -26,11 +27,38 @@ AGNES_VIDEO_MODEL = "agnes-video-v2.0"
 ADMIN_KEY = os.environ.get("AI_GATEWAY_ADMIN_KEY")
 
 
+def _explicit_e2e_ui(args) -> bool:
+    """调用方是否显式指向 tests/e2e 或 tests/ui(而非泛指 tests/)。"""
+    for a in args or []:
+        s = str(a).rstrip("/")
+        if s.endswith("tests/e2e") or s.endswith("tests/ui") or "tests/e2e/" in str(a) or "tests/ui/" in str(a):
+            return True
+    return False
+
+
+def _ensure_local_auth_db_path() -> None:
+    """本地单测(非 Docker)默认 auth DB 路径为 /app/data/auth.db,该目录在宿主机
+    上不存在或不可写 → SQLiteStore 初始化 PermissionError → create_app lifespan 失败。
+
+    未显式设置 AI_GATEWAY_AUTH_DB_PATH 时,指向系统临时目录,使 TestClient 能正常启动。
+    真实部署/容器内 /app/data 存在,不受影响。
+    """
+    if os.environ.get("AI_GATEWAY_AUTH_DB_PATH"):
+        return
+    os.environ["AI_GATEWAY_AUTH_DB_PATH"] = os.path.join(
+        tempfile.gettempdir(), "aigateway_test_auth.db"
+    )
+
+
 def pytest_configure(config):
-    """e2e 前置检查:环境变量 + gateway 健康。"""
-    # 单元测试子集(不含 tests/e2e 或 tests/ui)不需要 gateway,跳过
-    invoked_paths = " ".join(config.args or [])
-    if "tests/e2e" not in invoked_paths and "tests/ui" not in invoked_paths and invoked_paths.strip() != "tests":
+    """e2e 前置检查:环境变量 + gateway 健康。
+
+    仅当调用方显式指向 tests/e2e 或 tests/ui 时才 gate(需要真实 gateway + admin key)。
+    跑 `pytest tests/` 全量时不 gate —— e2e/ui 测试项由
+    pytest_collection_modifyitems 自动 deselect,不会被收集。
+    """
+    if not _explicit_e2e_ui(config.args):
+        _ensure_local_auth_db_path()
         return
 
     if not ADMIN_KEY:
@@ -50,6 +78,23 @@ def pytest_configure(config):
             f"start with: docker compose up -d",
             returncode=2,
         )
+
+
+def pytest_collection_modifyitems(config, items):
+    """跑 `pytest tests/` 全量时,自动 deselect tests/e2e 与 tests/ui 下的测试项。
+
+    这些是 e2e/integration 测试,依赖真实 gateway + Redis + LLM API,显式指定
+    `pytest tests/e2e/` 才会(经 pytest_configure gate 后)真正运行。
+    """
+    if _explicit_e2e_ui(config.args):
+        return
+    skip_marker = pytest.mark.skip(
+        reason="e2e/integration 测试: 需真实 gateway,显式跑 `pytest tests/e2e/` 或 `tests/ui/`"
+    )
+    for item in items:
+        if "tests/e2e/" in str(item.fspath).replace("\\", "/") or "tests/ui/" in str(item.fspath).replace("\\", "/"):
+            item.add_marker(skip_marker)
+
 
 
 @pytest.fixture(autouse=True)

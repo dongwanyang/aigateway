@@ -463,7 +463,8 @@ class ModelRouterStrategy:
                         model_name = model_entry.get("name", "")
                         if not model_name:
                             continue
-                        entry_modality = model_entry.get("modality")
+                        entry_caps = model_entry.get("capabilities")
+                        entry_modality = entry_caps if entry_caps is not None else model_entry.get("modality")
                         entry_capability = model_entry.get("capability")
                     elif isinstance(model_entry, str) and model_entry:
                         # 保留 name-only 便利写法：视为 modality=None，走后续兜底

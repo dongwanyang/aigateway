@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
@@ -150,14 +151,23 @@ class RAGRetrieverPlugin:
 
             # 使用 qdrant_client 库创建客户端连接
             from qdrant_client import QdrantClient
+            try:
+                from qdrant_client import AsyncQdrantClient
+            except ImportError:
+                AsyncQdrantClient = None
 
             client = QdrantClient(url=qdrant_url)
+            # aretrieve() 需要 async client，否则抛 "Async client is not initialized"
+            aclient = AsyncQdrantClient(url=qdrant_url) if AsyncQdrantClient else None
 
             # 创建 QdrantVectorStore
-            vector_store = QdrantVectorStore(
-                client=client,
-                collection_name=self._config.collection_name,
-            )
+            vs_kwargs: dict = {
+                "client": client,
+                "collection_name": self._config.collection_name,
+            }
+            if aclient is not None:
+                vs_kwargs["aclient"] = aclient
+            vector_store = QdrantVectorStore(**vs_kwargs)
 
             # 选择 embedding 后端：默认本地 HuggingFace 模型，避免依赖 OPENAI_API_KEY
             embed_model = self._resolve_embed_model()
@@ -274,6 +284,12 @@ class RAGRetrieverPlugin:
         if not user_query:
             return ctx
 
+        # 初始化(异常路径下 trace 仍可安全使用)
+        retrieved_chunks: List[str] = []
+        code_hits: List[Dict[str, Any]] = []
+        merged_chunks: List[str] = []
+        start_time = time.monotonic()
+
         try:
             # 使用 LlamaIndex retriever 检索
             retriever = self._index.as_retriever(
@@ -294,7 +310,7 @@ class RAGRetrieverPlugin:
                 filtered_nodes = await self._rerank(user_query, filtered_nodes)
 
             # 提取文本内容
-            retrieved_chunks: List[str] = []
+            retrieved_chunks = []
             for node in filtered_nodes:
                 text = node.get_content() if hasattr(node, "get_content") else str(node)
                 if text.strip():
@@ -311,7 +327,6 @@ class RAGRetrieverPlugin:
             # --- Code RAG: 并行查询 rag_code_* 代码集合并做图谱跳数展开 ---
             # 该分支彻底 "tolerant on retrieval" —— 任何异常都只记 warning,
             # 不影响文本检索主链路。
-            code_hits: List[Dict[str, Any]] = []
             if getattr(self._config, "code_rag_enabled", False):
                 try:
                     code_hits = await self._retrieve_code_hits(user_query)
@@ -325,6 +340,7 @@ class RAGRetrieverPlugin:
                         ctx.request_id,
                     )
                     ctx.extra[NS_RAG_RETRIEVER]["code_hits"] = []
+                    code_hits = []
 
             # 注入为 system message 前缀(文本 + 代码)
             merged_chunks = list(retrieved_chunks)
@@ -353,6 +369,17 @@ class RAGRetrieverPlugin:
             if NS_RAG_RETRIEVER not in ctx.extra:
                 ctx.extra[NS_RAG_RETRIEVER] = {}
             ctx.extra[NS_RAG_RETRIEVER].setdefault("retrieved_chunks", [])
+
+        # 记录插件 trace（best-effort, 与业务逻辑解耦）
+        duration_ms = (time.monotonic() - start_time) * 1000.0
+        try:
+            status = "success" if merged_chunks else "skip"
+            payload: dict[str, Any] = {"num_results": len(retrieved_chunks), "top_k": self._config.top_k}
+            if code_hits:
+                payload["num_code"] = len(code_hits)
+            ctx.add_plugin_trace("rag_retriever", duration_ms, status, payload=payload)
+        except Exception:
+            logger.debug("RAG trace recording failed (context may lack add_plugin_trace)")
 
         return ctx
 

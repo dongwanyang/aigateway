@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Trash2, X, Code2, FolderOpen, Server, GitBranch, Package, Loader2, XCircle, CheckCircle, PlayCircle, RefreshCw, GitCompareArrows, Search } from 'lucide-react'
+import { Trash2, X, Code2, FolderOpen, Server, GitBranch, Package, Loader2, XCircle, CheckCircle, PlayCircle, RefreshCw, GitCompareArrows } from 'lucide-react'
 import Card from '@/components/Card'
+import CodeRelationPanel from './CodeRelationPanel'
 import {
   importCodeRepository,
   listCodeImportTasks,
@@ -9,16 +10,11 @@ import {
   listCodeRepositories,
   deleteCodeRepository,
   syncCodeRepository,
-  queryCodeSymbols,
-  getCodeCallers,
-  getCodeCallees,
-  getCodeImpact,
 } from '@/api/client'
 import type {
   CodeImportSourceType,
   CodeImportTask,
   CodeRepositoryImport,
-  CodeSymbolRef,
 } from '@/api/client'
 
 const SOURCE_LABEL: Record<CodeImportSourceType, string> = {
@@ -134,16 +130,8 @@ export default function KnowledgeCodeTab() {
   const [syncingRepo, setSyncingRepo] = useState<string | null>(null)
   const [syncResult, setSyncResult] = useState<{ document_id: string; text: string } | null>(null)
 
-  // 调用关系查询面板状态
-  const [relationPanel, setRelationPanel] = useState<{
-    documentId: string
-    symbolInput: string
-    selectedSymbol: string | null
-    tab: 'callers' | 'callees' | 'impact'
-    loading: boolean
-    refs: CodeSymbolRef[]
-    error: string | null
-  } | null>(null)
+  // 调用关系面板:非弹窗,内嵌在仓库表格下方。null = 收起。
+  const [relationDocumentId, setRelationDocumentId] = useState<string | null>(null)
 
   // 任务队列:每个任务独立轮询
   const [tasks, setTasks] = useState<CodeImportTask[]>(loadSavedTasks)
@@ -207,12 +195,16 @@ export default function KnowledgeCodeTab() {
     try {
       const backendTasks = await listCodeImportTasks()
       const backendMap = new Map(backendTasks.map(t => [t.task_id, t]))
+      const backendIds = new Set(backendTasks.map(t => t.task_id))
 
       setTasks(prev => {
-        // 用后端状态覆盖本地任务, 后端不存在的保留本地(交由 pollTask 单独判真伪)
+        // 用后端状态覆盖本地任务; 后端不存在的本地任务:
+        //   - 终态任务 → 丢弃(幽灵残留)
+        //   - 非终态任务 → 保留,交由 pollTask 单独判真伪(避免后端列表瞬时缺失误删正在跑的任务)
         const merged = prev
           .filter(pt => !dismissedTaskIdsRef.current.has(pt.task_id))
           .map(pt => backendMap.get(pt.task_id) ?? pt)
+          .filter(pt => backendIds.has(pt.task_id) || !TERMINAL_STATUS.includes(pt.status))
         const mergedIds = new Set(merged.map(t => t.task_id))
         // 只补回后端非终态任务,避免把用户已 dismiss 的旧终态任务重新拉回
         for (const bt of backendTasks) {
@@ -284,19 +276,19 @@ export default function KnowledgeCodeTab() {
     setTasks(prev => prev.filter(t => t.task_id !== taskId))
   }
 
-  /** 取消任务 — cancel API 同步返回 200 后才更新状态,不需要乐观更新 */
+  /** 取消任务 — cancel API 同步返回实际状态,用后端返回的 status 更新 */
   async function handleCancelTask(task: CodeImportTask) {
     try {
-      await cancelCodeImportTask(task.task_id)
-      // 后端已确认,安全更新为 cancelled
+      const resp = await cancelCodeImportTask(task.task_id)
+      // 后端可能返回已终态的真实 status(如 completed),以实际为准
+      const actualStatus = (resp as { status: string }).status || 'cancelled'
       setTasks(prev =>
         prev.map(t =>
           t.task_id === task.task_id
-            ? { ...t, status: 'cancelled' as const, error: null }
+            ? { ...t, status: actualStatus as CodeImportTask['status'], error: null }
             : t,
         ),
       )
-      // 清轮询 timer — 不再需要 poll 纠正
       clearTaskTimers(timersRef.current, task.task_id)
     } catch (exc) {
       alert(`取消失败: ${exc instanceof Error ? exc.message : '未知错误'}`)
@@ -406,58 +398,8 @@ export default function KnowledgeCodeTab() {
     }
   }
 
-  async function handleOpenRelationPanel(documentId: string) {
-    setRelationPanel({
-      documentId,
-      symbolInput: '',
-      selectedSymbol: null,
-      tab: 'callers',
-      loading: false,
-      refs: [],
-      error: null,
-    })
-  }
-
-  async function handleSearchSymbol() {
-    if (!relationPanel || !relationPanel.symbolInput.trim()) return
-    const documentId = relationPanel.documentId
-    const sym = relationPanel.symbolInput.trim()
-    // 用函数式更新,避免 async 期间被 tab 切换/再次搜索覆盖中间状态
-    setRelationPanel(prev => (prev ? { ...prev, loading: true, error: null, refs: [] } : prev))
-    try {
-      const nodes = await queryCodeSymbols(documentId, sym, { limit: 10 })
-      if (nodes.length === 0) {
-        setRelationPanel(prev =>
-          prev ? { ...prev, loading: false, selectedSymbol: null, refs: [], error: `未找到符号: ${sym}` } : prev,
-        )
-        return
-      }
-      // 自动选中第一个并加载默认 tab(callers)
-      const first = nodes[0]
-      setRelationPanel(prev =>
-        prev ? { ...prev, loading: false, selectedSymbol: first.name, refs: [], error: null } : prev,
-      )
-      await loadRelationTab(documentId, first.name ?? sym, 'callers')
-    } catch (err) {
-      setRelationPanel(prev =>
-        prev ? { ...prev, loading: false, error: err instanceof Error ? err.message : String(err) } : prev,
-      )
-    }
-  }
-
-  async function loadRelationTab(documentId: string, symbol: string, tab: 'callers' | 'callees' | 'impact') {
-    setRelationPanel(prev => (prev ? { ...prev, tab, loading: true, refs: [], error: null } : prev))
-    try {
-      let refs: CodeSymbolRef[]
-      if (tab === 'callers') refs = await getCodeCallers(documentId, symbol)
-      else if (tab === 'callees') refs = await getCodeCallees(documentId, symbol)
-      else refs = await getCodeImpact(documentId, symbol, 2)
-      setRelationPanel(prev => (prev ? { ...prev, loading: false, refs, tab } : prev))
-    } catch (err) {
-      setRelationPanel(prev =>
-        prev ? { ...prev, loading: false, error: err instanceof Error ? err.message : String(err) } : prev,
-      )
-    }
+  function handleOpenRelationPanel(documentId: string) {
+    setRelationDocumentId(documentId)
   }
 
   const activeCount = useMemo(
@@ -852,112 +794,13 @@ export default function KnowledgeCodeTab() {
         </div>
       </Card>
 
-      {/* 调用关系查询面板(弹窗) */}
-      {relationPanel && (
-        <div
-          className="fixed inset-0 flex items-center justify-center"
-          style={{ background: 'rgba(0,0,0,0.5)', zIndex: 50 }}
-          onClick={() => setRelationPanel(null)}
-        >
-          <div
-            className="rounded-lg shadow-xl"
-            style={{ background: 'var(--color-bg-primary)', width: '640px', maxWidth: '90vw', maxHeight: '80vh', overflow: 'auto' }}
-            onClick={e => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between p-4 border-b" style={{ borderColor: 'var(--color-border)' }}>
-              <h4 className="text-md font-semibold flex items-center gap-2">
-                <GitCompareArrows size={16} /> 调用关系
-                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--font-size-xs)', color: 'var(--color-text-tertiary)' }}>
-                  {relationPanel.documentId}
-                </span>
-              </h4>
-              <button className="p-1 rounded cursor-pointer" onClick={() => setRelationPanel(null)}>
-                <X size={18} />
-              </button>
-            </div>
-            <div className="p-4 space-y-3">
-              {/* 符号搜索 */}
-              <div className="flex gap-2">
-                <input
-                  className="flex-1 px-3 py-1.5 rounded border"
-                  style={{ background: 'var(--color-bg-secondary)', borderColor: 'var(--color-border)', color: 'var(--color-text-primary)' }}
-                  placeholder="输入符号名(如 login)"
-                  value={relationPanel.symbolInput}
-                  onChange={e => setRelationPanel({ ...relationPanel, symbolInput: e.target.value })}
-                  onKeyDown={e => { if (e.key === 'Enter') handleSearchSymbol() }}
-                />
-                <button
-                  className="px-3 py-1.5 rounded flex items-center gap-1 cursor-pointer"
-                  style={{ background: 'var(--color-accent)', color: '#fff' }}
-                  onClick={handleSearchSymbol}
-                  disabled={relationPanel.loading}
-                >
-                  {relationPanel.loading ? <Loader2 size={14} className="animate-spin" /> : <Search size={14} />}
-                  搜索
-                </button>
-              </div>
-
-              {relationPanel.selectedSymbol && (
-                <div className="text-sm" style={{ color: 'var(--color-text-secondary)' }}>
-                  当前符号: <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--color-accent)' }}>{relationPanel.selectedSymbol}</span>
-                </div>
-              )}
-
-              {/* 三 tab:callers / callees / impact */}
-              {relationPanel.selectedSymbol && (
-                <div className="flex gap-1 border-b" style={{ borderColor: 'var(--color-border)' }}>
-                  {(['callers', 'callees', 'impact'] as const).map(t => (
-                    <button
-                      key={t}
-                      className="px-3 py-1.5 text-sm cursor-pointer"
-                      style={{
-                        borderBottom: relationPanel.tab === t ? '2px solid var(--color-accent)' : '2px solid transparent',
-                        color: relationPanel.tab === t ? 'var(--color-accent)' : 'var(--color-text-secondary)',
-                      }}
-                      onClick={() => loadRelationTab(relationPanel.documentId, relationPanel.selectedSymbol!, t)}
-                    >
-                      {t === 'callers' ? '调用者 (Callers)' : t === 'callees' ? '被调用 (Callees)' : '影响范围 (Impact)'}
-                    </button>
-                  ))}
-                </div>
-              )}
-
-              {relationPanel.error && (
-                <div className="text-sm" style={{ color: 'var(--color-danger)' }}>{relationPanel.error}</div>
-              )}
-
-              {/* 结果列表 */}
-              {relationPanel.selectedSymbol && !relationPanel.error && (
-                <div className="space-y-1">
-                  {relationPanel.loading ? (
-                    <div className="text-center py-4 text-sm" style={{ color: 'var(--color-text-tertiary)' }}>
-                      <Loader2 size={16} className="animate-spin inline mr-2" />加载中...
-                    </div>
-                  ) : relationPanel.refs.length === 0 ? (
-                    <div className="text-center py-4 text-sm" style={{ color: 'var(--color-text-tertiary)' }}>
-                      无 {relationPanel.tab}
-                    </div>
-                  ) : (
-                    relationPanel.refs.map((ref, idx) => (
-                      <div
-                        key={`${ref.name}-${idx}`}
-                        className="flex items-center justify-between px-3 py-1.5 rounded text-sm"
-                        style={{ background: 'var(--color-bg-secondary)' }}
-                      >
-                        <span style={{ fontFamily: 'var(--font-mono)' }}>
-                          <span style={{ color: 'var(--color-accent)' }}>{ref.name}</span>
-                          <span style={{ color: 'var(--color-text-tertiary)' }}> ({ref.kind})</span>
-                        </span>
-                        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--font-size-xs)', color: 'var(--color-text-tertiary)' }}>
-                          {ref.file_path}:{ref.start_line}
-                        </span>
-                      </div>
-                    ))
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
+      {/* 调用关系面板(内嵌,非弹窗) */}
+      {relationDocumentId && (
+        <div className="mt-4">
+          <CodeRelationPanel
+            documentId={relationDocumentId}
+            onClose={() => setRelationDocumentId(null)}
+          />
         </div>
       )}
     </div>

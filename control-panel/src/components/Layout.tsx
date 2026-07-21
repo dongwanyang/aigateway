@@ -1,9 +1,10 @@
-import { LayoutDashboard, Puzzle, DollarSign, Shield, Database, FileText, Sun, Moon, BookOpen, Settings, Bot } from 'lucide-react'
+import { LayoutDashboard, Puzzle, DollarSign, Shield, Database, FileText, Sun, Moon, BookOpen, Settings, Bot, MessageSquare } from 'lucide-react'
 import { Link, useLocation } from 'react-router-dom'
 import { useTheme } from '@/hooks/useTheme'
 
 const navItems = [
   { path: '/', label: '概览', icon: LayoutDashboard },
+  { path: '/chat', label: '聊天', icon: MessageSquare },
   { path: '/models', label: '模型配置', icon: Bot },
   { path: '/plugins', label: '插件管理', icon: Puzzle },
   { path: '/costs', label: '成本分析', icon: DollarSign },

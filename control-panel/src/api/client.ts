@@ -9,7 +9,6 @@ import type {
   ApiError,
   ChatCompletionRequest,
   ChatCompletionData,
-  ChatCompletionChunkData,
   ModelListData,
   EmbeddingRequest,
   EmbeddingListData,
@@ -26,6 +25,7 @@ import type {
   UpdateGroupRequest,
   AssignGroupRequest,
   CacheScope,
+  VideoStatusResponse,
 } from '@/types'
 
 // ------------------------------------------------------------------
@@ -101,28 +101,212 @@ export async function createChatCompletion(
   })
 }
 
-export async function createChatCompletionStream(
+/**
+ * POST /v1/chat/completions (stream=true) —— 按 content-type 分流返回。
+ *
+ * 后端对 understanding 意图返回 text/event-stream(逐 token);对 generation
+ * 意图命中草稿门控时直接返回 application/json(`draft_pending_confirmation`)。
+ * 调用方据 kind 分流:stream 走 SSE 解析,draft 直接消费草稿元数据。
+ *
+ * `signal` 透传给底层 fetch,使调用方能真正取消上游请求。
+ */
+export type ChatResponse =
+  | { kind: 'stream'; body: ReadableStream<Uint8Array> }
+  | {
+      kind: 'draft'
+      draftId: string
+      previewUrl: string
+      mediaType: 'image' | 'video'
+      generationParams: Record<string, unknown>
+    }
+
+export async function requestChatCompletion(
   body: ChatCompletionRequest,
-): Promise<ReadableStream<ChatCompletionChunkData>> {
+  signal?: AbortSignal,
+): Promise<ChatResponse> {
   const headers = await ensureAuthHeaders()
   const res = await fetch(`${API_BASE}/v1/chat/completions`, {
     method: 'POST',
     headers: { ...headers, 'Accept': 'text/event-stream' },
     body: JSON.stringify({ ...body, stream: true }),
+    signal,
   })
 
   if (!res.ok) {
     let errorMsg = `HTTP ${res.status}`
     try {
-      const body = (await res.json()) as ApiError
-      errorMsg = body.error?.message || errorMsg
+      const errBody = (await res.json()) as ApiError
+      errorMsg = errBody.error?.message || errorMsg
     } catch {
       // Non-JSON error response (e.g. HTML nginx page); use status code
     }
     throw new Error(errorMsg)
   }
 
-  return res.body as unknown as ReadableStream<ChatCompletionChunkData>
+  const contentType = res.headers.get('content-type') ?? ''
+
+  // 草稿门控:application/json + draft_pending_confirmation
+  if (contentType.includes('application/json')) {
+    const json = (await res.json()) as {
+      data?: { draft_id?: string; preview_url?: string; generation_params?: { media_type?: string } & Record<string, unknown> }
+      _meta?: { draft_pending_confirmation?: boolean }
+    }
+    const draftId = json.data?.draft_id
+    const previewUrl = json.data?.preview_url
+    if (!draftId || !previewUrl) {
+      throw new Error('草稿响应缺少 draft_id / preview_url')
+    }
+    const mediaTypeRaw = json.data?.generation_params?.media_type
+    const mediaType: 'image' | 'video' = mediaTypeRaw === 'video' ? 'video' : 'image'
+    return {
+      kind: 'draft',
+      draftId,
+      previewUrl,
+      mediaType,
+      generationParams: json.data?.generation_params ?? {},
+    }
+  }
+
+  // 流式 understanding
+  if (!res.body) {
+    throw new Error('Streaming response has no body')
+  }
+  return { kind: 'stream', body: res.body }
+}
+
+// ------------------------------------------------------------------
+// Draft-to-HiRes 工作流(/admin/draft/*,authenticate_admin,前端 admin key 可用)
+// ------------------------------------------------------------------
+
+/** GET /admin/draft/{id}/preview —— 草稿预览图(base64 data URL)。 */
+export async function getDraftPreview(
+  draftId: string,
+): Promise<{ previewDataUrl: string; previewCount: number }> {
+  const headers = await ensureAuthHeaders()
+  const res = await fetch(`${API_BASE}/admin/draft/${encodeURIComponent(draftId)}/preview`, {
+    headers,
+  })
+  if (!res.ok) {
+    let code = `HTTP ${res.status}`
+    try {
+      const b = (await res.json()) as { error?: { code?: string; message?: string } }
+      code = b.error?.code || b.error?.message || code
+    } catch {
+      // ignore
+    }
+    throw new Error(code)
+  }
+  const json = (await res.json()) as { preview_data_url?: string; preview_count?: number }
+  if (!json.preview_data_url) throw new Error('preview 响应缺少 preview_data_url')
+  return { previewDataUrl: json.preview_data_url, previewCount: json.preview_count ?? 1 }
+}
+
+/** POST /admin/draft/{id}/confirm —— 确认 → 高清放大 → 返回最终图 data URL。 */
+export async function confirmDraft(
+  draftId: string,
+): Promise<{ upscaledUrl: string; targetResolution: [number, number]; algorithm: string }> {
+  const headers = await ensureAuthHeaders()
+  const res = await fetch(`${API_BASE}/admin/draft/${encodeURIComponent(draftId)}/confirm`, {
+    method: 'POST',
+    headers,
+  })
+  if (!res.ok) {
+    let code = `HTTP ${res.status}`
+    try {
+      const b = (await res.json()) as { error?: { code?: string; message?: string } }
+      code = b.error?.code || b.error?.message || code
+    } catch {
+      // ignore
+    }
+    throw new Error(code)
+  }
+  const json = (await res.json()) as {
+    upscaled_url?: string
+    target_resolution?: [number, number]
+    algorithm?: string
+  }
+  if (!json.upscaled_url) throw new Error('confirm 响应缺少 upscaled_url')
+  return {
+    upscaledUrl: json.upscaled_url,
+    targetResolution: json.target_resolution ?? [0, 0],
+    algorithm: json.algorithm ?? 'upscale',
+  }
+}
+
+/** POST /admin/draft/{id}/reject —— 拒绝 → 重新生成新草稿。 */
+export async function rejectDraft(
+  draftId: string,
+): Promise<{ newDraftId: string; previewUrl: string; attemptNumber: number; maxAttempts: number }> {
+  const headers = await ensureAuthHeaders()
+  const res = await fetch(`${API_BASE}/admin/draft/${encodeURIComponent(draftId)}/reject`, {
+    method: 'POST',
+    headers,
+  })
+  if (!res.ok) {
+    let code = `HTTP ${res.status}`
+    try {
+      const b = (await res.json()) as { error?: { code?: string; message?: string } }
+      code = b.error?.code || b.error?.message || code
+    } catch {
+      // ignore
+    }
+    throw new Error(code)
+  }
+  const json = (await res.json()) as {
+    new_draft_id?: string
+    preview_url?: string
+    attempt_number?: number
+    max_attempts?: number
+  }
+  if (!json.new_draft_id || !json.preview_url) throw new Error('reject 响应缺少 new_draft_id / preview_url')
+  return {
+    newDraftId: json.new_draft_id,
+    previewUrl: json.preview_url,
+    attemptNumber: json.attempt_number ?? 1,
+    maxAttempts: json.max_attempts ?? 5,
+  }
+}
+
+/** GET /admin/draft/{id} —— 查草稿状态(刷新后判断是否过期)。 */
+export async function getDraftStatus(
+  draftId: string,
+): Promise<{ status: string; expiresAt: number; attemptNumber: number; maxAttempts: number }> {
+  const headers = await ensureAuthHeaders()
+  const res = await fetch(`${API_BASE}/admin/draft/${encodeURIComponent(draftId)}`, { headers })
+  if (!res.ok) {
+    let code = `HTTP ${res.status}`
+    try {
+      const b = (await res.json()) as { error?: { code?: string; message?: string } }
+      code = b.error?.code || b.error?.message || code
+    } catch {
+      // ignore
+    }
+    throw new Error(code)
+  }
+  const json = (await res.json()) as {
+    status?: string
+    expires_at?: number
+    attempt_number?: number
+    max_attempts?: number
+  }
+  return {
+    status: json.status ?? 'unknown',
+    expiresAt: json.expires_at ?? 0,
+    attemptNumber: json.attempt_number ?? 1,
+    maxAttempts: json.max_attempts ?? 5,
+  }
+}
+
+/** GET /v1/videos/{id} —— 轮询视频生成任务状态(passthrough 上游 JSON)。 */
+export async function getVideoStatus(videoId: string): Promise<VideoStatusResponse> {
+  const headers = await ensureAuthHeaders()
+  const res = await fetch(`${API_BASE}/v1/videos/${encodeURIComponent(videoId)}`, {
+    headers,
+  })
+  if (!res.ok) {
+    throw new Error(`视频状态查询失败: HTTP ${res.status}`)
+  }
+  return (await res.json()) as VideoStatusResponse
 }
 
 // ------------------------------------------------------------------
@@ -282,6 +466,87 @@ export async function getMetricsJson(): Promise<ApiResponse<MetricsJsonData>> {
   } catch {
     throw new Error('Metrics JSON returned invalid response')
   }
+}
+
+// ------------------------------------------------------------------
+// Admin: Cost Ledger (SQLite 持久化)
+// ------------------------------------------------------------------
+
+export interface LedgerRow {
+  id: number
+  trace_id: string
+  ts: string
+  ts_unix: number
+  user_id: string
+  group_id: string
+  model: string
+  provider: string
+  pipeline_kind: string
+  tokens_in: number
+  tokens_out: number
+  tokens_total: number
+  cost_usd: number
+  cached: number
+  stream: number
+  status: string
+}
+
+export interface CostSummary {
+  total: Record<string, number>
+  by_model: AggregateRow[]
+  by_user: AggregateRow[]
+  by_group: AggregateRow[]
+  by_day: AggregateDayRow[]
+}
+
+interface AggregateRow {
+  k: string
+  requests: number
+  tokens_in: number
+  tokens_out: number
+  tokens_total: number
+  cost_usd: number
+  cache_hits: number
+}
+
+interface AggregateDayRow {
+  k: string
+  requests: number
+  tokens_total: number
+  cost_usd: number
+}
+
+export async function getCostLedger(params?: {
+  limit?: number
+  offset?: number
+  start?: number | null
+  end?: number | null
+  user_id?: string | null
+  group_id?: string | null
+  model?: string | null
+}): Promise<LedgerRow[]> {
+  const headers = await ensureAuthHeaders()
+  const qs = new URLSearchParams()
+  if (params?.limit) qs.set('limit', String(params.limit))
+  if (params?.offset) qs.set('offset', String(params.offset))
+  if (params?.start !== undefined && params.start !== null) qs.set('start', String(params.start))
+  if (params?.end !== undefined && params.end !== null) qs.set('end', String(params.end))
+  if (params?.user_id) qs.set('user_id', params.user_id)
+  if (params?.group_id) qs.set('group_id', params.group_id)
+  if (params?.model) qs.set('model', params.model)
+  const url = `${API_BASE}/admin/costs/ledger${qs.toString() ? '?' + qs.toString() : ''}`
+  const res = await fetch(url, { headers })
+  if (!res.ok) throw new Error(`Failed to fetch cost ledger: ${res.status}`)
+  const body = await res.json()
+  return body.rows ?? []
+}
+
+export async function getCostSummary(days?: number): Promise<CostSummary> {
+  const headers = await ensureAuthHeaders()
+  const qs = days ? `?days=${days}` : ''
+  const res = await fetch(`${API_BASE}/admin/costs/summary${qs}`, { headers })
+  if (!res.ok) throw new Error(`Failed to fetch cost summary: ${res.status}`)
+  return res.json()
 }
 
 // ------------------------------------------------------------------
@@ -671,7 +936,7 @@ export async function getCodeImportTask(taskId: string): Promise<CodeImportTask>
   return await res.json()
 }
 
-export async function cancelCodeImportTask(taskId: string): Promise<{ task_id: string; status: 'cancelled' }> {
+export async function cancelCodeImportTask(taskId: string): Promise<{ task_id: string; status: CodeImportTaskStatus }> {
   const headers = await ensureAuthHeaders()
   const res = await fetch(
     `${API_BASE}/admin/rag/code/tasks/${encodeURIComponent(taskId)}/cancel`,
@@ -801,6 +1066,47 @@ export async function getCodeImpact(
   if (!res.ok) throw new Error(`Code impact failed: ${res.status}`)
   const body = await res.json()
   return body?.affected ?? []
+}
+
+
+// ------------------------------------------------------------------
+// Code RAG: File list + full symbol listing (call-graph panel)
+// ------------------------------------------------------------------
+
+export interface CodeFile {
+  path: string
+  language: string
+  node_count: number | null
+  size: number | null
+}
+
+export async function listCodeFiles(documentId: string): Promise<CodeFile[]> {
+  const headers = await ensureAuthHeaders()
+  const res = await fetch(
+    `${API_BASE}/admin/rag/code/repositories/${encodeURIComponent(documentId)}/files`,
+    { headers },
+  )
+  if (!res.ok) throw new Error(`Code files failed: ${res.status}`)
+  return await res.json()
+}
+
+// List all symbols via empty-string search (no new backend endpoint needed).
+// codegraph CLI ignores --limit partially on empty search, so pass a large limit
+// to fetch the full set; caller checks length === limit to detect truncation.
+export async function listAllSymbols(
+  documentId: string,
+  opts?: { kind?: string; limit?: number },
+): Promise<CodeSymbolNode[]> {
+  const headers = await ensureAuthHeaders()
+  const limit = opts?.limit ?? 5000
+  const params = new URLSearchParams({ symbol: '', limit: String(limit) })
+  if (opts?.kind) params.set('kind', opts.kind)
+  const res = await fetch(
+    `${API_BASE}/admin/rag/code/repositories/${encodeURIComponent(documentId)}/query?${params}`,
+    { headers },
+  )
+  if (!res.ok) throw new Error(`List symbols failed: ${res.status}`)
+  return await res.json()
 }
 
 

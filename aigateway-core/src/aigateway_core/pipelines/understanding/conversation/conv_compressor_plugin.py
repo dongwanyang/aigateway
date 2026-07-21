@@ -13,6 +13,7 @@ ConvCompressorPlugin — 对话历史压缩插件
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -137,12 +138,17 @@ class ConvCompressorPlugin:
 
         max_history = self._config.max_history
 
-        # 消息数未达阈值，无需压缩
+        # 消息数未达阈值，无需压缩——记一条 skip trace
         if len(messages) <= max_history:
+            ctx.add_plugin_trace(
+                "conv_compressor", 0.0, "skipped",
+                payload={"reason": "messages <= max_history", "message_count": len(messages)},
+            )
             return ctx
 
         # 需要压缩
         try:
+            start_time = time.monotonic()
             compressed_messages, raw_summary = await self._compress_messages(messages, max_history)
 
             # 清理内部标记
@@ -163,6 +169,15 @@ class ConvCompressorPlugin:
             ctx.extra["conv_compressor"]["summary"] = raw_summary
             ctx.extra["conv_compressor"]["original_count"] = len(messages)
             ctx.extra["conv_compressor"]["compressed_count"] = len(compressed_messages)
+
+            duration_ms = (time.monotonic() - start_time) * 1000.0
+            ctx.add_plugin_trace(
+                "conv_compressor", duration_ms, "success",
+                payload={
+                    "original_count": len(messages),
+                    "compressed_count": len(compressed_messages),
+                },
+            )
 
             logger.debug(
                 "对话历史压缩完成: original=%d messages, compressed=%d messages",

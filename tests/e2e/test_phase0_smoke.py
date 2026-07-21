@@ -75,17 +75,25 @@ def test_host_config_snapshot_restore(host_config):
 
 
 def test_trace_events_roundtrip(admin_client, trace_helpers):
-    from tests.fixtures.clients import chat
     import uuid
     tid = uuid.uuid4().hex
-    # Use admin key for the smoke chat call
+    # Use unique prompt to guarantee cache miss (static prompts may hit cache → short-circuit)
+    # and set X-Trace-Id directly (chat() helper sets X-Request-ID which trace middleware ignores).
     admin_c = httpx.Client(
         base_url=BASE,
         headers={"Authorization": f"Bearer {ADMIN_KEY}"},
         timeout=120,
     )
     try:
-        resp = chat(admin_c, "hello e2e smoke", trace_id=tid)
+        resp = admin_c.post(
+            "/v1/chat/completions",
+            json={
+                "model": "agnes-2.0-flash",
+                "messages": [{"role": "user", "content": f"hello e2e smoke {uuid.uuid4().hex}"}],
+            },
+            headers={"X-Trace-Id": tid},
+            timeout=120,
+        )
     finally:
         admin_c.close()
     # Upstream may return 502; skip rather than pass on an unverifiable chain

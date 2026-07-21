@@ -158,11 +158,11 @@ def test_t6_logger_carries_trace_id(admin_client, trace_helpers):
 
 
 def test_t7_early_return_emits_skip(admin_client, unique_prefix, trace_helpers):
-    """5.2 #7: 配额耗尽的请求 -> events 里有 status=skip 的 stage."""
+    """5.2 #7: 配额耗尽的请求 -> events 里有 status=error 的 check_quota stage."""
     r = admin_client.post("/admin/api-keys", json={
         "user_id": f"{unique_prefix}zero-quota",
-        "quotas": {"daily_tokens": 1, "monthly_cost": 0.001,
-                   "rate_limit_rpm": 60, "rate_limit_tpm": 1},
+        "daily_tokens": 1, "monthly_cost": 0.001,
+        "rate_limit_rpm": 60, "rate_limit_tpm": 1,
     })
     if r.status_code not in (200, 201):
         pytest.skip(f"cannot create zero-quota key: {r.status_code}")
@@ -171,18 +171,19 @@ def test_t7_early_return_emits_skip(admin_client, unique_prefix, trace_helpers):
     kid = data.get("key_id") or data.get("id")
     try:
         c = httpx.Client(base_url=BASE, headers={"Authorization": f"Bearer {key}"}, timeout=60)
-        # 先耗掉配额(用短 prompt,让上游快速返回)
+        # 先耗掉配额(用唯一 prompt 避免 cache hit;cache 命中会短路在 quota check 之前)
         tid = _tid()
         c.post("/v1/chat/completions",
                json={"model": "agnes-2.0-flash",
-                     "messages": [{"role": "user", "content": "hi"}]},
+                     "messages": [{"role": "user", "content": f"quota drain {uuid.uuid4().hex}"}]},
                headers={"X-Trace-Id": tid},
                timeout=60)
         # 再来一次应该被 quota 挡住(daily_tokens=1 已用完)
+        # 用唯一 prompt 避免 cache hit —— cache 命中时 quota check 不执行(status=ok 而非 error)
         tid2 = _tid()
         c.post("/v1/chat/completions",
                json={"model": "agnes-2.0-flash",
-                     "messages": [{"role": "user", "content": "hi again"}]},
+                     "messages": [{"role": "user", "content": f"quota exhausted {uuid.uuid4().hex}"}]},
                headers={"X-Trace-Id": tid2},
                timeout=60)
         c.close()
@@ -197,8 +198,9 @@ def test_t7_early_return_emits_skip(admin_client, unique_prefix, trace_helpers):
                         and e.get("kind") == "stage"]
         assert quota_events, \
             f"No key_store.check_quota stage for quota-exhausted request: {names}"
+        # cache 命中会让 check_quota status=ok 而非 error —— 用唯一 prompt 避免
         assert any(e.get("status") == "error" for e in quota_events), \
-            f"check_quota stage did not report error status: {quota_events}"
+            f"check_quota stage did not report error status (cache hit short-circuit?): {quota_events}"
         # 找到 check_quota error 事件的位置,其后不应有 bridge 事件
         quota_err_idx = next(
             (i for i, e in enumerate(evs)
