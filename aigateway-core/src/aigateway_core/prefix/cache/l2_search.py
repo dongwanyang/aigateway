@@ -9,19 +9,27 @@
 索引设计:
     索引名: aigateway:l2:idx
     Hash 前缀: aigateway:cache:v2search:
+    LANGUAGE_FIELD: doc_lang (每条文档读 doc_lang 字段值决定分词语言)
     字段:
         - normalized_prompt: TEXT (BM25 打分目标)
-        - pipeline_kind:    TAG  (隔离 understanding/generation)
-        - model_family:     TAG
-        - cache_scope:      TAG  (private/group/public)
-        - scope_id:         TAG  (user_id 或 group_id, 按 scope 过滤)
-        - response_json:    TEXT (OpenAI 格式响应 JSON)
-        - created_at:       NUMERIC
+        - doc_lang:          隐式语言字段 (写 chinese 触发 Friso 中文分词)
+        - pipeline_kind:     TAG  (隔离 understanding/generation)
+        - model_family:      TAG
+        - cache_scope:       TAG  (private/group/public)
+        - scope_id:          TAG  (user_id 或 group_id, 按 scope 过滤)
+        - response_json:     随 Hash 存储、可 return_fields 取回，但不进 schema 索引
+        - created_at:        NUMERIC
 
 注:
     normalized_prompt 是 dispatcher 传来的 JSON 序列化 messages 数组
     (含大量 JSON 语法字符)。BM25 分词前需抽回纯文本，否则括号引号
     污染词项。见 ``_extract_plain_text``。
+
+    **中文分词**: RediSearch 默认分词器只按空白/标点切词，对中文整段
+    当一个 token，导致原样重发都不命中。索引声明 ``LANGUAGE_FIELD
+    doc_lang`` + 文档写 ``doc_lang=chinese`` + 查询 ``.language("chinese")``
+    三处配合，启用 RediSearch 内置 Friso 词典分词（无需 jieba 等 Python
+    依赖）。完全相同/高度重叠的中文 prompt 高分命中，不相关的不命中。
 
     所有方法在 RediSearch 不可用 / 查询失败时返回 None / 空结果，
     调用方据此降级，不影响可用性。
@@ -42,7 +50,9 @@ logger = logging.getLogger(__name__)
 L2_INDEX_NAME = "aigateway:l2:idx"
 L2_HASH_PREFIX = "aigateway:cache:v2search:"
 
-# BM25 默认阈值。BM25 分数无上界，此值是保守起点，需按实际语料调参。
+# BM25 默认阈值。实测分数分布（response_json 不进 schema 后）：
+#   完全相同 prompt ~5、近重复 ~4.75、核心子串 ~3、单核心词 ~2.25、完全不相关 0。
+#   1.5 落在"命中区下沿"，过滤噪声词误命中，又保留近重复命中。需按实际语料调参。
 L2_DEFAULT_MIN_SCORE = 1.5
 L2_DEFAULT_TOP_K = 5
 
@@ -160,6 +170,11 @@ async def ensure_index(client: Any) -> bool:
         definition = IndexDefinition(
             prefix=[L2_HASH_PREFIX],
             index_type=IndexType.HASH,
+            # LANGUAGE_FIELD: 每条 Hash 文档读 doc_lang 字段值作为分词语言。
+            # RediSearch 内置 Friso 中文分词库，doc_lang=chinese 时对 CJK 文本
+            # 做词典分词（而非默认的空白/标点切分，否则中文整段当一个 token 无法命中）。
+            language_field="doc_lang",
+            language="chinese",
         )
         schema = (
             TextField("normalized_prompt", weight=1.0),
@@ -167,8 +182,11 @@ async def ensure_index(client: Any) -> bool:
             TagField("model_family", separator="|"),
             TagField("cache_scope", separator="|"),
             TagField("scope_id", separator="|"),
-            TextField("response_json"),
             NumericField("created_at"),
+            # 注意: response_json **不**进 schema。它仍随 Hash 存储、查询时经
+            # .return_fields("response_json") 取回，但不被 RediSearch 索引。
+            # 若声明为 TEXT，其庞杂内容会稀释 BM25 词项 IDF，导致 normalized_prompt
+            # 的命中分数从 ~5 掉到 ~0.4（实测），低于 min_score 阈值→永远 miss。
         )
         await client.ft(L2_INDEX_NAME).create_index(
             schema, definition=definition
@@ -214,11 +232,16 @@ async def store(
             redis_key,
             mapping={
                 "normalized_prompt": plain,
+                # doc_lang 与索引 LANGUAGE_FIELD 对应，触发 Friso 中文分词
+                "doc_lang": "chinese",
                 "pipeline_kind": _escape_tag(pipeline_kind),
                 "model_family": _escape_tag(model_family),
                 "cache_scope": _escape_tag(cache_scope),
                 "scope_id": _escape_tag(scope_id),
-                "response_json": value[:10000],  # 截断避免 payload 过大
+                # 截断避免 payload 过大。注: 截断可能切在 JSON 中间，
+                # 极端长响应命中缓存时下游 json.loads 会失败 → 走 miss 重算。
+                # 10000 字符覆盖绝大多数 chat completion 响应；超长响应本就少见。
+                "response_json": value[:10000],
                 "created_at": now,
             },
         )
@@ -271,7 +294,9 @@ async def search(
     ]
     filter_part = " ".join(filter_clauses)
 
-    # BM25 查询串: 过滤子句 + 全文匹配。纯文本需转义 RediSearch 特殊符。
+    # BM25 查询串: 过滤子句 + 全文匹配。
+    # _escape_query_text 保留中文原样（交 Friso 分词），只转义 RediSearch 特殊符。
+    # Query 加 .language("chinese") 让查询侧也走 Friso，与索引侧一致。
     query_text = _escape_query_text(plain)
     if not query_text:
         return None
@@ -282,6 +307,7 @@ async def search(
 
         q = (
             Query(query_str)
+            .language("chinese")
             .return_fields("response_json", "model_family", "pipeline_kind")
             .with_scores()
             .paging(0, top_k)
@@ -321,21 +347,30 @@ async def search(
 
 
 def _escape_query_text(text: str) -> str:
-    """转义 BM25 查询串中的 RediSearch 特殊字符。
+    """转义 BM25 查询串中的 RediSearch 特殊字符，保留中文交给 Friso 分词。
 
-    RediSearch 全文查询里 ``:`` ``(" ")`` ``|`` ``-`` ``$`` 等有特殊含义。
-    这里把文本拆词后，每个词用双引号包起来 (精确短语匹配太严，单词 OR 更
-    贴近 BM25 语义)。多个词之间空格即隐含 AND/OR 由 RediSearch 默认 (AND)。
+    RediSearch 全文查询里 ``:`` ``(" ")`` ``|`` ``-`` ``$`` ``*`` 等有特殊含义。
+    本函数把整段文本作为**裸查询串**返回（不按空格拆、不加引号），让索引侧
+    的 Friso 中文分词器（``LANGUAGE chinese``）对 CJK 文本做词典分词后按默认
+    AND 匹配。这样完全相同/高度重叠的中文 prompt 能高分命中，不相关的不命中。
+
+    之前按空格拆词+双引号包的做法对中文无效：中文无空格，整段被当成一个
+    精确短语，与文档分词后的 token 无法匹配（连原样重发都返回 0）。
+
+    特殊符统一用反斜杠转义；空文本返回空串（调用方据此判 miss）。
     """
     if not text:
         return ""
-    # 按空白切词，过滤空词
-    words = [w for w in text.split() if w]
-    if not words:
-        return ""
-    # 用双引号包每个词，避免特殊符被解释
-    quoted = [f'"{w}"' for w in words]
-    return " ".join(quoted)
+    # 转义 RediSearch 查询语法特殊符。Friso 分词在转义之后、查询解析之前进行，
+    # 不会受影响——它只对 \w 与 CJK 字符切词，这些符号会被 Friso 当分隔符丢弃。
+    out = []
+    for ch in text:
+        if ch in ':()"|-*$.\\':
+            out.append("\\" + ch)
+        else:
+            out.append(ch)
+    escaped = "".join(out).strip()
+    return escaped
 
 
 __all__ = [
