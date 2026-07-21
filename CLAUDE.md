@@ -38,7 +38,7 @@ Client → aigateway-api (FastAPI :8000)
                 → LiteLLMBridge._do_image_generation(/images/generations) / _do_video_generation(/videos, async)
                 → LiteLLMBridge.completion() → response
              5. GET /v1/videos/{id} polls video status
-         Cache: L1 (in-process LRU) → L2 (Redis+LZ4) → L3 (Qdrant vector, cosine≥0.95)
+         Cache: L1 (in-process LRU) → L2 (Redis Stack RediSearch BM25, Friso 中文分词) → L3 (Qdrant vector, cosine≥0.95)
          Auth: KeyStore (Redis-backed) via auth_middleware
 ```
 
@@ -87,7 +87,7 @@ control-panel/src/                  App.tsx (routes), api/client.ts, pages/ (10,
 
 ## Cache Key v2 (2026-07-06)
 
-L2 prefix `aigateway:cache:v2:*`. v1 keys expire naturally, not purged.
+L2 prefix `aigateway:cache:v2search:`. v1 keys expire naturally, not purged.
 
 ```
 key = SHA-256("v2" | pipeline_kind | model_family | temp_bucket | mt_bucket
@@ -110,10 +110,12 @@ key = SHA-256("v2" | pipeline_kind | model_family | temp_bucket | mt_bucket
 | Tier | Store              | Latency | Size cap    | TTL     |
 |------|--------------------|---------|-------------|---------|
 | L1   | `cachetools.LRU`   | <1ms    | ≤100KB/entry, 1000 entries | in-process |
-| L2   | Redis + LZ4        | few ms  | ≤500KB/entry | ~3600s |
+| L2   | Redis Stack RediSearch BM25 (Friso 中文分词) | few ms  | ≤500KB/entry | ~3600s |
 | L3   | Qdrant (Qwen3-Embedding-0.6B 1024-dim, cosine ≥0.95) | ~50ms | — | ~86400s |
 
-Backfill: L2 hit → L1; L3 hit → L1 only (approximate); MISS → L1+L2 + async L3 (if token_count ≥100). L3 has retrieve→rerank two stage. `qdrant_client.search/retrieve` treats 404 as miss (collection lazy-created on first `set_l3`).
+Backfill: L2 hit → L1; L3 hit → L1 only (approximate); MISS → L1+L2 + async L3.
+- **L2 BM25**: 基于 RediSearch FT.SEARCH，对 `normalized_prompt` 做 BM25 全文检索。中文用内置 Friso 词典分词（`IndexDefinition(language_field="doc_lang", language="chinese")` + 文档写 `doc_lang=chinese` + 查询 `.language("chinese")`）。`response_json` 随 Hash 存储但不进 schema（否则稀释 BM25 分数）。L2 捕获近重复 prompt；完全语义相似由 L3 覆盖。
+- **L3 语义缓存**: Qdrant + Qwen3-Embedding-0.6B 1024 维余弦相似度 ≥0.95。L3 命中返回缓存的 response_json；未命中时异步回填（通过 `l3_semantic._safe_l3_backfill`）。
 
 ## Security & Quotas
 

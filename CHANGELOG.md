@@ -8,6 +8,7 @@
 - **Async video task tracking**: `TaskTracker` persists video generation tasks in Redis (or in-memory fallback) with SCAN-based active listing, TTL, and status lifecycle management.
 - **Chat window MVP (Entry B)**: Control Panel `/chat` page with SSE streaming, multi-session list, draft cards, image/video rendering, typing indicators, routing badges, and message bubble polish.
 - **SQLite auth store**: Drop-in replacement for Redis-backed KeyStore/GroupStore using WAL-mode SQLite with atomic conditional UPDATE for quota enforcement.
+- **L2 BM25 cache with Friso Chinese tokenization**: L2 cache rebuilt on Redis Stack RediSearch full-text search (BM25) instead of exact SHA-256 hash + LZ4. Uses RediSearch's built-in Friso library for CJK segmentation (`LANGUAGE_FIELD doc_lang` + `language=chinese` on index, `doc_lang=chinese` on each Hash, `.language("chinese")` on query) — no jieba dependency. `response_json` is stored on the Hash but excluded from the index schema to avoid diluting BM25 IDF scores. Catches near-duplicate Chinese prompts without embedding compute; fully paraphrased prompts still fall through to L3 Qdrant semantic cache.
 - **Trace event consolidation**: Control Panel traces page merges pipeline trace events into one row per stage.
 
 ### Changed
@@ -15,6 +16,7 @@
 - Draft preview placeholders no longer include raw user prompts to prevent PII/secret leakage through generated image bytes.
 - TaskTracker `list_active` uses Redis SCAN instead of KEYS to avoid blocking the single uvicorn worker.
 - Code RAG supports atomic task cancellation and auto-deletes completed tasks; frontend reflects task status correctly.
+- Chat window resume logic: session-switch resume effect now depends on `[activeId]` only and reads `sessions`/`send` via refs, preventing the resume effect from re-firing on every `sessions` change and clobbering the empty assistant placeholder that `send` just appended (which caused draft responses to never render).
 
 ### Fixed
 - TOCTOU race in SQLite `check_quota`: re-reads row inside transaction and applies conditional UPDATE atomically.
@@ -28,6 +30,7 @@
 
 ### Tests
 - Added 30 new unit tests covering stream/non-stream image and video intents, extra_headers propagation, `ModelSelector.get_health`, video processing states, and concurrent quota race conditions.
+- Added 63 new unit tests: `test_l2_search.py` (L2 BM25 module — Friso index config, store/search, escape helpers, degradation paths, boundary score), `test_task_tracker.py` (TaskTracker register/get/update/list/delete in memory + Redis-mock modes, TTL preservation), `test_video_routes.py` (video polling endpoint — bridge unavailable, success, error masking, debug-gate detail exposure).
 
 ### Security
 - `authenticate_admin` middleware now requires explicit `is_admin=True` flag — closes auth bypass where any valid API key could access admin endpoints.

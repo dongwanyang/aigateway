@@ -44,6 +44,7 @@ AST.txt
 repomix-output.md
 .kiro/
 .playwright-cli/
+.playwright-mcp/
 .test-venv/
 /*.lock
 .CodeBuddy/
