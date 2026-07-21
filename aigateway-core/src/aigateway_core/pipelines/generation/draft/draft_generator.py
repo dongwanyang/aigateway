@@ -1123,12 +1123,80 @@ class DraftGeneratorStrategy:
 
         仅处理 http(s) URL；若 content 是 b64_json（response_format 改动导致），
         返回空串触发上层回退占位，而不是把 base64 字符串当 URL 去请求。
+
+        SSRF 防护：解析 hostname 后检查是否落在私有/内网 IP 范围，拒绝访问
+        元数据端点、localhost、RFC1918 地址等。
         """
         if not isinstance(url, str) or not url.startswith(("http://", "https://")):
             raise ValueError(f"非 HTTP 图片内容，无法下载: {str(url)[:40]!r}")
+
+        from urllib.parse import urlparse
+        import socket
+
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+        if not hostname:
+            raise ValueError(f"无法解析 URL hostname: {url[:60]!r}")
+
+        # Resolve hostname and reject private/internal IPs before issuing request.
+        try:
+            addr_infos = socket.getaddrinfo(hostname, None)
+        except socket.gaierror as exc:
+            raise ValueError(f"DNS resolution failed for {hostname}: {exc}") from exc
+
+        for family, _socktype, _proto, _canonname, sockaddr in addr_infos:
+            ip = sockaddr[0]
+            # IPv4
+            if family == socket.AF_INET:
+                ip_int = socket.inet_aton(ip)
+                # 127.0.0.0/8 loopback
+                if ip.startswith("127.") or ip == "0.0.0.0":
+                    raise ValueError(f"禁止访问 loopback 地址: {ip}")
+                # 10.0.0.0/8
+                if ip.startswith("10."):
+                    raise ValueError(f"禁止访问 RFC1918 私有地址: {ip}")
+                # 172.16.0.0/12
+                parts = list(map(int, ip.split(".")))
+                if parts[0] == 172 and 16 <= parts[1] <= 31:
+                    raise ValueError(f"禁止访问 RFC1918 私有地址: {ip}")
+                # 192.168.0.0/16
+                if parts[0] == 192 and parts[1] == 168:
+                    raise ValueError(f"禁止访问 RFC1918 私有地址: {ip}")
+                # 169.254.0.0/16 link-local (metadata endpoints)
+                if parts[0] == 169 and parts[1] == 254:
+                    raise ValueError(f"禁止访问 link-local 地址: {ip}")
+                # 0.0.0.0/8
+                if parts[0] == 0:
+                    raise ValueError(f"禁止访问特殊地址: {ip}")
+            # IPv6
+            elif family == socket.AF_INET6:
+                if ip == "::1" or ip.startswith("fe80:") or ip.startswith("fc") or ip.startswith("fd"):
+                    raise ValueError(f"禁止访问 IPv6 私有/环回地址: {ip}")
+                # Check for IPv4-mapped IPv6 addresses (::ffff:x.x.x.x)
+                if ip.startswith("::ffff:"):
+                    mapped_ip = ip[7:]
+                    parts = list(map(int, mapped_ip.split(".")))
+                    if len(parts) == 4 and all(0 <= p <= 255 for p in parts):
+                        if parts[0] == 127 or parts[0] == 0 or parts[0] == 10 or parts[0] == 169 or (parts[0] == 172 and 16 <= parts[1] <= 31) or (parts[0] == 192 and parts[1] == 168):
+                            raise ValueError(f"禁止访问 IPv4-mapped IPv6 私有地址: {ip}")
+
         import httpx
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
             resp = await client.get(url)
+            if resp.is_redirect:
+                location = resp.headers.get("location", "")
+                if location:
+                    # Validate redirect target recursively
+                    parsed_location = urlparse(location)
+                    if parsed_location.hostname:
+                        try:
+                            redirect_addrs = socket.getaddrinfo(parsed_location.hostname, None)
+                            for _, _, _, _, sockaddr in redirect_addrs:
+                                redirect_ip = sockaddr[0]
+                                if redirect_ip.startswith("127.") or redirect_ip == "0.0.0.0" or redirect_ip.startswith("10.") or redirect_ip.startswith("169.254.") or redirect_ip.startswith("192.168.") or redirect_ip.startswith("::1") or redirect_ip.startswith("fe80:") or redirect_ip.startswith("fc") or redirect_ip.startswith("fd"):
+                                    raise ValueError(f"禁止访问重定向目标: {location}")
+                        except socket.gaierror:
+                            pass
             resp.raise_for_status()
             return resp.content
 
@@ -1248,11 +1316,9 @@ class DraftGeneratorStrategy:
                 ).encode("utf-8")
                 previews.append(placeholder)
         else:
-            prompt_snippet = old_draft.generation_params.get("prompt", "")[:50]
             placeholder = (
                 f"DRAFT_PREVIEW:image:{width}x{height}:"
                 f"regenerated:attempt={old_draft.attempt_number + 1}:"
-                f"prompt={prompt_snippet}:"
                 f"id={new_draft_id}"
             ).encode("utf-8")
             previews = [placeholder]

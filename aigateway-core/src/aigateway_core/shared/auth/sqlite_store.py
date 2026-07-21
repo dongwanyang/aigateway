@@ -191,6 +191,10 @@ class _Conn:
 
     def _connect(self) -> sqlite3.Connection:
         if getattr(self._local, "conn", None) is None:
+            # Per-thread connection via threading.local() — safe because each
+            # asyncio.to_thread() call gets its own thread and thus its own conn.
+            # Quota ops (check_quota/increment_usage) deliberately stay on the
+            # event loop with a single shared connection for TOCTOU safety.
             conn = sqlite3.connect(self.db_path, timeout=30)
             conn.execute("PRAGMA journal_mode=WAL")
             # synchronous=NORMAL: WAL 模式下崩溃安全(仅可能丢最后几个事务),避免每次 commit fsync 阻塞事件循环
