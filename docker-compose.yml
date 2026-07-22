@@ -62,15 +62,18 @@ services:
       - gateway-net
 
   # ==========================================================
-  # Redis — KV 缓存 + API Key 存储
+  # Redis Stack — KV 缓存 + API Key 存储 + RediSearch (L2 BM25 / L3 向量 / RAG 热点)
+  # redis-stack 镜像内置 RediSearch/RedisJSON 模块，支持 FT.SEARCH (BM25) 与向量 KNN。
   # ==========================================================
   redis:
-    image: redis:7-alpine
+    image: redis/redis-stack:latest
     ports:
       - "6379:6379"
     volumes:
       - redis-data:/data
-    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy volatile-lru
+    # maxmemory 提到 512mb：三个 RediSearch 索引 (L2 BM25 / L3 语义 / RAG 热点) 额外占内存。
+    # volatile-lru：优先淘汰带 TTL 的 key (缓存)，保留无 TTL 的 API Key/配额数据。
+    command: redis-stack-server --appendonly yes --maxmemory 512mb --maxmemory-policy volatile-lru --save 60 1
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s

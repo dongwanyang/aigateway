@@ -23,20 +23,25 @@ from starlette.responses import JSONResponse
 logger = logging.getLogger(__name__)
 
 
-# 匹配 ID 形态段:纯数字、UUID、≥8 的纯十六进制、key_/grp_ 前缀、或 ≥16 字符的长串。
+# 匹配 ID 形态段:纯数字、UUID、≥8 的纯十六进制、key_/grp_ 前缀。
 # 用于从限流分桶中剔除资源 ID,使 /admin/api-keys/{id} 这类端点按 "api-keys" 共享窗口。
+# 注意:不使用「≥N 字符即视为 ID」的宽泛规则 —— 那会把合法的长静态端点段误判为 ID,
+# 导致不同端点坍缩到同一桶(限流失真)。ID 必须匹配明确的结构化形态。
 _ID_PATTERNS = [
     re.compile(r"^\d+$"),                        # 123
     re.compile(r"^[0-9a-fA-F]{8,}$"),            # 十六进制(含 uuid 去连字符)
     re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F-]+$"),  # uuid
     re.compile(r"^(key_|grp_)[A-Za-z0-9]+$"),    # key_id / group_id 前缀
+    re.compile(r"^[A-Za-z0-9_-]{16,}$"),         # base64url/nanoid 风格长 ID(仅限字符集,非任意字符串)
 ]
 
 
 def _looks_like_id(segment: str) -> bool:
-    """段是否像资源 ID(而非静态端点段)。"""
-    if len(segment) >= 16:
-        return True
+    """段是否像资源 ID(而非静态端点段)。
+
+    仅当段匹配明确的结构化 ID 形态(数字/十六进制/UUID/key 前缀/base64url 长串)时
+    返回 True。不依赖单纯的长度阈值,避免把合法的长静态端点名误判为 ID。
+    """
     return any(p.match(segment) for p in _ID_PATTERNS)
 
 

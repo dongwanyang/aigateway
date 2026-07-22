@@ -2,11 +2,16 @@
 
 Guidance for Claude Code when working in this repo. Keep terse — see rule "Trim CLAUDE.md" below.
 
-/browse #浏览器QA测试
-/qa #系统化测试修复
-/ship #发布工作流
+## gstack 角色路由
+- 当需要产品决策、范围判断时，使用 /office-hours 或 /plan-ceo-review
+- 当需要架构审查时，使用 /plan-eng-review
+- 当代码准备合并前，使用 /review 进行代码审查
+- 当需要端到端测试时，使用 /qa
+- 当准备发布时，使用 /ship
 
-code-review #完成后验证
+- 用 gstack 做前期决策：/office-hours → /plan-ceo-review → /plan-eng-review → /plan-design-review，确保方向正确
+- 用 Superpowers 做中期执行：Brainstorm → Plan → TDD → Subagent → Review → Finalize，确保代码质量
+- 回到 gstack 做后期验证：/qa（真实浏览器测试）→ /cso（安全审计）→ /ship（发布）→ /retro（复盘）
 
 
 ## Project Overview
@@ -33,7 +38,7 @@ Client → aigateway-api (FastAPI :8000)
                 → LiteLLMBridge._do_image_generation(/images/generations) / _do_video_generation(/videos, async)
                 → LiteLLMBridge.completion() → response
              5. GET /v1/videos/{id} polls video status
-         Cache: L1 (in-process LRU) → L2 (Redis+LZ4) → L3 (Qdrant vector, cosine≥0.95)
+         Cache: L1 (in-process LRU) → L2 (Redis Stack RediSearch BM25, Friso 中文分词) → L3 (Qdrant vector, cosine≥0.95)
          Auth: KeyStore (Redis-backed) via auth_middleware
 ```
 
@@ -82,7 +87,7 @@ control-panel/src/                  App.tsx (routes), api/client.ts, pages/ (10,
 
 ## Cache Key v2 (2026-07-06)
 
-L2 prefix `aigateway:cache:v2:*`. v1 keys expire naturally, not purged.
+L2 prefix `aigateway:cache:v2search:`. v1 keys expire naturally, not purged.
 
 ```
 key = SHA-256("v2" | pipeline_kind | model_family | temp_bucket | mt_bucket
@@ -105,10 +110,12 @@ key = SHA-256("v2" | pipeline_kind | model_family | temp_bucket | mt_bucket
 | Tier | Store              | Latency | Size cap    | TTL     |
 |------|--------------------|---------|-------------|---------|
 | L1   | `cachetools.LRU`   | <1ms    | ≤100KB/entry, 1000 entries | in-process |
-| L2   | Redis + LZ4        | few ms  | ≤500KB/entry | ~3600s |
+| L2   | Redis Stack RediSearch BM25 (Friso 中文分词) | few ms  | ≤500KB/entry | ~3600s |
 | L3   | Qdrant (Qwen3-Embedding-0.6B 1024-dim, cosine ≥0.95) | ~50ms | — | ~86400s |
 
-Backfill: L2 hit → L1; L3 hit → L1 only (approximate); MISS → L1+L2 + async L3 (if token_count ≥100). L3 has retrieve→rerank two stage. `qdrant_client.search/retrieve` treats 404 as miss (collection lazy-created on first `set_l3`).
+Backfill: L2 hit → L1; L3 hit → L1 only (approximate); MISS → L1+L2 + async L3.
+- **L2 BM25**: 基于 RediSearch FT.SEARCH，对 `normalized_prompt` 做 BM25 全文检索。中文用内置 Friso 词典分词（`IndexDefinition(language_field="doc_lang", language="chinese")` + 文档写 `doc_lang=chinese` + 查询 `.language("chinese")`）。`response_json` 随 Hash 存储但不进 schema（否则稀释 BM25 分数）。L2 捕获近重复 prompt；完全语义相似由 L3 覆盖。
+- **L3 语义缓存**: Qdrant + Qwen3-Embedding-0.6B 1024 维余弦相似度 ≥0.95。L3 命中返回缓存的 response_json；未命中时异步回填（通过 `l3_semantic._safe_l3_backfill`）。
 
 ## Security & Quotas
 

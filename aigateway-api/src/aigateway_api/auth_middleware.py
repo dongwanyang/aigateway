@@ -263,6 +263,18 @@ async def authenticate_admin(request: Request) -> Optional[Dict[str, Any]]:
             },
         )
 
+    # Admin endpoints require explicit is_admin flag
+    if not key_data.get("is_admin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error": {
+                    "code": "forbidden",
+                    "message": "Admin privileges required",
+                }
+            },
+        )
+
     request.state.api_key_data = key_data
     request.state.api_key_value = key_value
 

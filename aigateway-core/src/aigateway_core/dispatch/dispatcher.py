@@ -32,6 +32,7 @@ from fastapi.responses import JSONResponse
 
 from aigateway_core.dispatch.classifier import classify_request
 from aigateway_core.dispatch.context import PipelineContext
+from aigateway_core.prefix.cache.cache_keys import _model_family as _cache_model_family
 
 logger = logging.getLogger(__name__)
 
@@ -400,7 +401,19 @@ class RequestDispatcher:
         )
 
         cache_start = time.time()
-        cache_kwargs: Dict[str, Any] = {"user_id": user_id}
+        # L2 BM25 慢路径元数据: 精确哈希 miss 后按 BM25 检索相似 prompt.
+        # scope_id 按 cache_scope 取 user_id (private) 或 group_id (group/public).
+        l2_scope_id = user_id if cache_scope == "private" else group_id
+        cache_kwargs: Dict[str, Any] = {
+            "user_id": user_id,
+            "l2_search": {
+                "normalized_prompt": normalized_messages,
+                "pipeline_kind": "understanding",
+                "model_family": _cache_model_family(body.model),
+                "cache_scope": cache_scope,
+                "scope_id": l2_scope_id,
+            },
+        }
         if cache_manager._qdrant_client is not None:
             from aigateway_core.prefix.cache.l3_semantic import _compute_l3_vector
             l3_vec = await _compute_l3_vector(normalized_messages)
@@ -550,12 +563,14 @@ class RequestDispatcher:
                 body, request, litellm_bridge, plugin_trace, request_start_time,
                 user_id, key_hash, cache_key, normalized_messages,
                 pipeline_kind="understanding", group_id=group_id,
+                cache_scope=cache_scope, l2_scope_id=l2_scope_id,
             )
         return await self._call_llm_nonstream(
             body, request, litellm_bridge, plugin_trace, request_start_time,
             user_id, key_hash, cache_key, normalized_messages,
             pii_meta, router_meta, mol_meta, compress_meta,
             pipeline_kind="understanding", group_id=group_id,
+            cache_scope=cache_scope, l2_scope_id=l2_scope_id,
         )
 
     # ------------------------------------------------------------------
@@ -750,8 +765,8 @@ class RequestDispatcher:
         self, body, request, litellm_bridge, plugin_trace, request_start_time,
         user_id, key_hash, cache_key, normalized_messages,
         pii_meta=None, router_meta=None, mol_meta=None, compress_meta=None,
-        pipeline_kind: str = "understanding",
-        group_id: str = "",
+        pipeline_kind: str = "understanding", group_id: str = "",
+        cache_scope: str = "group", l2_scope_id: str = "",
         intent_hint: Optional[str] = None,
     ) -> JSONResponse:
         """非流式调 LiteLLM 出口 + 用量记录 + 缓存回填。
@@ -917,9 +932,19 @@ class RequestDispatcher:
                 value_str = json.dumps(result.get("data", {}))
                 cache_manager.l1_set(cache_key, value_str)
                 try:
-                    await cache_manager.l2_set(cache_key, value_str)
+                    await cache_manager.l2_search_store(
+                        cache_key,
+                        value_str,
+                        meta={
+                            "normalized_prompt": normalized_messages,
+                            "pipeline_kind": "understanding",
+                            "model_family": _cache_model_family(body.model),
+                            "cache_scope": cache_scope,
+                            "scope_id": l2_scope_id,
+                        },
+                    )
                 except Exception as exc:
-                    logger.warning("L2 回填失败: %s", exc)
+                    logger.warning("L2 BM25 回填失败: %s", exc)
                 # L3 异步回填（需要 normalized_messages 计算 embedding；缺则跳过）
                 if normalized_messages:
                     from aigateway_core.prefix.cache.l3_semantic import _safe_l3_backfill
@@ -960,8 +985,8 @@ class RequestDispatcher:
     async def _call_llm_stream(
         self, body, request, litellm_bridge, plugin_trace, request_start_time,
         user_id, key_hash, cache_key, normalized_messages,
-        pipeline_kind: str = "understanding",
-        group_id: str = "",
+        pipeline_kind: str = "understanding", group_id: str = "",
+        cache_scope: str = "group", l2_scope_id: str = "",
         intent_hint: Optional[str] = None,
     ) -> JSONResponse:
         """流式调 LiteLLM 出口。
@@ -1216,9 +1241,19 @@ class RequestDispatcher:
                 }, ensure_ascii=False)
                 cache_manager.l1_set(cache_key, value_str)
                 try:
-                    await cache_manager.l2_set(cache_key, value_str)
+                    await cache_manager.l2_search_store(
+                        cache_key,
+                        value_str,
+                        meta={
+                            "normalized_prompt": normalized_messages,
+                            "pipeline_kind": "understanding",
+                            "model_family": _cache_model_family(body.model),
+                            "cache_scope": cache_scope,
+                            "scope_id": l2_scope_id,
+                        },
+                    )
                 except Exception as exc:
-                    logger.warning("流式 L2 回填失败: %s", exc)
+                    logger.warning("流式 L2 BM25 回填失败: %s", exc)
                 # L3 异步回填（与非流式对齐；需要 normalized_messages 计算 embedding）
                 if normalized_messages:
                     from aigateway_core.prefix.cache.l3_semantic import _safe_l3_backfill

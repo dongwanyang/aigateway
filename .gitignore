@@ -44,9 +44,22 @@ AST.txt
 repomix-output.md
 .kiro/
 .playwright-cli/
+.playwright-mcp/
 .test-venv/
 /*.lock
 .CodeBuddy/
 project-tasks/
 data/
 .gstack/
+
+# Benchmark reports (generated, not committed)
+benchmarks/reports/*.md
+benchmarks/reports/*.html
+
+# Benchmark datasets (regenerated from scripts/)
+benchmarks/datasets/*.jsonl
+
+# Benchmark pycache
+benchmarks/__pycache__/
+benchmarks/scenarios/__pycache__/
+benchmarks/scripts/__pycache__/
