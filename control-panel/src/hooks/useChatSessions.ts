@@ -267,14 +267,21 @@ export function useChatSessions(): UseChatSessions {
 
   const patchActiveMessages = useCallback(
     (updater: (msgs: ChatPageMessage[]) => ChatPageMessage[]) => {
-      setSessions(prev => prev.map(s => {
-        if (s.id !== activeId) return s
-        const messages = updater(s.messages)
-        const title = s.title === '新对话' && messages.some(m => m.role === 'user')
-          ? titleFromMessages(messages)
-          : s.title
-        return { ...s, messages, title, updatedAt: Date.now() }
-      }))
+      setSessions(prev => {
+        const next = prev.map(s => {
+          if (s.id !== activeId) return s
+          const messages = updater(s.messages)
+          const title = s.title === '新对话' && messages.some(m => m.role === 'user')
+            ? titleFromMessages(messages)
+            : s.title
+          return { ...s, messages, title, updatedAt: Date.now() }
+        })
+        // 同步更新 ref,使同一事件循环内的 flushToStorage/pagehide 能读到最新状态。
+        // 否则 React 的 useEffect 写 ref 发生在渲染后,500ms debounce 或立即 flush
+        // 可能读到旧状态,导致 draft/incomplete 等关键标记丢失(刷新后误续传)。
+        sessionsRef.current = next
+        return next
+      })
     },
     [activeId],
   )
@@ -383,8 +390,10 @@ export function useChatSessions(): UseChatSessions {
       baseMsgs = baseMsgs.slice(-10) // 只保留最后10条消息
     }
 
-    // incomplete 续传:去掉末尾那条半截 assistant。注意 sessionsRef 此时还未反映上面的 slice,
-    // 但末尾 incomplete assistant 仍在 baseMsgs 里——显式切掉,避免发回后端。
+    // incomplete 续传:去掉末尾 assistant。resume 时上面刚追加了一个空占位,
+    // patchActiveMessages 已同步更新 sessionsRef,因此 baseMsgs 末尾就是这个空占位;
+    // 如果是旧代码路径,末尾也可能是未持久化的 incomplete assistant。无论哪种,
+    // 显式切掉避免把不完整的 assistant 发回后端。
     if (opts?.dropLastAssistant && baseMsgs.length > 0 && baseMsgs[baseMsgs.length - 1].role === 'assistant') {
       baseMsgs = baseMsgs.slice(0, -1)
     }
@@ -600,8 +609,8 @@ export function useChatSessions(): UseChatSessions {
     } else if (last.role === 'assistant' && (last.incomplete || (!last.content && !last.draft))) {
       // 末尾是未完成 assistant(incomplete=流中断有半截内容),或空占位 assistant(中断时一个 token 都没收到)。
       // 两种都要移除它 + 重发前一条 user。
-      // 注意:patchActiveMessages 是异步的,sessionsRef 还没反映 slice;send 读 sessionsRef 会拿到含该 assistant 的历史,
-      // 因此传 dropLastAssistant=true 让 send 在构造 wire 时显式切掉末尾 assistant,避免把半截内容当完整轮次发回后端。
+      // patchActiveMessages 已同步更新 sessionsRef,但 send 构造 wire 时仍传 dropLastAssistant=true,
+      // 作为防御性兜底,确保任何未同步的中间状态都不会把不完整 assistant 发回后端。
       patchActiveMessages(msgs => msgs.slice(0, -1))
       const prevUser = s.messages[s.messages.length - 2]
       if (prevUser?.role === 'user') {
