@@ -109,6 +109,9 @@ class DraftGeneratorStrategy:
         request: GenerationRequest,
         config: DraftWorkflowConfig,
         keyframe_count: Optional[int] = None,
+        chat_session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        group_id: Optional[str] = None,
     ) -> DraftResult:
         """生成低分辨率草图/关键帧.
 
@@ -173,6 +176,9 @@ class DraftGeneratorStrategy:
             attempt_number=1,
             max_attempts=config.max_regeneration_attempts,
             status=DRAFT_STATUS_PENDING,
+            session_id=chat_session_id,
+            user_id=user_id,
+            group_id=group_id,
         )
 
         # Store in Redis with TTL

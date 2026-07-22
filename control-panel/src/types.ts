@@ -461,6 +461,9 @@ export interface ChatPageMessage {
   draft?: ChatDraftState
   /** 视频生成任务 ID，用于刷新后轮询恢复（不持久化 data URL） */
   videoId?: string
+  /** 等待 draft 响应的标记（防止刷新后误续传）。超 30s 自动过期。 */
+  awaitingDraft?: boolean
+  awaitingDraftSince?: number // Date.now() when awaitingDraft was set
   ts: number
 }
 

@@ -121,7 +121,7 @@ export type ChatResponse =
     }
 
 export async function requestChatCompletion(
-  body: ChatCompletionRequest,
+  body: ChatCompletionRequest & { chat_session_id?: string },
   signal?: AbortSignal,
 ): Promise<ChatResponse> {
   const headers = await ensureAuthHeaders()
@@ -199,6 +199,51 @@ export async function getDraftPreview(
   const json = (await res.json()) as { preview_data_url?: string; preview_count?: number }
   if (!json.preview_data_url) throw new Error('preview 响应缺少 preview_data_url')
   return { previewDataUrl: json.preview_data_url, previewCount: json.preview_count ?? 1 }
+}
+
+/** GET /admin/draft/{id}/result —— 获取 confirm 后的高清图 data URL。 */
+export async function getDraftResult(
+  draftId: string,
+): Promise<{ resultDataUrl: string }> {
+  const headers = await ensureAuthHeaders()
+  const res = await fetch(`${API_BASE}/admin/draft/${encodeURIComponent(draftId)}/result`, {
+    headers,
+  })
+  if (!res.ok) {
+    let code = `HTTP ${res.status}`
+    try {
+      const b = (await res.json()) as { error?: { code?: string; message?: string } }
+      code = b.error?.code || b.error?.message || code
+    } catch {
+      // ignore
+    }
+    throw new Error(code)
+  }
+  const json = (await res.json()) as { result_data_url?: string }
+  if (!json.result_data_url) throw new Error('result 响应缺少 result_data_url')
+  return { resultDataUrl: json.result_data_url }
+}
+
+/** DELETE /admin/drafts/session/{session_id} —— 删除会话所有草稿。 */
+export async function deleteSessionDrafts(
+  sessionId: string,
+): Promise<{ session_id: string; deleted_count: number }> {
+  const headers = await ensureAuthHeaders()
+  const res = await fetch(`${API_BASE}/admin/drafts/session/${encodeURIComponent(sessionId)}`, {
+    method: 'DELETE',
+    headers,
+  })
+  if (!res.ok) {
+    let code = `HTTP ${res.status}`
+    try {
+      const b = (await res.json()) as { error?: { code?: string; message?: string } }
+      code = b.error?.code || b.error?.message || code
+    } catch {
+      // ignore
+    }
+    throw new Error(code)
+  }
+  return res.json() as Promise<{ session_id: string; deleted_count: number }>
 }
 
 /** POST /admin/draft/{id}/confirm —— 确认 → 高清放大 → 返回最终图 data URL。 */

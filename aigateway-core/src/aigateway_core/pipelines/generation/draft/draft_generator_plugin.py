@@ -134,6 +134,9 @@ class DraftGeneratorPlugin:
                 request=generation_request,
                 config=self._config.draft_workflow,
                 keyframe_count=keyframe_count,
+                chat_session_id=ctx.extra.get("chat_session_id"),
+                user_id=ctx.extra.get("user_id"),
+                group_id=ctx.extra.get("group_id"),
             )
 
             # 计算耗时

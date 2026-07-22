@@ -2,8 +2,10 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   requestChatCompletion,
   getDraftPreview,
+  getDraftResult,
   confirmDraft,
   rejectDraft,
+  deleteSessionDrafts,
   getVideoStatus,
 } from '@/api/client'
 import type { ChatPageMessage, ChatMessage, ChatSession, ChatDraftState, VideoStatusResponse } from '@/types'
@@ -196,7 +198,7 @@ export function useChatSessions(): UseChatSessions {
     setResumePollingKey(prev => prev + 1)
   }, [activeId])
 
-  // debounce 持久化
+  // debounce 持久化 — token 流式更新走这个，500ms 防抖足够（不需要每次 token 都写磁盘）
   useEffect(() => {
     const t = setTimeout(() => {
       try {
@@ -207,6 +209,26 @@ export function useChatSessions(): UseChatSessions {
     }, 500)
     return () => clearTimeout(t)
   }, [sessions])
+
+  /** 关键状态转换立即落盘 — 不经过 debounce。
+   *
+   * 以下场景必须调用，否则 500ms 窗口期内刷新会丢失状态：
+   * - Draft 响应到达（assistant 从空占位 → 有 draft）
+   * - SSE 流正常完成（assistant 从空占位/半截内容 → 完整文本）
+   * - 流中断标记 incomplete
+   * - 错误发生
+   *
+   * Token 流式增量更新不需要立即落盘：resume effect 只看
+   * incomplete/draft/videoId/error/content 这几个字段，
+   * 中间 token 丢了也不影响续传逻辑。
+   */
+  const flushToStorage = useCallback(() => {
+    try {
+      localStorage.setItem(SESSIONS_KEY, serializeSessions(sessionsRef.current))
+    } catch {
+      // quota / 序列化失败,静默
+    }
+  }, [])
 
   // 硬刷新/关闭页面时,500ms debounce 可能还没落盘(尤其流式中断刚标 incomplete 就刷新)。
   // pagehide 同步 flush,确保 incomplete 标记写入 localStorage,否则重载后续传判断会漏掉。
@@ -291,10 +313,14 @@ export function useChatSessions(): UseChatSessions {
     setError(null)
   }, [streaming, stop])
 
-  const deleteSession = useCallback((id: string) => {
+  const deleteSession = useCallback(async (id: string) => {
     // 删的是正在流式输出的 active 会话 → 必须中止上游,否则 send 闭包仍持有旧 activeId,
     // fetch 会继续跑到结束(空转烧 token/配额,patch 因会话已删而成 no-op)。
     if (id === activeId) stop()
+    // 先清后端草稿文件(异步,不阻塞 UI)
+    void deleteSessionDrafts(id).catch((e) => {
+      console.warn('删除会话草稿失败:', e instanceof Error ? e.message : e)
+    })
     setSessions(prev => {
       const next = prev.filter(s => s.id !== id)
       // 若删的是 active,切到第一个
@@ -375,7 +401,7 @@ export function useChatSessions(): UseChatSessions {
 
     try {
       const resp = await requestChatCompletion(
-        { model: 'auto', messages: wireMessages, stream: true },
+        { model: 'auto', messages: wireMessages, stream: true, chat_session_id: activeId ?? undefined },
         controller.signal,
       )
 
@@ -393,6 +419,8 @@ export function useChatSessions(): UseChatSessions {
           model: 'draft',
           draft,
         }))
+        // 关键状态转换: draft 响应到达，立即落盘防止 debounce 窗口期内刷新导致重发
+        flushToStorage()
         setStreaming(false)
         abortRef.current = null
         inflightRef.current = false  // 主请求已完成,预览拉取是 best-effort,不应阻塞下一条 send
@@ -521,11 +549,21 @@ export function useChatSessions(): UseChatSessions {
           ? { ...mm, draft: { ...mm.draft, status: 'pending', previewDataUrl: undefined, errorMessage: undefined } }
           : mm)
       } else if (st === 'confirmed') {
-        // 高清图 data URL 不持久化,刷新后丢失;后端无重取接口 → 标记 resultLost,
-        // DraftCard 据此显示"已确认(刷新后仅预览)"而非误导性的"高清图已生成"。
+        // 高清图:后端文件存储已持久化,刷新后重取(不标记 resultLost)。
         patchMessage(m.id, mm => mm.draft
-          ? { ...mm, draft: { ...mm.draft, previewDataUrl: undefined, resultDataUrl: undefined, resultLost: true } }
+          ? { ...mm, draft: { ...mm.draft, previewDataUrl: undefined, resultDataUrl: undefined } }
           : mm)
+        void getDraftResult(m.draft.draftId).then(
+          ({ resultDataUrl }) => patchMessage(m.id, mm => mm.draft
+            ? { ...mm, draft: { ...mm.draft, resultDataUrl } }
+            : mm),
+          (e: unknown) => {
+            const code = e instanceof Error ? e.message : '结果加载失败'
+            patchMessage(m.id, mm => mm.draft
+              ? { ...mm, draft: { ...mm.draft, resultLost: true, errorMessage: code } }
+              : mm)
+          },
+        )
       } else {
         continue // error/expired 不补拉
       }

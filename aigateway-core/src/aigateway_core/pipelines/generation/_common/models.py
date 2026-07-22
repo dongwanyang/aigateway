@@ -165,6 +165,9 @@ class DraftResult:
             "confirmed" — 已确认，可执行放大
             "rejected" — 已拒绝，可重新生成
             "expired" — 已过期，资源已释放
+        session_id: 关联的聊天会话 ID（用于文件存储和会话级清理）
+        user_id: 草稿所有者用户 ID（用于权限校验）
+        group_id: 草稿所属群组 ID（用于权限校验）
     """
 
     draft_id: str
@@ -175,6 +178,9 @@ class DraftResult:
     attempt_number: int = 1
     max_attempts: int = 5
     status: str = "pending"
+    session_id: Optional[str] = None
+    user_id: Optional[str] = None
+    group_id: Optional[str] = None
 
 
 # DraftResult 合法状态值
