@@ -302,6 +302,30 @@ def _build_codegraph_db_with_edges(db_path: Path, nodes: list[dict], edges: list
     conn.close()
 
 
+def test_build_symbol_chunks_progress_callback(tmp_path: Path) -> None:
+    """build_symbol_chunks 循环前知道 total, 每 200 符号回写 progress_cb。"""
+    from aigateway_core.pipelines.understanding.code_rag.splitter import build_symbol_chunks
+
+    repo = _build_codegraph_repo(
+        tmp_path,
+        {"mod.py": "\n".join(f"def fn_{i}():\n    return {i}\n" for i in range(5))},
+    )
+    calls: list[tuple[int, int, str]] = []
+
+    def cb(done: int, total: int, current_file: str) -> None:
+        calls.append((done, total, current_file))
+
+    # source_dir 指向 repo/src(graph_builder 把源码落在 repo/src/,db 存 src/mod.py,
+    # 剥 src/ → mod.py,join repo/src → repo/src/mod.py 存在)。
+    chunks = build_symbol_chunks(str(repo / "src"), str(repo), [], progress_cb=cb)
+    assert len(chunks) == 5
+    assert calls, "progress_cb should be called at least once"
+    # 收尾调用 done==total
+    assert calls[-1][0] == calls[-1][1] == 5
+    # total 在首次调用时已是 5(循环前已知)
+    assert calls[0][1] == 5
+
+
 def test_get_callers_callees_db_direct_matches_cli(tmp_path: Path) -> None:
     """db 直读后 get_callers/get_callees 与旧 CLI 结果一致。"""
     from aigateway_core.pipelines.understanding.code_rag.graph_query import get_callers, get_callees

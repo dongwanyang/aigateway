@@ -405,30 +405,6 @@ def lookup_symbol_metadata(
         return dict(_EMPTY_METADATA)
 
 
-def _callers_list(graph_repo_path: str, symbol: str) -> list[str]:
-    """调 `codegraph callers <symbol> --json`,返回 caller 名列表。"""
-    data = _run_codegraph_json(["callers", symbol], repo_path=graph_repo_path)
-    if not data or not isinstance(data, dict):
-        return []
-    return [
-        str(c.get("name"))
-        for c in (data.get("callers") or [])
-        if isinstance(c, dict) and c.get("name")
-    ]
-
-
-def _callees_list(graph_repo_path: str, symbol: str) -> list[str]:
-    """调 `codegraph callees <symbol> --json`,返回 callee 名列表。"""
-    data = _run_codegraph_json(["callees", symbol], repo_path=graph_repo_path)
-    if not data or not isinstance(data, dict):
-        return []
-    return [
-        str(c.get("name"))
-        for c in (data.get("callees") or [])
-        if isinstance(c, dict) and c.get("name")
-    ]
-
-
 def lookup_related_symbols_strict(
     graph_repo_path: str,
     file_path: str,
