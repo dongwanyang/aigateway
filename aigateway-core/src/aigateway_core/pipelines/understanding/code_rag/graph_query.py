@@ -73,6 +73,59 @@ def read_file_hashes(graph_repo_path: str) -> dict[str, str]:
         return {}
 
 
+def read_call_edges(graph_repo_path: str) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]]]:
+    """一次查全图 callers/callees,返回 (callers_map, callees_map)。
+
+    比"逐符号 spawn codegraph CLI"快 ~5000x(5k 符号:114ms vs 10k 子进程)。
+    key=node id(精确,避免同名跨文件误并);value=ref 行列表。
+    file_path 保留 src/ 前缀(与 read_file_hashes 一致,调用方按需剥)。
+
+    db 不存在或异常返回 ({}, {})(retrieval 容忍)。
+    """
+    db_path = _graph_db_path(graph_repo_path)
+    if not Path(db_path).exists():
+        return {}, {}
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            callees: dict[str, list[dict[str, Any]]] = {}
+            for r in conn.execute(
+                """
+                SELECT e.source AS sym_id, t.name, t.kind, t.file_path, t.start_line, t.end_line
+                FROM edges e JOIN nodes t ON t.id = e.target
+                WHERE e.kind = 'calls'
+                """
+            ):
+                callees.setdefault(str(r["sym_id"]), []).append({
+                    "name": str(r["name"]),
+                    "kind": str(r["kind"] or "function"),
+                    "file_path": str(r["file_path"] or ""),
+                    "start_line": int(r["start_line"] or 1),
+                    "end_line": int(r["end_line"] or r["start_line"] or 1),
+                })
+            callers: dict[str, list[dict[str, Any]]] = {}
+            for r in conn.execute(
+                """
+                SELECT e.target AS sym_id, s.name, s.kind, s.file_path, s.start_line, s.end_line
+                FROM edges e JOIN nodes s ON s.id = e.source
+                WHERE e.kind = 'calls'
+                """
+            ):
+                callers.setdefault(str(r["sym_id"]), []).append({
+                    "name": str(r["name"]),
+                    "kind": str(r["kind"] or "function"),
+                    "file_path": str(r["file_path"] or ""),
+                    "start_line": int(r["start_line"] or 1),
+                    "end_line": int(r["end_line"] or r["start_line"] or 1),
+                })
+            return callers, callees
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return {}, {}
+
+
 def run_codegraph_sync(graph_repo_path: str, *, timeout: float = 1800.0) -> str:
     """跑 `codegraph sync <graph_repo_path>`(位置参数,不接 -p),返回 raw stdout。
 

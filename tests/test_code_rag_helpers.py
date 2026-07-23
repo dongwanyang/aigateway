@@ -276,6 +276,69 @@ def _build_codegraph_repo(tmp_path: Path, files: dict[str, str]) -> Path:
     return repo
 
 
+def _build_codegraph_db_with_edges(db_path: Path, nodes: list[dict], edges: list[dict]) -> None:
+    """手建一个 codegraph schema 的 db（不调 CLI），供 read_call_edges 单测。"""
+    import sqlite3
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript("""
+    CREATE TABLE nodes (id TEXT PRIMARY KEY, kind TEXT, name TEXT, qualified_name TEXT,
+        file_path TEXT, language TEXT, start_line INTEGER, end_line INTEGER,
+        start_column INTEGER, end_column INTEGER, docstring TEXT, signature TEXT,
+        visibility TEXT, is_exported INTEGER, is_async INTEGER, is_static INTEGER,
+        is_abstract INTEGER, decorators TEXT, type_parameters TEXT, return_type TEXT,
+        updated_at INTEGER);
+    CREATE TABLE edges (id INTEGER PRIMARY KEY, source TEXT, target TEXT, kind TEXT,
+        metadata TEXT, line INTEGER, col INTEGER, provenance TEXT);
+    CREATE TABLE files (path TEXT, content_hash TEXT, language TEXT, size INTEGER, updated_at INTEGER);
+    """)
+    for n in nodes:
+        conn.execute("INSERT INTO nodes (id,kind,name,file_path,start_line,end_line) VALUES (?,?,?,?,?,?)",
+                     (n["id"], n["kind"], n["name"], n["file_path"], n["start_line"], n["end_line"]))
+    for e in edges:
+        conn.execute("INSERT INTO edges (source,target,kind) VALUES (?,?,?)",
+                     (e["source"], e["target"], e["kind"]))
+    conn.commit()
+    conn.close()
+
+
+def test_read_call_edges_returns_callers_and_callees(tmp_path: Path) -> None:
+    from aigateway_core.pipelines.understanding.code_rag.graph_query import read_call_edges
+
+    db_path = tmp_path / "repo" / ".codegraph" / "codegraph.db"
+    # alpha -> beta -> gamma; caller -> alpha
+    nodes = [
+        {"id": "f:alpha", "kind": "function", "name": "alpha", "file_path": "src/a.py", "start_line": 1, "end_line": 2},
+        {"id": "f:beta", "kind": "function", "name": "beta", "file_path": "src/a.py", "start_line": 3, "end_line": 4},
+        {"id": "f:gamma", "kind": "function", "name": "gamma", "file_path": "src/a.py", "start_line": 5, "end_line": 6},
+        {"id": "f:caller", "kind": "function", "name": "caller", "file_path": "src/a.py", "start_line": 7, "end_line": 8},
+    ]
+    edges = [
+        {"source": "f:alpha", "target": "f:beta", "kind": "calls"},
+        {"source": "f:beta", "target": "f:gamma", "kind": "calls"},
+        {"source": "f:caller", "target": "f:alpha", "kind": "calls"},
+    ]
+    _build_codegraph_db_with_edges(db_path, nodes, edges)
+
+    callers, callees = read_call_edges(str(tmp_path / "repo"))
+    assert [r["name"] for r in callees["f:alpha"]] == ["beta"]
+    assert [r["name"] for r in callees["f:beta"]] == ["gamma"]
+    assert [r["name"] for r in callees["f:caller"]] == ["alpha"]
+    assert [r["name"] for r in callers["f:beta"]] == ["alpha"]
+    assert [r["name"] for r in callers["f:alpha"]] == ["caller"]
+    # 无调用的符号不出现在 callees map
+    assert "f:gamma" not in callees
+    assert [r["name"] for r in callers["f:gamma"]] == ["beta"]
+
+
+def test_read_call_edges_empty_when_no_db(tmp_path: Path) -> None:
+    from aigateway_core.pipelines.understanding.code_rag.graph_query import read_call_edges
+
+    callers, callees = read_call_edges(str(tmp_path / "nope"))
+    assert callers == {}
+    assert callees == {}
+
+
 def test_lookup_symbol_metadata_reads_codegraph_sqlite_schema(tmp_path: Path) -> None:
     """lookup_symbol_metadata 走 codegraph CLI(重构后),验证 callers/callees/imports。"""
     from aigateway_core.pipelines.understanding.code_rag.graph_query import lookup_symbol_metadata
