@@ -161,10 +161,12 @@ class DraftResult:
         attempt_number: 当前重试次数
         max_attempts: 最大允许重试次数
         status: 草图状态
+            "generating" — 后台生成中（异步任务未完成）
             "pending" — 等待用户确认
             "confirmed" — 已确认，可执行放大
             "rejected" — 已拒绝，可重新生成
             "expired" — 已过期，资源已释放
+        media_type: 媒体类型 "image" | "video"，写 meta.json 供清理/读取分流
         session_id: 关联的聊天会话 ID（用于文件存储和会话级清理）
         user_id: 草稿所有者用户 ID（用于权限校验）
         group_id: 草稿所属群组 ID（用于权限校验）
@@ -178,17 +180,20 @@ class DraftResult:
     attempt_number: int = 1
     max_attempts: int = 5
     status: str = "pending"
+    media_type: str = "image"
     session_id: Optional[str] = None
     user_id: Optional[str] = None
     group_id: Optional[str] = None
 
 
 # DraftResult 合法状态值
+DRAFT_STATUS_GENERATING = "generating"
 DRAFT_STATUS_PENDING = "pending"
 DRAFT_STATUS_CONFIRMED = "confirmed"
 DRAFT_STATUS_REJECTED = "rejected"
 DRAFT_STATUS_EXPIRED = "expired"
 DRAFT_VALID_STATUSES = (
+    DRAFT_STATUS_GENERATING,
     DRAFT_STATUS_PENDING,
     DRAFT_STATUS_CONFIRMED,
     DRAFT_STATUS_REJECTED,

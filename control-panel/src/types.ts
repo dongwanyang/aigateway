@@ -472,7 +472,7 @@ export interface ChatDraftState {
   draftId: string
   previewUrl: string            // "/admin/draft/{id}/preview"
   mediaType: 'image' | 'video'
-  status: 'pending' | 'confirming' | 'confirmed' | 'rejecting' | 'rejected' | 'expired' | 'error'
+  status: 'generating' | 'pending' | 'confirming' | 'confirmed' | 'rejecting' | 'rejected' | 'expired' | 'error'
   /** 渲染时懒加载的预览图 data URL(不持久化) */
   previewDataUrl?: string
   /** confirm 后的高清图 data URL(不持久化) */

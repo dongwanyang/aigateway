@@ -178,14 +178,25 @@ export async function requestChatCompletion(
 // Draft-to-HiRes 工作流(/admin/draft/*,authenticate_admin,前端 admin key 可用)
 // ------------------------------------------------------------------
 
-/** GET /admin/draft/{id}/preview —— 草稿预览图(base64 data URL)。 */
+/** GET /admin/draft/{id}/preview —— 草稿预览图(base64 data URL)。
+ *
+ * 异步生成拆分后，preview 端点可能返回：
+ * - 200 + preview_data_url：预览就绪。
+ * - 202 + {status:'generating'}：后台生成未完成，前端继续轮询（不抛错）。
+ * - 4xx：草稿不存在/已过期/生成失败，抛错供调用方区分。
+ */
 export async function getDraftPreview(
   draftId: string,
-): Promise<{ previewDataUrl: string; previewCount: number }> {
+): Promise<{ previewDataUrl?: string; previewCount?: number; status?: 'generating' }> {
   const headers = await ensureAuthHeaders()
   const res = await fetch(`${API_BASE}/admin/draft/${encodeURIComponent(draftId)}/preview`, {
     headers,
   })
+  if (res.status === 202) {
+    // 生成中：返回 generating 标记，调用方据此继续轮询（非错误）
+    await res.json().catch(() => ({}))
+    return { status: 'generating' }
+  }
   if (!res.ok) {
     let code = `HTTP ${res.status}`
     try {

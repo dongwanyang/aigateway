@@ -5,12 +5,13 @@ Guidance for Claude Code when working in this repo. Keep terse — see rule "Tri
 ## gstack 角色路由
 - 当需要产品决策、范围判断时，使用 /office-hours 或 /plan-ceo-review
 - 当需要架构审查时，使用 /plan-eng-review
-- 当代码准备合并前，使用 /review 进行代码审查
+- 当代码准备合并前，使用 /code-review 进行代码审查
 - 当需要端到端测试时，使用 /qa
 - 当准备发布时，使用 /ship
 
+
 - 用 gstack 做前期决策：/office-hours → /plan-ceo-review → /plan-eng-review → /plan-design-review，确保方向正确
-- 用 Superpowers 做中期执行：Brainstorm → Plan → TDD → Subagent → Review → Finalize，确保代码质量
+- 用 Superpowers 做中期执行：Brainstorm → Plan → TDD → Subagent → CodeReview → Finalize，确保代码质量
 - 回到 gstack 做后期验证：/qa（真实浏览器测试）→ /cso（安全审计）→ /ship（发布）→ /retro（复盘）
 
 
@@ -243,6 +244,7 @@ python3 -m pytest tests/ui/                      # UI e2e: needs gateway :8000 +
 - **TokenCompressorStrategy** — deterministic hash-vector placeholder; real CLIP/ViT segmentation is a TODO.
 - **`GenerationPipeline` (`prefix/media/generation.py`) is orphaned** — 0 prod references. Gen path is the 6-plugin chain.
 - **AIDirectorStrategy late-binds bridge** — registration runs before bridge exists; `main.py` injects `_litellm_bridge` post-init.
+- **Draft-to-HiRes is async** (2026-07-23) — `DraftGeneratorStrategy.submit_draft` returns a `draft_id` immediately with `status='generating'` and spawns `_generate_draft_async` via `asyncio.create_task` (held in `self._bg_tasks` — strong ref required or CPython GCs the task mid-execution → Redis stuck `generating`). Two-layer storage: Redis (lightweight state, TTL) + file (`/data/drafts/{session_id}/{draft_id}/` = meta.json + preview*.bin + result.bin). `GET /admin/draft/{id}/preview` returns 202 while generating, 200 when ready, 410 on failed. `DraftSessionCleaner` (main.py lifespan) sweeps expired session dirs (mtime fallback). `_draft_dir` returns path **without** makedirs; only write paths (`_ensure_draft_dir`) create dirs — read paths creating dirs caused stray-dir disk leaks. Frontend `pollDraftPreview` (1s×120, `pollingDraftIds` Set dedup, `owns()` draftId guard) replaces single-shot `getDraftPreview`; `awaitingDraft`+`pendingAssistantIdRef` guards prevent resume-effect double-send on window switch/refresh.
 - **Dead frontend code** — `hooks/useAuth.ts`, `hooks/usePoll.ts` have 0 imports. Five API client fns (`createChatCompletion` non-stream, `listModels`, `createEmbeddings`, `getQuota`, `getMetricsJson`) are reserved for Entry B. `createChatCompletionStream` + new `getVideoStatus` now used by the `/chat` page (聊天窗 MVP).
 - **Implicit frontend auth** — no login page or Auth provider. `ensureAuthHeaders()` pulls key from localStorage silently; unset key → blank pages (except Plugins/Overview which handle it).
 - **Config writes must be atomic** — admin endpoints (`update_plugins_config`, `set_plugin_debug`, `update_global_config`) write `config.yaml` via `_atomic_write_yaml` (tempfile + `os.replace`). The Watchdog `load()` reads the file *without* `fcntl.flock`, so the old `open(w)+yaml.dump` (truncate-then-write) let it read a half-written file → `DebugConfigWatcher`/`PluginRegistry` got stale state. Never revert to non-atomic writes here.

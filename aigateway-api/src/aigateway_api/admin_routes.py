@@ -21,7 +21,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
@@ -2699,7 +2699,9 @@ async def get_draft_preview(
 ):
     """获取草稿预览图（base64 data URL）.
 
-    将 Redis 中存储的预览 bytes 转换为前端可直接渲染的 data URL。
+    异步生成拆分后，draft 可能处于 generating（后台生成中）/ pending（可取预览）/
+    failed/expired。前端轮询此端点：202=generating 继续轮询；200=取到 data URL；
+    4xx=终态错误。
     """
     try:
         strategy = _get_draft_strategy()
@@ -2709,6 +2711,18 @@ async def get_draft_preview(
     draft = await strategy.get_draft(draft_id)
     if draft is None:
         raise HTTPException(status_code=404, detail={"error": {"code": "draft_not_found", "message": f"Draft {draft_id} not found or expired"}})
+
+    # generating：后台生成未完成，返回 202 让前端继续轮询
+    if draft.status == "generating":
+        return Response(
+            content=json.dumps({"draft_id": draft_id, "status": "generating"}),
+            status_code=202,
+            media_type="application/json",
+        )
+    # failed：后台生成失败
+    if draft.status == "failed":
+        raise HTTPException(status_code=410, detail={"error": {"code": "draft_failed", "message": f"Draft {draft_id} generation failed"}})
+
     if not draft.previews:
         raise HTTPException(status_code=404, detail={"error": {"code": "no_preview", "message": "No preview images available"}})
 
@@ -2839,7 +2853,13 @@ async def get_draft_result(
         logger.error("Draft result ownership check failed: %s", exc)
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Ownership verification failed"}})
 
-    result_bytes = await strategy.get_result_bytes(draft_id)
+    try:
+        result_bytes = await strategy.get_result_bytes(draft_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"code": "no_result", "message": f"Draft {draft_id} has no upscaled result: {exc}"}},
+        )
     if result_bytes is None:
         raise HTTPException(
             status_code=404,

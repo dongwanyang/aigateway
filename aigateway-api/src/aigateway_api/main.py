@@ -604,6 +604,37 @@ async def lifespan(app: "FastAPI"):
     except Exception as exc:
         logger.warning("TaskTracker 初始化失败: %s", exc)
 
+    # 把 TaskTracker 绑定到 DraftGeneratorStrategy（异步生成任务状态追踪），
+    # 并启动 DraftSessionCleaner 定时清理过期 session 目录。
+    # task_tracker 在 draft_strategy 挂载之后才创建，故这里补绑。
+    draft_session_cleaner = None
+    try:
+        draft_strategy = getattr(app.state, "draft_strategy", None)
+        if draft_strategy is not None and task_tracker is not None:
+            draft_strategy._task_tracker = task_tracker
+            logger.info("DraftGeneratorStrategy 已绑定 task_tracker")
+        if draft_strategy is not None:
+            from aigateway_core.pipelines.generation.draft.draft_cleaner import (
+                DraftSessionCleaner,
+            )
+            store_dir = getattr(draft_strategy, "_store_dir", "/app/data/drafts")
+            retention_hours = getattr(
+                getattr(draft_strategy, "_config", None), "retention_period_hours", 24
+            )
+            draft_session_cleaner = DraftSessionCleaner(
+                store_dir=store_dir,
+                session_ttl_hours=retention_hours,
+                strategy=draft_strategy,
+            )
+            draft_session_cleaner.start()
+            app.state.draft_session_cleaner = draft_session_cleaner
+            logger.info(
+                "DraftSessionCleaner 已启动 (store_dir=%s, ttl=%dh)",
+                store_dir, retention_hours,
+            )
+    except Exception as exc:
+        logger.warning("DraftSessionCleaner 启动失败: %s", exc)
+
     # 挂载到 app.state，供 FastAPI 中间件/依赖注入使用
     app.state.sqlite_store = sqlite_store
     app.state.key_store = sqlite_store  # backward compat: admin_routes references key_store
@@ -724,6 +755,13 @@ async def lifespan(app: "FastAPI"):
     # 停止 L3 清理调度器
     if hasattr(app.state, 'l3_cleanup_scheduler') and app.state.l3_cleanup_scheduler:
         await app.state.l3_cleanup_scheduler.stop()
+    # 停止草稿会话清理器
+    if hasattr(app.state, 'draft_session_cleaner') and app.state.draft_session_cleaner:
+        try:
+            await app.state.draft_session_cleaner.stop()
+            logger.info("DraftSessionCleaner 已停止")
+        except Exception as exc:
+            logger.warning("停止 DraftSessionCleaner 出错: %s", exc)
 
     if redis_mgr is not None:
         try:

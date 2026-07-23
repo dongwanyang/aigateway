@@ -724,6 +724,7 @@ class RequestDispatcher:
                     "data": {
                         "draft_id": draft_id,
                         "preview_url": f"/admin/draft/{draft_id}/preview",
+                        "status": draft_info.get("status", "generating"),
                         "generation_params": draft_info.get("generation_params", {}),
                     },
                     "_meta": {"draft_pending_confirmation": True},

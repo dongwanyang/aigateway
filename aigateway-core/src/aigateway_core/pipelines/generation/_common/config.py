@@ -95,6 +95,9 @@ class DraftWorkflowConfig:
         target_fps_range: 允许的目标帧率范围 (默认: (24, 120))
         upscale_algorithm: 放大算法名称 (默认: "real-esrgan")
         draft_model: 草稿预览生成使用的图像模型 (默认: "agnes-image-2.1-flash")
+        store_dir: 草稿文件存储根目录 (默认: "/app/data/drafts")。
+            预览/结果 bytes 落盘于此，按 {store_dir}/{session_id}/{draft_id}/ 组织，
+            随会话生命周期由 DraftSessionCleaner 清理。Docker 挂载 ./data:/app/data。
     """
 
     enabled: bool = True
@@ -110,6 +113,7 @@ class DraftWorkflowConfig:
     target_fps_range: Tuple[int, int] = (24, 120)
     upscale_algorithm: str = "real-esrgan"
     draft_model: str = "agnes-image-2.1-flash"
+    store_dir: str = "/app/data/drafts"
 
 
 @dataclass
