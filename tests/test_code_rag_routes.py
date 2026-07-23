@@ -664,3 +664,71 @@ def test_run_code_import_task_batches_encode_calls_at_64_boundary(
 
     # 任务完成后 Redis key 已被清理(这是预期行为),不再断言状态落盘。
     # 上面的 encode/upsert 计数已充分证明任务正常完成。
+
+
+# ---------------------------------------------------------------------------
+# Task 5: SQLite code_rag_tasks store methods
+# ---------------------------------------------------------------------------
+
+
+def test_code_rag_task_upsert_read_list(tmp_path: Path) -> None:
+    from aigateway_core.shared.auth.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(db_path=str(tmp_path / "t.db"))
+    import time
+    now = int(time.time())
+    store.upsert_code_rag_task({
+        "task_id": "t1", "document_id": "code_abc", "status": "splitting",
+        "done": 3, "total": 10, "current_file": "a.py", "source_type": "git",
+        "source_label": "https://github.com/x/y.git", "embedding_model": "Qwen",
+        "graph_repo_path": "/data/code_graphs/code_abc", "error": "",
+        "created_at": now, "updated_at": now,
+    })
+    row = store.read_code_rag_task("t1")
+    assert row is not None
+    assert row["status"] == "splitting"
+    assert row["done"] == 3
+    assert row["source_label"] == "https://github.com/x/y.git"
+
+    # upsert 更新
+    store.upsert_code_rag_task({"task_id": "t1", "document_id": "code_abc",
+                                 "status": "completed", "done": 10, "total": 10,
+                                 "current_file": "", "source_type": "git",
+                                 "source_label": "https://github.com/x/y.git",
+                                 "embedding_model": "Qwen", "graph_repo_path": "/data/code_graphs/code_abc",
+                                 "error": "", "created_at": now, "updated_at": now})
+    assert store.read_code_rag_task("t1")["status"] == "completed"
+
+    # list DESC
+    store.upsert_code_rag_task({"task_id": "t2", "document_id": "code_def", "status": "pending",
+                                 "done": 0, "total": 0, "current_file": "", "source_type": "folder",
+                                 "source_label": "folder", "embedding_model": "Qwen", "graph_repo_path": "",
+                                 "error": "", "created_at": now + 10, "updated_at": now + 10})
+    rows = store.list_code_rag_tasks(limit=50, offset=0)
+    assert [r["task_id"] for r in rows] == ["t2", "t1"]
+
+
+def test_fail_non_terminal_tasks(tmp_path: Path) -> None:
+    from aigateway_core.shared.auth.sqlite_store import SQLiteStore
+    import time
+
+    store = SQLiteStore(db_path=str(tmp_path / "t.db"))
+    now = int(time.time())
+    base = {"document_id": "x", "done": 0, "total": 0, "current_file": "", "source_type": "git",
+            "source_label": "", "embedding_model": "", "graph_repo_path": "", "error": "",
+            "created_at": now, "updated_at": now}
+    store.upsert_code_rag_task({**base, "task_id": "a", "status": "splitting"})
+    store.upsert_code_rag_task({**base, "task_id": "b", "status": "embedding"})
+    store.upsert_code_rag_task({**base, "task_id": "c", "status": "completed"})
+    store.upsert_code_rag_task({**base, "task_id": "d", "status": "failed"})
+
+    n = store.fail_non_terminal_tasks("worker restarted")
+    assert n == 2
+    assert store.read_code_rag_task("a")["status"] == "failed"
+    assert store.read_code_rag_task("a")["error"] == "worker restarted"
+    assert store.read_code_rag_task("b")["status"] == "failed"
+    assert store.read_code_rag_task("c")["status"] == "completed"  # 不动
+    assert store.read_code_rag_task("d")["status"] == "failed"  # 已是终态
+
+    # 幂等:再跑一次,0 个非终态
+    assert store.fail_non_terminal_tasks("worker restarted") == 0

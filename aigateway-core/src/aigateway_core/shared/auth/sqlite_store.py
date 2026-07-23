@@ -130,6 +130,24 @@ CREATE INDEX IF NOT EXISTS idx_ledger_ts ON request_cost_ledger(ts_unix);
 CREATE INDEX IF NOT EXISTS idx_ledger_user ON request_cost_ledger(user_id);
 CREATE INDEX IF NOT EXISTS idx_ledger_group ON request_cost_ledger(group_id);
 CREATE INDEX IF NOT EXISTS idx_ledger_model ON request_cost_ledger(model);
+
+CREATE TABLE IF NOT EXISTS code_rag_tasks (
+    task_id         TEXT PRIMARY KEY,
+    document_id     TEXT NOT NULL,
+    status          TEXT NOT NULL,
+    done            INTEGER NOT NULL DEFAULT 0,
+    total           INTEGER NOT NULL DEFAULT 0,
+    current_file    TEXT,
+    source_type     TEXT,
+    source_label    TEXT,
+    embedding_model TEXT,
+    graph_repo_path TEXT,
+    error           TEXT,
+    created_at      INTEGER NOT NULL,
+    updated_at      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_code_rag_tasks_created ON code_rag_tasks(created_at);
+CREATE INDEX IF NOT EXISTS idx_code_rag_tasks_document ON code_rag_tasks(document_id);
 """
 
 
@@ -1680,6 +1698,44 @@ class SQLiteStore:
         except Exception as exc:
             logger.warning("prune_ledger 失败: %s", exc)
             return 0
+
+    # ── code_rag_tasks ────────────────────────────────────────────
+
+    def upsert_code_rag_task(self, task: dict) -> None:
+        cols = ("task_id", "document_id", "status", "done", "total", "current_file",
+                "source_type", "source_label", "embedding_model", "graph_repo_path",
+                "error", "created_at", "updated_at")
+        vals = tuple(task.get(c) for c in cols)
+        self.conn.execute(
+            f"""INSERT OR REPLACE INTO code_rag_tasks
+                ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})""",
+            vals,
+        )
+        self.conn.commit()
+
+    def read_code_rag_task(self, task_id: str) -> Optional[dict]:
+        row = self.conn.fetchone(
+            "SELECT * FROM code_rag_tasks WHERE task_id=?", (task_id,)
+        )
+        return dict(row) if row else None
+
+    def list_code_rag_tasks(self, limit: int = 50, offset: int = 0) -> list[dict]:
+        rows = self.conn.fetchall(
+            "SELECT * FROM code_rag_tasks ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            (int(limit), int(offset)),
+        )
+        return [dict(r) for r in rows]
+
+    def fail_non_terminal_tasks(self, error: str) -> int:
+        now = _now_unix()
+        cur = self.conn.execute(
+            """UPDATE code_rag_tasks
+               SET status='failed', error=?, updated_at=?
+               WHERE status NOT IN ('completed', 'failed', 'cancelled')""",
+            (error, now),
+        )
+        self.conn.commit()
+        return cur.rowcount
 
     async def query_ledger(
         self,
