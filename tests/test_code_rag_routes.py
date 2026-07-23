@@ -481,7 +481,7 @@ def test_run_code_import_task_passes_real_symbol_name_to_graph_lookup(
     from aigateway_api import code_rag_routes as routes_mod
 
     # ---- 桩:build_symbol_chunks 产出的 chunk 携带 function_name + callers + embed_text ----
-    def _fake_build_symbol_chunks(source_dir, graph_repo_path, ignore_patterns, *, only_files=None):
+    def _fake_build_symbol_chunks(source_dir, graph_repo_path, ignore_patterns, *, only_files=None, progress_cb=None):
         return [
             {
                 "file_path": "auth.py",
@@ -608,7 +608,7 @@ def test_run_code_import_task_batches_encode_calls_at_64_boundary(
     TOTAL = 70
     BATCH = 64
 
-    def _fake_build_symbol_chunks(source_dir, graph_repo_path, ignore_patterns, *, only_files=None):
+    def _fake_build_symbol_chunks(source_dir, graph_repo_path, ignore_patterns, *, only_files=None, progress_cb=None):
         return [
             {
                 "file_path": f"mod_{i}.py",
@@ -950,3 +950,64 @@ def test_sweep_orphaned_tasks_no_store_returns_zero() -> None:
 
     app_state = types.SimpleNamespace()
     assert sweep_orphaned_tasks(app_state) == 0
+
+
+# ---------------------------------------------------------------------------
+# Task 8: splitting progress callback wired to SQLite
+# ---------------------------------------------------------------------------
+
+
+def test_splitting_progress_written_to_sqlite(tmp_path: Path) -> None:
+    """build_symbol_chunks 的 progress_cb 经 run_coroutine_threadsafe 回写 SQLite。
+
+    splitter 跑在 executor 线程,progress_cb 必须把 _mark(done,total,current_file)
+    调度回主 event loop 写 SQLite。空 chunks → completed,但 total 应为最后一次回写值。
+    """
+    import asyncio as _aio
+    import time
+    import types
+
+    from aigateway_core.shared.auth.sqlite_store import SQLiteStore
+
+    import aigateway_api.code_rag_routes as routes
+    import aigateway_core.pipelines.understanding.code_rag.splitter as splitter_mod
+
+    store = SQLiteStore(db_path=str(tmp_path / "t.db"))
+    now = int(time.time())
+    store.upsert_code_rag_task({
+        "task_id": "t1", "document_id": "d1", "status": "splitting",
+        "done": 0, "total": 0, "current_file": "", "source_type": "git",
+        "source_label": "", "embedding_model": "", "graph_repo_path": "",
+        "error": "", "created_at": now, "updated_at": now,
+    })
+    app_state = types.SimpleNamespace(
+        sqlite_store=store, redis_manager=None, qdrant_manager=None, config_manager=None,
+    )
+
+    def fake_build(source_dir, graph_repo_path, ignore_patterns, *, only_files=None, progress_cb=None):
+        if progress_cb:
+            progress_cb(done=5, total=10, current_file="a.py")
+            progress_cb(done=10, total=10, current_file="b.py")
+        return []
+
+    orig = splitter_mod.build_symbol_chunks
+    splitter_mod.build_symbol_chunks = fake_build
+    import aigateway_core.pipelines.understanding.code_rag.graph_builder as graph_builder_mod
+    orig_build_graph = graph_builder_mod.build_code_graph
+    graph_builder_mod.build_code_graph = lambda src, dst: dst
+    try:
+        loop = _aio.new_event_loop()
+        loop.run_until_complete(routes._run_code_import_task(
+            app_state=app_state, task_id="t1", document_id="d1", source_dir="/x",
+            source_type="git", source_label="", embedding_model="Qwen",
+            ignore_patterns=[], graph_repo_path="/x", workspace_path=None,
+            cleanup_dirs=[],
+        ))
+    finally:
+        splitter_mod.build_symbol_chunks = orig
+        graph_builder_mod.build_code_graph = orig_build_graph
+
+    row = store.read_code_rag_task("t1")
+    # 空 chunks → completed;分片阶段至少回写过 total=10
+    assert row["total"] == 10
+    assert row["status"] == "completed"

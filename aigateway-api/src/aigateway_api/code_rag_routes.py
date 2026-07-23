@@ -604,11 +604,24 @@ async def _run_code_import_task(
         )
 
         # 2) split:用 codegraph 行号切源码 + 构造结构描述嵌入文本
-        await _mark(status="splitting")
+        await _mark(status="splitting", done=0, total=0)
+        # splitter 跑在 executor 线程,不能直接 await _mark;用 run_coroutine_threadsafe
+        # 把 _mark(done,total,current_file) 调度回主 event loop 写 SQLite。
+        def _split_progress(done: int, total: int, current_file: str) -> None:
+            asyncio.run_coroutine_threadsafe(
+                _mark(done=done, total=total, current_file=current_file),
+                loop,
+            ).result(timeout=10)
         chunks: List[Dict[str, Any]] = await loop.run_in_executor(
-            None, lambda: build_symbol_chunks(source_dir, graph_repo_path, ignore_patterns)
+            None, lambda: build_symbol_chunks(
+                source_dir, graph_repo_path, ignore_patterns, progress_cb=_split_progress
+            )
         )
-        await _mark(total=len(chunks))
+        # splitter 的 progress_cb 已按真实符号数回写 total;这里只在有 chunks 时
+        # 把 total 校正为实际切出的 chunk 数(部分节点切源码失败时 chunks < 节点数)。
+        # 空 chunks 不覆盖 total(保留回调写的值,让前端进度条停在真实节点数)。
+        if chunks:
+            await _mark(total=len(chunks), done=0)
         if not chunks:
             await _mark(status="completed", done=0)
             await _delete_task_key(app_state, task_id)
