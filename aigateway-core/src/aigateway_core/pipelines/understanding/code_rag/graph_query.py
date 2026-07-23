@@ -379,8 +379,8 @@ def lookup_symbol_metadata_strict(
         return result
 
     kind = str(node.get("kind") or 'module')
-    callers = _callers_list(graph_repo_path, symbol_name)
-    callees = _callees_list(graph_repo_path, symbol_name)
+    callers = [str(r["name"]) for r in get_callers(graph_repo_path, symbol_name)]
+    callees = [str(r["name"]) for r in get_callees(graph_repo_path, symbol_name)]
     chunk_type = _classify_chunk_type(kind, symbol_name, chunk_text)
     return {
         'callers': callers,
@@ -547,28 +547,41 @@ def query_symbols(
     return out
 
 
+def _lookup_symbol_id_by_name(graph_repo_path: str, symbol: str) -> str | None:
+    """按 name 查 node id(精确,取第一个 kind IN function/method/class 的)。db 直读,~1ms。"""
+    db_path = _graph_db_path(graph_repo_path)
+    if not Path(db_path).exists():
+        return None
+    try:
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT id FROM nodes WHERE name=? AND kind IN ('function','method','class') LIMIT 1",
+                (symbol,),
+            ).fetchone()
+            return str(row[0]) if row else None
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+
+
 def get_callers(graph_repo_path: str, symbol: str) -> list[dict[str, Any]]:
-    """包装 `codegraph callers <symbol> --json`。返回 caller 节点列表。"""
-    data = _run_codegraph_json(["callers", symbol], repo_path=graph_repo_path)
-    if not data or not isinstance(data, dict):
+    """返回 caller 节点列表(db 直读,走缓存 map)。"""
+    callers, _ = _get_cached_edges(graph_repo_path)
+    sym_id = _lookup_symbol_id_by_name(graph_repo_path, symbol)
+    if sym_id is None:
         return []
-    return [
-        _normalize_ref(c)
-        for c in (data.get("callers") or [])
-        if isinstance(c, dict)
-    ]
+    return list(callers.get(sym_id, []))
 
 
 def get_callees(graph_repo_path: str, symbol: str) -> list[dict[str, Any]]:
-    """包装 `codegraph callees <symbol> --json`。返回 callee 节点列表。"""
-    data = _run_codegraph_json(["callees", symbol], repo_path=graph_repo_path)
-    if not data or not isinstance(data, dict):
+    """返回 callee 节点列表(db 直读,走缓存 map)。"""
+    _, callees = _get_cached_edges(graph_repo_path)
+    sym_id = _lookup_symbol_id_by_name(graph_repo_path, symbol)
+    if sym_id is None:
         return []
-    return [
-        _normalize_ref(c)
-        for c in (data.get("callees") or [])
-        if isinstance(c, dict)
-    ]
+    return list(callees.get(sym_id, []))
 
 
 def get_impact(graph_repo_path: str, symbol: str, *, depth: int = 2) -> dict[str, Any]:

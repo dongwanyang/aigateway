@@ -302,6 +302,25 @@ def _build_codegraph_db_with_edges(db_path: Path, nodes: list[dict], edges: list
     conn.close()
 
 
+def test_get_callers_callees_db_direct_matches_cli(tmp_path: Path) -> None:
+    """db 直读后 get_callers/get_callees 与旧 CLI 结果一致。"""
+    from aigateway_core.pipelines.understanding.code_rag.graph_query import get_callers, get_callees
+    from aigateway_core.pipelines.understanding.code_rag import graph_query
+
+    repo = _build_codegraph_repo(
+        tmp_path,
+        # hash_password 必须有定义,否则 codegraph 不建节点 → 无 login→hash_password 边。
+        # 与 test_lookup_symbol_metadata_reads_codegraph_sqlite_schema 同款 fixture。
+        {"auth.py": "def login():\n    return hash_password()\ndef hash_password():\n    return 'h'\ndef register():\n    return login()\n"},
+    )
+    graph_query._edges_cache.clear()  # 防污染
+
+    callers = get_callers(str(repo), "login")
+    callees = get_callees(str(repo), "login")
+    assert "register" in [c["name"] for c in callers]
+    assert "hash_password" in [c["name"] for c in callees]
+
+
 def test_cached_edges_rebuild_on_file_hash_change(tmp_path: Path) -> None:
     from aigateway_core.pipelines.understanding.code_rag import graph_query
 
