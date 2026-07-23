@@ -302,6 +302,62 @@ def _build_codegraph_db_with_edges(db_path: Path, nodes: list[dict], edges: list
     conn.close()
 
 
+def test_cached_edges_rebuild_on_file_hash_change(tmp_path: Path) -> None:
+    from aigateway_core.pipelines.understanding.code_rag import graph_query
+
+    db_path = tmp_path / "repo" / ".codegraph" / "codegraph.db"
+    nodes = [
+        {"id": "f:alpha", "kind": "function", "name": "alpha", "file_path": "src/a.py", "start_line": 1, "end_line": 2},
+        {"id": "f:beta", "kind": "function", "name": "beta", "file_path": "src/a.py", "start_line": 3, "end_line": 4},
+    ]
+    edges = [{"source": "f:alpha", "target": "f:beta", "kind": "calls"}]
+    _build_codegraph_db_with_edges(db_path, nodes, edges)
+    # files 表需要至少一行供 hash 快照
+    import sqlite3
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("INSERT INTO files (path, content_hash) VALUES ('src/a.py', 'hash_v1')")
+    conn.commit()
+    conn.close()
+
+    # 清理模块级缓存(防其它测试污染)
+    graph_query._edges_cache.clear()
+
+    callers1, callees1 = graph_query._get_cached_edges(str(tmp_path / "repo"))
+    assert callees1["f:alpha"][0]["name"] == "beta"
+
+    # 改 db:加一条 calls 边 + 改 file hash
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("INSERT INTO nodes (id,kind,name,file_path,start_line,end_line) VALUES ('f:gamma','function','gamma','src/a.py',5,6)")
+    conn.execute("INSERT INTO edges (source,target,kind) VALUES ('f:beta','f:gamma','calls')")
+    conn.execute("UPDATE files SET content_hash='hash_v2' WHERE path='src/a.py'")
+    conn.commit()
+    conn.close()
+
+    callers2, callees2 = graph_query._get_cached_edges(str(tmp_path / "repo"))
+    assert callees2["f:beta"][0]["name"] == "gamma"  # 重建后看到新边
+
+
+def test_cached_edges_reuses_unchanged(tmp_path: Path) -> None:
+    from aigateway_core.pipelines.understanding.code_rag import graph_query
+
+    db_path = tmp_path / "repo2" / ".codegraph" / "codegraph.db"
+    _build_codegraph_db_with_edges(db_path,
+        [{"id": "f:x", "kind": "function", "name": "x", "file_path": "src/a.py", "start_line": 1, "end_line": 2}],
+        [])
+    import sqlite3
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("INSERT INTO files (path, content_hash) VALUES ('src/a.py', 'h1')")
+    conn.commit()
+    conn.close()
+
+    graph_query._edges_cache.clear()
+    graph_query._get_cached_edges(str(tmp_path / "repo2"))
+    call_count_before = graph_query._edges_cache[str(tmp_path / "repo2")][0]  # snapshot ref
+    graph_query._get_cached_edges(str(tmp_path / "repo2"))  # 第二次,hash 没变
+    # 仍是同一个 snapshot 对象(未重建)
+    assert graph_query._edges_cache[str(tmp_path / "repo2")][0] is call_count_before
+
+
 def test_read_call_edges_returns_callers_and_callees(tmp_path: Path) -> None:
     from aigateway_core.pipelines.understanding.code_rag.graph_query import read_call_edges
 

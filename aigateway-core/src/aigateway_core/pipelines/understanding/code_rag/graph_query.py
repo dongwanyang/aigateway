@@ -43,6 +43,11 @@ _EMPTY_METADATA: dict[str, Any] = {
     "class_name": None,
 }
 
+# 检索路径的 edges 缓存:key=graph_repo_path, value=(file_hashes_snapshot, callers_map, callees_map)。
+# 失效靠 files.content_hash 快照比对(增量 sync 改 db → 下次检索自动重建)。
+# split 阶段不进缓存(导入时只跑一次 read_call_edges 用完即丢,不污染)。
+_edges_cache: dict[str, tuple[dict[str, str], dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]]]] = {}
+
 # codegraph CLI 默认查询超时(秒)。查询类命令都是点查,30s 足够;build/sync 用
 # graph_builder.py 里更长的 timeout。
 _QUERY_TIMEOUT = 30.0
@@ -124,6 +129,23 @@ def read_call_edges(graph_repo_path: str) -> tuple[dict[str, list[dict[str, Any]
             conn.close()
     except sqlite3.Error:
         return {}, {}
+
+
+def _get_cached_edges(graph_repo_path: str) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]]]:
+    """懒加载 callers/callees map,按 file hash 快照失效。
+
+    返回 (callers_map, callees_map)。hash 不变 → 复用缓存;变了/首次 → 重建。
+    """
+    db_path = _graph_db_path(graph_repo_path)
+    if not Path(db_path).exists():
+        return {}, {}
+    snapshot = read_file_hashes(graph_repo_path)
+    cached = _edges_cache.get(graph_repo_path)
+    if cached is not None and cached[0] == snapshot:
+        return cached[1], cached[2]
+    callers, callees = read_call_edges(graph_repo_path)
+    _edges_cache[graph_repo_path] = (snapshot, callers, callees)
+    return callers, callees
 
 
 def run_codegraph_sync(graph_repo_path: str, *, timeout: float = 1800.0) -> str:
