@@ -29,6 +29,7 @@ imports 字段:codegraph CLI 没有 imports 查询命令,但 db 里 `edges.kind=
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -165,33 +166,52 @@ def _run_codegraph_json(
 
     构造: codegraph <args...> -p <repo_path> --json。
     失败/超时/非 JSON 输出都抛 RuntimeError(strict 链路用)。
+
+    用 Popen + start_new_session=True 启动子进程,超时后 killpg 收割整个
+    进程组(含 codegraph spawn 的孙进程),避免孙进程变僵尸卡住导入。
     """
+    import signal
+
     cmd = ["codegraph", *args, "-p", repo_path, "--json"]
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            check=False,
-            timeout=timeout,
+            start_new_session=True,
         )
     except FileNotFoundError as exc:
         raise RuntimeError(
             "codegraph CLI 未安装;请在 gateway 镜像中安装 @colbymchenry/codegraph"
         ) from exc
-    except subprocess.TimeoutExpired as exc:
+
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # killpg 收割整个进程组(start_new_session=True 让子进程自成一组)
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except (ProcessLookupError, OSError):
+            pass
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                pass
         raise RuntimeError(
             f"codegraph command timed out after {timeout}s: {' '.join(cmd)}"
-        ) from exc
+        )
 
     if proc.returncode != 0:
-        err = (proc.stderr or proc.stdout or "").strip()
+        err = (stderr or stdout or "").strip()
         raise RuntimeError(
             f"codegraph command failed ({' '.join(cmd)}): {err[:2000]}"
         )
 
-    stdout = (proc.stdout or "").strip()
+    stdout = (stdout or "").strip()
     if not stdout:
         return None
     try:
@@ -209,33 +229,50 @@ def _run_codegraph_raw(
 
     init/sync 用位置参数: `codegraph sync <path>`;不接 -p。
     node 接 -p: 由调用方在 args 里带 `-p <repo_path>`。
+
+    用 Popen + start_new_session=True 启动,超时后 killpg 收割整个进程组。
     """
+    import signal
+
     cmd = ["codegraph", *args]
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
             cwd=cwd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            check=False,
-            timeout=timeout,
+            start_new_session=True,
         )
     except FileNotFoundError as exc:
         raise RuntimeError(
             "codegraph CLI 未安装;请在 gateway 镜像中安装 @colbymchenry/codegraph"
         ) from exc
-    except subprocess.TimeoutExpired as exc:
+
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except (ProcessLookupError, OSError):
+            pass
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                pass
         raise RuntimeError(
             f"codegraph command timed out after {timeout}s: {' '.join(cmd)}"
-        ) from exc
+        )
 
     if proc.returncode != 0:
-        err = (proc.stderr or proc.stdout or "").strip()
+        err = (stderr or stdout or "").strip()
         raise RuntimeError(
             f"codegraph command failed ({' '.join(cmd)}): {err[:2000]}"
         )
-    return (proc.stdout or "").strip()
+    return (stdout or "").strip()
 
 
 def _classify_chunk_type(kind: str, symbol_name: str | None, chunk_text: str) -> str:

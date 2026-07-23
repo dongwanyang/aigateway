@@ -3,6 +3,7 @@
 Locked into repo-root config files so misplaced keys and missing volumes
 fail loudly instead of silently drifting.
 """
+import os
 from pathlib import Path
 
 import pytest
@@ -14,7 +15,6 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 def _load_yaml(path: Path) -> dict:
     return yaml.safe_load(path.read_text(encoding="utf-8"))
-
 
 def test_code_rag_settings_exist_in_template() -> None:
     content = (REPO_ROOT / "config.yaml.template").read_text(encoding="utf-8")
@@ -681,3 +681,153 @@ def test_split_code_directory_writes_symbol_names(tmp_path) -> None:
     assert names & {"login", "UserService", "register"}, (
         f"未能抽到 login/UserService/register 中的任何一个: names={names}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Task 9: start_new_session so deadline/timeout reaps child process groups
+# ---------------------------------------------------------------------------
+
+
+def test_run_codegraph_raw_uses_new_session(monkeypatch, tmp_path: Path) -> None:
+    """Popen 用 start_new_session=True,超时后 killpg 整个进程组。"""
+    import subprocess
+
+    from aigateway_core.pipelines.understanding.code_rag import graph_query
+
+    captured: dict = {}
+
+    class _FakeProc:
+        returncode = 0
+        pid = 12345
+
+        def communicate(self, timeout=None):
+            return ("ok", "")
+
+        def wait(self, timeout=None):
+            return 0
+
+    def fake_popen(cmd, **kwargs):
+        captured["kwargs"] = kwargs
+        return _FakeProc()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    graph_query._run_codegraph_raw(["node", "x", "-p", str(tmp_path)])
+    assert captured["kwargs"].get("start_new_session") is True
+
+
+def test_run_codegraph_json_uses_new_session(monkeypatch, tmp_path: Path) -> None:
+    """_run_codegraph_json 的 Popen 也带 start_new_session=True。"""
+    import subprocess
+
+    from aigateway_core.pipelines.understanding.code_rag import graph_query
+
+    captured: dict = {}
+
+    class _FakeProc:
+        returncode = 0
+        pid = 12345
+
+        def communicate(self, timeout=None):
+            return ("[]", "")
+
+        def wait(self, timeout=None):
+            return 0
+
+    def fake_popen(cmd, **kwargs):
+        captured["kwargs"] = kwargs
+        return _FakeProc()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    graph_query._run_codegraph_json(["query", "foo"], repo_path=str(tmp_path))
+    assert captured["kwargs"].get("start_new_session") is True
+
+
+def test_build_code_graph_run_codegraph_uses_new_session(monkeypatch, tmp_path: Path) -> None:
+    """graph_builder._run_codegraph 的 Popen 带 start_new_session=True。"""
+    import subprocess
+
+    from aigateway_core.pipelines.understanding.code_rag import graph_builder
+
+    captured: dict = {}
+
+    class _FakeProc:
+        returncode = 0
+        pid = 12345
+
+        def communicate(self, timeout=None):
+            return ("", None)
+
+        def wait(self, timeout=None):
+            return 0
+
+    def fake_popen(cmd, **kwargs):
+        captured["kwargs"] = kwargs
+        return _FakeProc()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    graph_builder._run_codegraph(["codegraph", "init", str(tmp_path)], cwd=str(tmp_path))
+    assert captured["kwargs"].get("start_new_session") is True
+
+
+def test_run_codegraph_raw_killpg_on_timeout(monkeypatch, tmp_path: Path) -> None:
+    """超时后必须 killpg 整个进程组(不能只杀主子进程,留孙进程僵尸)。"""
+    import signal
+    import subprocess
+
+    from aigateway_core.pipelines.understanding.code_rag import graph_query
+
+    killed: list[tuple[int, int]] = []
+
+    class _FakeProc:
+        returncode = 0
+        pid = 12345
+
+        def communicate(self, timeout=None):
+            raise subprocess.TimeoutExpired(cmd=["node"], timeout=timeout)
+
+        def wait(self, timeout=None):
+            return 0
+
+    def fake_killpg(pgid, sig):
+        killed.append((pgid, sig))
+
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kw: _FakeProc())
+    monkeypatch.setattr(os, "killpg", fake_killpg)
+    monkeypatch.setattr(os, "getpgid", lambda pid: 99999)
+    monkeypatch.setattr(signal, "SIGTERM", signal.SIGTERM)
+    monkeypatch.setattr(signal, "SIGKILL", signal.SIGKILL)
+
+    with pytest.raises(RuntimeError, match="timed out"):
+        graph_query._run_codegraph_raw(["node", "x", "-p", str(tmp_path)], timeout=0.01)
+    # killpg 被调用过(进程组被整组收割)
+    assert killed, "超时后未 killpg,孙进程会变僵尸"
+
+
+def test_run_codegraph_json_killpg_on_timeout(monkeypatch, tmp_path: Path) -> None:
+    """_run_codegraph_json 超时也走 killpg。"""
+    import signal
+    import subprocess
+
+    from aigateway_core.pipelines.understanding.code_rag import graph_query
+
+    killed: list = []
+
+    class _FakeProc:
+        returncode = 0
+        pid = 12345
+
+        def communicate(self, timeout=None):
+            raise subprocess.TimeoutExpired(cmd=["query"], timeout=timeout)
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kw: _FakeProc())
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: killed.append((pgid, sig)))
+    monkeypatch.setattr(os, "getpgid", lambda pid: 99999)
+    monkeypatch.setattr(signal, "SIGTERM", signal.SIGTERM)
+    monkeypatch.setattr(signal, "SIGKILL", signal.SIGKILL)
+
+    with pytest.raises(RuntimeError, match="timed out"):
+        graph_query._run_codegraph_json(["query", "x"], repo_path=str(tmp_path), timeout=0.01)
+    assert killed, "超时后未 killpg"
