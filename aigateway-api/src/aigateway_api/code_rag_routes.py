@@ -117,6 +117,36 @@ async def _read_task_state(app_state: Any, task_id: str) -> Optional[Dict[str, A
     return sqlite_store.read_code_rag_task(task_id)
 
 
+def sweep_orphaned_tasks(app_state: Any) -> int:
+    """启动时把非终态任务标 failed(worker 重启打断)。
+
+    返回标记数量。顺带清理孤儿临时目录(/tmp/code_rag_folder_* 与
+    /data/code_graphs/*/.tmp/)。SQLite store 不存在时返回 0。
+    """
+    sqlite_store = getattr(app_state, "sqlite_store", None)
+    marked = 0
+    if sqlite_store is not None:
+        marked = sqlite_store.fail_non_terminal_tasks("worker restarted during import")
+        if marked:
+            logger.info("code rag 启动清理: %d 个非终态任务标记为 failed", marked)
+
+    # 清理孤儿临时目录(旧失败残留)
+    import glob
+    for pattern in ("/tmp/code_rag_folder_*",):
+        for d in glob.glob(pattern):
+            try:
+                shutil.rmtree(d, ignore_errors=True)
+            except Exception:
+                pass
+    graph_db_dir = "/data/code_graphs"
+    for d in glob.glob(f"{graph_db_dir}/*/.tmp"):
+        try:
+            shutil.rmtree(d, ignore_errors=True)
+        except Exception:
+            pass
+    return marked
+
+
 def _shape_task_response(task_id: str, state: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """把 store 里的字段规范化为 API 输出结构.
 

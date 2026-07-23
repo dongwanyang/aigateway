@@ -897,3 +897,56 @@ def test_import_code_repository_writes_sqlite_and_strips_git_prefix(
     # git:// 前缀已去掉,前端直接拿到 URL
     assert row["source_label"] == "https://github.com/octocat/Hello-World.git"
     assert (row["document_id"] or "").startswith("code_")
+
+
+# ---------------------------------------------------------------------------
+# Task 7: startup orphan task sweep
+# ---------------------------------------------------------------------------
+
+
+def test_sweep_orphaned_tasks_marks_non_terminal(tmp_path: Path) -> None:
+    """sweep_orphaned_tasks 把非终态任务标 failed,清理孤儿临时目录。"""
+    import glob
+    import time
+    import types
+
+    from aigateway_core.shared.auth.sqlite_store import SQLiteStore
+
+    from aigateway_api.code_rag_routes import sweep_orphaned_tasks
+
+    store = SQLiteStore(db_path=str(tmp_path / "t.db"))
+    now = int(time.time())
+    base = {
+        "document_id": "x", "done": 0, "total": 0, "current_file": "",
+        "source_type": "git", "source_label": "", "embedding_model": "",
+        "graph_repo_path": "", "error": "", "created_at": now, "updated_at": now,
+    }
+    store.upsert_code_rag_task({**base, "task_id": "a", "status": "splitting"})
+    store.upsert_code_rag_task({**base, "task_id": "b", "status": "completed"})
+
+    # 造一个孤儿临时目录(模拟旧的 /tmp/code_rag_folder_* 残留)
+    orphan = tempfile.mkdtemp(prefix="code_rag_folder_")
+    assert Path(orphan).exists()
+
+    app_state = types.SimpleNamespace(sqlite_store=store)
+    n = sweep_orphaned_tasks(app_state)
+    assert n == 1
+    assert store.read_code_rag_task("a")["status"] == "failed"
+    assert "worker restarted" in store.read_code_rag_task("a")["error"]
+    assert store.read_code_rag_task("b")["status"] == "completed"
+
+    # 孤儿临时目录已被清掉
+    assert not Path(orphan).exists(), f"sweep 未清理孤儿临时目录: {orphan}"
+
+    # 幂等:再扫一次,0 个非终态
+    assert sweep_orphaned_tasks(app_state) == 0
+
+
+def test_sweep_orphaned_tasks_no_store_returns_zero() -> None:
+    """sqlite_store 缺失时返回 0(不崩)。"""
+    import types
+
+    from aigateway_api.code_rag_routes import sweep_orphaned_tasks
+
+    app_state = types.SimpleNamespace()
+    assert sweep_orphaned_tasks(app_state) == 0

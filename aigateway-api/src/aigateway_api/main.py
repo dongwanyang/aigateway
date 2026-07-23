@@ -647,6 +647,16 @@ async def lifespan(app: "FastAPI"):
     except Exception as exc:
         logger.warning("启动清理成本账本失败: %s", exc)
 
+    # 启动时清理 code rag 孤儿任务(网关重启打断的非终态导入任务标记 failed)
+    # + 清理 /tmp/code_rag_folder_* 与 /data/code_graphs/*/.tmp/ 残留临时目录
+    try:
+        from aigateway_api.code_rag_routes import sweep_orphaned_tasks
+        swept = sweep_orphaned_tasks(app.state)
+        if swept:
+            logger.info("code rag 孤儿任务清理完成: %d 个", swept)
+    except Exception as exc:
+        logger.warning("启动清理 code rag 孤儿任务失败: %s", exc)
+
     # 初始化 5 维度 Debug 开关(PR2 2026-07-05)。attach 到 ConfigManager.on_reload
     # 后,后续 config.yaml 变更自动 atomic swap;首次加载在 attach 内完成。
     from aigateway_core.shared.debug_config import init_debug_config_watcher
