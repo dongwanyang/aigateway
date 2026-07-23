@@ -4,6 +4,8 @@ Locked into repo-root config files so misplaced keys and missing volumes
 fail loudly instead of silently drifting.
 """
 import os
+import tempfile
+import io
 from pathlib import Path
 
 import pytest
@@ -831,3 +833,40 @@ def test_run_codegraph_json_killpg_on_timeout(monkeypatch, tmp_path: Path) -> No
     with pytest.raises(RuntimeError, match="timed out"):
         graph_query._run_codegraph_json(["query", "x"], repo_path=str(tmp_path), timeout=0.01)
     assert killed, "超时后未 killpg"
+
+
+# ---------------------------------------------------------------------------
+# Task 10: config allows code_rag as recognized top-level field
+# ---------------------------------------------------------------------------
+
+
+def test_code_rag_is_allowed_top_level() -> None:
+    """config.yaml 的 code_rag 块不应触发未识别字段警告。"""
+    import logging
+
+    from aigateway_core.shared.config import ConfigManager
+
+    stream: "io.StringIO" = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    cfg_logger = logging.getLogger("aigateway_core.shared.config")
+    cfg_logger.addHandler(handler)
+    old_level = cfg_logger.level
+    cfg_logger.setLevel(logging.WARNING)
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+            f.write(
+                "server:\n  host: 0.0.0.0\n  port: 8000\n"
+                "code_rag:\n  enabled: true\n  graph_db_dir: /tmp/x\n"
+            )
+            path = f.name
+        try:
+            ConfigManager(config_path=path)
+        finally:
+            os.remove(path)
+    finally:
+        cfg_logger.removeHandler(handler)
+        cfg_logger.setLevel(old_level)
+    # code_rag 在白名单里,不应出现在未识别字段警告中
+    assert "code_rag" not in stream.getvalue(), (
+        f"code_rag 被判为未识别字段: {stream.getvalue()!r}"
+    )

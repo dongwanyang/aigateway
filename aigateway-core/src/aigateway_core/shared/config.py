@@ -220,7 +220,7 @@ class ConfigManager:
             "server", "auth", "plugins", "providers", "embedding",
             "observability", "hot_reload", "debug_mode", "debug", "infrastructure",
             "cache", "media_optimization", "circuit_breaker", "rate_limiter",
-            "streaming", "generation_optimization",
+            "streaming", "generation_optimization", "code_rag",
         }
 
         # 环境变量覆盖产生的扁平键（AI_GATEWAY_* 去前缀后的小写形式）
@@ -781,7 +781,7 @@ class ConfigManager:
             "server", "auth", "plugins", "providers", "embedding",
             "observability", "hot_reload", "debug_mode", "debug", "infrastructure",
             "cache", "media_optimization", "circuit_breaker", "rate_limiter",
-            "streaming", "generation_optimization",
+            "streaming", "generation_optimization", "code_rag",
         }
 
         # 检查未识别的顶层字段
