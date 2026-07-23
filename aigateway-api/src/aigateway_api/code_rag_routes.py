@@ -47,31 +47,11 @@ router = APIRouter()
 
 
 # ----------------------------------------------------------------------
-# Redis key naming
+# Redis key naming (repo metadata list — still Redis-backed)
 # ----------------------------------------------------------------------
 
-_TASK_KEY_TMPL = "aigateway:rag:code:tasks:{task_id}"
 _REPO_LIST_KEY = "aigateway:rag:code:documents"
-_TASK_TTL_SECONDS = 24 * 3600
 _CANCELLED = "cancelled"
-
-# Lua script: atomically set status=cancelled only if current status is not terminal.
-# Returns "ok" on success, "already_terminal" if already done, "missing" if key gone.
-# This prevents the race where cancel writes "cancelled" then task completion
-# overwrites it with "completed"/"failed".
-_CANCELLATION_LUA = """
-local key = KEYS[1]
-local current = redis.call('HGET', key, 'status')
-if not current then
-    return 'missing'
-end
-local terminal = {['completed']=true, ['failed']=true, ['cancelled']=true}
-if terminal[current] then
-    return 'already_terminal'
-end
-redis.call('HSET', key, 'status', ARGV[1])
-return 'ok'
-"""
 
 
 # ----------------------------------------------------------------------
@@ -90,61 +70,55 @@ class _CodeImportJsonBody(BaseModel):
 
 
 # ----------------------------------------------------------------------
-# Task state helpers (Redis-backed)
+# Task state helpers (SQLite-backed code_rag_tasks table)
 # ----------------------------------------------------------------------
 
 
-def _task_key(task_id: str) -> str:
-    return _TASK_KEY_TMPL.format(task_id=task_id)
-
-
 async def _write_task_state(
-    redis_mgr: Any,
+    app_state: Any,
     task_id: str,
     fields: Dict[str, Any],
 ) -> None:
-    """把任务状态字段合并写入 Redis Hash + 刷新 TTL.
+    """把任务状态字段 upsert 到 SQLite code_rag_tasks 表。
 
-    值类型: 字符串直接存,dict/list 走 json.dumps。
+    fields 是部分字段(增量更新);读出现有行合并后写回(upsert 需要全列)。
+    终态留表当历史(不再像 Redis 那样 _delete_task_key 删 key)。
     """
-    if redis_mgr is None or redis_mgr.redis is None:
+    sqlite_store = getattr(app_state, "sqlite_store", None)
+    if sqlite_store is None:
         return
-    now = int(time.time())
-    payload: Dict[str, str] = {"updated_at": str(now)}
-    for k, v in fields.items():
-        if v is None:
-            payload[k] = ""
-        elif isinstance(v, (dict, list)):
-            payload[k] = json.dumps(v, ensure_ascii=False)
-        else:
-            payload[k] = str(v)
-    await redis_mgr.redis.hset(_task_key(task_id), mapping=payload)
-    await redis_mgr.redis.expire(_task_key(task_id), _TASK_TTL_SECONDS)
+    existing = sqlite_store.read_code_rag_task(task_id) or {}
+    existing.update({k: v for k, v in fields.items() if v is not None})
+    existing["task_id"] = task_id
+    existing.setdefault("document_id", "")
+    existing.setdefault("status", "pending")
+    existing.setdefault("done", 0)
+    existing.setdefault("total", 0)
+    existing.setdefault("current_file", "")
+    existing.setdefault("source_type", "")
+    existing.setdefault("source_label", "")
+    existing.setdefault("embedding_model", "")
+    existing.setdefault("graph_repo_path", "")
+    existing.setdefault("error", "")
+    existing.setdefault("created_at", int(time.time()))
+    existing["updated_at"] = int(time.time())
+    sqlite_store.upsert_code_rag_task(existing)
 
 
-async def _delete_task_key(redis_mgr: Any, task_id: str) -> None:
-    """任务完成后立即删除 Redis key，避免 24h TTL 内的脏数据。"""
-    if redis_mgr is None or redis_mgr.redis is None:
-        return
-    await redis_mgr.redis.delete(_task_key(task_id))
+async def _delete_task_key(app_state: Any, task_id: str) -> None:
+    """终态留表当历史(不再删 SQLite 行)。保留签名避免改调用点。"""
+    return None
 
 
-async def _read_task_state(redis_mgr: Any, task_id: str) -> Optional[Dict[str, Any]]:
-    if redis_mgr is None or redis_mgr.redis is None:
+async def _read_task_state(app_state: Any, task_id: str) -> Optional[Dict[str, Any]]:
+    sqlite_store = getattr(app_state, "sqlite_store", None)
+    if sqlite_store is None:
         return None
-    raw = await redis_mgr.redis.hgetall(_task_key(task_id))
-    if not raw:
-        return None
-    decoded: Dict[str, Any] = {}
-    for k, v in raw.items():
-        key = k.decode() if isinstance(k, bytes) else k
-        val = v.decode() if isinstance(v, bytes) else v
-        decoded[key] = val
-    return decoded
+    return sqlite_store.read_code_rag_task(task_id)
 
 
 def _shape_task_response(task_id: str, state: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """把 Redis Hash 里的字段规范化为 API 输出结构.
+    """把 store 里的字段规范化为 API 输出结构.
 
     created_at 缺失时返回 0 (非 null)，保证 list 端按时间倒序时老任务排末尾.
     """
@@ -526,7 +500,6 @@ async def _run_code_import_task_with_deadline(
     **kwargs: Any,
 ) -> None:
     """给整个导入任务加 wall-clock 上限,避免 "silently stuck"。"""
-    redis_mgr = getattr(app_state, "redis_manager", None)
     try:
         await asyncio.wait_for(
             _run_code_import_task(
@@ -541,7 +514,7 @@ async def _run_code_import_task_with_deadline(
             deadline_seconds,
         )
         await _write_task_state(
-            redis_mgr,
+            app_state,
             task_id,
             {
                 "status": "failed",
@@ -549,7 +522,7 @@ async def _run_code_import_task_with_deadline(
             },
         )
     except asyncio.CancelledError:
-        # 用户取消透传,由内层 _run_code_import_task 处理 Redis 标记
+        # 用户取消透传,由内层 _run_code_import_task 处理状态标记
         logger.info("code rag import task %s cancelled (deadline wrapper)", task_id)
         raise
 
@@ -586,7 +559,7 @@ async def _run_code_import_task(
     qdrant_mgr = getattr(app_state, "qdrant_manager", None)
 
     async def _mark(**fields: Any) -> None:
-        await _write_task_state(redis_mgr, task_id, fields)
+        await _write_task_state(app_state, task_id, fields)
 
     collection_name = resolve_collection_name(embedding_model)
     written_points = False
@@ -608,7 +581,7 @@ async def _run_code_import_task(
         await _mark(total=len(chunks))
         if not chunks:
             await _mark(status="completed", done=0)
-            await _delete_task_key(redis_mgr, task_id)
+            await _delete_task_key(app_state, task_id)
             return
 
         # 3) probe embedding dim + upsert collection
@@ -716,13 +689,13 @@ async def _run_code_import_task(
         await _append_repository(redis_mgr, repo_meta)
 
         await _mark(status="completed", error=None)
-        await _delete_task_key(redis_mgr, task_id)
+        await _delete_task_key(app_state, task_id)
 
     except asyncio.CancelledError:
         # 用户主动取消,不记为 failed
         logger.info("code rag import task %s cancelled by user", task_id)
         await _mark(status=_CANCELLED, error=None)
-        await _delete_task_key(redis_mgr, task_id)
+        await _delete_task_key(app_state, task_id)
         raise  # 重新抛出让 done_callback 处理
 
     except Exception as exc:
@@ -737,11 +710,11 @@ async def _run_code_import_task(
             except Exception:
                 logger.warning("回滚点位时二次异常,忽略")
         await _write_task_state(
-            redis_mgr,
+            app_state,
             task_id,
             {"status": "failed", "error": str(exc)},
         )
-        await _delete_task_key(redis_mgr, task_id)
+        await _delete_task_key(app_state, task_id)
     finally:
         for cleanup in cleanup_dirs:
             shutil.rmtree(cleanup, ignore_errors=True)
@@ -858,7 +831,7 @@ async def import_code_repository(
             source_dir = _materialize_git_repo(
                 body.git_url or "", body.git_branch, dest_dir=git_src_dir
             )
-            source_label = f"git://{body.git_url}"
+            source_label = body.git_url or ""
             workspace_path = git_src_dir
         else:
             raise HTTPException(
@@ -866,9 +839,8 @@ async def import_code_repository(
                 detail=f"JSON 请求只支持 server_path/git,收到 {source_type}",
             )
 
-    redis_mgr = getattr(app_state, "redis_manager", None)
     await _write_task_state(
-        redis_mgr,
+        app_state,
         task_id,
         {
             "status": "pending",
@@ -916,17 +888,19 @@ async def cancel_code_task(
     """取消一个正在运行的导入任务。
 
     流程:
-    1. 先读 Redis 确认任务状态,已是终态则直接返回(不覆盖)
-    2. 标记 Redis 状态为 cancelled
+    1. 先读 SQLite 确认任务状态,不存在则 404,已是终态则直接返回(不覆盖)
+    2. SQL 条件 UPDATE: 仅当当前非终态时才写 cancelled,防止与任务完成路径竞争
     3. 从 app.state.code_rag_active_tasks 中找到 asyncio.Task 并 cancel()
     4. asyncio 会在下一次 await 处抛出 CancelledError,
        _run_code_import_task 的 except 块捕获后走 finally 清理。
     """
     app_state = request.app.state
-    redis_mgr = getattr(app_state, "redis_manager", None)
+    sqlite_store = getattr(app_state, "sqlite_store", None)
+    if sqlite_store is None:
+        raise HTTPException(status_code=503, detail="task store unavailable")
 
     # 0) 检查当前状态,不存在则直接报 404,避免伪造 cancelled 任务
-    existing = await _read_task_state(redis_mgr, task_id)
+    existing = await _read_task_state(app_state, task_id)
     if not existing:
         raise HTTPException(
             status_code=404,
@@ -944,20 +918,17 @@ async def cancel_code_task(
         return {"task_id": task_id, "status": current_status}
 
     # 1) 原子 CAS: 仅当当前非终态时才写 cancelled,防止与任务完成路径竞争
-    try:
-        cas_result = await redis_mgr.redis.eval(_CANCELLATION_LUA, 1, _task_key(task_id), _CANCELLED)
-    except Exception:
-        # eval 不可用(如 FakeRedis fallback):回退到旧路径
-        await _write_task_state(redis_mgr, task_id, {"status": _CANCELLED})
-        cas_result = "ok"
-
-    if cas_result == "already_terminal":
+    now = int(time.time())
+    cur = sqlite_store.conn.execute(
+        "UPDATE code_rag_tasks SET status='cancelled', updated_at=? "
+        "WHERE task_id=? AND status NOT IN ('completed','failed','cancelled')",
+        (now, task_id),
+    )
+    sqlite_store.conn.commit()
+    if cur.rowcount == 0:
         # 并发写入导致状态已变,重新读取真实状态
-        updated = await _read_task_state(redis_mgr, task_id)
-        return {"task_id": task_id, "status": updated.get("status") or "cancelled"}
-    elif cas_result == "missing":
-        logger.warning("Code rag import task %s Redis key vanished during cancel", task_id)
-        return {"task_id": task_id, "status": "cancelled"}
+        updated = await _read_task_state(app_state, task_id)
+        return {"task_id": task_id, "status": (updated or {}).get("status") or "cancelled"}
 
     # 2) 取消 asyncio.Task
     active = getattr(app_state, "code_rag_active_tasks", None)
@@ -965,7 +936,7 @@ async def cancel_code_task(
         active[task_id].cancel()
         logger.info("Cancelled code rag import task %s", task_id)
     else:
-        # 任务已完成/从未创建,Redis 标记已写,静默返回
+        # 任务已完成/从未创建,SQLite 标记已写,静默返回
         logger.info("Code rag import task %s not found in active tasks (already done?)", task_id)
 
     return {"task_id": task_id, "status": _CANCELLED}
@@ -974,41 +945,19 @@ async def cancel_code_task(
 @router.get("/rag/code/tasks")
 async def list_code_tasks(
     request: Request,
+    limit: int = 50,
+    offset: int = 0,
     _auth: Dict[str, Any] = Depends(authenticate_admin),
 ) -> List[Dict[str, Any]]:
-    """列出所有活跃任务(终态任务在完成后已从 Redis 删除)。
+    """列出最近的任务(按 created_at 倒序,默认 50 条)。
 
-    前端页面刷新后可用此接口恢复正在运行的任务。已完成/失败/已取消的
-    任务由前端本地状态(localStorage)维护。
+    任务终态留表当历史,故 list 端能返回已完成/失败/取消的任务供前端恢复。
     """
-    redis_mgr = getattr(request.app.state, "redis_manager", None)
-    if redis_mgr is None or redis_mgr.redis is None:
+    sqlite_store = getattr(request.app.state, "sqlite_store", None)
+    if sqlite_store is None:
         return []
-
-    # 使用 SCAN 替代 KEYS,避免阻塞 Redis 单线程事件循环
-    pattern = _TASK_KEY_TMPL.format(task_id="*")
-    cursor = 0
-    all_keys: List[str] = []
-    while True:
-        cursor, keys = await redis_mgr.redis.scan(cursor, match=pattern, count=100)
-        all_keys.extend(keys)
-        if cursor == 0:
-            break
-    active: List[Dict[str, Any]] = []
-    for key in all_keys:
-        k = key.decode() if isinstance(key, bytes) else key
-        tid = k.rsplit(":", 1)[-1]
-        # 复用 _read_task_state 解码 Redis Hash 的 bytes key/val,
-        # 否则 raw 是 {b"status": b"completed", ...}, _shape_task_response 用 str
-        # key 取值会全部落空, 退化成假 pending + source_label=None,
-        # 前端刷新恢复后就丢失任务来源标签。
-        state = await _read_task_state(redis_mgr, tid)
-        if not state:
-            continue
-        active.append(_shape_task_response(tid, state))
-    # 按 created_at 倒序(最新的在前)
-    active.sort(key=lambda t: int(t.get("created_at") or 0), reverse=True)
-    return active
+    rows = sqlite_store.list_code_rag_tasks(limit=limit, offset=offset)
+    return [_shape_task_response(r["task_id"], r) for r in rows]
 
 
 @router.get("/rag/code/tasks/{task_id}")
@@ -1017,8 +966,7 @@ async def get_code_task(
     request: Request,
     _auth: Dict[str, Any] = Depends(authenticate_admin),
 ) -> Dict[str, Any]:
-    redis_mgr = getattr(request.app.state, "redis_manager", None)
-    state = await _read_task_state(redis_mgr, task_id)
+    state = await _read_task_state(request.app.state, task_id)
     if not state:
         raise HTTPException(
             status_code=404,

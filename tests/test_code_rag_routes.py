@@ -10,6 +10,7 @@ import asyncio
 import json
 import shutil
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Dict, List
 from unittest.mock import AsyncMock, MagicMock
@@ -94,11 +95,17 @@ class _FakeConfigManager:
 
 def _make_client(monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, FastAPI]:
     """构造一个精简的 FastAPI 应用,只挂 code_rag_router,让 auth 通过。"""
+    from aigateway_core.shared.auth.sqlite_store import SQLiteStore
+
     app = FastAPI()
     app.include_router(code_rag_router, prefix="/admin")
     app.state.redis_manager = _FakeRedisManager()
     app.state.qdrant_manager = _FakeQdrantManager()
     app.state.config_manager = _FakeConfigManager(CODE_RAG_CFG)
+    # Task state 现在落 SQLite(与 main.py lifespan 一致)
+    db_dir = tempfile.mkdtemp(prefix="code_rag_test_")
+    app.state._test_db_dir = db_dir
+    app.state.sqlite_store = SQLiteStore(db_path=str(Path(db_dir) / "tasks.db"))
 
     async def _allow_any() -> Dict[str, Any]:
         return {"user_id": "admin"}
@@ -112,6 +119,24 @@ def _make_client(monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, FastAPI]:
     )
 
     return TestClient(app), app
+
+
+def _read_task(store, task_id: str) -> Dict[str, Any]:
+    """从 SQLiteStore 读一行,缺失返回 {}。"""
+    row = store.read_code_rag_task(task_id)
+    return row or {}
+
+
+def _make_app_state_with_store(tmp_path: Path) -> "SimpleNamespace":
+    """构造一个带 sqlite_store 的 app.state(供 _run_code_import_task 集成测试)。"""
+    from types import SimpleNamespace
+
+    from aigateway_core.shared.auth.sqlite_store import SQLiteStore
+
+    app_state = SimpleNamespace()
+    app_state.redis_manager = _FakeRedisManager()
+    app_state.sqlite_store = SQLiteStore(db_path=str(tmp_path / "tasks.db"))
+    return app_state
 
 
 def test_post_code_import_server_path_returns_task_id(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -133,9 +158,9 @@ def test_post_code_import_server_path_returns_task_id(monkeypatch: pytest.Monkey
     # 否则 import 端点把任务状态写空 / 不 spawn 任务也能让本测试通过(fake-test 漏洞).
     task_id = body["task_id"]
 
-    # 1) 任务状态确实落进了 Redis Hash,且关键字段由端点写入了正确值
-    state = _run(app.state.redis_manager.redis.hgetall(f"aigateway:rag:code:tasks:{task_id}"))
-    assert state, "import 端点没有把 task 状态写入 Redis"
+    # 1) 任务状态确实落进了 SQLite code_rag_tasks,且关键字段由端点写入了正确值
+    state = _read_task(app.state.sqlite_store, task_id)
+    assert state, "import 端点没有把 task 状态写入 SQLite"
     assert state.get("status") == "pending"
     assert state.get("source_type") == "server_path"
     assert state.get("source_label") == "server_path:///tmp"
@@ -223,10 +248,10 @@ def test_post_code_import_folder_multipart_accepts_files(monkeypatch: pytest.Mon
     assert body["status"] == "pending"
     assert body["task_id"]
 
-    # 验证 folder 源把 source_type/source_label 真正落进了 Redis,
+    # 验证 folder 源把 source_type/source_label 真正落进了 SQLite,
     # 否则前端轮询拿到的任务元数据全是空(fake-test 漏洞).
     task_id = body["task_id"]
-    state = _run(app.state.redis_manager.redis.hgetall(f"aigateway:rag:code:tasks:{task_id}"))
+    state = _read_task(app.state.sqlite_store, task_id)
     assert state.get("source_type") == "folder"
     assert state.get("source_label") == "folder://main.py"
     assert state.get("embedding_model") == "Qwen/Qwen3-Embedding-0.6B"
@@ -268,9 +293,9 @@ def test_post_code_import_zip_multipart_accepts_file(monkeypatch: pytest.MonkeyP
     assert body["status"] == "pending"
     assert body["task_id"]
 
-    # 验证 zip 源把 source_type/source_label 真正落进了 Redis.
+    # 验证 zip 源把 source_type/source_label 真正落进了 SQLite.
     task_id = body["task_id"]
-    state = _run(app.state.redis_manager.redis.hgetall(f"aigateway:rag:code:tasks:{task_id}"))
+    state = _read_task(app.state.sqlite_store, task_id)
     assert state.get("source_type") == "zip"
     assert state.get("source_label") == "zip://repo.zip"
     assert state.get("embedding_model") == "Qwen/Qwen3-Embedding-0.6B"
@@ -295,13 +320,14 @@ def _run(coro: Any) -> Any:
 
 def test_get_code_task_reflects_written_state(monkeypatch: pytest.MonkeyPatch) -> None:
     client, app = _make_client(monkeypatch)
-    # 手写一个 completed 任务状态
-    _run(
-        app.state.redis_manager.redis.hset(
-            "aigateway:rag:code:tasks:t1",
-            mapping={"status": "completed", "done": "3", "total": "3", "current_file": ""},
-        )
-    )
+    # 手写一个 completed 任务状态到 SQLite
+    now = int(time.time())
+    app.state.sqlite_store.upsert_code_rag_task({
+        "task_id": "t1", "document_id": "d1", "status": "completed",
+        "done": 3, "total": 3, "current_file": "", "source_type": "git",
+        "source_label": "", "embedding_model": "", "graph_repo_path": "",
+        "error": "", "created_at": now, "updated_at": now,
+    })
     response = client.get("/admin/rag/code/tasks/t1")
     body = response.json()
     assert body["status"] == "completed"
@@ -499,8 +525,11 @@ def test_run_code_import_task_passes_real_symbol_name_to_graph_lookup(
     )
 
     # ---- 桩:app.state ----
+    from aigateway_core.shared.auth.sqlite_store import SQLiteStore
+
     app_state = SimpleNamespace()
     app_state.redis_manager = _FakeRedisManager()
+    app_state.sqlite_store = SQLiteStore(db_path=str(tmp_path / "tasks_sym.db"))
     qdrant_mgr = _FakeQdrantManager()
     put_resp = MagicMock()
     put_resp.raise_for_status = MagicMock()
@@ -627,6 +656,8 @@ def test_run_code_import_task_batches_encode_calls_at_64_boundary(
 
     app_state = SimpleNamespace()
     app_state.redis_manager = _FakeRedisManager()
+    from aigateway_core.shared.auth.sqlite_store import SQLiteStore
+    app_state.sqlite_store = SQLiteStore(db_path=str(tmp_path / "tasks_batch.db"))
     qdrant_mgr = _FakeQdrantManager()
     put_resp = MagicMock()
     put_resp.raise_for_status = MagicMock()
@@ -662,8 +693,8 @@ def test_run_code_import_task_batches_encode_calls_at_64_boundary(
     # 每批单独 upsert 一次
     assert qdrant_mgr._http.put.await_count == 2
 
-    # 任务完成后 Redis key 已被清理(这是预期行为),不再断言状态落盘。
-    # 上面的 encode/upsert 计数已充分证明任务正常完成。
+    # 任务完成后 SQLite 行保留为历史(终态留表);encode/upsert 计数已证明任务正常完成。
+    assert app_state.sqlite_store.read_code_rag_task("t-batch")["status"] == "completed"
 
 
 # ---------------------------------------------------------------------------
@@ -732,3 +763,137 @@ def test_fail_non_terminal_tasks(tmp_path: Path) -> None:
 
     # 幂等:再跑一次,0 个非终态
     assert store.fail_non_terminal_tasks("worker restarted") == 0
+
+
+# ---------------------------------------------------------------------------
+# Task 6: task state Redis -> SQLite (routes read SQLite)
+# ---------------------------------------------------------------------------
+
+
+def test_list_code_tasks_reads_sqlite(tmp_path: Path) -> None:
+    """list_code_tasks 必须从 app.state.sqlite_store 读 SQLite,而非 Redis。"""
+    import time
+    import types
+
+    from aigateway_core.shared.auth.sqlite_store import SQLiteStore
+
+    from aigateway_api.code_rag_routes import list_code_tasks
+
+    store = SQLiteStore(db_path=str(tmp_path / "t.db"))
+    now = int(time.time())
+    store.upsert_code_rag_task({
+        "task_id": "t1", "document_id": "d1", "status": "completed",
+        "done": 5, "total": 5, "current_file": "", "source_type": "git",
+        "source_label": "https://github.com/x/y.git", "embedding_model": "",
+        "graph_repo_path": "", "error": "", "created_at": now, "updated_at": now,
+    })
+
+    # 路由签名是 list_code_tasks(request, limit, offset, _auth)。
+    # request.app.state.sqlite_store 是真正的取用路径,这里构造匹配的桩。
+    request = types.SimpleNamespace(app=types.SimpleNamespace(state=types.SimpleNamespace(sqlite_store=store)))
+    out = asyncio.new_event_loop().run_until_complete(
+        list_code_tasks(request, 50, 0, {})
+    )
+    assert len(out) == 1
+    assert out[0]["task_id"] == "t1"
+    assert out[0]["status"] == "completed"
+    # JSON shape 不变 + source_label 原样(git 前缀已在端点层去掉)
+    assert out[0]["source_label"] == "https://github.com/x/y.git"
+
+
+def test_get_code_task_reads_sqlite(tmp_path: Path) -> None:
+    """get_code_task 从 SQLite 读;404 行为不变。"""
+    import time
+    import types
+
+    from aigateway_core.shared.auth.sqlite_store import SQLiteStore
+
+    from aigateway_api.code_rag_routes import get_code_task
+
+    store = SQLiteStore(db_path=str(tmp_path / "t.db"))
+    now = int(time.time())
+    store.upsert_code_rag_task({
+        "task_id": "t2", "document_id": "d2", "status": "splitting",
+        "done": 3, "total": 10, "current_file": "a.py", "source_type": "git",
+        "source_label": "https://github.com/x/y.git", "embedding_model": "",
+        "graph_repo_path": "", "error": "", "created_at": now, "updated_at": now,
+    })
+
+    request = types.SimpleNamespace(app=types.SimpleNamespace(state=types.SimpleNamespace(sqlite_store=store)))
+    out = asyncio.new_event_loop().run_until_complete(get_code_task("t2", request, {}))
+    assert out["task_id"] == "t2"
+    assert out["status"] == "splitting"
+    assert out["done"] == 3
+    assert out["total"] == 10
+    assert out["current_file"] == "a.py"
+
+
+def test_cancel_code_task_uses_sqlite_cas(tmp_path: Path) -> None:
+    """cancel_code_task 走 SQLite 条件 UPDATE,已终态不覆盖。"""
+    import time
+    import types
+
+    from aigateway_core.shared.auth.sqlite_store import SQLiteStore
+
+    from aigateway_api.code_rag_routes import cancel_code_task
+
+    store = SQLiteStore(db_path=str(tmp_path / "t.db"))
+    now = int(time.time())
+    base = {
+        "document_id": "d3", "done": 0, "total": 0, "current_file": "",
+        "source_type": "git", "source_label": "", "embedding_model": "",
+        "graph_repo_path": "", "error": "", "created_at": now, "updated_at": now,
+    }
+    # 一个运行中(splitting) + 一个已 completed
+    store.upsert_code_rag_task({**base, "task_id": "running", "status": "splitting"})
+    store.upsert_code_rag_task({**base, "task_id": "done", "status": "completed"})
+
+    state = types.SimpleNamespace(sqlite_store=store, code_rag_active_tasks={})
+    request = types.SimpleNamespace(app=types.SimpleNamespace(state=state))
+    # 取消运行中任务
+    out = asyncio.new_event_loop().run_until_complete(cancel_code_task("running", request, {}))
+    assert out["status"] == "cancelled"
+    assert store.read_code_rag_task("running")["status"] == "cancelled"
+
+    # 取消已终态任务 → 不覆盖,返回当前状态
+    out2 = asyncio.new_event_loop().run_until_complete(cancel_code_task("done", request, {}))
+    assert out2["status"] == "completed"
+    assert store.read_code_rag_task("done")["status"] == "completed"
+
+
+def test_import_code_repository_writes_sqlite_and_strips_git_prefix(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """import 端点:pending 落 SQLite(非 Redis);git source_label 无 git:// 前缀。"""
+    from aigateway_core.shared.auth.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(db_path=str(tmp_path / "t.db"))
+    client, app = _make_client(monkeypatch)
+    # 把 sqlite_store 挂上(模拟 main.py lifespan 做的事)
+    app.state.sqlite_store = store
+    # 避免真的跑 git clone(gitpython 在测试环境没装 / 不应触网)
+    fake_src = tmp_path / "git_src"
+    fake_src.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(
+        "aigateway_api.code_rag_routes._materialize_git_repo",
+        lambda url, branch, *, dest_dir=None: str(fake_src),
+    )
+
+    response = client.post(
+        "/admin/rag/code/import",
+        json={
+            "source_type": "git",
+            "git_url": "https://github.com/octocat/Hello-World.git",
+            "embedding_model": "Qwen/Qwen3-Embedding-0.6B",
+        },
+    )
+    assert response.status_code == 200, response.text
+    task_id = response.json()["task_id"]
+
+    row = store.read_code_rag_task(task_id)
+    assert row is not None, "import 端点没把 task 写入 SQLite"
+    assert row["status"] == "pending"
+    assert row["source_type"] == "git"
+    # git:// 前缀已去掉,前端直接拿到 URL
+    assert row["source_label"] == "https://github.com/octocat/Hello-World.git"
+    assert (row["document_id"] or "").startswith("code_")
