@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.1.0.1] - 2026-07-24
+
+### Fixed
+- **Code RAG import stuck forever on large repos**: Replaced per-symbol `codegraph` CLI subprocess spawning (~10k spawns for a 5k-symbol repo) with 2 SQL queries against the codegraph SQLite db (114ms). Callers/callees are now resolved via in-process cache invalidated by file-hash snapshot.
+- **Orphaned import tasks after gateway restart**: Startup sweep marks non-terminal tasks as `failed` so the frontend no longer shows "importing" indefinitely.
+- **No progress during splitting phase**: Import progress is now written to SQLite every 200 symbols, giving users real-time visibility into how long imports take.
+- **Task state lost on restart**: Task state moved from Redis keys to SQLite `code_rag_tasks` table with history retention, pagination, and conditional cancel.
+
+### Added
+- **Corrupt-db detection**: Import fails loudly on a corrupted codegraph db instead of silently producing empty callers/callees.
+- **Thread-safe edges cache**: LRU cache guarded by `threading.Lock` prevents `RuntimeError` from concurrent access by admin routes and RAG retrieval paths.
+
+### Changed
+- Code RAG task queries paginated (`?limit=50&offset=0`) to prevent unbounded scans on large task histories.
+
+---
+
 ## [0.1.0.0] - 2026-07-21
 
 ### Added
