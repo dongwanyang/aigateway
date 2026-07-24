@@ -54,15 +54,11 @@ export default function DraftCard({ draft, onConfirm, onReject }: DraftCardProps
       {draft.status === 'confirmed' && draft.resultDataUrl ? (
         <ImageLightbox src={draft.resultDataUrl} alt="高清结果" thumbAlt="高清结果(点击放大)" />
       ) : draft.previewDataUrl ? (
-        draft.mediaType === 'video' ? (
-          <video
-            src={draft.previewDataUrl}
-            controls
-            style={{ maxWidth: '100%', borderRadius: 6, border: '1px solid var(--color-border)' }}
-          />
-        ) : (
-          <ImageLightbox src={draft.previewDataUrl} alt="草稿预览" thumbAlt="草稿预览(点击放大)" />
-        )
+        <ImageLightbox
+          src={draft.previewDataUrl}
+          alt={draft.mediaType === 'video' ? '视频首帧预览' : '草稿预览'}
+          thumbAlt={draft.mediaType === 'video' ? '视频首帧预览(点击放大)' : '草稿预览(点击放大)'}
+        />
       ) : !terminal ? (
         <div
           className="flex items-center justify-center"
