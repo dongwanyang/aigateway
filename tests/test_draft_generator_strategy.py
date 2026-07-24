@@ -461,3 +461,47 @@ def test_video_submit_result_dataclass():
     assert r.draft_id == "d1"
     assert r.video_id == "vid_x"
     assert r.status == "generating"
+
+
+@pytest.mark.asyncio
+async def test_confirm_video_draft_calls_bridge_and_returns_video_id(strategy, video_request, default_config):
+    """视频草稿确认后应调 bridge._do_video_generation,存 video_id,返回 VideoSubmitResult。"""
+    result = await strategy.generate_draft(video_request, default_config)
+    draft = await _await_generating(strategy, result.draft_id)
+    assert draft.media_type == "video"
+
+    # mock bridge: _do_video_generation 返回含 video_id 的结果
+    from unittest.mock import AsyncMock
+    strategy._litellm_bridge = AsyncMock()
+    strategy._litellm_bridge._do_video_generation = AsyncMock(return_value={
+        "_meta": {"video_id": "vid_test_123"},
+        "usage": {},
+    })
+
+    out = await strategy.confirm_draft(draft.draft_id)
+    assert isinstance(out, VideoSubmitResult)
+    assert out.video_id == "vid_test_123"
+    assert out.status == "generating"
+    # bridge 被调用
+    strategy._litellm_bridge._do_video_generation.assert_awaited_once()
+    # video_id 持久化到 draft
+    reloaded = await strategy._load_draft(draft.draft_id)
+    assert reloaded is not None
+    assert reloaded.video_id == "vid_test_123"
+    assert reloaded.status == DRAFT_STATUS_CONFIRMED
+
+
+@pytest.mark.asyncio
+async def test_confirm_image_draft_still_returns_upscale_result(strategy, image_request, default_config):
+    """图片草稿确认仍走放大路径,返回 UpscaleResult(回归保护)。"""
+    result = await strategy.generate_draft(image_request, default_config)
+    draft = await _await_generating(strategy, result.draft_id)
+    assert draft.media_type == "image"
+
+    from unittest.mock import AsyncMock
+    strategy._litellm_bridge = AsyncMock()  # 图片路径不应调 _do_video_generation
+
+    out = await strategy.confirm_draft(draft.draft_id)
+    assert isinstance(out, UpscaleResult)
+    assert not isinstance(out, VideoSubmitResult)
+    strategy._litellm_bridge._do_video_generation.assert_not_called()

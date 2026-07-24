@@ -36,6 +36,7 @@ from aigateway_core.pipelines.generation._common.models import (
     DraftResult,
     GenerationRequest,
     UpscaleResult,
+    VideoSubmitResult,
 )
 from aigateway_core.shared.integration_configs import ComfyUIConfig
 
@@ -429,6 +430,11 @@ class DraftGeneratorStrategy:
         ttl_remaining = max(1, int(draft.expires_at - time.time()))
         await self._store_draft(draft, ttl_remaining)
 
+        # 视频草稿:调 bridge 提交 Agnes /videos 异步任务,返回 video_id。
+        # 不走图片放大路径。
+        if draft.media_type == "video":
+            return await self._confirm_video_draft(draft)
+
         # Upscale to target resolution via pixel-level super-resolution
         target_resolution = self._get_target_resolution(draft)
         start_time = time.monotonic()
@@ -482,6 +488,68 @@ class DraftGeneratorStrategy:
         )
 
         return result
+
+    async def _confirm_video_draft(self, draft: DraftResult) -> VideoSubmitResult:
+        """视频草稿确认:调 bridge._do_video_generation 提交 Agnes /videos 任务。
+
+        MVP 不传 input_reference(关键帧仅作预览确认,不强制作为视频首帧)。
+        提交后把 video_id 存到 draft 上,供前端刷新后重新轮询。
+
+        Args:
+            draft: 已确认的视频草稿(media_type=='video')
+
+        Returns:
+            VideoSubmitResult 含 video_id
+
+        Raises:
+            DraftWorkflowError: bridge 未绑定或 Agnes /videos 调用失败
+        """
+        if self._litellm_bridge is None:
+            raise DraftWorkflowError(
+                "LiteLLM bridge not bound to DraftGeneratorStrategy; cannot submit video"
+            )
+
+        prompt = draft.generation_params.get("prompt", "")
+        messages = [{"role": "user", "content": prompt}]
+
+        # 模型解析:优先 generation_params 里的 model hint,否则按意图解析
+        model = draft.generation_params.get("model")
+        try:
+            if not model:
+                resolved = await self._litellm_bridge._resolve_by_intent(
+                    intent="generation:video", model_hint=None
+                )
+                if "error" in resolved:
+                    raise DraftWorkflowError(
+                        f"video model resolution failed: {resolved['error']}"
+                    )
+                model = resolved["model"]
+
+            vid_result = await self._litellm_bridge._do_video_generation(
+                messages=messages, model=model
+            )
+        except DraftWorkflowError:
+            raise
+        except Exception as exc:
+            raise DraftWorkflowError(f"Agnes /videos submission failed: {exc}") from exc
+
+        video_id = (vid_result.get("_meta") or {}).get("video_id", "")
+        if not video_id:
+            raise DraftWorkflowError(
+                "Agnes /videos returned no video_id"
+            )
+
+        # 持久化 video_id 到 draft,刷新后前端凭此重新轮询
+        draft.video_id = video_id
+        ttl_remaining = max(1, int(draft.expires_at - time.time()))
+        await self._store_draft(draft, ttl_remaining)
+
+        logger.info(
+            "generation_optimization.draft_generator.video_submitted",
+            extra={"draft_id": draft.draft_id, "video_id": video_id, "model": model},
+        )
+
+        return VideoSubmitResult(draft_id=draft.draft_id, video_id=video_id, status="generating")
 
     async def reject_draft(self, draft_id: str) -> DraftResult:
         """拒绝草图并重新生成.
