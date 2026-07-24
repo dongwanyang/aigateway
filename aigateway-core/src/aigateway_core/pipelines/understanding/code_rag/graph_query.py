@@ -29,6 +29,7 @@ imports 字段:codegraph CLI 没有 imports 查询命令,但 db 里 `edges.kind=
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -42,6 +43,40 @@ _EMPTY_METADATA: dict[str, Any] = {
     "function_name": None,
     "class_name": None,
 }
+
+# 检索路径的 edges 缓存:key=graph_repo_path, value=(file_hashes_snapshot, callers_map, callees_map)。
+# 失效靠 files.content_hash 快照比对(增量 sync 改 db → 下次检索自动重建)。
+# split 阶段不进缓存(导入时只跑一次 read_call_edges_strict 用完即丢,不污染)。
+# 有界 LRU(cachetools):每个仓库 ~2.8MB map,32 仓库上限 ~90MB,防长期累积泄漏;
+# 仓库删除时主动 pop(见 invalidate_edges_cache)。
+#
+# 线程安全:cachetools.LRUCache 的 __getitem__ 会 __touch 内部 OrderedDict(读即写),
+# 并发 get/set/pop 会抛 "OrderedDict mutated during iteration" 或丢条目。本缓存被两类
+# 线程访问 —— admin /callers 路由在 run_in_executor 的默认线程池,RAG retrieval 在
+# event-loop 线程,外加 invalidate 在 loop 线程。故所有缓存访问串行化在 _cache_lock 下;
+# SQL 重建(read_call_edges_strict,~114ms)留在锁外,不阻塞其它仓库的缓存命中。
+import threading
+from cachetools import LRUCache  # type: ignore[import-untyped]
+_edges_cache: LRUCache = LRUCache(maxsize=32)
+_cache_lock = threading.Lock()
+
+# 损坏哨兵:read_call_edges_strict 抛错时缓存此值,避免后续每次检索都重新打开损坏 db
+# 重抛(性能悬崖)。哨兵让重试有界——直到 files.content_hash 变化(下次 sync)才重建。
+# 结构同正常条目 (snapshot, callers, callees),但 callers/callees 为 None 标记"损坏"。
+_CORRUPT_MARK = None
+
+
+def _cache_key(graph_repo_path: str) -> str:
+    """统一缓存键:解析为绝对路径,消除符号链接/相对路径/尾斜杠差异。
+    保证 seed/retrieval 用的 key 与 invalidate_edges_cache(pop)用的 key 一致。
+    """
+    return str(Path(graph_repo_path).resolve())
+
+
+def invalidate_edges_cache(graph_repo_path: str) -> None:
+    """删除某仓库的 edges 缓存条目。仓库被删时调,避免残留失效条目。"""
+    with _cache_lock:
+        _edges_cache.pop(_cache_key(graph_repo_path), None)
 
 # codegraph CLI 默认查询超时(秒)。查询类命令都是点查,30s 足够;build/sync 用
 # graph_builder.py 里更长的 timeout。
@@ -73,6 +108,112 @@ def read_file_hashes(graph_repo_path: str) -> dict[str, str]:
         return {}
 
 
+def read_call_edges(graph_repo_path: str) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]]]:
+    """一次查全图 callers/callees,返回 (callers_map, callees_map)。
+
+    比"逐符号 spawn codegraph CLI"快 ~5000x(5k 符号:114ms vs 10k 子进程)。
+    key=node id(精确,避免同名跨文件误并);value=ref 行列表。
+    file_path 保留 src/ 前缀(与 read_file_hashes 一致,调用方按需剥)。
+
+    db 不存在或异常返回 ({}, {})(retrieval 容忍 —— 绝不让检索链因 db 问题断掉)。
+    """
+    return _read_call_edges_impl(graph_repo_path, strict=False)
+
+
+def read_call_edges_strict(graph_repo_path: str) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]]]:
+    """严格版:用于 import 阶段。db 不存在返回 ({}, {})(正常:图谱还没建);
+    但真正的 sqlite3.Error(db 损坏/schema 异常)抛出,不吞 —— 让 import 失败暴露,
+    而不是静默降级成空 callers/callees 误判导入"成功"。
+    """
+    return _read_call_edges_impl(graph_repo_path, strict=True)
+
+
+def _read_call_edges_impl(
+    graph_repo_path: str, *, strict: bool
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]]]:
+    db_path = _graph_db_path(graph_repo_path)
+    if not Path(db_path).exists():
+        return {}, {}
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            callees: dict[str, list[dict[str, Any]]] = {}
+            for r in conn.execute(
+                """
+                SELECT e.source AS sym_id, t.name, t.kind, t.file_path, t.start_line, t.end_line
+                FROM edges e JOIN nodes t ON t.id = e.target
+                WHERE e.kind = 'calls'
+                """
+            ):
+                callees.setdefault(str(r["sym_id"]), []).append({
+                    "name": str(r["name"]),
+                    "kind": str(r["kind"] or "function"),
+                    "file_path": str(r["file_path"] or ""),
+                    "start_line": int(r["start_line"] or 1),
+                    "end_line": int(r["end_line"] or r["start_line"] or 1),
+                })
+            callers: dict[str, list[dict[str, Any]]] = {}
+            for r in conn.execute(
+                """
+                SELECT e.target AS sym_id, s.name, s.kind, s.file_path, s.start_line, s.end_line
+                FROM edges e JOIN nodes s ON s.id = e.source
+                WHERE e.kind = 'calls'
+                """
+            ):
+                callers.setdefault(str(r["sym_id"]), []).append({
+                    "name": str(r["name"]),
+                    "kind": str(r["kind"] or "function"),
+                    "file_path": str(r["file_path"] or ""),
+                    "start_line": int(r["start_line"] or 1),
+                    "end_line": int(r["end_line"] or r["start_line"] or 1),
+                })
+            return callers, callees
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        if strict:
+            raise
+        return {}, {}
+
+
+def _get_cached_edges(graph_repo_path: str) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]]]:
+    """懒加载 callers/callees map,按 file hash 快照失效。
+
+    返回 (callers_map, callees_map)。hash 不变 → 复用缓存;变了/首次 → 重建。
+    重建用 read_call_edges_strict —— db 存在但损坏时抛 sqlite3.Error,不静默缓存空 map
+    (retrieval 路径的调用方包了 try/except 降级,strict 路径让它冒泡暴露)。
+    db 不存在仍返回 ({},{}) —— 严格路径首次检索前图谱还没建是合法状态。
+
+    线程安全:缓存读写串行化在 _cache_lock;SQL 重建在锁外(不阻塞其它仓库命中)。
+    损坏 db:缓存 _CORRUPT_SENTINEL(哨兵),避免后续每次检索都重新打开损坏 db 重抛
+    (性能悬崖);直到 files.content_hash 变化(下次 sync)才重建。
+    """
+    db_path = _graph_db_path(graph_repo_path)
+    if not Path(db_path).exists():
+        return {}, {}
+    key = _cache_key(graph_repo_path)
+    snapshot = read_file_hashes(graph_repo_path)
+    with _cache_lock:
+        cached = _edges_cache.get(key)
+    if cached is not None and cached[0] == snapshot:
+        # 损坏哨兵:hash 未变 → 不重试(避免性能悬崖),让调用方降级。
+        # 非损坏 → 返回缓存的 maps。
+        if cached[1] is _CORRUPT_MARK:
+            raise sqlite3.Error(f"codegraph db 损坏(缓存哨兵命中): {graph_repo_path}")
+        return cached[1], cached[2]
+    try:
+        callers, callees = read_call_edges_strict(graph_repo_path)
+    except sqlite3.Error:
+        # 缓存哨兵(带当前 snapshot):bound 重试,直到下次 file-hash 变化才重建。
+        with _cache_lock:
+            _edges_cache[key] = (snapshot, _CORRUPT_MARK, _CORRUPT_MARK)
+        raise
+    with _cache_lock:
+        _edges_cache[key] = (snapshot, callers, callees)
+    return callers, callees
+
+
 def run_codegraph_sync(graph_repo_path: str, *, timeout: float = 1800.0) -> str:
     """跑 `codegraph sync <graph_repo_path>`(位置参数,不接 -p),返回 raw stdout。
 
@@ -90,33 +231,52 @@ def _run_codegraph_json(
 
     构造: codegraph <args...> -p <repo_path> --json。
     失败/超时/非 JSON 输出都抛 RuntimeError(strict 链路用)。
+
+    用 Popen + start_new_session=True 启动子进程,超时后 killpg 收割整个
+    进程组(含 codegraph spawn 的孙进程),避免孙进程变僵尸卡住导入。
     """
+    import signal
+
     cmd = ["codegraph", *args, "-p", repo_path, "--json"]
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            check=False,
-            timeout=timeout,
+            start_new_session=True,
         )
     except FileNotFoundError as exc:
         raise RuntimeError(
             "codegraph CLI 未安装;请在 gateway 镜像中安装 @colbymchenry/codegraph"
         ) from exc
-    except subprocess.TimeoutExpired as exc:
+
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # killpg 收割整个进程组(start_new_session=True 让子进程自成一组)
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except (ProcessLookupError, OSError):
+            pass
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                pass
         raise RuntimeError(
             f"codegraph command timed out after {timeout}s: {' '.join(cmd)}"
-        ) from exc
+        )
 
     if proc.returncode != 0:
-        err = (proc.stderr or proc.stdout or "").strip()
+        err = (stderr or stdout or "").strip()
         raise RuntimeError(
             f"codegraph command failed ({' '.join(cmd)}): {err[:2000]}"
         )
 
-    stdout = (proc.stdout or "").strip()
+    stdout = (stdout or "").strip()
     if not stdout:
         return None
     try:
@@ -134,33 +294,50 @@ def _run_codegraph_raw(
 
     init/sync 用位置参数: `codegraph sync <path>`;不接 -p。
     node 接 -p: 由调用方在 args 里带 `-p <repo_path>`。
+
+    用 Popen + start_new_session=True 启动,超时后 killpg 收割整个进程组。
     """
+    import signal
+
     cmd = ["codegraph", *args]
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
             cwd=cwd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            check=False,
-            timeout=timeout,
+            start_new_session=True,
         )
     except FileNotFoundError as exc:
         raise RuntimeError(
             "codegraph CLI 未安装;请在 gateway 镜像中安装 @colbymchenry/codegraph"
         ) from exc
-    except subprocess.TimeoutExpired as exc:
+
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except (ProcessLookupError, OSError):
+            pass
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                pass
         raise RuntimeError(
             f"codegraph command timed out after {timeout}s: {' '.join(cmd)}"
-        ) from exc
+        )
 
     if proc.returncode != 0:
-        err = (proc.stderr or proc.stdout or "").strip()
+        err = (stderr or stdout or "").strip()
         raise RuntimeError(
             f"codegraph command failed ({' '.join(cmd)}): {err[:2000]}"
         )
-    return (proc.stdout or "").strip()
+    return (stdout or "").strip()
 
 
 def _classify_chunk_type(kind: str, symbol_name: str | None, chunk_text: str) -> str:
@@ -304,8 +481,8 @@ def lookup_symbol_metadata_strict(
         return result
 
     kind = str(node.get("kind") or 'module')
-    callers = _callers_list(graph_repo_path, symbol_name)
-    callees = _callees_list(graph_repo_path, symbol_name)
+    callers = [str(r["name"]) for r in get_callers(graph_repo_path, symbol_name)]
+    callees = [str(r["name"]) for r in get_callees(graph_repo_path, symbol_name)]
     chunk_type = _classify_chunk_type(kind, symbol_name, chunk_text)
     return {
         'callers': callers,
@@ -328,30 +505,6 @@ def lookup_symbol_metadata(
         return lookup_symbol_metadata_strict(graph_repo_path, file_path, symbol_name, chunk_text)
     except Exception:
         return dict(_EMPTY_METADATA)
-
-
-def _callers_list(graph_repo_path: str, symbol: str) -> list[str]:
-    """调 `codegraph callers <symbol> --json`,返回 caller 名列表。"""
-    data = _run_codegraph_json(["callers", symbol], repo_path=graph_repo_path)
-    if not data or not isinstance(data, dict):
-        return []
-    return [
-        str(c.get("name"))
-        for c in (data.get("callers") or [])
-        if isinstance(c, dict) and c.get("name")
-    ]
-
-
-def _callees_list(graph_repo_path: str, symbol: str) -> list[str]:
-    """调 `codegraph callees <symbol> --json`,返回 callee 名列表。"""
-    data = _run_codegraph_json(["callees", symbol], repo_path=graph_repo_path)
-    if not data or not isinstance(data, dict):
-        return []
-    return [
-        str(c.get("name"))
-        for c in (data.get("callees") or [])
-        if isinstance(c, dict) and c.get("name")
-    ]
 
 
 def lookup_related_symbols_strict(
@@ -472,28 +625,41 @@ def query_symbols(
     return out
 
 
+def _lookup_symbol_id_by_name(graph_repo_path: str, symbol: str) -> str | None:
+    """按 name 查 node id(精确,取第一个 kind IN function/method/class 的)。db 直读,~1ms。"""
+    db_path = _graph_db_path(graph_repo_path)
+    if not Path(db_path).exists():
+        return None
+    try:
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT id FROM nodes WHERE name=? AND kind IN ('function','method','class') LIMIT 1",
+                (symbol,),
+            ).fetchone()
+            return str(row[0]) if row else None
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+
+
 def get_callers(graph_repo_path: str, symbol: str) -> list[dict[str, Any]]:
-    """包装 `codegraph callers <symbol> --json`。返回 caller 节点列表。"""
-    data = _run_codegraph_json(["callers", symbol], repo_path=graph_repo_path)
-    if not data or not isinstance(data, dict):
+    """返回 caller 节点列表(db 直读,走缓存 map)。"""
+    callers, _ = _get_cached_edges(graph_repo_path)
+    sym_id = _lookup_symbol_id_by_name(graph_repo_path, symbol)
+    if sym_id is None:
         return []
-    return [
-        _normalize_ref(c)
-        for c in (data.get("callers") or [])
-        if isinstance(c, dict)
-    ]
+    return list(callers.get(sym_id, []))
 
 
 def get_callees(graph_repo_path: str, symbol: str) -> list[dict[str, Any]]:
-    """包装 `codegraph callees <symbol> --json`。返回 callee 节点列表。"""
-    data = _run_codegraph_json(["callees", symbol], repo_path=graph_repo_path)
-    if not data or not isinstance(data, dict):
+    """返回 callee 节点列表(db 直读,走缓存 map)。"""
+    _, callees = _get_cached_edges(graph_repo_path)
+    sym_id = _lookup_symbol_id_by_name(graph_repo_path, symbol)
+    if sym_id is None:
         return []
-    return [
-        _normalize_ref(c)
-        for c in (data.get("callees") or [])
-        if isinstance(c, dict)
-    ]
+    return list(callees.get(sym_id, []))
 
 
 def get_impact(graph_repo_path: str, symbol: str, *, depth: int = 2) -> dict[str, Any]:

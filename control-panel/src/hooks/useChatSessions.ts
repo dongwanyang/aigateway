@@ -2,8 +2,10 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   requestChatCompletion,
   getDraftPreview,
+  getDraftResult,
   confirmDraft,
   rejectDraft,
+  deleteSessionDrafts,
   getVideoStatus,
 } from '@/api/client'
 import type { ChatPageMessage, ChatMessage, ChatSession, ChatDraftState, VideoStatusResponse } from '@/types'
@@ -24,15 +26,26 @@ const resumedSessionIds = new Set<string>()
 /** 正在轮询的视频任务 ID 集合，防止重复轮询。 */
 const pollingVideoIds = new Set<string>()
 
+/** 正在轮询的草稿 ID 集合，防止重复轮询（同 pollingVideoIds 模式）。 */
+const pollingDraftIds = new Set<string>()
+
 /** 视频轮询间隔（毫秒） */
 const VIDEO_POLL_INTERVAL_MS = 5000
 
 /** 视频轮询最大次数，超时后停止（约 30 分钟） */
 const VIDEO_POLL_MAX_ATTEMPTS = 360
 
+/** 草稿预览轮询间隔（毫秒）—— 后台 ComfyUI 生成通常数秒内完成。 */
+const DRAFT_POLL_INTERVAL_MS = 1000
+
+/** 草稿预览轮询最大次数，超时（120s）后标记 expired。
+ *  模型生成图片较慢（ComfyUI 队列 + 放大），60s 常超时，放宽到 120s。 */
+const DRAFT_POLL_MAX_ATTEMPTS = 120
+
 /** 清理所有正在进行的视频轮询 */
 function clearAllPolling() {
   pollingVideoIds.clear()
+  pollingDraftIds.clear()
 }
 
 function newSessionId(): string {
@@ -50,8 +63,8 @@ function titleFromMessages(messages: ChatPageMessage[]): string {
 function hasActiveAsyncTask(msg: ChatPageMessage): boolean {
   // 视频任务：有 videoId 且未标记 error/incomplete
   if (msg.videoId && !msg.error && !msg.incomplete) return true
-  // 草稿任务：pending/confirming/rejecting 状态
-  if (msg.draft && ['pending', 'confirming', 'rejecting'].includes(msg.draft.status)) return true
+  // 草稿任务：generating(后台生成中)/pending/confirming/rejecting 状态
+  if (msg.draft && ['generating', 'pending', 'confirming', 'rejecting'].includes(msg.draft.status)) return true
   return false
 }
 
@@ -149,7 +162,15 @@ export function useChatSessions(): UseChatSessions {
   const [error, setError] = useState<string | null>(null)
   // 当前正在等待回复的助手消息 ID(空 content 占位)。用于在切换会话后仍能在
   // 原会话上显示三点动画——streaming=false 不代表该消息不需要提示。
-  const [pendingAssistantId, setPendingAssistantId] = useState<string | null>(null)
+  // ref + state 双轨:ref 供 send/resume 同步读取(避免状态异步更新导致的孤儿窗口——
+  // 切换会话频繁时 state 还没 flush,读到的旧 id 已对应被 slice 掉的占位,三点闪烁/失效);
+  // state 供 MessageBubble re-render。两者始终同步写入。
+  const [pendingAssistantId, setPendingAssistantIdState] = useState<string | null>(null)
+  const pendingAssistantIdRef = useRef<string | null>(null)
+  const setPendingAssistantId = useCallback((id: string | null) => {
+    pendingAssistantIdRef.current = id
+    setPendingAssistantIdState(id)
+  }, [])
   const abortRef = useRef<AbortController | null>(null)
   const inflightRef = useRef(false)
   // 用于触发轮询恢复：每次 activeId 变化时递增，确保刷新/切换会话后轮询 effect 重新运行
@@ -196,7 +217,7 @@ export function useChatSessions(): UseChatSessions {
     setResumePollingKey(prev => prev + 1)
   }, [activeId])
 
-  // debounce 持久化
+  // debounce 持久化 — token 流式更新走这个，500ms 防抖足够（不需要每次 token 都写磁盘）
   useEffect(() => {
     const t = setTimeout(() => {
       try {
@@ -207,6 +228,52 @@ export function useChatSessions(): UseChatSessions {
     }, 500)
     return () => clearTimeout(t)
   }, [sessions])
+
+  /** 关键状态转换立即落盘 — 不经过 debounce。
+   *
+   * 以下场景必须调用，否则 500ms 窗口期内刷新会丢失状态：
+   * - Draft 响应到达（assistant 从空占位 → 有 draft）
+   * - SSE 流正常完成（assistant 从空占位/半截内容 → 完整文本）
+   * - 流中断标记 incomplete
+   * - 错误发生
+   *
+   * Token 流式增量更新不需要立即落盘：resume effect 只看
+   * incomplete/draft/videoId/error/content 这几个字段，
+   * 中间 token 丢了也不影响续传逻辑。
+   *
+   * 带指数退避重试：localStorage 配额超限或序列化失败时最多重试 3 次，
+   * 全部失败后通过 setError 通知用户。
+   */
+  const flushRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    return () => {
+      if (flushRetryTimerRef.current) {
+        clearTimeout(flushRetryTimerRef.current)
+        flushRetryTimerRef.current = null
+      }
+    }
+  }, [])
+
+  const flushToStorage = useCallback((retryCount = 0) => {
+    const MAX_RETRIES = 3
+    try {
+      localStorage.setItem(SESSIONS_KEY, serializeSessions(sessionsRef.current))
+      // 成功则清除重试定时器
+      if (flushRetryTimerRef.current) {
+        clearTimeout(flushRetryTimerRef.current)
+        flushRetryTimerRef.current = null
+      }
+    } catch (e) {
+      if (retryCount < MAX_RETRIES) {
+        flushRetryTimerRef.current = setTimeout(
+          () => flushToStorage(retryCount + 1),
+          100 * Math.pow(2, retryCount),
+        )
+      } else {
+        setError(`草稿保存失败: ${e instanceof Error ? e.message : 'unknown'}`)
+      }
+    }
+  }, [])
 
   // 硬刷新/关闭页面时,500ms debounce 可能还没落盘(尤其流式中断刚标 incomplete 就刷新)。
   // pagehide 同步 flush,确保 incomplete 标记写入 localStorage,否则重载后续传判断会漏掉。
@@ -245,14 +312,21 @@ export function useChatSessions(): UseChatSessions {
 
   const patchActiveMessages = useCallback(
     (updater: (msgs: ChatPageMessage[]) => ChatPageMessage[]) => {
-      setSessions(prev => prev.map(s => {
-        if (s.id !== activeId) return s
-        const messages = updater(s.messages)
-        const title = s.title === '新对话' && messages.some(m => m.role === 'user')
-          ? titleFromMessages(messages)
-          : s.title
-        return { ...s, messages, title, updatedAt: Date.now() }
-      }))
+      setSessions(prev => {
+        const next = prev.map(s => {
+          if (s.id !== activeId) return s
+          const messages = updater(s.messages)
+          const title = s.title === '新对话' && messages.some(m => m.role === 'user')
+            ? titleFromMessages(messages)
+            : s.title
+          return { ...s, messages, title, updatedAt: Date.now() }
+        })
+        // 同步更新 ref,使同一事件循环内的 flushToStorage/pagehide 能读到最新状态。
+        // 否则 React 的 useEffect 写 ref 发生在渲染后,500ms debounce 或立即 flush
+        // 可能读到旧状态,导致 draft/incomplete 等关键标记丢失(刷新后误续传)。
+        sessionsRef.current = next
+        return next
+      })
     },
     [activeId],
   )
@@ -291,10 +365,14 @@ export function useChatSessions(): UseChatSessions {
     setError(null)
   }, [streaming, stop])
 
-  const deleteSession = useCallback((id: string) => {
+  const deleteSession = useCallback(async (id: string) => {
     // 删的是正在流式输出的 active 会话 → 必须中止上游,否则 send 闭包仍持有旧 activeId,
     // fetch 会继续跑到结束(空转烧 token/配额,patch 因会话已删而成 no-op)。
     if (id === activeId) stop()
+    // 先清后端草稿文件(异步,不阻塞 UI)
+    void deleteSessionDrafts(id).catch((e) => {
+      console.warn('删除会话草稿失败:', e instanceof Error ? e.message : e)
+    })
     setSessions(prev => {
       const next = prev.filter(s => s.id !== id)
       // 若删的是 active,切到第一个
@@ -318,6 +396,79 @@ export function useChatSessions(): UseChatSessions {
     if (activeId) resumedSessionIds.delete(activeId)
     patchActiveMessages(() => [])
   }, [stop, patchActiveMessages, activeId])
+
+  /** 轮询草稿预览图，直到就绪/失败/超时。
+   *
+   * 后台 ComfyUI 生成是异步的:preview 端点先返回 202(generating),生成完成后 200。
+   * 用 pollingDraftIds Set 去重(同 pollingVideoIds 模式),保证同一 draft 只有一个轮询在跑
+   * ——send 发起 + resume effect 恢复都调本函数,幂等。
+   *
+   * 终态处理:
+   * - 200 + previewDataUrl → status='pending' + previewDataUrl + awaitingDraft=false
+   * - 4xx(not_found/expired/draft_failed) → status='expired'/'error'
+   * - 60s 超时 → status='expired' + errorMessage
+   */
+  const pollDraftPreview = useCallback(async (draftId: string, msgId: string) => {
+    if (pollingDraftIds.has(draftId)) return
+    pollingDraftIds.add(draftId)
+
+    // 防御性守卫:patch 前确认消息当前 draftId 仍是本轮轮询的 draftId。
+    // reject 会替换 draftId 并起新轮询;若旧轮询仍 in-flight,其 patch 不应
+    // 覆盖新草稿的 generating 状态(返回 m 即 no-op)。
+    const owns = (m: ChatPageMessage): m is ChatPageMessage & { draft: ChatDraftState } =>
+      m.draft?.draftId === draftId
+
+    let attempts = 0
+    while (attempts < DRAFT_POLL_MAX_ATTEMPTS) {
+      attempts++
+      await new Promise(resolve => setTimeout(resolve, DRAFT_POLL_INTERVAL_MS))
+
+      try {
+        const r = await getDraftPreview(draftId)
+        if (r.status === 'generating') {
+          continue // 202:后台仍在生成,继续轮询
+        }
+        // 200:预览就绪
+        if (r.previewDataUrl) {
+          patchMessage(msgId, m => owns(m)
+            ? { ...m, draft: { ...m.draft, status: 'pending', previewDataUrl: r.previewDataUrl, errorMessage: undefined }, awaitingDraft: false }
+            : m)
+          break
+        }
+        // 200 但无 data URL:异常,按 error 处理
+        patchMessage(msgId, m => owns(m)
+          ? { ...m, draft: { ...m.draft, status: 'error', errorMessage: '预览响应缺少 data URL' }, awaitingDraft: false }
+          : m)
+        break
+      } catch (e) {
+        const code = e instanceof Error ? e.message : '预览加载失败'
+        // 4xx 终态:不再轮询
+        if (code.includes('not_found') || code.includes('expired')) {
+          patchMessage(msgId, m => owns(m)
+            ? { ...m, draft: { ...m.draft, status: 'expired', errorMessage: code }, awaitingDraft: false }
+            : m)
+          break
+        }
+        if (code.includes('draft_failed')) {
+          patchMessage(msgId, m => owns(m)
+            ? { ...m, draft: { ...m.draft, status: 'error', errorMessage: code }, awaitingDraft: false }
+            : m)
+          break
+        }
+        // 网络错误等瞬时失败:继续重试,不立即判定失败
+        console.warn(`Failed to poll draft preview for ${draftId}:`, e)
+      }
+    }
+
+    // 超时:仍未取到预览
+    if (attempts >= DRAFT_POLL_MAX_ATTEMPTS) {
+      patchMessage(msgId, m => owns(m)
+        ? { ...m, draft: { ...m.draft, status: 'expired', errorMessage: '草稿生成超时' }, awaitingDraft: false }
+        : m)
+    }
+
+    pollingDraftIds.delete(draftId)
+  }, [patchMessage])
 
   /** 核心:发送一条用户消息。resume=true 时不重复追加 user 消息(续传场景)。
    *  dropLastAssistant=true:wire 历史去掉末尾那条 assistant(用于 incomplete 续传——
@@ -357,8 +508,10 @@ export function useChatSessions(): UseChatSessions {
       baseMsgs = baseMsgs.slice(-10) // 只保留最后10条消息
     }
 
-    // incomplete 续传:去掉末尾那条半截 assistant。注意 sessionsRef 此时还未反映上面的 slice,
-    // 但末尾 incomplete assistant 仍在 baseMsgs 里——显式切掉,避免发回后端。
+    // incomplete 续传:去掉末尾 assistant。resume 时上面刚追加了一个空占位,
+    // patchActiveMessages 已同步更新 sessionsRef,因此 baseMsgs 末尾就是这个空占位;
+    // 如果是旧代码路径,末尾也可能是未持久化的 incomplete assistant。无论哪种,
+    // 显式切掉避免把不完整的 assistant 发回后端。
     if (opts?.dropLastAssistant && baseMsgs.length > 0 && baseMsgs[baseMsgs.length - 1].role === 'assistant') {
       baseMsgs = baseMsgs.slice(0, -1)
     }
@@ -375,39 +528,36 @@ export function useChatSessions(): UseChatSessions {
 
     try {
       const resp = await requestChatCompletion(
-        { model: 'auto', messages: wireMessages, stream: true },
+        { model: 'auto', messages: wireMessages, stream: true, chat_session_id: activeId ?? undefined },
         controller.signal,
       )
 
       if (resp.kind === 'draft') {
-        // 草稿分支:不读流,把 assistant 占位转为草稿消息,拉预览图
+        // 草稿分支:dispatcher 立即返回 draft_id(后台 ComfyUI 异步生成预览)。
+        // 把 assistant 占位转为草稿消息,初始 status='generating',启动轮询拉预览。
         const draft: ChatDraftState = {
           draftId: resp.draftId,
           previewUrl: resp.previewUrl,
           mediaType: resp.mediaType,
-          status: 'pending',
+          status: 'generating',
         }
         patchMessage(assistantId, m => ({
           ...m,
           intent: resp.mediaType === 'image' ? 'generation:image' : 'generation:video',
           model: 'draft',
           draft,
+          awaitingDraft: true,       // 标记 server-side draft task 进行中，防止刷新误续传
+          awaitingDraftSince: Date.now(),
         }))
+        // 草稿消息渲染 DraftCard(非 text 分支),不再需要三点占位
+        setPendingAssistantId(null)
+        // 关键状态转换: draft 响应到达，立即落盘防止 debounce 窗口期内刷新导致重发
+        flushToStorage()
         setStreaming(false)
         abortRef.current = null
-        inflightRef.current = false  // 主请求已完成,预览拉取是 best-effort,不应阻塞下一条 send
-        // 异步拉预览图(不阻塞 streaming 状态)
-        try {
-          const { previewDataUrl } = await getDraftPreview(resp.draftId)
-          patchMessage(assistantId, m => m.draft
-            ? { ...m, draft: { ...m.draft, previewDataUrl } }
-            : m)
-        } catch (e) {
-          const code = e instanceof Error ? e.message : '预览加载失败'
-          patchMessage(assistantId, m => m.draft
-            ? { ...m, draft: { ...m.draft, status: code.includes('not_found') || code.includes('expired') ? 'expired' : 'error', errorMessage: code } }
-            : m)
-        }
+        inflightRef.current = false  // 主请求已完成,预览轮询是 best-effort,不应阻塞下一条 send
+        // 异步轮询预览图(202=generating 继续轮询;200=就绪;4xx=expired/failed)
+        void pollDraftPreview(resp.draftId, assistantId)
         return
       }
 
@@ -464,6 +614,19 @@ export function useChatSessions(): UseChatSessions {
         // 标记 incomplete(刷新续传依据)。reader 释放交给 finally,避免重复 releaseLock 抛 TypeError。
         patchMessage(assistantId, m => (m.content ? { ...m, incomplete: true } : m))
         setStreaming(false)
+        // 中断时一个 token 都没收到(空占位):必须清 pendingAssistantId。
+        // 否则切走再切回,resume effect(line 741)误判"send 仍在进行中"而提前 return,
+        // 既不续传也不清三点 → TypingDots 永久卡死(Issue 3 回归)。
+        // stop() 注释说"不清 pendingAssistantId"是针对正常流式中途切走(切回时三点仍该显示),
+        // 但那是在 send 协程仍存活、streaming=true 的前提下;这里 send 已终止,性质不同。
+        const stalled = sessionsRef.current
+          .find(s => s.id === activeId)?.messages
+          .find(m => m.id === assistantId)
+        // 所有权守卫:仅当 pending 仍指向本 send 的占位时才清,避免覆盖已起步的新 send B
+        // (虽 microtask-vs-useEffect 时序下不可达,但防御未来 send 启动时机变更)。
+        if (stalled && !stalled.content && !stalled.draft && pendingAssistantIdRef.current === assistantId) {
+          setPendingAssistantId(null)
+        }
       } else {
         const msg = e instanceof Error ? e.message : '请求失败'
         setError(msg)
@@ -486,7 +649,7 @@ export function useChatSessions(): UseChatSessions {
         if (isResume) resumeSessionRef.current = null
       }
     }
-  }, [streaming, activeId, patchActiveMessages, patchMessage])
+  }, [streaming, activeId, patchActiveMessages, patchMessage, pollDraftPreview, setPendingAssistantId])
 
   // sendRef:resume effect 通过它调用 send,而不把 send 放进 effect 依赖数组。
   // 否则 send 依赖 streaming,setStreaming(true) 时 send 引用变化 → effect 重跑 →
@@ -510,41 +673,58 @@ export function useChatSessions(): UseChatSessions {
     // 有内容需处理才标记;空会话不标(否则 clearActive 后同会话再发+刷新会被永久阻塞续传)。
     resumedSessionIds.add(activeId)
 
-    // 2) 先补拉所有草稿消息的预览图(data URL 不持久化,刷新后全丢)
-    //    pending/confirming/rejecting → 降级 pending;confirmed → 保留状态;
-    //    error/expired → 不动。若草稿已被后端回收 → 标记 expired。
+    // 2) 恢复所有草稿消息的预览/结果(data URL 不持久化,刷新后全丢)
+    //    - generating / awaitingDraft(server-side 任务进行中) → 只确保有轮询在跑,
+    //      不 wipe previewDataUrl、不改 status(pollDraftPreview 的 Set 去重保证幂等)。
+    //    - pending 且无 previewDataUrl → 启动 pollDraftPreview(后端已生成完,首轮即 200)。
+    //    - confirmed 且无 resultDataUrl → getDraftResult(后端 result.bin 已持久化)。
+    //    - error/expired → 不动。
+    //    同时重置超时的 awaitingDraft 标记(>30s)，防止永久阻塞续传。
     for (const m of s.messages) {
       if (m.role !== 'assistant' || !m.draft) continue
-      const st = m.draft.status
-      if (st === 'pending' || st === 'confirming' || st === 'rejecting') {
-        patchMessage(m.id, mm => mm.draft
-          ? { ...mm, draft: { ...mm.draft, status: 'pending', previewDataUrl: undefined, errorMessage: undefined } }
-          : mm)
-      } else if (st === 'confirmed') {
-        // 高清图 data URL 不持久化,刷新后丢失;后端无重取接口 → 标记 resultLost,
-        // DraftCard 据此显示"已确认(刷新后仅预览)"而非误导性的"高清图已生成"。
-        patchMessage(m.id, mm => mm.draft
-          ? { ...mm, draft: { ...mm.draft, previewDataUrl: undefined, resultDataUrl: undefined, resultLost: true } }
-          : mm)
-      } else {
-        continue // error/expired 不补拉
+      // 重置过期的 awaitingDraft 标记
+      if (m.awaitingDraft && m.awaitingDraftSince && (Date.now() - m.awaitingDraftSince > 30000)) {
+        patchMessage(m.id, mm => ({ ...mm, awaitingDraft: false }))
       }
-      void getDraftPreview(m.draft.draftId).then(
-        ({ previewDataUrl }) => patchMessage(m.id, mm => mm.draft
-          ? { ...mm, draft: { ...mm.draft, previewDataUrl } }
-          : mm),
-        (e: unknown) => {
-          const code = e instanceof Error ? e.message : '预览加载失败'
-          patchMessage(m.id, mm => mm.draft
-            ? { ...mm, draft: { ...mm.draft, status: 'expired', errorMessage: code } }
-            : mm)
-        },
-      )
+      const st = m.draft.status
+      if (st === 'generating' || m.awaitingDraft) {
+        // 后台生成中:确保轮询在跑(幂等),不 wipe 状态
+        void pollDraftPreview(m.draft.draftId, m.id)
+      } else if (st === 'pending' || st === 'confirming' || st === 'rejecting') {
+        // 降级 pending,若预览丢失则轮询补拉(后端已生成,首轮 200)
+        patchMessage(m.id, mm => mm.draft
+          ? { ...mm, draft: { ...mm.draft, status: 'pending', errorMessage: undefined } }
+          : mm)
+        if (!m.draft.previewDataUrl) {
+          void pollDraftPreview(m.draft.draftId, m.id)
+        }
+      } else if (st === 'confirmed') {
+        // 高清图:后端文件存储已持久化,刷新后重取(不标记 resultLost)。
+        if (!m.draft.resultDataUrl) {
+          void getDraftResult(m.draft.draftId).then(
+            ({ resultDataUrl }) => patchMessage(m.id, mm => mm.draft
+              ? { ...mm, draft: { ...mm.draft, resultDataUrl } }
+              : mm),
+            (e: unknown) => {
+              const code = e instanceof Error ? e.message : '结果加载失败'
+              patchMessage(m.id, mm => mm.draft
+                ? { ...mm, draft: { ...mm.draft, resultLost: true, errorMessage: code } }
+                : mm)
+            },
+          )
+        }
+        // 已确认但预览也丢了(刷新),补拉预览(后端有 preview.bin)
+        if (!m.draft.previewDataUrl) {
+          void pollDraftPreview(m.draft.draftId, m.id)
+        }
+      }
+      // error/expired:不动
     }
 
     // 检查是否有活跃的异步任务（视频/草稿），如果有则跳过续传
-    const hasActiveAsyncTaskInLastMsg = s.messages.length > 0 && hasActiveAsyncTask(s.messages[s.messages.length - 1])
-    if (hasActiveAsyncTaskInLastMsg) {
+    // 扫描所有消息而非仅最后一条，防止 flushToStorage 静默失败时漏掉 draft 状态
+    const anyActiveAsyncTask = s.messages.some(hasActiveAsyncTask)
+    if (anyActiveAsyncTask) {
       // 有活跃任务，不重发，等待轮询恢复
       return
     }
@@ -562,8 +742,20 @@ export function useChatSessions(): UseChatSessions {
     } else if (last.role === 'assistant' && (last.incomplete || (!last.content && !last.draft))) {
       // 末尾是未完成 assistant(incomplete=流中断有半截内容),或空占位 assistant(中断时一个 token 都没收到)。
       // 两种都要移除它 + 重发前一条 user。
-      // 注意:patchActiveMessages 是异步的,sessionsRef 还没反映 slice;send 读 sessionsRef 会拿到含该 assistant 的历史,
-      // 因此传 dropLastAssistant=true 让 send 在构造 wire 时显式切掉末尾 assistant,避免把半截内容当完整轮次发回后端。
+      // 如果 awaitingDraft 已设置，说明 server-side draft task 仍在进行中，不要续传。
+      // 同时检查 draft.status==='generating'(awaitingDraft 30s 后会被重置,但生成
+      // 可能仍未完成 —— 轮询窗口 120s),避免重置后误判中断而重发。
+      if (last.awaitingDraft || last.draft?.status === 'generating') {
+        return
+      }
+      // Issue 3: 若该空占位仍是当前 pending 的助手消息(pendingAssistantIdRef 同步读取),
+      // 说明它的 send 仍在进行中(只是被 StrictMode/切换暂时打断观察),并非真正中断——
+      // 不要 slice + 重发,否则会造成孤儿窗口(三点瞬时失效)+ 重复请求(Issue 2)。
+      if (!last.content && !last.draft && pendingAssistantIdRef.current === last.id) {
+        return
+      }
+      // patchActiveMessages 已同步更新 sessionsRef,但 send 构造 wire 时仍传 dropLastAssistant=true,
+      // 作为防御性兜底,确保任何未同步的中间状态都不会把不完整 assistant 发回后端。
       patchActiveMessages(msgs => msgs.slice(0, -1))
       const prevUser = s.messages[s.messages.length - 2]
       if (prevUser?.role === 'user') {
@@ -610,21 +802,12 @@ export function useChatSessions(): UseChatSessions {
     patchMessage(msgId, m => m.draft ? { ...m, draft: { ...m.draft, status: 'rejecting', errorMessage: undefined } } : m)
     try {
       const { newDraftId, previewUrl } = await rejectDraft(msg.draft.draftId)
-      // 更新为新草稿,重置状态 + 重新拉预览
+      // 后端异步生成新草稿:立即切到 generating,清旧预览,启动轮询(同 send 草稿分支)。
+      // awaitingDraft 守卫阻止恢复效果误续传/误重发(Issue 2)。
       patchMessage(msgId, m => m.draft
-        ? { ...m, draft: { ...m.draft, draftId: newDraftId, previewUrl, status: 'pending', previewDataUrl: undefined, resultDataUrl: undefined, errorMessage: undefined } }
+        ? { ...m, draft: { ...m.draft, draftId: newDraftId, previewUrl, status: 'generating', previewDataUrl: undefined, resultDataUrl: undefined, errorMessage: undefined }, awaitingDraft: true, awaitingDraftSince: Date.now() }
         : m)
-      try {
-        const { previewDataUrl } = await getDraftPreview(newDraftId)
-        patchMessage(msgId, m => m.draft
-          ? { ...m, draft: { ...m.draft, previewDataUrl } }
-          : m)
-      } catch (e) {
-        const code = e instanceof Error ? e.message : '预览加载失败'
-        patchMessage(msgId, m => m.draft
-          ? { ...m, draft: { ...m.draft, status: 'error', errorMessage: code } }
-          : m)
-      }
+      void pollDraftPreview(newDraftId, msgId)
     } catch (e) {
       const code = e instanceof Error ? e.message : '重新生成失败'
       const expired = code.includes('expired') || code.includes('not_found')
@@ -632,7 +815,7 @@ export function useChatSessions(): UseChatSessions {
         ? { ...m, draft: { ...m.draft, status: expired ? 'expired' : 'error', errorMessage: code } }
         : m)
     }
-  }, [sessions, activeId, patchMessage])
+  }, [sessions, activeId, patchMessage, pollDraftPreview])
 
   /** 轮询视频任务状态，完成后更新消息内容。 */
   const pollVideoStatus = useCallback(async (videoId: string, msgId: string) => {

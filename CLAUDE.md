@@ -5,12 +5,13 @@ Guidance for Claude Code when working in this repo. Keep terse — see rule "Tri
 ## gstack 角色路由
 - 当需要产品决策、范围判断时，使用 /office-hours 或 /plan-ceo-review
 - 当需要架构审查时，使用 /plan-eng-review
-- 当代码准备合并前，使用 /review 进行代码审查
+- 当代码准备合并前，使用 /code-review 进行代码审查
 - 当需要端到端测试时，使用 /qa
 - 当准备发布时，使用 /ship
 
+
 - 用 gstack 做前期决策：/office-hours → /plan-ceo-review → /plan-eng-review → /plan-design-review，确保方向正确
-- 用 Superpowers 做中期执行：Brainstorm → Plan → TDD → Subagent → Review → Finalize，确保代码质量
+- 用 Superpowers 做中期执行：Brainstorm → Plan → TDD → Subagent → CodeReview → Finalize，确保代码质量
 - 回到 gstack 做后期验证：/qa（真实浏览器测试）→ /cso（安全审计）→ /ship（发布）→ /retro（复盘）
 
 
@@ -39,7 +40,7 @@ Client → aigateway-api (FastAPI :8000)
                 → LiteLLMBridge.completion() → response
              5. GET /v1/videos/{id} polls video status
          Cache: L1 (in-process LRU) → L2 (Redis Stack RediSearch BM25, Friso 中文分词) → L3 (Qdrant vector, cosine≥0.95)
-         Auth: KeyStore (Redis-backed) via auth_middleware
+         Auth: SQLiteStore (WAL-mode, TOCTOU-safe atomic UPDATE) via auth_middleware
 ```
 
 **Two entry points** (agent identity, not just proxy):
@@ -79,7 +80,7 @@ aigateway-core/src/aigateway_core/  Shared library - runtime skeleton (prefix/di
     understanding/      rag/ (RAGRetriever), conversation/ (ConvCompressor), compression/ (PromptCompress LLMLingua-2), code_rag/
     generation/         director/intent/token/draft/cost/routing_signals/ (6 plugins + strategies) + _common/ (config/models/metrics/exceptions/api_key_groups) + registration.py
   route/                bridge/ (LiteLLMBridge + cooldown), streaming/ (SSE + cache_stream + metrics_wrapper), metrics/ (costing), model_resolution/ (ModelRouterStrategy auto resolver)
-  shared/               config, tracing, trace_event, exceptions, plugin_registry, logger, metrics, debug_config, redis_client, qdrant_client, integration_configs, auth/key_store, auth/group_store
+  shared/               config, tracing, trace_event, exceptions, plugin_registry, logger, metrics, debug_config, redis_client, qdrant_client, integration_configs, auth/sqlite_store, auth/key_store, auth/group_store
 
 aigateway-cli/src/aigateway_cli/    __main__, chat, run, session
 control-panel/src/                  App.tsx (routes), api/client.ts, pages/ (10, incl. /chat), components/ (incl. chat/), hooks/
@@ -119,9 +120,7 @@ Backfill: L2 hit → L1; L3 hit → L1 only (approximate); MISS → L1+L2 + asyn
 
 ## Security & Quotas
 
-`KeyStore` — Redis hash per key. Per-key: daily tokens (default 1M), monthly cost ($50), RPM (60), TPM (100K). Pub/Sub sync across instances. Auto-reseeds from `config.yaml` if Redis empty. Quota enforcement uses an atomic Lua script (`check_quota` → `EVALSHA`/`EVAL`) that checks all 4 dims for key+group in one round-trip and bumps counters immediately (TOCTOU-safe). The pre-flight estimate (token count ÷4, cost=0) is reserved; `increment_usage` reconciles the delta (actual − reserved) post-LLM via `_reserved_tokens`/`_reserved_cost`. FakeRedis (tests) lacks `eval` → falls back to non-atomic `_check_quota_legacy`.
-
-`GroupStore` — Redis hash per group (`aigateway:group:{group_id}`). Group-level quotas (daily tokens, monthly cost, RPM, TPM) shared pool for all member keys. Per-key personal quotas are sub-limits within the group. Quota check: group first, then personal. Error codes prefixed `Group ` for group-level rejection. Group members stored as Redis Set (`aigateway:group:{gid}:members`). Group events broadcast via `aigateway:groups:sync` Pub/Sub channel.
+`SQLiteStore` — WAL-mode SQLite replacing Redis-backed KeyStore/GroupStore. Schema: `api_keys` (key metadata + limits + runtime counters), `quota_records` (per-day/per-month usage tracking for key + group), `groups` (group metadata + shared limits), `group_members` (many-to-many key↔group, stored as rows not Redis Set), `meta` (schema versioning). Per-key: daily tokens (default 1M), monthly cost ($50), RPM (60), TPM (100K). Auto-reseeds from `config.yaml` if empty. Quota enforcement uses atomic conditional UPDATE inside a transaction (TOCTOU-safe). Group-level quotas (daily tokens, monthly cost, RPM, TPM) shared pool for all member keys. Per-key personal quotas are sub-limits within the group. Quota check: group first, then personal. Error codes prefixed `Group ` for group-level rejection.
 
 `PIIDetector` — 3-pass (exclusion → named fields → standalone). 20+ patterns (email, phone, credit card, Chinese ID, passwords, API keys, connection strings). Strategies: sanitize / reject / hash.
 
@@ -157,7 +156,7 @@ Backfill: L2 hit → L1; L3 hit → L1 only (approximate); MISS → L1+L2 + asyn
 | `main.py` | App factory, lifespan init, both PipelineEngine instances. |
 | `dispatch/dispatcher.py` | Request flow, classification, cache backfill (core). |
 | `prefix/cache/` | Cache-key gen, L1/L2/L3, rerankers, backfill. |
-| `prefix/pii/` + `shared/auth/` | PIIDetector, KeyStore. |
+| `prefix/pii/` + `shared/auth/` | PIIDetector, SQLiteStore (WAL-mode, TOCTOU-safe). |
 | `route/bridge/litellm_bridge.py` | Multi-provider calls, fallback, cooldown, auto resolver, intent-driven routing (`_resolve_by_intent`, `_do_image_generation`, `_do_video_generation`), video polling (`GET /v1/videos/{id}`). Cooldown reads `circuit_breaker:` section. |
 | `pipelines/generation/` | 6 gen plugins + strategies (+ `_common/`, `registration.py`). |
 | `prefix/media/` | Media Optimization V2. |
@@ -202,7 +201,7 @@ python3 -m pytest tests/ --cov=aigateway_core --cov=aigateway_api
 python3 -m pytest tests/e2e/                     # e2e: needs live gateway + ADMIN_KEY + Redis/Qdrant
 python3 -m pytest tests/ui/                      # UI e2e: needs gateway :8000 + panel :3000
 ```
-62 unit test files + 8 e2e (`tests/e2e/`, incl. `test_plugin_debug_integration.py`, `test_e2e_multimodal.py`). `tests/conftest.py` gates e2e/ui: only runs when those paths are invoked explicitly (checks `AI_GATEWAY_ADMIN_KEY` + `GET /health`); `pytest tests/` auto-skips them via `pytest_collection_modifyitems` so a missing gateway never hangs the unit run. Env uses `python3` (no `python` alias).
+82 unit test files + 8 e2e (`tests/e2e/`, incl. `test_plugin_debug_integration.py`, `test_e2e_multimodal.py`). `tests/conftest.py` gates e2e/ui: only runs when those paths are invoked explicitly (checks `AI_GATEWAY_ADMIN_KEY` + `GET /health`); `pytest tests/` auto-skips them via `pytest_collection_modifyitems` so a missing gateway never hangs the unit run. Env uses `python3` (no `python` alias).
 
 ### Config precedence (high → low)
 1. Real process env (docker-compose `environment:` / shell `export`)
@@ -229,10 +228,11 @@ python3 -m pytest tests/ui/                      # UI e2e: needs gateway :8000 +
 10. **Per-model `base_url` override** — providers like Agnes route text/image/video to different endpoints. Set `providers.<name>.model_grouper[].models[].base_url`; fallbacks always inherit provider-level URL.
 11. **Single-worker** — `workers: 1` in Dockerfile CMD; the config field is deprecated.
 12. **Streaming parity** — SSE path also decrements quota, backfills cache, uses real cost.
+13. **Bridge logged model resolution** — `_resolve_logged_model` and `_resolve_stream_logged_model` in `dispatcher.py` extract the actual resolved model name from bridge results (not the client's `auto` placeholder) for logging, cost ledger, and cache backfill. Priority: `_meta.routed_to.model` > response body `data.model` > original `body_model`.
 
 ## Known States & Gotchas
 
-- **Code RAG is now a separate subsystem** — Control Panel Knowledge page has a Code tab with async imports (folder/server_path/git/zip), dedicated `/admin/rag/code/*` routes, per-model `rag_code_*` Qdrant collections, and per-repo CodeGraph SQLite files under `/data/code_graphs`. Graph build uses the official `@colbymchenry/codegraph` CLI (`codegraph init` / `codegraph index`), not a Python `codegraph` API. Graph query has **strict/tolerant split**: import path calls `lookup_symbol_metadata_strict` (any SQLite/schema failure fails the whole import), retrieval calls the tolerant wrapper (never breaks the text-RAG chain). Retrieval also honors `code_rag_graph_hops` — a BFS over `edges.kind='calls'` fetches related-symbol chunks from the same collection.
+- **Code RAG is now a separate subsystem** — Control Panel Knowledge page has a Code tab with async imports (folder/server_path/git/zip), dedicated `/admin/rag/code/*` routes, per-model `rag_code_*` Qdrant collections, and per-repo CodeGraph SQLite files under `/data/code_graphs`. Graph build uses the official `@colbymchenry/codegraph` CLI (`codegraph init` only). callers/callees are **db-direct** via `read_call_edges` (2 SQL queries on the `edges` table + a process-level `_edges_cache` invalidated by `files.content_hash` snapshot), not per-symbol CLI spawns (5k symbols: 114ms vs ~10k subprocesses). `get_node` keeps CLI (needs markdown source blocks). Graph query has **strict/tolerant split**: import path calls `lookup_symbol_metadata_strict` (any SQLite/schema failure fails the whole import), retrieval calls the tolerant wrapper (never breaks the text-RAG chain). Retrieval honors `code_rag_graph_hops` — a BFS over in-memory `edges.kind='calls'` maps. Import task state lives in the SQLite `code_rag_tasks` table (terminal rows retained as history; `list_code_tasks` paginates with `?limit&offset`), not Redis task keys. On startup, `sweep_orphaned_tasks` (main.py lifespan, after `prune_ledger`) marks non-terminal rows `failed` ("worker restarted during import") and clears stale `/tmp/code_rag_folder_*` + `/data/code_graphs/*/.tmp/` dirs. Splitting writes progress every 200 symbols via `build_symbol_chunks(progress_cb=...)`, scheduled back to the event loop with `asyncio.run_coroutine_threadsafe`. codegraph subprocesses run with `start_new_session=True` and are reaped via `os.killpg` on timeout (prevents zombie grandchildren).
 - **Control Panel "调用关系"** now opens an inline (non-modal) expandable call-graph panel below the repo table: file list → symbols (file:line copy) → recursive caller/callee tree with cycle guard. Uses existing `/admin/rag/code/{files,query,callers,callees}` endpoints.
 - **Intent-driven routing** — `classify_request` is now async, uses LLM intent prediction (not modality/model name). Returns `understanding|generation:image|generation:video`. `generation_intent` field removed; `model=='auto'` removed — client model acts as hint. Model config uses `capabilities: [text,image,video]` multi-select (replaced `modality`). Bridge adds `_do_image_generation` (/images/generations, OpenAI Images API), `_do_video_generation` (/videos, async), `GET /v1/videos/{id}` polling. Intent prediction returns `{"generation":"...","hint":"..."}` JSON; predication/ai_director feeds hint through `ModelSelector` to select cheapest text model, explicitly passed — does NOT trigger smart routing. Polymorphic models selected by capability intersection with intent pool. See `tests/test_generation_routing.py`.
 - **Understanding pipeline runs only 2 plugins in engine** — 7 registered, `dispatcher._skip_names` filters out 5 (pii/cache/semantic/compress/media, all already run in the shared prefix); engine executes `rag_retriever + conv_compressor` only. Generation pipeline sets no skip → all 6 gen-opt plugins run.
@@ -243,6 +243,7 @@ python3 -m pytest tests/ui/                      # UI e2e: needs gateway :8000 +
 - **TokenCompressorStrategy** — deterministic hash-vector placeholder; real CLIP/ViT segmentation is a TODO.
 - **`GenerationPipeline` (`prefix/media/generation.py`) is orphaned** — 0 prod references. Gen path is the 6-plugin chain.
 - **AIDirectorStrategy late-binds bridge** — registration runs before bridge exists; `main.py` injects `_litellm_bridge` post-init.
+- **Draft-to-HiRes is async** (2026-07-23) — `DraftGeneratorStrategy.submit_draft` returns a `draft_id` immediately with `status='generating'` and spawns `_generate_draft_async` via `asyncio.create_task` (held in `self._bg_tasks` — strong ref required or CPython GCs the task mid-execution → Redis stuck `generating`). Two-layer storage: Redis (lightweight state, TTL) + file (`/data/drafts/{session_id}/{draft_id}/` = meta.json + preview*.bin + result.bin). `GET /admin/draft/{id}/preview` returns 202 while generating, 200 when ready, 410 on failed. `DraftSessionCleaner` (main.py lifespan) sweeps expired session dirs (mtime fallback). `_draft_dir` returns path **without** makedirs; only write paths (`_ensure_draft_dir`) create dirs — read paths creating dirs caused stray-dir disk leaks. Frontend `pollDraftPreview` (1s×120, `pollingDraftIds` Set dedup, `owns()` draftId guard) replaces single-shot `getDraftPreview`; `awaitingDraft`+`pendingAssistantIdRef` guards prevent resume-effect double-send on window switch/refresh.
 - **Dead frontend code** — `hooks/useAuth.ts`, `hooks/usePoll.ts` have 0 imports. Five API client fns (`createChatCompletion` non-stream, `listModels`, `createEmbeddings`, `getQuota`, `getMetricsJson`) are reserved for Entry B. `createChatCompletionStream` + new `getVideoStatus` now used by the `/chat` page (聊天窗 MVP).
 - **Implicit frontend auth** — no login page or Auth provider. `ensureAuthHeaders()` pulls key from localStorage silently; unset key → blank pages (except Plugins/Overview which handle it).
 - **Config writes must be atomic** — admin endpoints (`update_plugins_config`, `set_plugin_debug`, `update_global_config`) write `config.yaml` via `_atomic_write_yaml` (tempfile + `os.replace`). The Watchdog `load()` reads the file *without* `fcntl.flock`, so the old `open(w)+yaml.dump` (truncate-then-write) let it read a half-written file → `DebugConfigWatcher`/`PluginRegistry` got stale state. Never revert to non-atomic writes here.

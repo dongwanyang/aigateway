@@ -36,28 +36,47 @@ def _run_codegraph(args: list[str], *, cwd: str, timeout: float = 1800.0) -> Non
 
     仅用于 build 阶段的 `codegraph init`（位置参数命令）。查询类命令（query/callers/
     callees/impact/files）走 graph_query.py 里的 _run_codegraph_json / _run_codegraph_raw。
+
+    用 Popen + start_new_session=True 启动,超时后 killpg 收割整个进程组
+    (codegraph init 会 spawn 解析器孙进程,只杀主子进程会留僵尸)。
     """
+    import os
+    import signal
+
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             args,
             cwd=cwd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            check=False,
-            timeout=timeout,
+            start_new_session=True,
         )
     except FileNotFoundError as exc:
         raise RuntimeError(
             "codegraph CLI 未安装；请在 gateway 镜像中安装 @colbymchenry/codegraph"
         ) from exc
-    except subprocess.TimeoutExpired as exc:
+
+    try:
+        stdout, _ = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except (ProcessLookupError, OSError):
+            pass
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                pass
         raise RuntimeError(
             f"codegraph command timed out after {timeout}s: {' '.join(args)}"
-        ) from exc
+        )
 
     if proc.returncode != 0:
-        output = proc.stdout.strip()
+        output = (stdout or "").strip()
         raise RuntimeError(
             f"codegraph command failed ({' '.join(args)}): {output[:4000]}"
         )

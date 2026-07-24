@@ -319,7 +319,7 @@ def _read_symbol_nodes(
             placeholders = ",".join("?" for _ in only_files)
             rows = conn.execute(
                 f"""
-                SELECT kind, name, file_path, start_line, end_line, signature, docstring, language
+                SELECT id, kind, name, file_path, start_line, end_line, signature, docstring, language
                 FROM nodes
                 WHERE kind IN ('function', 'method', 'class')
                   AND name IS NOT NULL AND name != ''
@@ -331,7 +331,7 @@ def _read_symbol_nodes(
         else:
             rows = conn.execute(
                 """
-                SELECT kind, name, file_path, start_line, end_line, signature, docstring, language
+                SELECT id, kind, name, file_path, start_line, end_line, signature, docstring, language
                 FROM nodes
                 WHERE kind IN ('function', 'method', 'class')
                   AND name IS NOT NULL AND name != ''
@@ -424,35 +424,33 @@ def build_symbol_chunks(
     ignore_patterns: list[str],
     *,
     only_files: list[str] | None = None,
+    progress_cb: Any = None,
 ) -> list[dict[str, Any]]:
     """从 codegraph db 读符号节点,用行号切源码 + 构造结构描述嵌入文本。
 
-    每个符号节点产出 1 个 chunk,字段:
-      embed_text(结构描述,用于 embedding)
-      chunk_text(源码,存 payload)
-      file_path / filename / language / chunk_index
-      start_line / end_line / function_name / class_name
-      callers / callees / imports / signature / docstring
-
-    callers/callees 调 graph_query(CLI);imports 走 db 点查询。
-    ignore_patterns: 路径含任一子串的符号跳过(与 split_code_directory 一致)。
-    only_files: 增量 sync 用,只切这些 db file_path(带 src/ 前缀)的符号;
-      不给则切全部。注意 only_files 里的 chunk_index 从 0 重新计(单文件重切)。
+    callers/callees 走 read_call_edges_strict(2 条 SQL,全图一次),不再逐符号 spawn CLI。
+    用 strict 版:db 存在但损坏时抛 sqlite3.Error,让 import 整体失败暴露,而不是
+    静默降级成空 callers/callees 误判导入"成功"。db 不存在仍返回 ({},{})(图谱未建,
+    但 import 流程里 build_code_graph 在前,此处 db 必然存在,空 map 只发生在无 calls 边)。
+    progress_cb(done, total, current_file) 每 200 符号回写一次(splitting 阶段进度)。
     """
     from aigateway_core.pipelines.understanding.code_rag.graph_query import (
-        _callees_list,
-        _callers_list,
         _get_imports_for_file,
+        read_call_edges_strict,
     )
 
     logger = logging.getLogger(__name__)
     source_root = Path(source_dir).resolve()
     nodes = _read_symbol_nodes(graph_repo_path, only_files=only_files)
 
+    # 一次性建全图 callers/callees map(替代 ~10k 次 CLI 子进程)
+    callers_map, callees_map = read_call_edges_strict(graph_repo_path)
+    total = len(nodes)
+
     chunks: list[dict[str, Any]] = []
     per_file_index: dict[str, int] = {}
 
-    for node in nodes:
+    for i, node in enumerate(nodes):
         rel_in_db = str(node.get("file_path") or "")
         if any(pat and pat in rel_in_db for pat in (ignore_patterns or [])):
             continue
@@ -470,17 +468,10 @@ def build_symbol_chunks(
             )
             continue
 
-        # callers/callees 走 CLI(失败容忍:空列表)
-        try:
-            callers = _callers_list(graph_repo_path, name)
-        except Exception as exc:
-            logger.debug("code_rag: callers 查询失败 %s: %s", name, exc)
-            callers = []
-        try:
-            callees = _callees_list(graph_repo_path, name)
-        except Exception as exc:
-            logger.debug("code_rag: callees 查询失败 %s: %s", name, exc)
-            callees = []
+        # O(1) 查 map(不再 spawn CLI)。node id 精确匹配。
+        sym_id = str(node.get("id") or "")
+        callers = [str(r["name"]) for r in callers_map.get(sym_id, [])]
+        callees = [str(r["name"]) for r in callees_map.get(sym_id, [])]
         try:
             imports = _get_imports_for_file(graph_repo_path, rel_path)
         except Exception:
@@ -519,5 +510,13 @@ def build_symbol_chunks(
                 "docstring": docstring or "",
             }
         )
+
+        if progress_cb is not None and (i % 200 == 0 or i == total - 1):
+            progress_cb(done=i + 1, total=total, current_file=rel_path)
+
+    # 收尾(空 chunks 也回写一次 total,让进度条到 100%)
+    if progress_cb is not None and total == 0:
+        progress_cb(done=0, total=0, current_file="")
+
     return chunks
 

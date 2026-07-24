@@ -186,6 +186,7 @@ def register_generation_optimization_plugins(
         config=config.draft_workflow,
         redis_client=redis_client,
         comfyui_config=comfyui_config,
+        store_dir=getattr(config.draft_workflow, "store_dir", None),
     )
     model_router_strategy = ModelRouterStrategy(
         config=config.model_router,

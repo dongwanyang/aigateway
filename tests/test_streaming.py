@@ -154,3 +154,46 @@ class TestCreateSseResponse:
             b"data: {\"delta\":\"hello\"}\n\n",
             b"data: [DONE]\n\n",
         ]
+
+
+class TestSSEGeneratorReal:
+    """Test SSEGenerator directly with real async iterator."""
+
+    @pytest.mark.asyncio
+    async def test_sse_generator_success(self):
+        from aigateway_core.route.streaming.sse import SSEGenerator
+
+        async def gen():
+            yield {"key": "value"}
+            yield {"foo": "bar"}
+
+        generator = SSEGenerator(gen(), chat_id="test-chat")
+        chunks = []
+        async for chunk in generator.generate():
+            chunks.append(chunk)
+
+        assert len(chunks) == 3
+        assert chunks[0] == 'data: {"key": "value"}\n\n'
+        assert chunks[1] == 'data: {"foo": "bar"}\n\n'
+        assert chunks[2] == 'data: [DONE]\n\n'
+
+    @pytest.mark.asyncio
+    async def test_sse_generator_error_handling(self):
+        from aigateway_core.route.streaming.sse import SSEGenerator
+
+        async def gen():
+            yield {"key": "value"}
+            raise ValueError("Something went wrong")
+
+        generator = SSEGenerator(gen(), chat_id="test-chat")
+        chunks = []
+        async for chunk in generator.generate():
+            chunks.append(chunk)
+
+        assert len(chunks) == 3
+        assert chunks[0] == 'data: {"key": "value"}\n\n'
+        import json
+        err_data = json.loads(chunks[1].replace("data: ", "").strip())
+        assert err_data["error"]["code"] == "internal_error"
+        assert "Something went wrong" in err_data["error"]["message"]
+        assert chunks[2] == 'data: [DONE]\n\n'

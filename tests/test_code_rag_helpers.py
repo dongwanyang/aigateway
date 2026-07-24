@@ -3,6 +3,9 @@
 Locked into repo-root config files so misplaced keys and missing volumes
 fail loudly instead of silently drifting.
 """
+import os
+import tempfile
+import io
 from pathlib import Path
 
 import pytest
@@ -14,7 +17,6 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 def _load_yaml(path: Path) -> dict:
     return yaml.safe_load(path.read_text(encoding="utf-8"))
-
 
 def test_code_rag_settings_exist_in_template() -> None:
     content = (REPO_ROOT / "config.yaml.template").read_text(encoding="utf-8")
@@ -276,6 +278,255 @@ def _build_codegraph_repo(tmp_path: Path, files: dict[str, str]) -> Path:
     return repo
 
 
+def _build_codegraph_db_with_edges(db_path: Path, nodes: list[dict], edges: list[dict]) -> None:
+    """手建一个 codegraph schema 的 db（不调 CLI），供 read_call_edges 单测。"""
+    import sqlite3
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript("""
+    CREATE TABLE nodes (id TEXT PRIMARY KEY, kind TEXT, name TEXT, qualified_name TEXT,
+        file_path TEXT, language TEXT, start_line INTEGER, end_line INTEGER,
+        start_column INTEGER, end_column INTEGER, docstring TEXT, signature TEXT,
+        visibility TEXT, is_exported INTEGER, is_async INTEGER, is_static INTEGER,
+        is_abstract INTEGER, decorators TEXT, type_parameters TEXT, return_type TEXT,
+        updated_at INTEGER);
+    CREATE TABLE edges (id INTEGER PRIMARY KEY, source TEXT, target TEXT, kind TEXT,
+        metadata TEXT, line INTEGER, col INTEGER, provenance TEXT);
+    CREATE TABLE files (path TEXT, content_hash TEXT, language TEXT, size INTEGER, updated_at INTEGER);
+    """)
+    for n in nodes:
+        conn.execute("INSERT INTO nodes (id,kind,name,file_path,start_line,end_line) VALUES (?,?,?,?,?,?)",
+                     (n["id"], n["kind"], n["name"], n["file_path"], n["start_line"], n["end_line"]))
+    for e in edges:
+        conn.execute("INSERT INTO edges (source,target,kind) VALUES (?,?,?)",
+                     (e["source"], e["target"], e["kind"]))
+    conn.commit()
+    conn.close()
+
+
+def test_build_symbol_chunks_progress_callback(tmp_path: Path) -> None:
+    """build_symbol_chunks 循环前知道 total, 每 200 符号回写 progress_cb。"""
+    from aigateway_core.pipelines.understanding.code_rag.splitter import build_symbol_chunks
+
+    repo = _build_codegraph_repo(
+        tmp_path,
+        {"mod.py": "\n".join(f"def fn_{i}():\n    return {i}\n" for i in range(5))},
+    )
+    calls: list[tuple[int, int, str]] = []
+
+    def cb(done: int, total: int, current_file: str) -> None:
+        calls.append((done, total, current_file))
+
+    # source_dir 指向 repo/src(graph_builder 把源码落在 repo/src/,db 存 src/mod.py,
+    # 剥 src/ → mod.py,join repo/src → repo/src/mod.py 存在)。
+    chunks = build_symbol_chunks(str(repo / "src"), str(repo), [], progress_cb=cb)
+    assert len(chunks) == 5
+    assert calls, "progress_cb should be called at least once"
+    # 收尾调用 done==total
+    assert calls[-1][0] == calls[-1][1] == 5
+    # total 在首次调用时已是 5(循环前已知)
+    assert calls[0][1] == 5
+
+
+def test_get_callers_callees_db_direct_matches_cli(tmp_path: Path) -> None:
+    """db 直读后 get_callers/get_callees 与旧 CLI 结果一致。"""
+    from aigateway_core.pipelines.understanding.code_rag.graph_query import get_callers, get_callees
+    from aigateway_core.pipelines.understanding.code_rag import graph_query
+
+    repo = _build_codegraph_repo(
+        tmp_path,
+        # hash_password 必须有定义,否则 codegraph 不建节点 → 无 login→hash_password 边。
+        # 与 test_lookup_symbol_metadata_reads_codegraph_sqlite_schema 同款 fixture。
+        {"auth.py": "def login():\n    return hash_password()\ndef hash_password():\n    return 'h'\ndef register():\n    return login()\n"},
+    )
+    graph_query._edges_cache.clear()  # 防污染
+
+    callers = get_callers(str(repo), "login")
+    callees = get_callees(str(repo), "login")
+    assert "register" in [c["name"] for c in callers]
+    assert "hash_password" in [c["name"] for c in callees]
+
+
+def test_cached_edges_rebuild_on_file_hash_change(tmp_path: Path) -> None:
+    from aigateway_core.pipelines.understanding.code_rag import graph_query
+
+    db_path = tmp_path / "repo" / ".codegraph" / "codegraph.db"
+    nodes = [
+        {"id": "f:alpha", "kind": "function", "name": "alpha", "file_path": "src/a.py", "start_line": 1, "end_line": 2},
+        {"id": "f:beta", "kind": "function", "name": "beta", "file_path": "src/a.py", "start_line": 3, "end_line": 4},
+    ]
+    edges = [{"source": "f:alpha", "target": "f:beta", "kind": "calls"}]
+    _build_codegraph_db_with_edges(db_path, nodes, edges)
+    # files 表需要至少一行供 hash 快照
+    import sqlite3
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("INSERT INTO files (path, content_hash) VALUES ('src/a.py', 'hash_v1')")
+    conn.commit()
+    conn.close()
+
+    # 清理模块级缓存(防其它测试污染)
+    graph_query._edges_cache.clear()
+
+    callers1, callees1 = graph_query._get_cached_edges(str(tmp_path / "repo"))
+    assert callees1["f:alpha"][0]["name"] == "beta"
+
+    # 改 db:加一条 calls 边 + 改 file hash
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("INSERT INTO nodes (id,kind,name,file_path,start_line,end_line) VALUES ('f:gamma','function','gamma','src/a.py',5,6)")
+    conn.execute("INSERT INTO edges (source,target,kind) VALUES ('f:beta','f:gamma','calls')")
+    conn.execute("UPDATE files SET content_hash='hash_v2' WHERE path='src/a.py'")
+    conn.commit()
+    conn.close()
+
+    callers2, callees2 = graph_query._get_cached_edges(str(tmp_path / "repo"))
+    assert callees2["f:beta"][0]["name"] == "gamma"  # 重建后看到新边
+
+
+def test_cached_edges_reuses_unchanged(tmp_path: Path) -> None:
+    from aigateway_core.pipelines.understanding.code_rag import graph_query
+
+    db_path = tmp_path / "repo2" / ".codegraph" / "codegraph.db"
+    _build_codegraph_db_with_edges(db_path,
+        [{"id": "f:x", "kind": "function", "name": "x", "file_path": "src/a.py", "start_line": 1, "end_line": 2}],
+        [])
+    import sqlite3
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("INSERT INTO files (path, content_hash) VALUES ('src/a.py', 'h1')")
+    conn.commit()
+    conn.close()
+
+    graph_query._edges_cache.clear()
+    graph_query._get_cached_edges(str(tmp_path / "repo2"))
+    key = graph_query._cache_key(str(tmp_path / "repo2"))
+    call_count_before = graph_query._edges_cache[key][0]  # snapshot ref
+    graph_query._get_cached_edges(str(tmp_path / "repo2"))  # 第二次,hash 没变
+    # 仍是同一个 snapshot 对象(未重建)
+    assert graph_query._edges_cache[key][0] is call_count_before
+
+
+def test_cached_edges_concurrent_access_is_thread_safe(tmp_path: Path) -> None:
+    """_edges_cache (cachetools LRUCache) 被多线程并发访问不能抛 / 不能丢条目。
+
+    LRUCache.__getitem__ 会 __touch 内部 OrderedDict(读即写),且 LRU 驱逐会改结构;
+    不加锁并发 get/set/pop 会抛 'OrderedDict mutated during iteration' 或丢条目。
+    本测试并发命中 + invalidate(pop)竞争,锁化后应全程无异常。
+
+    注:纯 get/get 并发在 CPython GIL 下罕见抛错,故额外驱动 LRU 驱逐(maxsize=32,
+    写入 40+ 仓库)与 invalidate(pop)竞争 —— 这两个路径真正改 OrderedDict 结构。
+    """
+    import sqlite3
+    import threading
+    from aigateway_core.pipelines.understanding.code_rag import graph_query
+
+    def _seed(repo_dir: Path, idx: int) -> str:
+        db_path = repo_dir / ".codegraph" / "codegraph.db"
+        _build_codegraph_db_with_edges(
+            db_path,
+            [{"id": f"f:sym{idx}", "kind": "function", "name": f"sym{idx}",
+              "file_path": f"src/a{idx}.py", "start_line": 1, "end_line": 2}],
+            [],
+        )
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(f"INSERT INTO files (path, content_hash) VALUES ('src/a{idx}.py', 'h{idx}')")
+        conn.commit()
+        conn.close()
+        return str(repo_dir)
+
+    # 40 个仓库 > maxsize=32,驱动 LRU 驱逐路径
+    repos = [_seed(tmp_path / f"repo{i}", i) for i in range(40)]
+    graph_query._edges_cache.clear()
+    errors: list[Exception] = []
+
+    def _hit(repo: str) -> None:
+        for _ in range(20):
+            try:
+                graph_query._get_cached_edges(repo)
+            except sqlite3.Error:
+                pass
+            except Exception as exc:
+                errors.append(exc)
+
+    def _invalidate_loop() -> None:
+        for repo in repos:
+            for _ in range(10):
+                try:
+                    graph_query.invalidate_edges_cache(repo)
+                except Exception as exc:
+                    errors.append(exc)
+
+    threads = [threading.Thread(target=_hit, args=(r,)) for r in repos]
+    threads += [threading.Thread(target=_invalidate_loop) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors, f"并发缓存访问抛了非预期异常: {errors[:3]}"
+
+
+def test_invalidate_edges_cache_key_matches_seed_under_symlink(tmp_path: Path) -> None:
+    """delete 用的 resolved key 必须与 seed/retrieval 用的 key 一致。
+    通过 _cache_key(.resolve()) 统一;即便传入带尾斜杠/相对路径变体也能 pop 命中。
+    """
+    from aigateway_core.pipelines.understanding.code_rag import graph_query
+
+    db_path = tmp_path / "repo" / ".codegraph" / "codegraph.db"
+    _build_codegraph_db_with_edges(
+        db_path,
+        [{"id": "f:x", "kind": "function", "name": "x", "file_path": "src/a.py", "start_line": 1, "end_line": 2}],
+        [],
+    )
+    import sqlite3
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("INSERT INTO files (path, content_hash) VALUES ('src/a.py', 'h1')")
+    conn.commit()
+    conn.close()
+
+    graph_query._edges_cache.clear()
+    base = str(tmp_path / "repo")
+    graph_query._get_cached_edges(base)
+    assert graph_query._cache_key(base) in graph_query._edges_cache
+    # 用不同字符串变体(尾斜杠)invalidate,仍应命中 pop
+    graph_query.invalidate_edges_cache(base + "/")
+    assert graph_query._cache_key(base) not in graph_query._edges_cache
+
+
+def test_read_call_edges_returns_callers_and_callees(tmp_path: Path) -> None:
+    from aigateway_core.pipelines.understanding.code_rag.graph_query import read_call_edges
+
+    db_path = tmp_path / "repo" / ".codegraph" / "codegraph.db"
+    # alpha -> beta -> gamma; caller -> alpha
+    nodes = [
+        {"id": "f:alpha", "kind": "function", "name": "alpha", "file_path": "src/a.py", "start_line": 1, "end_line": 2},
+        {"id": "f:beta", "kind": "function", "name": "beta", "file_path": "src/a.py", "start_line": 3, "end_line": 4},
+        {"id": "f:gamma", "kind": "function", "name": "gamma", "file_path": "src/a.py", "start_line": 5, "end_line": 6},
+        {"id": "f:caller", "kind": "function", "name": "caller", "file_path": "src/a.py", "start_line": 7, "end_line": 8},
+    ]
+    edges = [
+        {"source": "f:alpha", "target": "f:beta", "kind": "calls"},
+        {"source": "f:beta", "target": "f:gamma", "kind": "calls"},
+        {"source": "f:caller", "target": "f:alpha", "kind": "calls"},
+    ]
+    _build_codegraph_db_with_edges(db_path, nodes, edges)
+
+    callers, callees = read_call_edges(str(tmp_path / "repo"))
+    assert [r["name"] for r in callees["f:alpha"]] == ["beta"]
+    assert [r["name"] for r in callees["f:beta"]] == ["gamma"]
+    assert [r["name"] for r in callees["f:caller"]] == ["alpha"]
+    assert [r["name"] for r in callers["f:beta"]] == ["alpha"]
+    assert [r["name"] for r in callers["f:alpha"]] == ["caller"]
+    # 无调用的符号不出现在 callees map
+    assert "f:gamma" not in callees
+    assert [r["name"] for r in callers["f:gamma"]] == ["beta"]
+
+
+def test_read_call_edges_empty_when_no_db(tmp_path: Path) -> None:
+    from aigateway_core.pipelines.understanding.code_rag.graph_query import read_call_edges
+
+    callers, callees = read_call_edges(str(tmp_path / "nope"))
+    assert callers == {}
+    assert callees == {}
+
+
 def test_lookup_symbol_metadata_reads_codegraph_sqlite_schema(tmp_path: Path) -> None:
     """lookup_symbol_metadata 走 codegraph CLI(重构后),验证 callers/callees/imports。"""
     from aigateway_core.pipelines.understanding.code_rag.graph_query import lookup_symbol_metadata
@@ -518,4 +769,191 @@ def test_split_code_directory_writes_symbol_names(tmp_path) -> None:
     names = {c["function_name"] for c in chunks} | {c["class_name"] for c in chunks}
     assert names & {"login", "UserService", "register"}, (
         f"未能抽到 login/UserService/register 中的任何一个: names={names}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Task 9: start_new_session so deadline/timeout reaps child process groups
+# ---------------------------------------------------------------------------
+
+
+def test_run_codegraph_raw_uses_new_session(monkeypatch, tmp_path: Path) -> None:
+    """Popen 用 start_new_session=True,超时后 killpg 整个进程组。"""
+    import subprocess
+
+    from aigateway_core.pipelines.understanding.code_rag import graph_query
+
+    captured: dict = {}
+
+    class _FakeProc:
+        returncode = 0
+        pid = 12345
+
+        def communicate(self, timeout=None):
+            return ("ok", "")
+
+        def wait(self, timeout=None):
+            return 0
+
+    def fake_popen(cmd, **kwargs):
+        captured["kwargs"] = kwargs
+        return _FakeProc()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    graph_query._run_codegraph_raw(["node", "x", "-p", str(tmp_path)])
+    assert captured["kwargs"].get("start_new_session") is True
+
+
+def test_run_codegraph_json_uses_new_session(monkeypatch, tmp_path: Path) -> None:
+    """_run_codegraph_json 的 Popen 也带 start_new_session=True。"""
+    import subprocess
+
+    from aigateway_core.pipelines.understanding.code_rag import graph_query
+
+    captured: dict = {}
+
+    class _FakeProc:
+        returncode = 0
+        pid = 12345
+
+        def communicate(self, timeout=None):
+            return ("[]", "")
+
+        def wait(self, timeout=None):
+            return 0
+
+    def fake_popen(cmd, **kwargs):
+        captured["kwargs"] = kwargs
+        return _FakeProc()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    graph_query._run_codegraph_json(["query", "foo"], repo_path=str(tmp_path))
+    assert captured["kwargs"].get("start_new_session") is True
+
+
+def test_build_code_graph_run_codegraph_uses_new_session(monkeypatch, tmp_path: Path) -> None:
+    """graph_builder._run_codegraph 的 Popen 带 start_new_session=True。"""
+    import subprocess
+
+    from aigateway_core.pipelines.understanding.code_rag import graph_builder
+
+    captured: dict = {}
+
+    class _FakeProc:
+        returncode = 0
+        pid = 12345
+
+        def communicate(self, timeout=None):
+            return ("", None)
+
+        def wait(self, timeout=None):
+            return 0
+
+    def fake_popen(cmd, **kwargs):
+        captured["kwargs"] = kwargs
+        return _FakeProc()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    graph_builder._run_codegraph(["codegraph", "init", str(tmp_path)], cwd=str(tmp_path))
+    assert captured["kwargs"].get("start_new_session") is True
+
+
+def test_run_codegraph_raw_killpg_on_timeout(monkeypatch, tmp_path: Path) -> None:
+    """超时后必须 killpg 整个进程组(不能只杀主子进程,留孙进程僵尸)。"""
+    import signal
+    import subprocess
+
+    from aigateway_core.pipelines.understanding.code_rag import graph_query
+
+    killed: list[tuple[int, int]] = []
+
+    class _FakeProc:
+        returncode = 0
+        pid = 12345
+
+        def communicate(self, timeout=None):
+            raise subprocess.TimeoutExpired(cmd=["node"], timeout=timeout)
+
+        def wait(self, timeout=None):
+            return 0
+
+    def fake_killpg(pgid, sig):
+        killed.append((pgid, sig))
+
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kw: _FakeProc())
+    monkeypatch.setattr(os, "killpg", fake_killpg)
+    monkeypatch.setattr(os, "getpgid", lambda pid: 99999)
+    monkeypatch.setattr(signal, "SIGTERM", signal.SIGTERM)
+    monkeypatch.setattr(signal, "SIGKILL", signal.SIGKILL)
+
+    with pytest.raises(RuntimeError, match="timed out"):
+        graph_query._run_codegraph_raw(["node", "x", "-p", str(tmp_path)], timeout=0.01)
+    # killpg 被调用过(进程组被整组收割)
+    assert killed, "超时后未 killpg,孙进程会变僵尸"
+
+
+def test_run_codegraph_json_killpg_on_timeout(monkeypatch, tmp_path: Path) -> None:
+    """_run_codegraph_json 超时也走 killpg。"""
+    import signal
+    import subprocess
+
+    from aigateway_core.pipelines.understanding.code_rag import graph_query
+
+    killed: list = []
+
+    class _FakeProc:
+        returncode = 0
+        pid = 12345
+
+        def communicate(self, timeout=None):
+            raise subprocess.TimeoutExpired(cmd=["query"], timeout=timeout)
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kw: _FakeProc())
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: killed.append((pgid, sig)))
+    monkeypatch.setattr(os, "getpgid", lambda pid: 99999)
+    monkeypatch.setattr(signal, "SIGTERM", signal.SIGTERM)
+    monkeypatch.setattr(signal, "SIGKILL", signal.SIGKILL)
+
+    with pytest.raises(RuntimeError, match="timed out"):
+        graph_query._run_codegraph_json(["query", "x"], repo_path=str(tmp_path), timeout=0.01)
+    assert killed, "超时后未 killpg"
+
+
+# ---------------------------------------------------------------------------
+# Task 10: config allows code_rag as recognized top-level field
+# ---------------------------------------------------------------------------
+
+
+def test_code_rag_is_allowed_top_level() -> None:
+    """config.yaml 的 code_rag 块不应触发未识别字段警告。"""
+    import logging
+
+    from aigateway_core.shared.config import ConfigManager
+
+    stream: "io.StringIO" = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    cfg_logger = logging.getLogger("aigateway_core.shared.config")
+    cfg_logger.addHandler(handler)
+    old_level = cfg_logger.level
+    cfg_logger.setLevel(logging.WARNING)
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+            f.write(
+                "server:\n  host: 0.0.0.0\n  port: 8000\n"
+                "code_rag:\n  enabled: true\n  graph_db_dir: /tmp/x\n"
+            )
+            path = f.name
+        try:
+            ConfigManager(config_path=path)
+        finally:
+            os.remove(path)
+    finally:
+        cfg_logger.removeHandler(handler)
+        cfg_logger.setLevel(old_level)
+    # code_rag 在白名单里,不应出现在未识别字段警告中
+    assert "code_rag" not in stream.getvalue(), (
+        f"code_rag 被判为未识别字段: {stream.getvalue()!r}"
     )

@@ -27,6 +27,7 @@ from aigateway_core.pipelines.generation._common.config import DraftWorkflowConf
 from aigateway_core.pipelines.generation._common.exceptions import DraftWorkflowError
 from aigateway_core.pipelines.generation._common.models import (
     DRAFT_STATUS_CONFIRMED,
+    DRAFT_STATUS_GENERATING,
     DRAFT_STATUS_PENDING,
     DraftResult,
     GenerationRequest,
@@ -38,8 +39,8 @@ from aigateway_core.pipelines.generation.draft.draft_generator import (
 
 
 @pytest.fixture
-def default_config():
-    """Default Draft workflow config."""
+def default_config(tmp_path):
+    """Default Draft workflow config (store_dir 指向 tmp_path 避免写 /app)."""
     return DraftWorkflowConfig(
         enabled=True,
         draft_resolution=(512, 512),
@@ -53,12 +54,13 @@ def default_config():
         target_fps=60,
         target_fps_range=(24, 120),
         upscale_algorithm="real-esrgan",
+        store_dir=str(tmp_path / "drafts"),
     )
 
 
 @pytest.fixture
 def strategy(default_config):
-    """Create a DraftGeneratorStrategy instance with in-memory store."""
+    """Create a DraftGeneratorStrategy instance with in-memory store + tmp store_dir."""
     return DraftGeneratorStrategy(config=default_config, redis_client=None)
 
 
@@ -82,6 +84,21 @@ def video_request():
     )
 
 
+async def _await_generating(strategy, draft_id, timeout=5.0):
+    """轮询 get_draft 直到 generating 后台任务完成（status != generating）.
+
+    异步生成拆分后，generate_draft 立即返回 generating；后台 task 跑完才 pending。
+    测试用此 helper 等待终态。
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        d = await strategy.get_draft(draft_id)
+        if d is not None and d.status != DRAFT_STATUS_GENERATING:
+            return d
+        await asyncio.sleep(0.01)
+    return await strategy.get_draft(draft_id)
+
+
 # ===================================================================
 # Test: generate_draft for image requests
 # ===================================================================
@@ -92,11 +109,17 @@ class TestGenerateDraftImage:
 
     @pytest.mark.asyncio
     async def test_generates_single_preview(self, strategy, image_request, default_config):
-        """Image request should produce exactly one preview."""
+        """Image request should produce exactly one preview (after async generation)."""
         result = await strategy.generate_draft(image_request, default_config)
+        # submit_draft 立即返回 generating，previews 空
+        assert result.status == DRAFT_STATUS_GENERATING
+        assert len(result.previews) == 0
 
-        assert isinstance(result, DraftResult)
-        assert len(result.previews) == 1
+        # 后台 task 完成后 status=pending，previews 落盘
+        final = await _await_generating(strategy, result.draft_id)
+        assert final is not None
+        assert final.status == DRAFT_STATUS_PENDING
+        assert len(final.previews) == 1
 
     @pytest.mark.asyncio
     async def test_draft_id_is_unique(self, strategy, image_request, default_config):
@@ -108,10 +131,12 @@ class TestGenerateDraftImage:
 
     @pytest.mark.asyncio
     async def test_status_is_pending(self, strategy, image_request, default_config):
-        """New draft status should be 'pending'."""
+        """After async generation completes, draft status should be 'pending'."""
         result = await strategy.generate_draft(image_request, default_config)
+        assert result.status == DRAFT_STATUS_GENERATING  # 提交即 generating
 
-        assert result.status == DRAFT_STATUS_PENDING
+        final = await _await_generating(strategy, result.draft_id)
+        assert final.status == DRAFT_STATUS_PENDING
 
     @pytest.mark.asyncio
     async def test_attempt_number_is_one(self, strategy, image_request, default_config):
@@ -147,22 +172,25 @@ class TestGenerateDraftVideo:
 
     @pytest.mark.asyncio
     async def test_default_keyframe_count(self, strategy, video_request, default_config):
-        """Video: default is ceil(30/5) = 6 keyframes."""
+        """Video: default is ceil(30/5) = 6 keyframes (after async generation)."""
         result = await strategy.generate_draft(video_request, default_config)
+        final = await _await_generating(strategy, result.draft_id)
 
         # ceil(30 / 5) = 6 keyframes
-        assert len(result.previews) == 6
+        assert len(final.previews) == 6
 
     @pytest.mark.asyncio
-    async def test_minimum_two_keyframes(self, strategy, video_request):
+    async def test_minimum_two_keyframes(self, strategy, video_request, tmp_path):
         """Video: at least 2 keyframes even with very long intervals."""
         config = DraftWorkflowConfig(
             preview_video_duration_seconds=3,
             preview_keyframe_interval_seconds=60,  # interval > duration
+            store_dir=str(tmp_path / "drafts"),
         )
         result = await strategy.generate_draft(video_request, config)
+        final = await _await_generating(strategy, result.draft_id)
 
-        assert len(result.previews) >= 2
+        assert len(final.previews) >= 2
 
     @pytest.mark.asyncio
     async def test_explicit_keyframe_count_override(
@@ -172,8 +200,9 @@ class TestGenerateDraftVideo:
         result = await strategy.generate_draft(
             video_request, default_config, keyframe_count=10
         )
+        final = await _await_generating(strategy, result.draft_id)
 
-        assert len(result.previews) == 10
+        assert len(final.previews) == 10
 
     @pytest.mark.asyncio
     async def test_explicit_keyframe_count_minimum_two(
@@ -183,8 +212,9 @@ class TestGenerateDraftVideo:
         result = await strategy.generate_draft(
             video_request, default_config, keyframe_count=1
         )
+        final = await _await_generating(strategy, result.draft_id)
 
-        assert len(result.previews) == 2
+        assert len(final.previews) == 2
 
     @pytest.mark.asyncio
     async def test_generation_params_records_media_type(
@@ -210,6 +240,7 @@ class TestConfirmDraft:
     ):
         """Confirming a pending draft should return UpscaleResult."""
         draft = await strategy.generate_draft(image_request, default_config)
+        await _await_generating(strategy, draft.draft_id)
         result = await strategy.confirm_draft(draft.draft_id)
 
         assert isinstance(result, UpscaleResult)
@@ -228,6 +259,7 @@ class TestConfirmDraft:
         两种环境下都应返回合理的整数分辨率，且与 result.algorithm_used 一致。
         """
         draft = await strategy.generate_draft(image_request, default_config)
+        await _await_generating(strategy, draft.draft_id)
         result = await strategy.confirm_draft(draft.draft_id)
 
         # target_resolution 必须是有效的 (w, h) 正整数对
@@ -245,6 +277,7 @@ class TestConfirmDraft:
     ):
         """Upscale result should use the configured algorithm."""
         draft = await strategy.generate_draft(image_request, default_config)
+        await _await_generating(strategy, draft.draft_id)
         result = await strategy.confirm_draft(draft.draft_id)
 
         assert result.algorithm_used == "real-esrgan"
@@ -255,6 +288,7 @@ class TestConfirmDraft:
     ):
         """After confirmation, draft status should be 'confirmed'."""
         draft = await strategy.generate_draft(image_request, default_config)
+        await _await_generating(strategy, draft.draft_id)
         await strategy.confirm_draft(draft.draft_id)
 
         stored = await strategy.get_draft(draft.draft_id)
@@ -273,6 +307,7 @@ class TestConfirmDraft:
     ):
         """Confirming an already confirmed draft should raise error."""
         draft = await strategy.generate_draft(image_request, default_config)
+        await _await_generating(strategy, draft.draft_id)
         await strategy.confirm_draft(draft.draft_id)
 
         with pytest.raises(DraftWorkflowError, match="cannot be confirmed"):
@@ -286,6 +321,7 @@ class TestConfirmDraft:
             target_resolution=(8000, 8000),  # exceeds max
         )
         draft = await strategy.generate_draft(request, default_config)
+        await _await_generating(strategy, draft.draft_id)
         result = await strategy.confirm_draft(draft.draft_id)
 
         assert result.target_resolution[0] <= 4096
@@ -306,6 +342,7 @@ class TestRejectDraft:
     ):
         """Rejecting a draft should produce a new DraftResult."""
         draft = await strategy.generate_draft(image_request, default_config)
+        await _await_generating(strategy, draft.draft_id)
         new_draft = await strategy.reject_draft(draft.draft_id)
 
         assert isinstance(new_draft, DraftResult)
@@ -317,6 +354,7 @@ class TestRejectDraft:
     ):
         """Rejection should increment the attempt number."""
         draft = await strategy.generate_draft(image_request, default_config)
+        await _await_generating(strategy, draft.draft_id)
         assert draft.attempt_number == 1
 
         new_draft = await strategy.reject_draft(draft.draft_id)
@@ -328,6 +366,7 @@ class TestRejectDraft:
     ):
         """Rejected draft should be deleted (not cached)."""
         draft = await strategy.generate_draft(image_request, default_config)
+        await _await_generating(strategy, draft.draft_id)
         await strategy.reject_draft(draft.draft_id)
 
         # Old draft should be gone
@@ -342,11 +381,12 @@ class TestRejectDraft:
 
     @pytest.mark.asyncio
     async def test_reject_limit_reached_raises_error(
-        self, strategy, image_request
+        self, strategy, image_request, tmp_path
     ):
         """Should raise error when max_regeneration_attempts reached."""
-        config = DraftWorkflowConfig(max_regeneration_attempts=3)
+        config = DraftWorkflowConfig(max_regeneration_attempts=3, store_dir=str(tmp_path / "drafts"))
         draft = await strategy.generate_draft(image_request, config)
+        await _await_generating(strategy, draft.draft_id)
 
         # Reject twice (attempt 1 -> 2, 2 -> 3)
         new_draft = await strategy.reject_draft(draft.draft_id)
@@ -358,11 +398,12 @@ class TestRejectDraft:
 
     @pytest.mark.asyncio
     async def test_reject_limit_preserves_last_draft(
-        self, strategy, image_request
+        self, strategy, image_request, tmp_path
     ):
         """When limit is reached, the last draft should still be retrievable."""
-        config = DraftWorkflowConfig(max_regeneration_attempts=2)
+        config = DraftWorkflowConfig(max_regeneration_attempts=2, store_dir=str(tmp_path / "drafts"))
         draft = await strategy.generate_draft(image_request, config)
+        await _await_generating(strategy, draft.draft_id)
         new_draft = await strategy.reject_draft(draft.draft_id)
 
         # This rejection should fail
@@ -385,8 +426,9 @@ class TestGetDraft:
 
     @pytest.mark.asyncio
     async def test_get_existing_draft(self, strategy, image_request, default_config):
-        """Should retrieve an existing draft by ID."""
+        """Should retrieve an existing draft by ID (pending after async gen)."""
         draft = await strategy.generate_draft(image_request, default_config)
+        await _await_generating(strategy, draft.draft_id)
         retrieved = await strategy.get_draft(draft.draft_id)
 
         assert retrieved is not None

@@ -604,6 +604,37 @@ async def lifespan(app: "FastAPI"):
     except Exception as exc:
         logger.warning("TaskTracker 初始化失败: %s", exc)
 
+    # 把 TaskTracker 绑定到 DraftGeneratorStrategy（异步生成任务状态追踪），
+    # 并启动 DraftSessionCleaner 定时清理过期 session 目录。
+    # task_tracker 在 draft_strategy 挂载之后才创建，故这里补绑。
+    draft_session_cleaner = None
+    try:
+        draft_strategy = getattr(app.state, "draft_strategy", None)
+        if draft_strategy is not None and task_tracker is not None:
+            draft_strategy._task_tracker = task_tracker
+            logger.info("DraftGeneratorStrategy 已绑定 task_tracker")
+        if draft_strategy is not None:
+            from aigateway_core.pipelines.generation.draft.draft_cleaner import (
+                DraftSessionCleaner,
+            )
+            store_dir = getattr(draft_strategy, "_store_dir", "/app/data/drafts")
+            retention_hours = getattr(
+                getattr(draft_strategy, "_config", None), "retention_period_hours", 24
+            )
+            draft_session_cleaner = DraftSessionCleaner(
+                store_dir=store_dir,
+                session_ttl_hours=retention_hours,
+                strategy=draft_strategy,
+            )
+            draft_session_cleaner.start()
+            app.state.draft_session_cleaner = draft_session_cleaner
+            logger.info(
+                "DraftSessionCleaner 已启动 (store_dir=%s, ttl=%dh)",
+                store_dir, retention_hours,
+            )
+    except Exception as exc:
+        logger.warning("DraftSessionCleaner 启动失败: %s", exc)
+
     # 挂载到 app.state，供 FastAPI 中间件/依赖注入使用
     app.state.sqlite_store = sqlite_store
     app.state.key_store = sqlite_store  # backward compat: admin_routes references key_store
@@ -615,6 +646,16 @@ async def lifespan(app: "FastAPI"):
         await sqlite_store.prune_ledger(keep_days=90)
     except Exception as exc:
         logger.warning("启动清理成本账本失败: %s", exc)
+
+    # 启动时清理 code rag 孤儿任务(网关重启打断的非终态导入任务标记 failed)
+    # + 清理 /tmp/code_rag_folder_* 与 /data/code_graphs/*/.tmp/ 残留临时目录
+    try:
+        from aigateway_api.code_rag_routes import sweep_orphaned_tasks
+        swept = sweep_orphaned_tasks(app.state)
+        if swept:
+            logger.info("code rag 孤儿任务清理完成: %d 个", swept)
+    except Exception as exc:
+        logger.warning("启动清理 code rag 孤儿任务失败: %s", exc)
 
     # 初始化 5 维度 Debug 开关(PR2 2026-07-05)。attach 到 ConfigManager.on_reload
     # 后,后续 config.yaml 变更自动 atomic swap;首次加载在 attach 内完成。
@@ -724,6 +765,13 @@ async def lifespan(app: "FastAPI"):
     # 停止 L3 清理调度器
     if hasattr(app.state, 'l3_cleanup_scheduler') and app.state.l3_cleanup_scheduler:
         await app.state.l3_cleanup_scheduler.stop()
+    # 停止草稿会话清理器
+    if hasattr(app.state, 'draft_session_cleaner') and app.state.draft_session_cleaner:
+        try:
+            await app.state.draft_session_cleaner.stop()
+            logger.info("DraftSessionCleaner 已停止")
+        except Exception as exc:
+            logger.warning("停止 DraftSessionCleaner 出错: %s", exc)
 
     if redis_mgr is not None:
         try:

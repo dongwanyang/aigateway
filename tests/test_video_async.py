@@ -152,3 +152,75 @@ async def test_retrieve_video_polls_status():
 
     assert result["status"] == "in_progress"
     assert result["progress"] == 50
+
+
+@pytest.mark.asyncio
+async def test_video_429_rate_limit():
+    """429 rate limit should raise via raise_for_status."""
+    b = _bridge()
+
+    async def fake_post(url, headers, json):
+        resp = MagicMock()
+        resp.status_code = 429
+        resp.raise_for_status = MagicMock(side_effect=Exception("429 Too Many Requests"))
+        return resp
+
+    with patch("aigateway_core.route.bridge.litellm_bridge.httpx.AsyncClient") as MC:
+        client = MagicMock()
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=None)
+        client.post = AsyncMock(side_effect=fake_post)
+        MC.return_value = client
+        with pytest.raises(Exception, match="429"):
+            await b._do_video_generation(messages=[{"role": "user", "content": "x"}], model="agnes-video-v2.0")
+
+
+@pytest.mark.asyncio
+async def test_video_timeout_error():
+    """Timeout should raise via raise_for_status."""
+    b = _bridge()
+
+    async def fake_post(url, headers, json):
+        resp = MagicMock()
+        resp.status_code = 504
+        resp.raise_for_status = MagicMock(side_effect=Exception("504 Gateway Timeout"))
+        return resp
+
+    with patch("aigateway_core.route.bridge.litellm_bridge.httpx.AsyncClient") as MC:
+        client = MagicMock()
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=None)
+        client.post = AsyncMock(side_effect=fake_post)
+        MC.return_value = client
+        with pytest.raises(Exception, match="504"):
+            await b._do_video_generation(messages=[{"role": "user", "content": "x"}], model="agnes-video-v2.0")
+
+
+@pytest.mark.asyncio
+async def test_video_submit_b64_json():
+    """b64_json response format should be normalized to chat completions."""
+    b = _bridge()
+
+    async def fake_post(url, headers, json):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {"id": "video_123", "object": "video", "status": "queued",
+                                  "progress": 0, "created_at": 1, "model": "agnes-video-v2.0",
+                                  "prompt": json["prompt"], "seconds": "4", "size": "720x1280"}
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+    client.post = AsyncMock(side_effect=fake_post)
+
+    with patch("aigateway_core.route.bridge.litellm_bridge.httpx.AsyncClient") as MC:
+        MC.return_value = client
+        result = await b._do_video_generation(
+            messages=[{"role": "user", "content": "生成一段跳舞视频"}], model="agnes-video-v2.0"
+        )
+
+    msg = result["choices"][0]["message"]["content"]
+    assert "video_123" in msg
+    assert "/v1/videos/video_123" in msg

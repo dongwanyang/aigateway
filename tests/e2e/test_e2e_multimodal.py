@@ -286,3 +286,43 @@ class TestE2EMultimodal:
         assert "data" in data
         assert isinstance(data["data"], list)
         assert len(data["data"]) > 0
+
+
+class TestE2EWithRealBridgeSubset:
+    """端到端测试：部分真实 bridge 调用（不走外部 API）。"""
+
+    @pytest.mark.asyncio
+    async def test_model_resolution_calls_real_bridge(self):
+        """Bypass mock bridge for model resolution tests (no external API calls)."""
+        from aigateway_api.main import app as real_app
+        from aigateway_core.route.bridge.litellm_bridge import LiteLLMBridge
+
+        # 创建真实 bridge 实例但不配置 providers
+        bridge = LiteLLMBridge(config={})  # No external providers configured
+        real_app.state.litellm_bridge = bridge
+
+        # Override list_models to return a mock list
+        async def mock_list_models():
+            return [{"id": "gpt-4o", "object": "model"}]
+        bridge.list_models = mock_list_models
+
+        from fastapi.testclient import TestClient
+        with TestClient(real_app) as client:
+            resp = client.get("/v1/models")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "data" in data
+        assert isinstance(data["data"], list)
+        assert len(data["data"]) > 0
+
+    @pytest.mark.asyncio
+    async def test_bridge_auto_resolver_no_op(self):
+        """Test that model resolution logic runs without errors but doesn't hit external APIs."""
+        from aigateway_core.route.bridge.litellm_bridge import LiteLLMBridge
+
+        bridge = LiteLLMBridge(config={})  # No providers
+        result = await bridge._resolve_by_intent(intent="understanding", model_hint=None)
+
+        assert "error" in result
+        assert result["error"]["code"] == "no_model_for_intent"

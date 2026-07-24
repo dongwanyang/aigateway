@@ -10,12 +10,17 @@ interface DraftCardProps {
 
 /** 草稿预览/确认/拒绝卡片。挂在 generation 意图助手消息上。 */
 export default function DraftCard({ draft, onConfirm, onReject }: DraftCardProps) {
-  const busy = draft.status === 'confirming' || draft.status === 'rejecting'
+  const busy = draft.status === 'generating' || draft.status === 'confirming' || draft.status === 'rejecting'
   const terminal = draft.status === 'expired' || draft.status === 'error'
 
   return (
     <div className="flex flex-col gap-2" style={{ minWidth: 220 }}>
       {/* 状态文案 */}
+      {draft.status === 'generating' && (
+        <span className="text-xs flex items-center gap-1" style={{ color: 'var(--color-text-secondary)' }}>
+          <Loader2 size={12} className="animate-spin" /> 正在生成草稿预览…
+        </span>
+      )}
       {draft.status === 'pending' && (
         <span className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
           草稿预览({draft.mediaType === 'video' ? '视频' : '图片'})· 确认后高清放大

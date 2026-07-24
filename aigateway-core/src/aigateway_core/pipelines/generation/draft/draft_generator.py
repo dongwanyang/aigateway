@@ -31,6 +31,7 @@ from aigateway_core.pipelines.generation._common.config import DraftWorkflowConf
 from aigateway_core.pipelines.generation._common.exceptions import DraftWorkflowError
 from aigateway_core.pipelines.generation._common.models import (
     DRAFT_STATUS_CONFIRMED,
+    DRAFT_STATUS_GENERATING,
     DRAFT_STATUS_PENDING,
     DraftResult,
     GenerationRequest,
@@ -40,8 +41,10 @@ from aigateway_core.shared.integration_configs import ComfyUIConfig
 
 logger = logging.getLogger(__name__)
 
-# Redis key prefix for draft storage
+# Redis key prefix for draft storage (元数据/状态; previews/result bytes 落盘文件)
 _DRAFT_KEY_PREFIX = "aigateway:draft"
+# Redis set: 记录一个 session 下所有 draft_id，供 delete_session 批量删 key
+_DRAFT_SESSION_KEY_PREFIX = "aigateway:draft:session"
 
 # Default negative prompt for image generation
 _DEFAULT_NEGATIVE_PROMPT = "ugly, blurry, low quality, distorted, deformed"
@@ -63,14 +66,24 @@ class DraftGeneratorStrategy:
     """草图生成器 — 管理 Draft-to-HiRes 工作流.
 
     负责生成低分辨率草图供用户预览确认，确认后执行高清放大，
-    拒绝后重新生成。所有草图存储在 Redis 中，带 TTL 自动过期。
+    拒绝后重新生成。
+
+    存储双层设计：
+    - Redis (`aigateway:draft:{draft_id}`) 存轻量元数据 + status，
+      供前端轮询快速读状态（不读 bytes）。
+    - 文件 (`{store_dir}/{session_id}/{draft_id}/`) 存 previews/result bytes
+      + meta.json。随会话生命周期由 DraftSessionCleaner 清理，不受 Redis TTL 影响。
+    - 生成异步化：submit_draft 立即返回 draft_id (status=generating)，
+      后台 _generate_draft_async 跑 ComfyUI，完成写 preview.bin + status=pending。
 
     当 ComfyUI 服务可用时，使用 ComfyUI API 执行真实图像/视频生成。
     当 ComfyUI 不可用或执行失败时，回退到占位实现。
 
     Attributes:
         _config: Draft 工作流配置
-        _redis_client: Redis 客户端实例（需支持 async get/set/delete/expire）
+        _redis_client: Redis 客户端实例（需支持 async get/set/delete/expire/sadd/srem/smembers）
+        _store_dir: 草稿文件存储根目录
+        _task_tracker: TaskTracker 实例（延迟绑定，追踪异步生成任务状态）
         _comfyui_config: ComfyUI API 连接配置
         _comfyui_available: ComfyUI 服务是否可用
     """
@@ -80,6 +93,8 @@ class DraftGeneratorStrategy:
         config: DraftWorkflowConfig,
         redis_client: Any = None,
         comfyui_config: Optional[ComfyUIConfig] = None,
+        store_dir: Optional[str] = None,
+        task_tracker: Any = None,
     ) -> None:
         """初始化 DraftGeneratorStrategy.
 
@@ -87,9 +102,13 @@ class DraftGeneratorStrategy:
             config: Draft-to-HiRes 工作流配置
             redis_client: Redis 客户端实例。若为 None，则使用内存字典模拟。
             comfyui_config: ComfyUI API 连接配置。若为 None，使用默认配置。
+            store_dir: 草稿文件存储根目录。None 时取 config.store_dir。
+            task_tracker: TaskTracker 实例。可延迟绑定（由 main.py 注入）。
         """
         self._config = config
         self._redis_client = redis_client
+        self._store_dir = store_dir or getattr(config, "store_dir", "/app/data/drafts")
+        self._task_tracker = task_tracker
         self._comfyui_config = comfyui_config or ComfyUIConfig()
         self._comfyui_available: bool = False
         # litellm_bridge 延迟绑定（由 main.py 注入），用于低分辨率预览生成
@@ -103,93 +122,275 @@ class DraftGeneratorStrategy:
         self._sr_infer_lock = threading.Lock()
         # In-memory fallback when no Redis client is provided (for testing)
         self._memory_store: Dict[str, str] = {}
+        # session → set(draft_id) 的内存镜像（无 Redis 时测试用）
+        self._memory_session_index: Dict[str, set] = {}
+        # 后台生成任务强引用集合。asyncio.create_task 返回的 Task 仅被事件循环的
+        # WeakSet 持有，CPython GC 可能在 submit_draft 返回后回收未完成的协程，
+        # 导致 Redis 状态永久卡在 generating、前端轮询到超时。这里持有强引用，
+        # 任务完成后通过 add_done_callback 自动移除。
+        self._bg_tasks: set = set()
 
     async def generate_draft(
         self,
         request: GenerationRequest,
         config: DraftWorkflowConfig,
         keyframe_count: Optional[int] = None,
+        chat_session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        group_id: Optional[str] = None,
     ) -> DraftResult:
-        """生成低分辨率草图/关键帧.
+        """提交草稿生成任务（异步）— 立即返回 draft_id，后台生成预览.
+
+        生成被拆为两阶段（方案 B 异步化）：
+        1. submit_draft：生成 draft_id、写 meta（status=generating）、注册 TaskTracker、
+           asyncio.create_task 起后台生成、立即返回 DraftResult（previews 空，status=generating）。
+           不阻塞 dispatcher —— 前端拿到 draft_id 后轮询 GET /admin/draft/{id}/preview。
+        2. _generate_draft_async（后台）：跑 ComfyUI 生成，完成写 preview.bin + status=pending。
 
         图片请求: 生成低分辨率预览（单张，默认 1024x1024）
         视频请求: 按时间间隔动态生成关键帧
-            - 默认每 5 秒一帧，最少 2 帧（首末帧）
-            - 用户可显式指定 keyframe_count 覆盖
 
         Args:
             request: 生成请求
             config: Draft 工作流配置（允许运行时覆盖）
             keyframe_count: 用户显式指定的关键帧数量，覆盖间隔计算
+            chat_session_id: 聊天会话 ID（文件存储/会话级清理用）
+            user_id: 草稿所有者
+            group_id: 草稿所属群组
 
         Returns:
-            DraftResult 包含 draft_id、previews、过期时间等
+            DraftResult（status=generating，previews 为空）。前端据 draft_id 轮询取预览。
         """
-        # 探测 ComfyUI 服务是否可用（原代码从未调用，_comfyui_available 恒为 False，
-        # 导致永远走字符串占位）。这里在每次生成前探测一次，可用则走真生成，
-        # 不可用则走占位降级（_generate_image_preview 等已实现）。
-        try:
-            await self._check_comfyui()
-        except Exception as exc:
-            logger.warning("ComfyUI 探测失败，走占位降级: %s", exc)
+        return await self.submit_draft(
+            request, config, keyframe_count, chat_session_id, user_id, group_id
+        )
 
+    async def submit_draft(
+        self,
+        request: GenerationRequest,
+        config: DraftWorkflowConfig,
+        keyframe_count: Optional[int] = None,
+        chat_session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        group_id: Optional[str] = None,
+    ) -> DraftResult:
+        """提交草稿生成任务（异步）— 立即返回 draft_id (status=generating)."""
         draft_id = uuid.uuid4().hex
         now = time.time()
         ttl_seconds = config.retention_period_hours * 3600
         expires_at = now + ttl_seconds
 
-        # Determine if this is a video request
         is_video = self._is_video_request(request)
+        media_type = "video" if is_video else "image"
 
-        if is_video:
-            # Video: generate keyframes
-            num_keyframes = self._calculate_keyframe_count(
-                request, config, keyframe_count
-            )
-            previews = await self._generate_video_previews_with_comfyui(
-                request, config, num_keyframes
-            )
-        else:
-            # Image: single low-res preview (config.draft_resolution)
-            previews = [await self._generate_image_preview_with_comfyui(request, config)]
-
-        # Build generation params snapshot
+        # generation_params 快照（后台 task 也要用，这里先建好）
         generation_params: Dict[str, Any] = {
             "prompt": request.prompt,
             "target_resolution": list(request.target_resolution),
-            "media_type": "video" if is_video else "image",
+            "media_type": media_type,
             "draft_resolution": list(config.draft_resolution),
             "request_id": request.request_id,
         }
         if is_video and keyframe_count is not None:
             generation_params["explicit_keyframe_count"] = keyframe_count
 
+        # 占位 DraftResult：status=generating，previews 空
         draft = DraftResult(
             draft_id=draft_id,
-            previews=previews,
+            previews=[],
             generation_params=generation_params,
             created_at=now,
             expires_at=expires_at,
             attempt_number=1,
             max_attempts=config.max_regeneration_attempts,
-            status=DRAFT_STATUS_PENDING,
+            status=DRAFT_STATUS_GENERATING,
+            media_type=media_type,
+            session_id=chat_session_id,
+            user_id=user_id,
+            group_id=group_id,
         )
 
-        # Store in Redis with TTL
+        # 写 meta + Redis 元数据（status=generating）—— 前端轮询据此知道在生成中
         await self._store_draft(draft, ttl_seconds)
 
+        # 注册 TaskTracker（供 /admin/chat/tasks 列出未完成任务）
+        if self._task_tracker is not None:
+            try:
+                await self._task_tracker.register(
+                    task_type="draft",
+                    task_id=draft_id,
+                    metadata={
+                        "session_id": chat_session_id,
+                        "user_id": user_id,
+                        "group_id": group_id,
+                        "media_type": media_type,
+                        "request_id": request.request_id,
+                    },
+                    ttl_seconds=ttl_seconds,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("TaskTracker register draft failed: %s", exc)
+
+        # 起后台生成任务（不 await —— 立即返回 draft_id）。
+        # 必须持有强引用：事件循环仅用 WeakSet 跟踪 Task，若被 GC 回收则协程
+        # 永不执行、Redis 状态卡 generating（见 _bg_tasks 注释）。
+        bg_task = asyncio.create_task(
+            self._generate_draft_async(
+                draft_id=draft_id,
+                request=request,
+                config=config,
+                keyframe_count=keyframe_count,
+                is_video=is_video,
+                media_type=media_type,
+                generation_params=generation_params,
+                ttl_seconds=ttl_seconds,
+                expires_at=expires_at,
+                chat_session_id=chat_session_id,
+                user_id=user_id,
+                group_id=group_id,
+            ),
+            name=f"draft-generate-{draft_id}",
+        )
+        self._bg_tasks.add(bg_task)
+        bg_task.add_done_callback(self._bg_tasks.discard)
+
         logger.info(
-            "generation_optimization.draft_generator.draft_created",
+            "generation_optimization.draft_generator.draft_submitted",
             extra={
                 "draft_id": draft_id,
-                "media_type": "video" if is_video else "image",
-                "preview_count": len(previews),
+                "media_type": media_type,
                 "expires_at": expires_at,
                 "request_id": request.request_id,
             },
         )
 
         return draft
+
+    async def _generate_draft_async(
+        self,
+        draft_id: str,
+        request: GenerationRequest,
+        config: DraftWorkflowConfig,
+        keyframe_count: Optional[int],
+        is_video: bool,
+        media_type: str,
+        generation_params: Dict[str, Any],
+        ttl_seconds: int,
+        expires_at: float,
+        chat_session_id: Optional[str],
+        user_id: Optional[str],
+        group_id: Optional[str],
+    ) -> None:
+        """后台生成预览（由 submit_draft 用 asyncio.create_task 起动）.
+
+        完成后：写 preview.bin + 更新 meta/Redis status=pending + TaskTracker succeeded。
+        失败：status=failed + TaskTracker failed，错误写 meta。
+        """
+        start_time = time.monotonic()
+        try:
+            # 探测 ComfyUI（每次生成前探一次，可用则真生成，否则占位降级）
+            try:
+                await self._check_comfyui()
+            except Exception as exc:
+                logger.warning("ComfyUI 探测失败，走占位降级: %s", exc)
+
+            if is_video:
+                num_keyframes = self._calculate_keyframe_count(
+                    request, config, keyframe_count
+                )
+                previews = await self._generate_video_previews_with_comfyui(
+                    request, config, num_keyframes
+                )
+            else:
+                previews = [await self._generate_image_preview_with_comfyui(request, config)]
+
+            draft = DraftResult(
+                draft_id=draft_id,
+                previews=previews,
+                generation_params=generation_params,
+                created_at=time.time(),
+                expires_at=expires_at,
+                attempt_number=1,
+                max_attempts=config.max_regeneration_attempts,
+                status=DRAFT_STATUS_PENDING,
+                media_type=media_type,
+                session_id=chat_session_id,
+                user_id=user_id,
+                group_id=group_id,
+            )
+            await self._store_draft(draft, max(1, int(expires_at - time.time())))
+
+            if self._task_tracker is not None:
+                try:
+                    await self._task_tracker.update_status(
+                        "draft", draft_id, "succeeded",
+                        metadata={"preview_count": len(previews)},
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("TaskTracker update succeeded failed: %s", exc)
+
+            logger.info(
+                "generation_optimization.draft_generator.draft_created",
+                extra={
+                    "draft_id": draft_id,
+                    "media_type": media_type,
+                    "preview_count": len(previews),
+                    "expires_at": expires_at,
+                    "request_id": request.request_id,
+                    "duration_ms": round((time.monotonic() - start_time) * 1000, 2),
+                },
+            )
+        except Exception as exc:
+            logger.error(
+                "generation_optimization.draft_generator.async_failed",
+                extra={"draft_id": draft_id, "error": str(exc)},
+                exc_info=True,
+            )
+            # 标记 failed（写 meta + Redis，前端轮询据此报错）
+            try:
+                draft_dir = self._ensure_draft_dir(chat_session_id, draft_id)
+                meta = self._read_meta(draft_dir) or {}
+                meta.update({
+                    "draft_id": draft_id,
+                    "session_id": chat_session_id,
+                    "user_id": user_id,
+                    "group_id": group_id,
+                    "media_type": media_type,
+                    "status": "failed",
+                    "expires_at": expires_at,
+                    "error": str(exc),
+                })
+                tmp = self._meta_path(draft_dir) + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(meta, f)
+                os.replace(tmp, self._meta_path(draft_dir))
+
+                # 更新 Redis 元数据 status=failed
+                key = self._make_redis_key(draft_id)
+                if self._redis_client is not None:
+                    raw = await self._redis_client.get(key)
+                else:
+                    raw = self._memory_store.get(key)
+                if raw is not None:
+                    raw = raw.decode() if isinstance(raw, bytes) else raw
+                    data = json.loads(raw)
+                    data["status"] = "failed"
+                    ttl_remaining = max(1, int(expires_at - time.time()))
+                    if self._redis_client is not None:
+                        await self._redis_client.set(key, json.dumps(data), ex=ttl_remaining)
+                    else:
+                        self._memory_store[key] = json.dumps(data)
+            except Exception:  # noqa: BLE001
+                logger.error("failed to mark draft %s as failed", draft_id, exc_info=True)
+
+            if self._task_tracker is not None:
+                try:
+                    await self._task_tracker.update_status(
+                        "draft", draft_id, "failed", metadata={"error": str(exc)}
+                    )
+                except Exception as exc2:  # noqa: BLE001
+                    logger.debug("TaskTracker update failed failed: %s", exc2)
+
 
     async def confirm_draft(self, draft_id: str) -> UpscaleResult:
         """确认草图并执行高清放大.
@@ -261,6 +462,14 @@ class DraftGeneratorStrategy:
             algorithm_used=algorithm_used,
             duration_ms=duration_ms,
         )
+
+        # 持久化高清结果到文件（修复原"confirm 后 output_data 仅内存返回、未落盘"bug）。
+        # GET /admin/draft/{id}/result 通过 get_result_bytes 读取此文件，刷新后可重取。
+        try:
+            draft_dir = self._ensure_draft_dir(draft.session_id, draft_id)
+            self._write_result_bytes(draft_dir, output_data)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("draft result persist failed (draft_id=%s): %s", draft_id, exc)
 
         logger.info(
             "generation_optimization.draft_generator.draft_confirmed",
@@ -1332,6 +1541,10 @@ class DraftGeneratorStrategy:
             attempt_number=old_draft.attempt_number + 1,
             max_attempts=old_draft.max_attempts,
             status=DRAFT_STATUS_PENDING,
+            media_type=media_type,
+            session_id=old_draft.session_id,
+            user_id=old_draft.user_id,
+            group_id=old_draft.group_id,
         )
 
         # Store new draft
@@ -1350,13 +1563,14 @@ class DraftGeneratorStrategy:
         return new_draft
 
     # ===================================================================
-    # 内部方法 — Redis 存取
+    # 内部方法 — 双层存储（Redis 元数据 + 文件 bytes）
     # ===================================================================
 
     def _make_redis_key(self, draft_id: str) -> str:
         """构建 Redis 键名.
 
         格式: aigateway:draft:{draft_id}
+        Redis 只存轻量元数据 + status；previews/result bytes 落盘文件。
 
         Args:
             draft_id: 草图唯一标识
@@ -1366,53 +1580,181 @@ class DraftGeneratorStrategy:
         """
         return f"{_DRAFT_KEY_PREFIX}:{draft_id}"
 
-    async def _store_draft(self, draft: DraftResult, ttl_seconds: int) -> None:
-        """将草图存储到 Redis.
+    def _make_session_index_key(self, session_id: str) -> str:
+        """构建 session→draft_id 集合的 Redis 键名 (供 delete_session 批量删)."""
+        return f"{_DRAFT_SESSION_KEY_PREFIX}:{session_id}"
 
-        将 DraftResult 序列化为 JSON 存储，previews 数据编码为
-        base64 字符串列表。
+    def _draft_dir(self, session_id: Optional[str], draft_id: str) -> str:
+        """草稿文件目录路径: {store_dir}/{session_id or 'unknown'}/{draft_id}/.
+
+        仅计算路径，**不创建目录**。session_id 缺失时归入 'unknown' 桶。
+        读路径（_load_draft / get_result_bytes / delete_draft）调用本函数——
+        若此处 makedirs，会对 Redis key 已过期但文件已被 cleaner 删除的草稿
+        重建空目录，cleaner 的 mtime 兜底要到 24h 后才回收，造成磁盘泄漏。
+        需要确保目录存在的写路径请改用 _ensure_draft_dir。
+        """
+        sid = session_id or "unknown"
+        return os.path.join(self._store_dir, sid, draft_id)
+
+    def _ensure_draft_dir(self, session_id: Optional[str], draft_id: str) -> str:
+        """返回草稿目录路径并确保其存在（仅写路径调用）。"""
+        path = self._draft_dir(session_id, draft_id)
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    @staticmethod
+    def _meta_path(draft_dir: str) -> str:
+        return os.path.join(draft_dir, "meta.json")
+
+    def _write_meta(self, draft_dir: str, draft: DraftResult) -> None:
+        """写 meta.json（含 expires_at，供 DraftSessionCleaner 判过期）."""
+        meta = {
+            "draft_id": draft.draft_id,
+            "session_id": draft.session_id,
+            "user_id": draft.user_id,
+            "group_id": draft.group_id,
+            "media_type": draft.media_type,
+            "status": draft.status,
+            "expires_at": draft.expires_at,
+            "created_at": draft.created_at,
+            "attempt_number": draft.attempt_number,
+            "max_attempts": draft.max_attempts,
+            "generation_params": draft.generation_params,
+        }
+        tmp = self._meta_path(draft_dir) + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(meta, f)
+        os.replace(tmp, self._meta_path(draft_dir))  # 原子写，防 cleaner 读半截
+
+    def _read_meta(self, draft_dir: str) -> Optional[Dict[str, Any]]:
+        """读 meta.json；不存在/损坏返回 None."""
+        path = self._meta_path(draft_dir)
+        if not os.path.isfile(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError, ValueError):
+            return None
+
+    def _write_preview_bytes(
+        self, draft_dir: str, previews: List[bytes], media_type: str
+    ) -> None:
+        """写预览 bytes: 图片单文件 preview.bin；视频多文件 preview_{i}.bin."""
+        if not previews:
+            return
+        if media_type == "video":
+            for i, p in enumerate(previews):
+                with open(os.path.join(draft_dir, f"preview_{i}.bin"), "wb") as f:
+                    f.write(p)
+        else:
+            with open(os.path.join(draft_dir, "preview.bin"), "wb") as f:
+                f.write(previews[0])
+
+    def _read_preview_bytes(
+        self, draft_dir: str, media_type: str
+    ) -> List[bytes]:
+        """读预览 bytes. 文件缺失返回空列表."""
+        result: List[bytes] = []
+        if media_type == "video":
+            i = 0
+            while True:
+                p = os.path.join(draft_dir, f"preview_{i}.bin")
+                if not os.path.isfile(p):
+                    break
+                with open(p, "rb") as f:
+                    result.append(f.read())
+                i += 1
+        else:
+            p = os.path.join(draft_dir, "preview.bin")
+            if os.path.isfile(p):
+                with open(p, "rb") as f:
+                    result.append(f.read())
+        return result
+
+    def _write_result_bytes(self, draft_dir: str, data: bytes) -> None:
+        """写高清结果 bytes (confirm 后持久化，修复原'高清图未存'bug)."""
+        with open(os.path.join(draft_dir, "result.bin"), "wb") as f:
+            f.write(data)
+
+    def _read_result_bytes(self, draft_dir: str) -> Optional[bytes]:
+        """读高清结果 bytes；不存在返回 None."""
+        p = os.path.join(draft_dir, "result.bin")
+        if not os.path.isfile(p):
+            return None
+        with open(p, "rb") as f:
+            return f.read()
+
+    async def _index_draft_to_session(
+        self, session_id: Optional[str], draft_id: str, ttl_seconds: int
+    ) -> None:
+        """把 draft_id 加入 session 索引集合（delete_session 批量删 key 用）."""
+        if not session_id:
+            return
+        key = self._make_session_index_key(session_id)
+        if self._redis_client is not None:
+            try:
+                await self._redis_client.sadd(key, draft_id)
+                await self._redis_client.expire(key, ttl_seconds)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("session index sadd failed: %s", exc)
+        else:
+            self._memory_session_index.setdefault(session_id, set()).add(draft_id)
+
+    async def _store_draft(self, draft: DraftResult, ttl_seconds: int) -> None:
+        """存草图元数据到 Redis + previews bytes 到文件.
+
+        Redis 只存轻量元数据（含 status/session_id/user_id/group_id/media_type），
+        不再存 previews base64（大 value 且易被 TTL 删）。previews bytes 落盘
+        {store_dir}/{session_id}/{draft_id}/preview*.bin + meta.json。
 
         Args:
             draft: 草图结果
             ttl_seconds: TTL 秒数
         """
-        import base64
+        draft_dir = self._ensure_draft_dir(draft.session_id, draft.draft_id)
 
-        key = self._make_redis_key(draft.draft_id)
+        # previews bytes 落盘（generating 阶段 previews 为空，仅建目录 + meta）
+        if draft.previews:
+            self._write_preview_bytes(draft_dir, draft.previews, draft.media_type)
 
-        # Serialize: convert previews bytes to base64 strings
+        # meta.json（cleaner 据此判过期；原子写）
+        self._write_meta(draft_dir, draft)
+
+        # Redis 元数据
         serialized = {
             "draft_id": draft.draft_id,
-            "previews_b64": [
-                base64.b64encode(p).decode("ascii") for p in draft.previews
-            ],
+            "session_id": draft.session_id,
+            "user_id": draft.user_id,
+            "group_id": draft.group_id,
+            "media_type": draft.media_type,
             "generation_params": draft.generation_params,
             "created_at": draft.created_at,
             "expires_at": draft.expires_at,
             "attempt_number": draft.attempt_number,
             "max_attempts": draft.max_attempts,
             "status": draft.status,
+            "store_dir": draft_dir,  # 供 _load_draft 定位文件
         }
-
         data = json.dumps(serialized)
 
         if self._redis_client is not None:
-            await self._redis_client.set(key, data, ex=ttl_seconds)
+            await self._redis_client.set(key := self._make_redis_key(draft.draft_id), data, ex=ttl_seconds)
         else:
-            # In-memory fallback
-            self._memory_store[key] = data
+            self._memory_store[self._make_redis_key(draft.draft_id)] = data
+
+        await self._index_draft_to_session(draft.session_id, draft.draft_id, ttl_seconds)
 
     async def _load_draft(self, draft_id: str) -> Optional[DraftResult]:
-        """从 Redis 加载草图.
+        """从 Redis 加载草图元数据; previews bytes 按需从文件懒加载.
 
         Args:
             draft_id: 草图唯一标识
 
         Returns:
-            DraftResult 或 None
+            DraftResult 或 None。previews 可能为空（generating 阶段或文件丢失），
+            调用方需要完整 previews 时显式调 _read_preview_bytes。
         """
-        import base64
-
         key = self._make_redis_key(draft_id)
 
         if self._redis_client is not None:
@@ -1435,10 +1777,11 @@ class DraftGeneratorStrategy:
             )
             return None
 
-        # Deserialize previews from base64
-        previews = [
-            base64.b64decode(p) for p in data.get("previews_b64", [])
-        ]
+        media_type = data.get("media_type", "image")
+        draft_dir = data.get("store_dir") or self._draft_dir(data.get("session_id"), draft_id)
+
+        # previews 懒加载：generating 阶段无文件，返回空列表（调用方按需再读）
+        previews = self._read_preview_bytes(draft_dir, media_type) if data.get("status") != DRAFT_STATUS_GENERATING else []
 
         return DraftResult(
             draft_id=data["draft_id"],
@@ -1449,22 +1792,134 @@ class DraftGeneratorStrategy:
             attempt_number=data.get("attempt_number", 1),
             max_attempts=data.get("max_attempts", self._config.max_regeneration_attempts),
             status=data.get("status", DRAFT_STATUS_PENDING),
+            media_type=media_type,
+            session_id=data.get("session_id"),
+            user_id=data.get("user_id"),
+            group_id=data.get("group_id"),
         )
 
-    async def _delete_draft(self, draft_id: str) -> None:
-        """从 Redis 删除草图（立即释放资源）.
+    async def get_result_bytes(self, draft_id: str) -> bytes:
+        """读取 confirm 后的高清结果 bytes (GET /admin/draft/{id}/result 用).
+
+        Args:
+            draft_id: 草图唯一标识
+
+        Returns:
+            高清图 bytes
+
+        Raises:
+            DraftWorkflowError: 草稿不存在或尚未确认（无 result.bin）
+        """
+        draft = await self._load_draft(draft_id)
+        if draft is None:
+            raise DraftWorkflowError(f"Draft not found or expired: {draft_id}")
+        draft_dir = self._draft_dir(draft.session_id, draft_id)
+        result = self._read_result_bytes(draft_dir)
+        if result is None:
+            raise DraftWorkflowError(
+                f"Draft result not available (not confirmed yet): {draft_id}"
+            )
+        return result
+
+    async def delete_draft(self, draft_id: str) -> None:
+        """删除单个草图: rmtree 文件目录 + 删 Redis 元数据 key.
 
         Args:
             draft_id: 草图唯一标识
         """
-        key = self._make_redis_key(draft_id)
+        import shutil
 
+        # 先读 meta 拿 session_id 定位目录（Redis key 可能已过期但文件还在）
+        draft = await self._load_draft(draft_id)
+        session_id = draft.session_id if draft else None
+        draft_dir = self._draft_dir(session_id, draft_id)
+
+        shutil.rmtree(draft_dir, ignore_errors=True)
+
+        key = self._make_redis_key(draft_id)
         if self._redis_client is not None:
             await self._redis_client.delete(key)
         else:
             self._memory_store.pop(key, None)
 
+        if session_id:
+            skey = self._make_session_index_key(session_id)
+            if self._redis_client is not None:
+                try:
+                    await self._redis_client.srem(skey, draft_id)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("session index srem failed: %s", exc)
+            else:
+                self._memory_session_index.get(session_id, set()).discard(draft_id)
+
         logger.debug(
             "generation_optimization.draft_generator.draft_deleted",
             extra={"draft_id": draft_id},
         )
+
+    async def _delete_draft(self, draft_id: str) -> None:
+        """从 Redis 删除草图元数据（保留文件，供 delete_session 统一 rmtree）.
+
+        旧接口，保留向后兼容。新代码用 delete_draft（文件+Redis 一起删）。
+        """
+        key = self._make_redis_key(draft_id)
+        if self._redis_client is not None:
+            await self._redis_client.delete(key)
+        else:
+            self._memory_store.pop(key, None)
+
+    async def delete_session(self, session_id: str) -> int:
+        """删除一个会话的所有草稿 (DELETE /admin/drafts/session/{id} 用).
+
+        rmtree {store_dir}/{session_id}/ 整个目录 + 删该 session 所有 Redis draft key。
+
+        Args:
+            session_id: 聊天会话 ID
+
+        Returns:
+            删除的草稿数量
+        """
+        import shutil
+
+        # 1) 收集该 session 下所有 draft_id（从 Redis set 或目录扫描）
+        draft_ids: list[str] = []
+        if self._redis_client is not None:
+            skey = self._make_session_index_key(session_id)
+            try:
+                members = await self._redis_client.smembers(skey)
+                draft_ids = [m.decode() if isinstance(m, bytes) else m for m in members]
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("session index smembers failed: %s", exc)
+        else:
+            draft_ids = list(self._memory_session_index.get(session_id, set()))
+
+        # 2) 删每个 draft 的 Redis key
+        deleted = 0
+        for draft_id in draft_ids:
+            key = self._make_redis_key(draft_id)
+            if self._redis_client is not None:
+                await self._redis_client.delete(key)
+            else:
+                self._memory_store.pop(key, None)
+            deleted += 1
+
+        # 3) 删 session 索引 set
+        if self._redis_client is not None:
+            try:
+                await self._redis_client.delete(self._make_session_index_key(session_id))
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("session index delete failed: %s", exc)
+        else:
+            self._memory_session_index.pop(session_id, None)
+
+        # 4) rmtree 整个 session 目录（覆盖 Redis 已过期但文件残留的情况）
+        session_dir = os.path.join(self._store_dir, session_id)
+        if os.path.isdir(session_dir):
+            shutil.rmtree(session_dir, ignore_errors=True)
+
+        logger.info(
+            "generation_optimization.draft_generator.session_deleted",
+            extra={"session_id": session_id, "deleted_count": deleted},
+        )
+        return deleted
+

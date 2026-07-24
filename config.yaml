@@ -109,14 +109,15 @@ providers:
     model_grouper:
     - models:
       - name: agnes-2.0-flash
-        capabilities:
-        - text
+        modality:
+        - llm
+        - mllm
       - name: agnes-image-2.1-flash
-        capabilities:
-        - image
+        modality:
+        - generative
       - name: agnes-video-v2.0
-        capabilities:
-        - video
+        modality:
+        - generative
       fallback_models: []
       pricing:
         agnes-2.0-flash:
@@ -137,8 +138,9 @@ providers:
     model_grouper:
     - models:
       - name: deepseek-v4-flash
-        capabilities:
-        - text
+        modality:
+        - llm
+        - mllm
       fallback_models: []
       pricing:
         deepseek-v4-flash:
@@ -153,14 +155,17 @@ providers:
     model_grouper:
     - models:
       - name: glm-5.2
-        capabilities:
-        - text
+        modality:
+        - llm
+        - mllm
       - name: deepseek-v4-pro
-        capabilities:
-        - text
+        modality:
+        - llm
+        - mllm
       - name: kimi-k2.7-code
-        capabilities:
-        - text
+        modality:
+        - llm
+        - mllm
       fallback_models: []
       pricing:
         glm-5.2:
@@ -209,9 +214,9 @@ cache:
   l2:
     max_value_bytes: 512000
     default_ttl: 3600
-    bm25:                    # Redis Stack RediSearch BM25 近似匹配
+    bm25:
       enabled: true
-      min_score: 1.5         # BM25 分数阈值，低于此值视为 miss（需按实际语料调参）
+      min_score: 1.5
       top_k: 5
   l3:
     min_token_count: 100
