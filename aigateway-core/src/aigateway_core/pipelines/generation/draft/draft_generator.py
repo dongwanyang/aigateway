@@ -1734,6 +1734,7 @@ class DraftGeneratorStrategy:
             "attempt_number": draft.attempt_number,
             "max_attempts": draft.max_attempts,
             "status": draft.status,
+            "video_id": draft.video_id,
             "store_dir": draft_dir,  # 供 _load_draft 定位文件
         }
         data = json.dumps(serialized)
@@ -1796,6 +1797,7 @@ class DraftGeneratorStrategy:
             session_id=data.get("session_id"),
             user_id=data.get("user_id"),
             group_id=data.get("group_id"),
+            video_id=data.get("video_id"),
         )
 
     async def get_result_bytes(self, draft_id: str) -> bytes:

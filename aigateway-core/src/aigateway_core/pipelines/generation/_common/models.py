@@ -184,6 +184,8 @@ class DraftResult:
     session_id: Optional[str] = None
     user_id: Optional[str] = None
     group_id: Optional[str] = None
+    """视频任务提交后 Agnes 返回的 video_id,用于刷新后重新轮询 /v1/videos/{id}。仅 media_type=='video' 确认后有值。"""
+    video_id: Optional[str] = None
 
 
 # DraftResult 合法状态值

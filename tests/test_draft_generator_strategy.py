@@ -440,3 +440,15 @@ class TestGetDraft:
         """Should return None for nonexistent draft."""
         result = await strategy.get_draft("does_not_exist")
         assert result is None
+
+
+@pytest.mark.asyncio
+async def test_video_id_persists_through_store_load(strategy, video_request, default_config):
+    """DraftResult.video_id 应能通过 _store_draft / _load_draft 往返。"""
+    result = await strategy.generate_draft(video_request, default_config)
+    draft = await _await_generating(strategy, result.draft_id)
+    draft.video_id = "vid_abc123"
+    await strategy._store_draft(draft, ttl_seconds=60)
+    reloaded = await strategy._load_draft(draft.draft_id)
+    assert reloaded is not None
+    assert reloaded.video_id == "vid_abc123"
