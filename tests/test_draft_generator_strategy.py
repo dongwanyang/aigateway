@@ -32,6 +32,7 @@ from aigateway_core.pipelines.generation._common.models import (
     DraftResult,
     GenerationRequest,
     UpscaleResult,
+    VideoSubmitResult,
 )
 from aigateway_core.pipelines.generation.draft.draft_generator import (
     DraftGeneratorStrategy,
@@ -452,3 +453,11 @@ async def test_video_id_persists_through_store_load(strategy, video_request, def
     reloaded = await strategy._load_draft(draft.draft_id)
     assert reloaded is not None
     assert reloaded.video_id == "vid_abc123"
+
+
+def test_video_submit_result_dataclass():
+    """VideoSubmitResult 字段与默认值。"""
+    r = VideoSubmitResult(draft_id="d1", video_id="vid_x")
+    assert r.draft_id == "d1"
+    assert r.video_id == "vid_x"
+    assert r.status == "generating"

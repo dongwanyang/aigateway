@@ -225,6 +225,24 @@ class UpscaleResult:
 
 
 @dataclass
+class VideoSubmitResult:
+    """视频任务提交结果.
+
+    用户确认视频草稿后调 Agnes /videos 提交异步任务的输出。
+    与 UpscaleResult 平行 —— confirm_draft 按 media_type 返回二者之一。
+
+    Attributes:
+        draft_id: 关联的草图标识
+        video_id: Agnes /videos 返回的任务 id,前端据此轮询 GET /v1/videos/{id}
+        status: 任务状态,提交成功后为 "generating"
+    """
+
+    draft_id: str
+    video_id: str
+    status: str = "generating"
+
+
+@dataclass
 class PromptTemplate:
     """提示词模板.
 
