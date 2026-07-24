@@ -57,7 +57,7 @@
           缓存: L1(LRU) -> L2(Redis) -> L3(Qdrant)
 ```
 
-**总分总编排**：共享前置（Media / PII / Cache / Compress，所有请求必经）-> `classify_request` 按模态分流 -> 理解型管线（RAG + Conv Compressor）或生成型管线（Director -> Intent -> Token -> Draft -> Router -> Cost 六插件链）-> 配额校验 -> LiteLLMBridge 统一出口（含自动模型解析与 fallback）。`model_router` 插件已移除，路由在 LiteLLMBridge 内完成。
+**总分总编排**：共享前置（Media / PII / Cache / Compress，所有请求必经）-> `classify_request` (async LLM intent prediction) 分流 → understanding | generation:image | generation:video -> 理解型管线（RAG + Conv Compressor）或生成型管线（Director -> Intent -> Token -> Draft -> Router -> Cost 六插件链）-> 配额校验 -> LiteLLMBridge 统一出口（含 capabilities 池过滤 + image/video 生成路径）。`model_router` 插件已移除，路由在 LiteLLMBridge 内完成。
 
 ---
 
@@ -197,11 +197,11 @@ aigateway/
 │   │   ├── understanding/   # rag / conversation / compression / code_rag
 │   │   └── generation/      # 6 插件链：director / intent / token / draft / routing_signals / cost
 │   ├── route/           # LiteLLMBridge / SSE / metrics / model_resolution
-│   └── shared/          # config / tracing / redis / qdrant / auth(key_store+group_store)
+│   └── shared/          # config / tracing / redis / qdrant / auth(sqlite_store)
 ├── aigateway-api/src/aigateway_api/     # FastAPI 服务（openai_compat / admin_routes / *_routes / middlewares）
 ├── aigateway-cli/src/aigateway_cli/     # CLI（chat / run / session / codegraph）
 ├── control-panel/src/                   # React 控制面板（10 个页面）
-├── tests/                               # 1100+ 测试
+├── tests/                               # 82+ 测试文件
 ├── config.yaml                          # 唯一配置文件
 └── docker-compose.yml                   # 6 服务编排
 ```
@@ -245,9 +245,6 @@ plugins:
     config:
       compression_ratio: 0.5
       model_name: "microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbank"
-  - name: model_router
-    enabled: true
-    depends_on: [prompt_compress]
 
 # 多模态处理
 media_optimization:
@@ -317,14 +314,20 @@ generation_optimization:
 | POST | `/v1/chat/completions` | 聊天补全（流式/非流式，多模态） |
 | GET | `/v1/models` | 列出可用模型 |
 | POST | `/v1/embeddings` | 嵌入向量 |
+| GET | `/v1/videos/{video_id}` | 视频生成任务状态查询 |
 
 ### 管理
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET/POST/DELETE | `/admin/api-keys` | API Key CRUD |
+| GET/POST/PUT/DELETE | `/admin/api-keys` | API Key CRUD |
 | POST/GET/PUT/DELETE | `/templates` | Prompt 模板 CRUD |
-| POST | `/drafts/{draft_id}/action` | Draft 确认/拒绝 |
+| POST | `/admin/drafts/{draft_id}/action` | Draft 确认/拒绝 |
+| GET | `/admin/chat/tasks` | 异步任务列表 |
+| GET | `/admin/logs` | 请求日志 |
+| GET/PUT/DELETE | `/admin/cache/l3/*` | L3 语义缓存管理 |
+| POST/GET | `/admin/rag/code/*` | Code RAG 导入与查询 |
+| GET | `/admin/config/debug` | Debug 开关配置 |
 
 ### 基础设施
 
@@ -341,7 +344,7 @@ generation_optimization:
 |------|------|------|
 | gateway | 8000 | FastAPI API (Python 3.12 + Tesseract + FFmpeg) |
 | control-panel | 3000 | React 控制面板 (Nginx) |
-| redis | 6379 | 缓存 + API Key + 特征向量 + Draft 暂存 |
+| redis | 6379 | 缓存 + Draft 暂存 |
 | qdrant | 6333 | 向量数据库 (语义缓存 + RAG) |
 | prometheus | 9090 | 指标采集 (30 天保留) |
 | grafana | 3001 | 可视化面板 (admin/admin) |
@@ -353,7 +356,7 @@ generation_optimization:
 ### 运行测试
 
 ```bash
-python -m pytest tests/ -v          # 全部 1100+ 测试
+python -m pytest tests/ -v          # 全部 82+ 测试文件
 python -m pytest tests/ -x -q       # 快速模式（首个失败停止）
 ```
 

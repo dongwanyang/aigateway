@@ -40,7 +40,7 @@ Client → aigateway-api (FastAPI :8000)
                 → LiteLLMBridge.completion() → response
              5. GET /v1/videos/{id} polls video status
          Cache: L1 (in-process LRU) → L2 (Redis Stack RediSearch BM25, Friso 中文分词) → L3 (Qdrant vector, cosine≥0.95)
-         Auth: KeyStore (Redis-backed) via auth_middleware
+         Auth: SQLiteStore (WAL-mode, TOCTOU-safe atomic UPDATE) via auth_middleware
 ```
 
 **Two entry points** (agent identity, not just proxy):
@@ -80,7 +80,7 @@ aigateway-core/src/aigateway_core/  Shared library - runtime skeleton (prefix/di
     understanding/      rag/ (RAGRetriever), conversation/ (ConvCompressor), compression/ (PromptCompress LLMLingua-2), code_rag/
     generation/         director/intent/token/draft/cost/routing_signals/ (6 plugins + strategies) + _common/ (config/models/metrics/exceptions/api_key_groups) + registration.py
   route/                bridge/ (LiteLLMBridge + cooldown), streaming/ (SSE + cache_stream + metrics_wrapper), metrics/ (costing), model_resolution/ (ModelRouterStrategy auto resolver)
-  shared/               config, tracing, trace_event, exceptions, plugin_registry, logger, metrics, debug_config, redis_client, qdrant_client, integration_configs, auth/key_store, auth/group_store
+  shared/               config, tracing, trace_event, exceptions, plugin_registry, logger, metrics, debug_config, redis_client, qdrant_client, integration_configs, auth/sqlite_store, auth/key_store, auth/group_store
 
 aigateway-cli/src/aigateway_cli/    __main__, chat, run, session
 control-panel/src/                  App.tsx (routes), api/client.ts, pages/ (10, incl. /chat), components/ (incl. chat/), hooks/
@@ -120,9 +120,7 @@ Backfill: L2 hit → L1; L3 hit → L1 only (approximate); MISS → L1+L2 + asyn
 
 ## Security & Quotas
 
-`KeyStore` — Redis hash per key. Per-key: daily tokens (default 1M), monthly cost ($50), RPM (60), TPM (100K). Pub/Sub sync across instances. Auto-reseeds from `config.yaml` if Redis empty. Quota enforcement uses an atomic Lua script (`check_quota` → `EVALSHA`/`EVAL`) that checks all 4 dims for key+group in one round-trip and bumps counters immediately (TOCTOU-safe). The pre-flight estimate (token count ÷4, cost=0) is reserved; `increment_usage` reconciles the delta (actual − reserved) post-LLM via `_reserved_tokens`/`_reserved_cost`. FakeRedis (tests) lacks `eval` → falls back to non-atomic `_check_quota_legacy`.
-
-`GroupStore` — Redis hash per group (`aigateway:group:{group_id}`). Group-level quotas (daily tokens, monthly cost, RPM, TPM) shared pool for all member keys. Per-key personal quotas are sub-limits within the group. Quota check: group first, then personal. Error codes prefixed `Group ` for group-level rejection. Group members stored as Redis Set (`aigateway:group:{gid}:members`). Group events broadcast via `aigateway:groups:sync` Pub/Sub channel.
+`SQLiteStore` — WAL-mode SQLite replacing Redis-backed KeyStore/GroupStore. Schema: `api_keys` (key metadata + limits + runtime counters), `quota_records` (per-day/per-month usage tracking for key + group), `groups` (group metadata + shared limits), `group_members` (many-to-many key↔group, stored as rows not Redis Set), `meta` (schema versioning). Per-key: daily tokens (default 1M), monthly cost ($50), RPM (60), TPM (100K). Auto-reseeds from `config.yaml` if empty. Quota enforcement uses atomic conditional UPDATE inside a transaction (TOCTOU-safe). Group-level quotas (daily tokens, monthly cost, RPM, TPM) shared pool for all member keys. Per-key personal quotas are sub-limits within the group. Quota check: group first, then personal. Error codes prefixed `Group ` for group-level rejection.
 
 `PIIDetector` — 3-pass (exclusion → named fields → standalone). 20+ patterns (email, phone, credit card, Chinese ID, passwords, API keys, connection strings). Strategies: sanitize / reject / hash.
 
@@ -158,7 +156,7 @@ Backfill: L2 hit → L1; L3 hit → L1 only (approximate); MISS → L1+L2 + asyn
 | `main.py` | App factory, lifespan init, both PipelineEngine instances. |
 | `dispatch/dispatcher.py` | Request flow, classification, cache backfill (core). |
 | `prefix/cache/` | Cache-key gen, L1/L2/L3, rerankers, backfill. |
-| `prefix/pii/` + `shared/auth/` | PIIDetector, KeyStore. |
+| `prefix/pii/` + `shared/auth/` | PIIDetector, SQLiteStore (WAL-mode, TOCTOU-safe). |
 | `route/bridge/litellm_bridge.py` | Multi-provider calls, fallback, cooldown, auto resolver, intent-driven routing (`_resolve_by_intent`, `_do_image_generation`, `_do_video_generation`), video polling (`GET /v1/videos/{id}`). Cooldown reads `circuit_breaker:` section. |
 | `pipelines/generation/` | 6 gen plugins + strategies (+ `_common/`, `registration.py`). |
 | `prefix/media/` | Media Optimization V2. |
@@ -203,7 +201,7 @@ python3 -m pytest tests/ --cov=aigateway_core --cov=aigateway_api
 python3 -m pytest tests/e2e/                     # e2e: needs live gateway + ADMIN_KEY + Redis/Qdrant
 python3 -m pytest tests/ui/                      # UI e2e: needs gateway :8000 + panel :3000
 ```
-62 unit test files + 8 e2e (`tests/e2e/`, incl. `test_plugin_debug_integration.py`, `test_e2e_multimodal.py`). `tests/conftest.py` gates e2e/ui: only runs when those paths are invoked explicitly (checks `AI_GATEWAY_ADMIN_KEY` + `GET /health`); `pytest tests/` auto-skips them via `pytest_collection_modifyitems` so a missing gateway never hangs the unit run. Env uses `python3` (no `python` alias).
+82 unit test files + 8 e2e (`tests/e2e/`, incl. `test_plugin_debug_integration.py`, `test_e2e_multimodal.py`). `tests/conftest.py` gates e2e/ui: only runs when those paths are invoked explicitly (checks `AI_GATEWAY_ADMIN_KEY` + `GET /health`); `pytest tests/` auto-skips them via `pytest_collection_modifyitems` so a missing gateway never hangs the unit run. Env uses `python3` (no `python` alias).
 
 ### Config precedence (high → low)
 1. Real process env (docker-compose `environment:` / shell `export`)
@@ -230,6 +228,7 @@ python3 -m pytest tests/ui/                      # UI e2e: needs gateway :8000 +
 10. **Per-model `base_url` override** — providers like Agnes route text/image/video to different endpoints. Set `providers.<name>.model_grouper[].models[].base_url`; fallbacks always inherit provider-level URL.
 11. **Single-worker** — `workers: 1` in Dockerfile CMD; the config field is deprecated.
 12. **Streaming parity** — SSE path also decrements quota, backfills cache, uses real cost.
+13. **Bridge logged model resolution** — `_resolve_logged_model` and `_resolve_stream_logged_model` in `dispatcher.py` extract the actual resolved model name from bridge results (not the client's `auto` placeholder) for logging, cost ledger, and cache backfill. Priority: `_meta.routed_to.model` > response body `data.model` > original `body_model`.
 
 ## Known States & Gotchas
 
