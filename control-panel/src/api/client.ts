@@ -257,10 +257,14 @@ export async function deleteSessionDrafts(
   return res.json() as Promise<{ session_id: string; deleted_count: number }>
 }
 
-/** POST /admin/draft/{id}/confirm —— 确认 → 高清放大 → 返回最终图 data URL。 */
-export async function confirmDraft(
-  draftId: string,
-): Promise<{ upscaledUrl: string; targetResolution: [number, number]; algorithm: string }> {
+/** POST /admin/draft/{id}/confirm —— 确认草稿。
+ * 图片:触发高清放大,返回 upscaled_url data URL。
+ * 视频:提交 Agnes /videos 任务,返回 video_id(前端轮询 /v1/videos/{id})。 */
+export type ConfirmDraftResult =
+  | { videoId: string; status: string; mediaType: 'video' }
+  | { upscaledUrl: string; targetResolution: [number, number]; algorithm: string; mediaType: 'image' }
+
+export async function confirmDraft(draftId: string): Promise<ConfirmDraftResult> {
   const headers = await ensureAuthHeaders()
   const res = await fetch(`${API_BASE}/admin/draft/${encodeURIComponent(draftId)}/confirm`, {
     method: 'POST',
@@ -277,15 +281,26 @@ export async function confirmDraft(
     throw new Error(code)
   }
   const json = (await res.json()) as {
+    media_type?: string
+    video_id?: string
+    status?: string
     upscaled_url?: string
     target_resolution?: [number, number]
     algorithm?: string
+  }
+  if (json.media_type === 'video' && json.video_id) {
+    return {
+      videoId: json.video_id,
+      status: json.status ?? 'generating',
+      mediaType: 'video',
+    }
   }
   if (!json.upscaled_url) throw new Error('confirm 响应缺少 upscaled_url')
   return {
     upscaledUrl: json.upscaled_url,
     targetResolution: json.target_resolution ?? [0, 0],
     algorithm: json.algorithm ?? 'upscale',
+    mediaType: 'image',
   }
 }
 
