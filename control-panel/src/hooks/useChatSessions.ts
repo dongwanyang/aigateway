@@ -771,52 +771,6 @@ export function useChatSessions(): UseChatSessions {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId])
 
-  const confirmDraftMsg = useCallback(async (msgId: string) => {
-    const s = sessions.find(x => x.id === activeId)
-    const msg = s?.messages.find(m => m.id === msgId)
-    if (!msg?.draft) return
-    // 防连点:status 已是 confirming/rejecting 时直接返回(按钮 disable 依赖 re-render,有窗口期)。
-    if (msg.draft.status === 'confirming' || msg.draft.status === 'rejecting') return
-    patchMessage(msgId, m => m.draft ? { ...m, draft: { ...m.draft, status: 'confirming', errorMessage: undefined } } : m)
-    try {
-      const { upscaledUrl, targetResolution, algorithm } = await confirmDraft(msg.draft.draftId)
-      patchMessage(msgId, m => m.draft
-        ? { ...m, draft: { ...m.draft, status: 'confirmed', resultDataUrl: upscaledUrl, errorMessage: undefined } }
-        : m)
-      void algorithm
-      void targetResolution
-    } catch (e) {
-      const code = e instanceof Error ? e.message : '确认失败'
-      const expired = code.includes('expired') || code.includes('not_found')
-      patchMessage(msgId, m => m.draft
-        ? { ...m, draft: { ...m.draft, status: expired ? 'expired' : 'error', errorMessage: code } }
-        : m)
-    }
-  }, [sessions, activeId, patchMessage])
-
-  const rejectDraftMsg = useCallback(async (msgId: string) => {
-    const s = sessions.find(x => x.id === activeId)
-    const msg = s?.messages.find(m => m.id === msgId)
-    if (!msg?.draft) return
-    if (msg.draft.status === 'confirming' || msg.draft.status === 'rejecting') return
-    patchMessage(msgId, m => m.draft ? { ...m, draft: { ...m.draft, status: 'rejecting', errorMessage: undefined } } : m)
-    try {
-      const { newDraftId, previewUrl } = await rejectDraft(msg.draft.draftId)
-      // 后端异步生成新草稿:立即切到 generating,清旧预览,启动轮询(同 send 草稿分支)。
-      // awaitingDraft 守卫阻止恢复效果误续传/误重发(Issue 2)。
-      patchMessage(msgId, m => m.draft
-        ? { ...m, draft: { ...m.draft, draftId: newDraftId, previewUrl, status: 'generating', previewDataUrl: undefined, resultDataUrl: undefined, errorMessage: undefined }, awaitingDraft: true, awaitingDraftSince: Date.now() }
-        : m)
-      void pollDraftPreview(newDraftId, msgId)
-    } catch (e) {
-      const code = e instanceof Error ? e.message : '重新生成失败'
-      const expired = code.includes('expired') || code.includes('not_found')
-      patchMessage(msgId, m => m.draft
-        ? { ...m, draft: { ...m.draft, status: expired ? 'expired' : 'error', errorMessage: code } }
-        : m)
-    }
-  }, [sessions, activeId, patchMessage, pollDraftPreview])
-
   /** 轮询视频任务状态，完成后更新消息内容。 */
   const pollVideoStatus = useCallback(async (videoId: string, msgId: string) => {
     if (pollingVideoIds.has(videoId)) return
@@ -864,6 +818,65 @@ export function useChatSessions(): UseChatSessions {
 
     pollingVideoIds.delete(videoId)
   }, [patchMessage])
+
+  const confirmDraftMsg = useCallback(async (msgId: string) => {
+    const s = sessions.find(x => x.id === activeId)
+    const msg = s?.messages.find(m => m.id === msgId)
+    if (!msg?.draft) return
+    // 防连点:status 已是 confirming/rejecting 时直接返回(按钮 disable 依赖 re-render,有窗口期)。
+    if (msg.draft.status === 'confirming' || msg.draft.status === 'rejecting') return
+    patchMessage(msgId, m => m.draft ? { ...m, draft: { ...m.draft, status: 'confirming', errorMessage: undefined } } : m)
+    try {
+      const result = await confirmDraft(msg.draft.draftId)
+      if (result.mediaType === 'video') {
+        // 视频草稿确认:提交 Agnes /videos 任务拿到 video_id。
+        // 把 draft 消息转成 video 消息(清 draft,挂 videoId),直接启动轮询。
+        // 不依赖 resumePollingKey effect(那个只在 session 切换/加载时触发)。
+        patchMessage(msgId, m => ({
+          ...m,
+          draft: undefined,
+          videoId: result.videoId,
+          intent: 'generation:video',
+          model: 'video',
+        }))
+        void pollVideoStatus(result.videoId, msgId)
+      } else {
+        // 图片草稿确认:高清放大结果挂到 draft.resultDataUrl。
+        patchMessage(msgId, m => m.draft
+          ? { ...m, draft: { ...m.draft, status: 'confirmed', resultDataUrl: result.upscaledUrl, errorMessage: undefined } }
+          : m)
+      }
+    } catch (e) {
+      const code = e instanceof Error ? e.message : '确认失败'
+      const expired = code.includes('expired') || code.includes('not_found')
+      patchMessage(msgId, m => m.draft
+        ? { ...m, draft: { ...m.draft, status: expired ? 'expired' : 'error', errorMessage: code } }
+        : m)
+    }
+  }, [sessions, activeId, patchMessage, pollVideoStatus])
+
+  const rejectDraftMsg = useCallback(async (msgId: string) => {
+    const s = sessions.find(x => x.id === activeId)
+    const msg = s?.messages.find(m => m.id === msgId)
+    if (!msg?.draft) return
+    if (msg.draft.status === 'confirming' || msg.draft.status === 'rejecting') return
+    patchMessage(msgId, m => m.draft ? { ...m, draft: { ...m.draft, status: 'rejecting', errorMessage: undefined } } : m)
+    try {
+      const { newDraftId, previewUrl } = await rejectDraft(msg.draft.draftId)
+      // 后端异步生成新草稿:立即切到 generating,清旧预览,启动轮询(同 send 草稿分支)。
+      // awaitingDraft 守卫阻止恢复效果误续传/误重发(Issue 2)。
+      patchMessage(msgId, m => m.draft
+        ? { ...m, draft: { ...m.draft, draftId: newDraftId, previewUrl, status: 'generating', previewDataUrl: undefined, resultDataUrl: undefined, errorMessage: undefined }, awaitingDraft: true, awaitingDraftSince: Date.now() }
+        : m)
+      void pollDraftPreview(newDraftId, msgId)
+    } catch (e) {
+      const code = e instanceof Error ? e.message : '重新生成失败'
+      const expired = code.includes('expired') || code.includes('not_found')
+      patchMessage(msgId, m => m.draft
+        ? { ...m, draft: { ...m.draft, status: expired ? 'expired' : 'error', errorMessage: code } }
+        : m)
+    }
+  }, [sessions, activeId, patchMessage, pollDraftPreview])
 
   /** 刷新后自动轮询未完成的视频任务。 */
   useEffect(() => {
