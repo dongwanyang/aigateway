@@ -388,3 +388,52 @@ class TestRouterRegistration:
         full_path = "/api/v1/generation/drafts/{draft_id}/action"
         assert full_path in paths
         assert "POST" in paths[full_path]
+
+
+# ==================================================================
+# /admin/draft/{id}/confirm 路由按 media_type 分流返回(视频 → video_id)
+# ==================================================================
+
+
+@pytest.fixture
+def draft_strategy_with_video_draft(monkeypatch):
+    """注入一个 mock draft strategy,其 confirm_draft 对视频返 VideoSubmitResult。
+
+    对齐本文件已有测试的 app 注入方式:admin_routes.confirm_draft 内部调
+    `_get_draft_strategy()`(无参,从 app.state 取),故直接 monkeypatch
+    `aigateway_api.admin_routes._get_draft_strategy` 返回 mock strategy,
+    与 TestDraftActionEndpoint 用 FakeRequest 注入 strategy 同义。
+    """
+    from aigateway_core.pipelines.generation._common.models import VideoSubmitResult
+    from unittest.mock import AsyncMock
+    from aigateway_api import admin_routes
+
+    class _FakeDraft:
+        user_id = None
+        group_id = None
+
+    strategy = AsyncMock()
+    strategy.get_draft = AsyncMock(return_value=_FakeDraft())
+    strategy.confirm_draft = AsyncMock(return_value=VideoSubmitResult(
+        draft_id="d_video", video_id="vid_test_123", status="generating"
+    ))
+    monkeypatch.setattr(admin_routes, "_get_draft_strategy", lambda: strategy)
+    return "d_video"
+
+
+@pytest.mark.asyncio
+async def test_confirm_draft_video_returns_video_id(draft_strategy_with_video_draft):
+    """视频草稿 confirm 应返回 {video_id, status, media_type},而非 upscaled_url。"""
+    draft_id = draft_strategy_with_video_draft
+    from aigateway_api.admin_routes import confirm_draft
+
+    # _auth: authenticate_admin 依赖项,直接传 dict(无 owner 校验冲突)
+    req = FakeRequest(strategy=None)  # strategy 走 monkeypatched _get_draft_strategy,不用 request.app
+    resp = await confirm_draft(draft_id, req, {"user_id": "", "group_id": ""})
+
+    # confirm_draft 返回 dict(FastAPI 序列化为 JSON)
+    body = resp if isinstance(resp, dict) else {"_raw": resp}
+    assert body["media_type"] == "video"
+    assert body["video_id"] == "vid_test_123"
+    assert body["status"] == "generating"
+    assert "upscaled_url" not in body

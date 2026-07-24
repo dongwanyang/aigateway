@@ -2780,10 +2780,31 @@ async def confirm_draft(
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Ownership verification failed"}})
 
     try:
-        upscale_result = await strategy.confirm_draft(draft_id)
+        result = await strategy.confirm_draft(draft_id)
     except Exception as exc:
         raise HTTPException(status_code=400, detail={"error": {"code": "draft_confirm_failed", "message": str(exc)}})
 
+    # 视频草稿:返回 video_id,前端轮询 /v1/videos/{id}
+    from aigateway_core.pipelines.generation._common.models import VideoSubmitResult
+    if isinstance(result, VideoSubmitResult):
+        try:
+            from .openai_compat import _record_request_log
+            await _record_request_log(
+                request=request, method="POST", endpoint=f"/admin/draft/{draft_id}/confirm",
+                status_code=200, duration_ms=0.0,
+                model="agnes-video-v2.0", cache_hit=False, cache_tier=None,
+            )
+        except Exception as exc:
+            logger.warning("视频草稿确认请求日志写入失败: %s", exc)
+        return {
+            "draft_id": draft_id,
+            "video_id": result.video_id,
+            "status": result.status,
+            "media_type": "video",
+        }
+
+    # 图片草稿:放大结果转 base64 data URL(原逻辑)
+    upscale_result = result
     output_data = upscale_result.output_data
     # 如果输出是 bytes，转为 base64 data URL
     if isinstance(output_data, bytes):
