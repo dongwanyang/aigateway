@@ -1705,6 +1705,10 @@ class SQLiteStore:
         cols = ("task_id", "document_id", "status", "done", "total", "current_file",
                 "source_type", "source_label", "embedding_model", "graph_repo_path",
                 "error", "created_at", "updated_at")
+        # NOT NULL 列必须有值,否则 INSERT OR REPLACE 会把缺失列写成 NULL → 违反约束抛错。
+        for required in ("task_id", "document_id", "status", "created_at", "updated_at"):
+            if task.get(required) is None:
+                raise ValueError(f"upsert_code_rag_task 缺少 NOT NULL 字段: {required}")
         vals = tuple(task.get(c) for c in cols)
         self.conn.execute(
             f"""INSERT OR REPLACE INTO code_rag_tasks
@@ -1712,6 +1716,27 @@ class SQLiteStore:
             vals,
         )
         self.conn.commit()
+
+    def update_code_rag_task(self, task_id: str, fields: dict) -> int:
+        """部分列 UPDATE(原子,行级加锁,避免 read-merge-upsert 的 TOCTOU 竞态)。
+
+        只写 fields 里出现的列(值为 None 的列不写,跳过);刷 updated_at。
+        返回受影响行数(0 表示 task_id 不存在)。供 progress_cb / _mark 并发写用。
+        """
+        if not fields:
+            return 0
+        set_cols = [c for c in fields if fields[c] is not None]
+        if not set_cols:
+            return 0
+        set_cols.append("updated_at")
+        set_clause = ", ".join(f"{c}=?" for c in set_cols)
+        vals = tuple(fields[c] for c in fields if fields[c] is not None) + (_now_unix(), task_id)
+        cur = self.conn.execute(
+            f"UPDATE code_rag_tasks SET {set_clause} WHERE task_id=?",
+            vals,
+        )
+        self.conn.commit()
+        return cur.rowcount
 
     def read_code_rag_task(self, task_id: str) -> Optional[dict]:
         row = self.conn.fetchone(
@@ -1727,10 +1752,16 @@ class SQLiteStore:
         return [dict(r) for r in rows]
 
     def fail_non_terminal_tasks(self, error: str) -> int:
+        """把非终态任务标 failed(worker 重启打断)。error 里带原 status,便于排查。
+
+        幂等:终态(completed/failed/cancelled)不进分支,failed 自身也是终态,多次重启不重复处理。
+        """
         now = _now_unix()
         cur = self.conn.execute(
             """UPDATE code_rag_tasks
-               SET status='failed', error=?, updated_at=?
+               SET status='failed',
+                   error = ? || ' (was: ' || status || ')',
+                   updated_at=?
                WHERE status NOT IN ('completed', 'failed', 'cancelled')""",
             (error, now),
         )

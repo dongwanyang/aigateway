@@ -756,13 +756,53 @@ def test_fail_non_terminal_tasks(tmp_path: Path) -> None:
     n = store.fail_non_terminal_tasks("worker restarted")
     assert n == 2
     assert store.read_code_rag_task("a")["status"] == "failed"
-    assert store.read_code_rag_task("a")["error"] == "worker restarted"
-    assert store.read_code_rag_task("b")["status"] == "failed"
+    # error 带原 status,便于排查是哪一步被打断
+    assert store.read_code_rag_task("a")["error"] == "worker restarted (was: splitting)"
+    assert store.read_code_rag_task("b")["error"] == "worker restarted (was: embedding)"
     assert store.read_code_rag_task("c")["status"] == "completed"  # 不动
     assert store.read_code_rag_task("d")["status"] == "failed"  # 已是终态
 
-    # 幂等:再跑一次,0 个非终态
+    # 幂等:再跑一次,0 个非终态(failed 自身已是终态)
     assert store.fail_non_terminal_tasks("worker restarted") == 0
+
+
+def test_update_code_rag_task_partial_does_not_clobber(tmp_path: Path) -> None:
+    """update_code_rag_task 部分列 UPDATE 必须不覆盖未涉及的字段(防 progress 竞态)。
+
+    场景:progress_cb 写 done/total/current_file,绝不能把另一并发写刚写的 status
+    或 created_at 覆盖掉。行为:只写传入的列 + updated_at。
+    """
+    from aigateway_core.shared.auth.sqlite_store import SQLiteStore
+    import time
+
+    store = SQLiteStore(db_path=str(tmp_path / "t.db"))
+    now = int(time.time())
+    store.upsert_code_rag_task({
+        "task_id": "t1", "document_id": "code_x", "status": "splitting",
+        "done": 0, "total": 5000, "current_file": "", "source_type": "git",
+        "source_label": "https://github.com/x/y.git", "embedding_model": "Qwen",
+        "graph_repo_path": "/data/code_graphs/code_x", "error": "",
+        "created_at": now, "updated_at": now,
+    })
+
+    # 部分更新:只写 done + current_file
+    affected = store.update_code_rag_task("t1", {"done": 200, "current_file": "src/a.py"})
+    assert affected == 1
+    row = store.read_code_rag_task("t1")
+    assert row["done"] == 200
+    assert row["current_file"] == "src/a.py"
+    # 未涉及的字段保持不变
+    assert row["status"] == "splitting"
+    assert row["total"] == 5000
+    assert row["created_at"] == now  # created_at 不被刷
+    assert row["source_label"] == "https://github.com/x/y.git"
+
+    # 不存在的 task_id 返回 0
+    assert store.update_code_rag_task("nope", {"done": 1}) == 0
+
+    # 空 fields 或全 None 不写(不报错)
+    assert store.update_code_rag_task("t1", {}) == 0
+    assert store.update_code_rag_task("t1", {"done": None, "status": None}) == 0
 
 
 # ---------------------------------------------------------------------------

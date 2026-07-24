@@ -79,30 +79,38 @@ async def _write_task_state(
     task_id: str,
     fields: Dict[str, Any],
 ) -> None:
-    """把任务状态字段 upsert 到 SQLite code_rag_tasks 表。
+    """把任务状态字段写入 SQLite code_rag_tasks 表(增量更新,原子)。
 
-    fields 是部分字段(增量更新);读出现有行合并后写回(upsert 需要全列)。
-    终态留表当历史(不再像 Redis 那样 _delete_task_key 删 key)。
+    行存在 → 部分列 UPDATE(行级原子,避免 read-merge-upsert 的 TOCTOU 竞态——
+    progress_cb 在 executor 线程、主 coro 在 loop 线程,各自独立 SQLite 连接,
+    部分列 UPDATE 保证并发写不互相覆盖未涉及的字段)。
+    行不存在 → 全列 upsert(首次创建,补 NOT NULL 默认值)。
+    fields 里值为 None 的列在 UPDATE 路径下跳过;终态留表当历史(不再删行)。
     """
     sqlite_store = getattr(app_state, "sqlite_store", None)
     if sqlite_store is None:
         return
-    existing = sqlite_store.read_code_rag_task(task_id) or {}
-    existing.update({k: v for k, v in fields.items() if v is not None})
-    existing["task_id"] = task_id
-    existing.setdefault("document_id", "")
-    existing.setdefault("status", "pending")
-    existing.setdefault("done", 0)
-    existing.setdefault("total", 0)
-    existing.setdefault("current_file", "")
-    existing.setdefault("source_type", "")
-    existing.setdefault("source_label", "")
-    existing.setdefault("embedding_model", "")
-    existing.setdefault("graph_repo_path", "")
-    existing.setdefault("error", "")
-    existing.setdefault("created_at", int(time.time()))
-    existing["updated_at"] = int(time.time())
-    sqlite_store.upsert_code_rag_task(existing)
+    present = {k: v for k, v in fields.items() if v is not None}
+    existing = sqlite_store.read_code_rag_task(task_id)
+    if existing is None:
+        # 首次创建:补 NOT NULL 默认值后全列 upsert
+        present.setdefault("task_id", task_id)
+        present.setdefault("document_id", "")
+        present.setdefault("status", "pending")
+        present.setdefault("done", 0)
+        present.setdefault("total", 0)
+        present.setdefault("current_file", "")
+        present.setdefault("source_type", "")
+        present.setdefault("source_label", "")
+        present.setdefault("embedding_model", "")
+        present.setdefault("graph_repo_path", "")
+        present.setdefault("error", "")
+        present.setdefault("created_at", int(time.time()))
+        present["updated_at"] = int(time.time())
+        sqlite_store.upsert_code_rag_task(present)
+    else:
+        # 行已存在:原子部分列 UPDATE(只写 present 里的列)
+        sqlite_store.update_code_rag_task(task_id, present)
 
 
 async def _delete_task_key(app_state: Any, task_id: str) -> None:
@@ -131,19 +139,22 @@ def sweep_orphaned_tasks(app_state: Any) -> int:
             logger.info("code rag 启动清理: %d 个非终态任务标记为 failed", marked)
 
     # 清理孤儿临时目录(旧失败残留)
+    # 清理孤儿临时目录(旧失败残留)。ignore_errors=True 已吞异常,无需再包 except。
+    # 记录删了哪些,debug 级别可追溯(避免静默删错)。
     import glob
+    swept_dirs: list[str] = []
     for pattern in ("/tmp/code_rag_folder_*",):
         for d in glob.glob(pattern):
-            try:
-                shutil.rmtree(d, ignore_errors=True)
-            except Exception:
-                pass
+            shutil.rmtree(d, ignore_errors=True)
+            if not Path(d).exists():
+                swept_dirs.append(d)
     graph_db_dir = "/data/code_graphs"
     for d in glob.glob(f"{graph_db_dir}/*/.tmp"):
-        try:
-            shutil.rmtree(d, ignore_errors=True)
-        except Exception:
-            pass
+        shutil.rmtree(d, ignore_errors=True)
+        if not Path(d).exists():
+            swept_dirs.append(d)
+    if swept_dirs:
+        logger.info("code rag 启动清理: 删除 %d 个孤儿临时目录", len(swept_dirs))
     return marked
 
 
@@ -607,21 +618,28 @@ async def _run_code_import_task(
         await _mark(status="splitting", done=0, total=0)
         # splitter 跑在 executor 线程,不能直接 await _mark;用 run_coroutine_threadsafe
         # 把 _mark(done,total,current_file) 调度回主 event loop 写 SQLite。
+        # fire-and-forget:不阻塞 executor 线程、不 .result(timeout) —— 进度回写是
+        # best-effort,绝不能因 loop 繁忙超时而把 import 整体打死。失败只记日志。
         def _split_progress(done: int, total: int, current_file: str) -> None:
-            asyncio.run_coroutine_threadsafe(
+            fut = asyncio.run_coroutine_threadsafe(
                 _mark(done=done, total=total, current_file=current_file),
                 loop,
-            ).result(timeout=10)
+            )
+            def _on_done(f: "asyncio.Future[Any]") -> None:
+                exc = f.exception()
+                if exc is not None:
+                    logger.warning("code rag 进度回写失败(task=%s): %r", task_id, exc)
+            fut.add_done_callback(_on_done)
         chunks: List[Dict[str, Any]] = await loop.run_in_executor(
             None, lambda: build_symbol_chunks(
                 source_dir, graph_repo_path, ignore_patterns, progress_cb=_split_progress
             )
         )
-        # splitter 的 progress_cb 已按真实符号数回写 total;这里只在有 chunks 时
-        # 把 total 校正为实际切出的 chunk 数(部分节点切源码失败时 chunks < 节点数)。
-        # 空 chunks 不覆盖 total(保留回调写的值,让前端进度条停在真实节点数)。
+        # splitter 的 progress_cb 已按真实符号数回写 total 和 done;这里只在有 chunks
+        # 时把 total 校正为实际切出的 chunk 数(部分节点切源码失败时 chunks < 节点数)。
+        # 只写 total 不写 done —— 否则会把 progress_cb 写的终态 done 清零,前端进度条回弹。
         if chunks:
-            await _mark(total=len(chunks), done=0)
+            await _mark(total=len(chunks))
         if not chunks:
             await _mark(status="completed", done=0)
             await _delete_task_key(app_state, task_id)
@@ -874,6 +892,8 @@ async def import_code_repository(
             source_dir = _materialize_git_repo(
                 body.git_url or "", body.git_branch, dest_dir=git_src_dir
             )
+            # git_url 已是完整 URL(https://...),加 git:// 前缀会成畸形双 scheme
+            # (git://https://...)。直接用原值,与 folder:// 等非-URL 标签区分。
             source_label = body.git_url or ""
             workspace_path = git_src_dir
         else:
@@ -1080,6 +1100,14 @@ async def delete_code_repository(
     # 删除整个 {graph_db_dir}/{document_id}/ 目录(重构后:含 .codegraph/ + src/
     # managed 源)。同时兜底删旧的 {document_id}.db 裸文件(存量数据,见 plan 风险项)。
     # graph_repo_dir 已在上方校验为 graph_db_dir 的合法子路径。
+    # 先 evict 检索路径的 edges 缓存,避免删库后仍返回陈旧 callers/callees。
+    try:
+        from aigateway_core.pipelines.understanding.code_rag.graph_query import (
+            invalidate_edges_cache,
+        )
+        invalidate_edges_cache(str(graph_repo_dir))
+    except Exception as exc:
+        logger.warning("evict edges 缓存失败(%s): %s", document_id, exc)
     if graph_repo_dir.exists():
         try:
             shutil.rmtree(graph_repo_dir, ignore_errors=True)

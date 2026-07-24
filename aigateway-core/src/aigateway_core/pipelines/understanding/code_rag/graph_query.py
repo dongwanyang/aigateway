@@ -46,8 +46,37 @@ _EMPTY_METADATA: dict[str, Any] = {
 
 # 检索路径的 edges 缓存:key=graph_repo_path, value=(file_hashes_snapshot, callers_map, callees_map)。
 # 失效靠 files.content_hash 快照比对(增量 sync 改 db → 下次检索自动重建)。
-# split 阶段不进缓存(导入时只跑一次 read_call_edges 用完即丢,不污染)。
-_edges_cache: dict[str, tuple[dict[str, str], dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]]]] = {}
+# split 阶段不进缓存(导入时只跑一次 read_call_edges_strict 用完即丢,不污染)。
+# 有界 LRU(cachetools):每个仓库 ~2.8MB map,32 仓库上限 ~90MB,防长期累积泄漏;
+# 仓库删除时主动 pop(见 invalidate_edges_cache)。
+#
+# 线程安全:cachetools.LRUCache 的 __getitem__ 会 __touch 内部 OrderedDict(读即写),
+# 并发 get/set/pop 会抛 "OrderedDict mutated during iteration" 或丢条目。本缓存被两类
+# 线程访问 —— admin /callers 路由在 run_in_executor 的默认线程池,RAG retrieval 在
+# event-loop 线程,外加 invalidate 在 loop 线程。故所有缓存访问串行化在 _cache_lock 下;
+# SQL 重建(read_call_edges_strict,~114ms)留在锁外,不阻塞其它仓库的缓存命中。
+import threading
+from cachetools import LRUCache  # type: ignore[import-untyped]
+_edges_cache: LRUCache = LRUCache(maxsize=32)
+_cache_lock = threading.Lock()
+
+# 损坏哨兵:read_call_edges_strict 抛错时缓存此值,避免后续每次检索都重新打开损坏 db
+# 重抛(性能悬崖)。哨兵让重试有界——直到 files.content_hash 变化(下次 sync)才重建。
+# 结构同正常条目 (snapshot, callers, callees),但 callers/callees 为 None 标记"损坏"。
+_CORRUPT_MARK = None
+
+
+def _cache_key(graph_repo_path: str) -> str:
+    """统一缓存键:解析为绝对路径,消除符号链接/相对路径/尾斜杠差异。
+    保证 seed/retrieval 用的 key 与 invalidate_edges_cache(pop)用的 key 一致。
+    """
+    return str(Path(graph_repo_path).resolve())
+
+
+def invalidate_edges_cache(graph_repo_path: str) -> None:
+    """删除某仓库的 edges 缓存条目。仓库被删时调,避免残留失效条目。"""
+    with _cache_lock:
+        _edges_cache.pop(_cache_key(graph_repo_path), None)
 
 # codegraph CLI 默认查询超时(秒)。查询类命令都是点查,30s 足够;build/sync 用
 # graph_builder.py 里更长的 timeout。
@@ -86,8 +115,22 @@ def read_call_edges(graph_repo_path: str) -> tuple[dict[str, list[dict[str, Any]
     key=node id(精确,避免同名跨文件误并);value=ref 行列表。
     file_path 保留 src/ 前缀(与 read_file_hashes 一致,调用方按需剥)。
 
-    db 不存在或异常返回 ({}, {})(retrieval 容忍)。
+    db 不存在或异常返回 ({}, {})(retrieval 容忍 —— 绝不让检索链因 db 问题断掉)。
     """
+    return _read_call_edges_impl(graph_repo_path, strict=False)
+
+
+def read_call_edges_strict(graph_repo_path: str) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]]]:
+    """严格版:用于 import 阶段。db 不存在返回 ({}, {})(正常:图谱还没建);
+    但真正的 sqlite3.Error(db 损坏/schema 异常)抛出,不吞 —— 让 import 失败暴露,
+    而不是静默降级成空 callers/callees 误判导入"成功"。
+    """
+    return _read_call_edges_impl(graph_repo_path, strict=True)
+
+
+def _read_call_edges_impl(
+    graph_repo_path: str, *, strict: bool
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]]]:
     db_path = _graph_db_path(graph_repo_path)
     if not Path(db_path).exists():
         return {}, {}
@@ -129,6 +172,8 @@ def read_call_edges(graph_repo_path: str) -> tuple[dict[str, list[dict[str, Any]
         finally:
             conn.close()
     except sqlite3.Error:
+        if strict:
+            raise
         return {}, {}
 
 
@@ -136,16 +181,36 @@ def _get_cached_edges(graph_repo_path: str) -> tuple[dict[str, list[dict[str, An
     """懒加载 callers/callees map,按 file hash 快照失效。
 
     返回 (callers_map, callees_map)。hash 不变 → 复用缓存;变了/首次 → 重建。
+    重建用 read_call_edges_strict —— db 存在但损坏时抛 sqlite3.Error,不静默缓存空 map
+    (retrieval 路径的调用方包了 try/except 降级,strict 路径让它冒泡暴露)。
+    db 不存在仍返回 ({},{}) —— 严格路径首次检索前图谱还没建是合法状态。
+
+    线程安全:缓存读写串行化在 _cache_lock;SQL 重建在锁外(不阻塞其它仓库命中)。
+    损坏 db:缓存 _CORRUPT_SENTINEL(哨兵),避免后续每次检索都重新打开损坏 db 重抛
+    (性能悬崖);直到 files.content_hash 变化(下次 sync)才重建。
     """
     db_path = _graph_db_path(graph_repo_path)
     if not Path(db_path).exists():
         return {}, {}
+    key = _cache_key(graph_repo_path)
     snapshot = read_file_hashes(graph_repo_path)
-    cached = _edges_cache.get(graph_repo_path)
+    with _cache_lock:
+        cached = _edges_cache.get(key)
     if cached is not None and cached[0] == snapshot:
+        # 损坏哨兵:hash 未变 → 不重试(避免性能悬崖),让调用方降级。
+        # 非损坏 → 返回缓存的 maps。
+        if cached[1] is _CORRUPT_MARK:
+            raise sqlite3.Error(f"codegraph db 损坏(缓存哨兵命中): {graph_repo_path}")
         return cached[1], cached[2]
-    callers, callees = read_call_edges(graph_repo_path)
-    _edges_cache[graph_repo_path] = (snapshot, callers, callees)
+    try:
+        callers, callees = read_call_edges_strict(graph_repo_path)
+    except sqlite3.Error:
+        # 缓存哨兵(带当前 snapshot):bound 重试,直到下次 file-hash 变化才重建。
+        with _cache_lock:
+            _edges_cache[key] = (snapshot, _CORRUPT_MARK, _CORRUPT_MARK)
+        raise
+    with _cache_lock:
+        _edges_cache[key] = (snapshot, callers, callees)
     return callers, callees
 
 

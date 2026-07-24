@@ -397,10 +397,97 @@ def test_cached_edges_reuses_unchanged(tmp_path: Path) -> None:
 
     graph_query._edges_cache.clear()
     graph_query._get_cached_edges(str(tmp_path / "repo2"))
-    call_count_before = graph_query._edges_cache[str(tmp_path / "repo2")][0]  # snapshot ref
+    key = graph_query._cache_key(str(tmp_path / "repo2"))
+    call_count_before = graph_query._edges_cache[key][0]  # snapshot ref
     graph_query._get_cached_edges(str(tmp_path / "repo2"))  # 第二次,hash 没变
     # 仍是同一个 snapshot 对象(未重建)
-    assert graph_query._edges_cache[str(tmp_path / "repo2")][0] is call_count_before
+    assert graph_query._edges_cache[key][0] is call_count_before
+
+
+def test_cached_edges_concurrent_access_is_thread_safe(tmp_path: Path) -> None:
+    """_edges_cache (cachetools LRUCache) 被多线程并发访问不能抛 / 不能丢条目。
+
+    LRUCache.__getitem__ 会 __touch 内部 OrderedDict(读即写),且 LRU 驱逐会改结构;
+    不加锁并发 get/set/pop 会抛 'OrderedDict mutated during iteration' 或丢条目。
+    本测试并发命中 + invalidate(pop)竞争,锁化后应全程无异常。
+
+    注:纯 get/get 并发在 CPython GIL 下罕见抛错,故额外驱动 LRU 驱逐(maxsize=32,
+    写入 40+ 仓库)与 invalidate(pop)竞争 —— 这两个路径真正改 OrderedDict 结构。
+    """
+    import sqlite3
+    import threading
+    from aigateway_core.pipelines.understanding.code_rag import graph_query
+
+    def _seed(repo_dir: Path, idx: int) -> str:
+        db_path = repo_dir / ".codegraph" / "codegraph.db"
+        _build_codegraph_db_with_edges(
+            db_path,
+            [{"id": f"f:sym{idx}", "kind": "function", "name": f"sym{idx}",
+              "file_path": f"src/a{idx}.py", "start_line": 1, "end_line": 2}],
+            [],
+        )
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(f"INSERT INTO files (path, content_hash) VALUES ('src/a{idx}.py', 'h{idx}')")
+        conn.commit()
+        conn.close()
+        return str(repo_dir)
+
+    # 40 个仓库 > maxsize=32,驱动 LRU 驱逐路径
+    repos = [_seed(tmp_path / f"repo{i}", i) for i in range(40)]
+    graph_query._edges_cache.clear()
+    errors: list[Exception] = []
+
+    def _hit(repo: str) -> None:
+        for _ in range(20):
+            try:
+                graph_query._get_cached_edges(repo)
+            except sqlite3.Error:
+                pass
+            except Exception as exc:
+                errors.append(exc)
+
+    def _invalidate_loop() -> None:
+        for repo in repos:
+            for _ in range(10):
+                try:
+                    graph_query.invalidate_edges_cache(repo)
+                except Exception as exc:
+                    errors.append(exc)
+
+    threads = [threading.Thread(target=_hit, args=(r,)) for r in repos]
+    threads += [threading.Thread(target=_invalidate_loop) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors, f"并发缓存访问抛了非预期异常: {errors[:3]}"
+
+
+def test_invalidate_edges_cache_key_matches_seed_under_symlink(tmp_path: Path) -> None:
+    """delete 用的 resolved key 必须与 seed/retrieval 用的 key 一致。
+    通过 _cache_key(.resolve()) 统一;即便传入带尾斜杠/相对路径变体也能 pop 命中。
+    """
+    from aigateway_core.pipelines.understanding.code_rag import graph_query
+
+    db_path = tmp_path / "repo" / ".codegraph" / "codegraph.db"
+    _build_codegraph_db_with_edges(
+        db_path,
+        [{"id": "f:x", "kind": "function", "name": "x", "file_path": "src/a.py", "start_line": 1, "end_line": 2}],
+        [],
+    )
+    import sqlite3
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("INSERT INTO files (path, content_hash) VALUES ('src/a.py', 'h1')")
+    conn.commit()
+    conn.close()
+
+    graph_query._edges_cache.clear()
+    base = str(tmp_path / "repo")
+    graph_query._get_cached_edges(base)
+    assert graph_query._cache_key(base) in graph_query._edges_cache
+    # 用不同字符串变体(尾斜杠)invalidate,仍应命中 pop
+    graph_query.invalidate_edges_cache(base + "/")
+    assert graph_query._cache_key(base) not in graph_query._edges_cache
 
 
 def test_read_call_edges_returns_callers_and_callees(tmp_path: Path) -> None:

@@ -428,12 +428,15 @@ def build_symbol_chunks(
 ) -> list[dict[str, Any]]:
     """从 codegraph db 读符号节点,用行号切源码 + 构造结构描述嵌入文本。
 
-    callers/callees 走 read_call_edges(2 条 SQL,全图一次),不再逐符号 spawn CLI。
+    callers/callees 走 read_call_edges_strict(2 条 SQL,全图一次),不再逐符号 spawn CLI。
+    用 strict 版:db 存在但损坏时抛 sqlite3.Error,让 import 整体失败暴露,而不是
+    静默降级成空 callers/callees 误判导入"成功"。db 不存在仍返回 ({},{})(图谱未建,
+    但 import 流程里 build_code_graph 在前,此处 db 必然存在,空 map 只发生在无 calls 边)。
     progress_cb(done, total, current_file) 每 200 符号回写一次(splitting 阶段进度)。
     """
     from aigateway_core.pipelines.understanding.code_rag.graph_query import (
         _get_imports_for_file,
-        read_call_edges,
+        read_call_edges_strict,
     )
 
     logger = logging.getLogger(__name__)
@@ -441,7 +444,7 @@ def build_symbol_chunks(
     nodes = _read_symbol_nodes(graph_repo_path, only_files=only_files)
 
     # 一次性建全图 callers/callees map(替代 ~10k 次 CLI 子进程)
-    callers_map, callees_map = read_call_edges(graph_repo_path)
+    callers_map, callees_map = read_call_edges_strict(graph_repo_path)
     total = len(nodes)
 
     chunks: list[dict[str, Any]] = []
