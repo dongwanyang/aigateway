@@ -5,6 +5,8 @@ type Phase = 'idle' | 'polling' | 'succeeded' | 'failed' | 'timeout'
 
 interface MediaVideoProps {
   content: string
+  videoId?: string
+  videoUrl?: string
   done: boolean
 }
 
@@ -20,9 +22,13 @@ function parseVideoId(content: string): string | null {
   return m ? m[1] : null
 }
 
-export default function MediaVideo({ content, done }: MediaVideoProps) {
+function extractVideoUrl(status: { url?: string; video?: { url?: string } }): string | null {
+  return status.video?.url || status.url || null
+}
+
+export default function MediaVideo({ content, videoId: initialVideoId, videoUrl: initialVideoUrl, done }: MediaVideoProps) {
   const [phase, setPhase] = useState<Phase>('idle')
-  const [videoUrl, setVideoUrl] = useState<string | null>(null)
+  const [videoUrl, setVideoUrl] = useState<string | null>(initialVideoUrl ?? null)
   const [elapsed, setElapsed] = useState(0)
   // 用 setTimeout 递归替代 setInterval，防止 poll() 耗时 >3s 时多个 HTTP 请求并发。
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -32,7 +38,11 @@ export default function MediaVideo({ content, done }: MediaVideoProps) {
   const mountedRef = useRef(true)
   useEffect(() => () => { mountedRef.current = false }, [])
 
-  const videoId = done ? parseVideoId(content) : null
+  const videoId = done ? (initialVideoId ?? parseVideoId(content)) : null
+
+  useEffect(() => {
+    setVideoUrl(initialVideoUrl ?? null)
+  }, [initialVideoUrl])
 
   useEffect(() => {
     if (!done || !videoId) return
@@ -60,15 +70,16 @@ export default function MediaVideo({ content, done }: MediaVideoProps) {
         }
         const st = await getVideoStatus(videoId!)
         if (cancelled) return
-        if (st.status === 'succeeded' && st.video?.url) {
+        const resolvedUrl = extractVideoUrl(st)
+        if ((st.status === 'succeeded' || st.status === 'completed') && resolvedUrl) {
           if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null }
           if (mountedRef.current) {
-            setVideoUrl(st.video.url)
+            setVideoUrl(resolvedUrl)
             setPhase('succeeded')
           }
           return
         }
-        if (st.status === 'failed' || st.error) {
+        if (st.status === 'failed' || st.status === 'error' || st.error) {
           if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null }
           if (mountedRef.current) setPhase('failed')
           return

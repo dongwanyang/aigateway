@@ -276,22 +276,25 @@ class LiteLLMBridge:
                             # 可选：per-model base_url 覆盖 provider 级别
                             model_base_url = model_entry.get("base_url") or None
                             raw_caps = model_entry.get("capabilities")
-                            if isinstance(raw_caps, list):
-                                model_caps = [
-                                    str(x) for x in raw_caps if x
-                                ] or ["text"]
-                            else:
-                                if raw_caps is not None:
-                                    logger.warning(
-                                        "litellm_bridge: model=%s capabilities expected list, "
-                                        "got %r; defaulting to ['text']",
-                                        model_name,
-                                        type(raw_caps).__name__,
-                                    )
-                                model_caps = ["text"]
+                            raw_modality = model_entry.get("modality")
+                            model_caps = self._normalize_model_capabilities(
+                                model_name=model_name,
+                                raw_caps=raw_caps,
+                                raw_modality=raw_modality,
+                            )
+                            if raw_caps is not None and not isinstance(raw_caps, list):
+                                logger.warning(
+                                    "litellm_bridge: model=%s capabilities expected list, got %r; falling back to legacy modality normalization",
+                                    model_name,
+                                    type(raw_caps).__name__,
+                                )
                         elif isinstance(model_entry, str):
                             model_name = model_entry
-                            model_caps = ["text"]
+                            model_caps = self._normalize_model_capabilities(
+                                model_name=model_name,
+                                raw_caps=None,
+                                raw_modality=None,
+                            )
                         else:
                             continue
 
@@ -482,7 +485,7 @@ class LiteLLMBridge:
         return self._cooldown_tracker.get_provider_states()
 
     def _build_routing_strategy(self, providers_config: Dict[str, Any]) -> str:
-        """构建路由策略配置。
+        """构建路由策略配置.
 
         Args:
             providers_config: 提供商配置。
@@ -501,6 +504,51 @@ class LiteLLMBridge:
                 }
                 return strategy_map.get(strategy, "simple-shuffle")
         return "simple-shuffle"
+
+    def _normalize_model_capabilities(
+        self,
+        model_name: str,
+        raw_caps: Any,
+        raw_modality: Any,
+    ) -> List[str]:
+        """兼容新旧配置格式：优先读 capabilities；没有时回退到旧 modality。"""
+        if isinstance(raw_caps, list):
+            caps = [str(x) for x in raw_caps if x]
+            if caps:
+                return caps
+
+        modalities = []
+        if isinstance(raw_modality, list):
+            modalities = [str(x) for x in raw_modality if x]
+        elif isinstance(raw_modality, str):
+            modalities = [raw_modality]
+
+        inferred: List[str] = []
+        lower_name = (model_name or "").lower()
+
+        if "llm" in modalities or "mllm" in modalities:
+            inferred.append("text")
+        if "generative" in modalities:
+            if "video" in lower_name:
+                inferred.append("video")
+            elif "image" in lower_name:
+                inferred.append("image")
+            else:
+                inferred.extend(["image", "video"])
+
+        if not inferred and lower_name:
+            if "video" in lower_name:
+                inferred.append("video")
+            elif "image" in lower_name:
+                inferred.append("image")
+            elif "llm" in lower_name or "model" in lower_name or "flash" in lower_name:
+                inferred.append("text")
+
+        if not inferred:
+            inferred = ["text"]
+
+        # 保证不出现重复值
+        return list(dict.fromkeys(inferred))
 
     # ------------------------------------------------------------------
     # 核心调用

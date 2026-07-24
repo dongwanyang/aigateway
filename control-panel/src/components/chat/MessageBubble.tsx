@@ -78,7 +78,12 @@ export default function MessageBubble({ msg, isStreaming, pendingAssistantId, on
           <MediaImage content={msg.content} done={!isStreaming} />
         )}
         {kind === 'video' && (
-          <MediaVideo content={msg.content} done={!isStreaming} />
+          <MediaVideo
+            content={msg.content}
+            videoId={msg.videoId}
+            videoUrl={msg.videoUrl}
+            done={!isStreaming}
+          />
         )}
         {kind === 'text' && (
           <>

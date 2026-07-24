@@ -82,6 +82,33 @@ async def test_video_intent_pools_video_models():
 
 
 @pytest.mark.asyncio
+async def test_legacy_modality_config_still_selects_video_capability():
+    """Legacy modality-only configs should be normalized to capabilities for routing."""
+    legacy_config = {
+        "agnes": {
+            "api_key": "k",
+            "base_url": "https://apihub.agnes-ai.com/v1",
+            "model_grouper": [{
+                "models": [
+                    {"name": "agnes-2.0-flash", "modality": ["llm", "mllm"]},
+                    {"name": "agnes-image-2.1-flash", "modality": ["generative"]},
+                    {"name": "agnes-video-v2.0", "modality": ["generative"]},
+                ],
+                "fallback_models": [],
+                "pricing": {},
+            }],
+        }
+    }
+    b = LiteLLMBridge(config={"providers": legacy_config})
+    b._build_model_list(legacy_config)
+    b.router = MagicMock()
+
+    resolved = await b._resolve_by_intent(intent="generation:video", model_hint=None)
+    assert resolved["model"] == "agnes-video-v2.0"
+    assert resolved["meta"]["intent"] == "generation:video"
+
+
+@pytest.mark.asyncio
 async def test_polymorphic_model_selected_for_both_text_and_image():
     """agnes-2.0-flash is polymorphic: selected for both understanding and image."""
     b = _bridge()

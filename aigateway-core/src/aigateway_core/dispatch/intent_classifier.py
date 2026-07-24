@@ -136,8 +136,16 @@ class IntentClassifier:
     # 带图片/视频输入块不再直接判生成 —— "描述这张图"是理解(mllm),不是生成。
     _IMAGE_GEN_KEYWORDS = ("画", "生成图", "生成一张", "生成图片", "draw", "generate image",
                            "create image", "生成图像")
-    _VIDEO_GEN_KEYWORDS = ("生成视频", "生成一段视频", "generate video", "create video",
-                           "make a video")
+    _VIDEO_GEN_KEYWORDS = (
+        "生成视频", "生成一段视频", "生成一个视频", "生成视频文件",
+        "generate video", "generate a video", "generate a 10-second video",
+        "create video", "create a video", "make a video", "make a 10-second video",
+    )
+
+    _VIDEO_GEN_PATTERN = re.compile(
+        r"\b(generate|create|make|produce)(?:\s+(?:a|an|the))?.{0,20}\b(video|clip|animation)\b",
+        re.IGNORECASE,
+    )
 
     def _heuristic(self, messages: List[Dict[str, Any]]) -> Dict[str, Any]:
         """降级启发式: 仅按最后一条 user 文本的生成关键词判定, 带图输入默认 understanding.
@@ -146,8 +154,16 @@ class IntentClassifier:
         错误路由到 _do_image_generation。图片/视频输入块本身不构成生成意图。
         """
         user_text = self._extract_last_user_text(messages).lower()
-        if any(kw in user_text for kw in self._VIDEO_GEN_KEYWORDS):
+
+        video_pattern = re.search(r"(生成|做|制作|创作).{0,20}视频", user_text)
+        if (
+            video_pattern
+            or self._VIDEO_GEN_PATTERN.search(user_text)
+            or any(kw in user_text for kw in self._VIDEO_GEN_KEYWORDS)
+        ):
             return {"generation": "video", "hint": "None"}
-        if any(kw in user_text for kw in self._IMAGE_GEN_KEYWORDS):
+
+        image_pattern = re.search(r"(生成|画|做|制作|创作).{0,20}(图|图片|图像)", user_text)
+        if image_pattern or any(kw in user_text for kw in self._IMAGE_GEN_KEYWORDS):
             return {"generation": "image", "hint": "None"}
         return {"generation": "understanding", "hint": "None"}

@@ -447,7 +447,7 @@ export interface AssignGroupRequest {
 // Chat 页面本地类型(聊天窗 MVP)
 // ------------------------------------------------------------------
 
-/** 聊天页单条消息(v2:加 incomplete + draft + videoId) */
+/** 聊天页单条消息(v2:加 incomplete + draft + videoId + videoUrl) */
 export interface ChatPageMessage {
   id: string
   role: 'user' | 'assistant'
@@ -459,8 +459,10 @@ export interface ChatPageMessage {
   incomplete?: boolean
   /** 草稿消息附加状态(仅 generation 意图的助手消息) */
   draft?: ChatDraftState
-  /** 视频生成任务 ID，用于刷新后轮询恢复（不持久化 data URL） */
+  /** 视频生成任务 ID，用于刷新后轮询恢复。 */
   videoId?: string
+  /** 视频最终可播放 URL（不依赖内容文本解析）。 */
+  videoUrl?: string
   /** 等待 draft 响应的标记（防止刷新后误续传）。超 30s 自动过期。 */
   awaitingDraft?: boolean
   awaitingDraftSince?: number // Date.now() when awaitingDraft was set
@@ -495,7 +497,8 @@ export interface ChatSession {
 /** GET /v1/videos/{id} 返回的上游视频任务状态(passthrough) */
 export interface VideoStatusResponse {
   id?: string
-  status?: string  // 'queued' | 'in_progress' | 'succeeded' | 'failed' | ...
+  status?: string  // 'queued' | 'in_progress' | 'succeeded' | 'completed' | 'failed' | ...
+  url?: string
   video?: { url?: string }
   error?: { code?: string; message?: string }
 }

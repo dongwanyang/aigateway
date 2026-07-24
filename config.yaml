@@ -109,15 +109,16 @@ providers:
     model_grouper:
     - models:
       - name: agnes-2.0-flash
-        modality:
-        - llm
-        - mllm
+        capabilities:
+        - text
+        - image
+        - video
       - name: agnes-image-2.1-flash
-        modality:
-        - generative
+        capabilities:
+        - image
       - name: agnes-video-v2.0
-        modality:
-        - generative
+        capabilities:
+        - video
       fallback_models: []
       pricing:
         agnes-2.0-flash:
@@ -138,9 +139,8 @@ providers:
     model_grouper:
     - models:
       - name: deepseek-v4-flash
-        modality:
-        - llm
-        - mllm
+        capabilities:
+        - text
       fallback_models: []
       pricing:
         deepseek-v4-flash:
@@ -155,17 +155,14 @@ providers:
     model_grouper:
     - models:
       - name: glm-5.2
-        modality:
-        - llm
-        - mllm
+        capabilities:
+        - text
       - name: deepseek-v4-pro
-        modality:
-        - llm
-        - mllm
+        capabilities:
+        - text
       - name: kimi-k2.7-code
-        modality:
-        - llm
-        - mllm
+        capabilities:
+        - text
       fallback_models: []
       pricing:
         glm-5.2:

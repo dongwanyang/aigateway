@@ -70,7 +70,7 @@ function hasActiveAsyncTask(msg: ChatPageMessage): boolean {
 
 /** 判断视频任务是否已完成（成功或失败）。 */
 function isVideoTerminal(status: string | undefined): boolean {
-  return status === 'succeeded' || status === 'failed' || status === 'error' || status === 'expired'
+  return status === 'succeeded' || status === 'completed' || status === 'failed' || status === 'error' || status === 'expired'
 }
 
 /** 从 localStorage 加载 sessions,无则迁移旧单会话 key,再无则空数组。 */
@@ -833,12 +833,13 @@ export function useChatSessions(): UseChatSessions {
 
         if (terminalStatus) {
           pollingVideoIds.delete(videoId)
-          const video = status.video
-          if (status.status === 'succeeded' && video?.url) {
-            // 视频生成成功，更新消息内容
+          const resolvedUrl = status.video?.url || status.url
+          if ((status.status === 'succeeded' || status.status === 'completed') && resolvedUrl) {
+            // 视频生成成功：保留消息的 videoId，并把最终 URL 单独挂到 message 上。
+            // 不再把 content 改写成纯 URL 文本，否则 MessageBubble 会走到错误的 media 分支。
             patchMessage(msgId, m => ({
               ...m,
-              content: `Video generated successfully. URL: ${video.url}`,
+              videoUrl: resolvedUrl,
               intent: 'generation:video',
               model: 'video',
             }))

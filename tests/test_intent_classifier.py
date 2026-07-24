@@ -102,6 +102,42 @@ async def test_timeout_fallback_heuristic_generation_keyword():
 
 
 @pytest.mark.asyncio
+async def test_timeout_fallback_heuristic_image_to_video_request():
+    """基于图片内容生成视频这类自然语言也应判为 video."""
+    bridge, sel = _mock_bridge()
+    import asyncio as _a
+
+    async def slow(*a, **k):
+        await _a.sleep(5)
+
+    bridge.completion = AsyncMock(side_effect=slow)
+    ic = IntentClassifier(bridge=bridge, model_selector=sel, config={"timeout_seconds": 0.1})
+    result = await ic.classify(
+        messages=[{"role": "user", "content": "根据这张图生成一个视频"}],
+        body_model=None,
+    )
+    assert result["generation"] == "video"
+
+
+@pytest.mark.asyncio
+async def test_timeout_fallback_heuristic_english_video_prompt():
+    """英文自然语言'generate a 10-second video ...'也应判为 video."""
+    bridge, sel = _mock_bridge()
+    import asyncio as _a
+
+    async def slow(*a, **k):
+        await _a.sleep(5)
+
+    bridge.completion = AsyncMock(side_effect=slow)
+    ic = IntentClassifier(bridge=bridge, model_selector=sel, config={"timeout_seconds": 0.1})
+    result = await ic.classify(
+        messages=[{"role": "user", "content": "Please generate a 10-second video about a sunset over the ocean"}],
+        body_model=None,
+    )
+    assert result["generation"] == "video"
+
+
+@pytest.mark.asyncio
 async def test_malformed_json_fallback():
     bridge, sel = _mock_bridge()
     bridge.completion.return_value = _resp("not json at all")
