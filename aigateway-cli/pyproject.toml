@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "aigateway-cli"
-version = "0.1.0"
+version = "0.1.1.0"
 description = "AI Gateway CLI — interactive chat and single-request command-line tool."
 requires-python = ">=3.12,<3.14"
 license = "MIT"
