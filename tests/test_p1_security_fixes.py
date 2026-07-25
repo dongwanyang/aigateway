@@ -173,6 +173,7 @@ def test_frontend_and_nginx_security_contracts():
     assert "gitleaks/gitleaks-action@v3" in workflow
     assert "GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}" in workflow
     assert "aquasecurity/trivy-action@v0.36.0" in workflow
+    assert "trivyignores: .trivyignore.yaml" in workflow
     assert "inputs: aigateway-api/requirements.txt" in workflow
     assert "ignore-vulns: PYSEC-2026-1215" in workflow
     assert "inputs: aigateway-core/" in workflow

@@ -1,0 +1,16 @@
+misconfigurations:
+  - id: AVD-DS-0002
+    paths:
+      - "Dockerfile.frontend"
+    expired_at: 2027-01-31
+    statement: >-
+      The nginx master binds the existing privileged HTTP/HTTPS ports and then
+      drops request handling to nginx workers. Moving to an unprivileged image
+      requires a coordinated compose and production TLS port migration.
+  - id: AVD-DS-0002
+    paths:
+      - "aigateway-api/Dockerfile"
+    expired_at: 2027-01-31
+    statement: >-
+      The API currently writes to host and named volumes whose ownership varies
+      by deployment. Migrate volume ownership before enforcing a non-root UID.
