@@ -1,28 +1,17 @@
-# ============================================================
-# 构建加速:启用 BuildKit(并行层构建 + 增量上下文传输)
-#   set -a && source .env.docker && set +a && docker compose ...
-#   或直接:sudo DOCKER_BUILDKIT=1 docker compose up -d --build gateway
-# .dockerignore 已排除 .venv/node_modules/.git 等,构建上下文 < 10MB
-# ============================================================
 name: aigateway
 
 services:
-  # ==========================================================
-  # API Gateway 服务
-  # ==========================================================
   gateway:
     build:
       context: .
       dockerfile: aigateway-api/Dockerfile
     ports:
       - "8000:8000"
-    # .env 注入:容器内 os.environ 同时含 .env 与下方 environment:
-    # 优先级:environment: 段(覆盖) > .env > config.yaml
     env_file:
       - .env
     environment:
-      - AI_GATEWAY_REDIS_URL=redis://aigateway-redis-1:6379/0
-      - AI_GATEWAY_QDRANT_URL=http://aigateway-qdrant-1:6333
+      - AI_GATEWAY_REDIS_URL=redis://redis:6379/0
+      - AI_GATEWAY_QDRANT_URL=http://qdrant:6333
     volumes:
       - ./config.yaml:/app/config.yaml
       - code_graphs_data:/data/code_graphs
@@ -32,21 +21,9 @@ services:
       redis:
         condition: service_healthy
     restart: unless-stopped
-    # GPU 透传（需宿主装 NVIDIA 驱动 + nvidia-container-toolkit）：
-    # 让容器内 torch.cuda 可见 Tesla T4，用于 L3 向量计算 / prompt_compress。
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
     networks:
       - gateway-net
 
-  # ==========================================================
-  # 前端控制面板
-  # ==========================================================
   control-panel:
     build:
       context: ./control-panel
@@ -61,18 +38,12 @@ services:
     networks:
       - gateway-net
 
-  # ==========================================================
-  # Redis Stack — KV 缓存 + API Key 存储 + RediSearch (L2 BM25 / L3 向量 / RAG 热点)
-  # redis-stack 镜像内置 RediSearch/RedisJSON 模块，支持 FT.SEARCH (BM25) 与向量 KNN。
-  # ==========================================================
   redis:
-    image: redis/redis-stack:latest
-    ports:
-      - "6379:6379"
+    image: redis/redis-stack:7.2.0-v18
+    expose:
+      - "6379"
     volumes:
       - redis-data:/data
-    # maxmemory 提到 512mb：三个 RediSearch 索引 (L2 BM25 / L3 语义 / RAG 热点) 额外占内存。
-    # volatile-lru：优先淘汰带 TTL 的 key (缓存)，保留无 TTL 的 API Key/配额数据。
     command: redis-stack-server --appendonly yes --maxmemory 512mb --maxmemory-policy volatile-lru --save 60 1
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -83,27 +54,21 @@ services:
     networks:
       - gateway-net
 
-  # ==========================================================
-  # Qdrant — 向量数据库（L3 语义缓存）
-  # ==========================================================
   qdrant:
-    image: qdrant/qdrant:latest
-    ports:
-      - "6333:6333"
-      - "6334:6334"
+    image: qdrant/qdrant:v1.13.4
+    expose:
+      - "6333"
+      - "6334"
     volumes:
       - qdrant-data:/qdrant/storage
     restart: unless-stopped
     networks:
       - gateway-net
 
-  # ==========================================================
-  # Prometheus — 指标采集
-  # ==========================================================
   prometheus:
-    image: prom/prometheus:latest
-    ports:
-      - "9090:9090"
+    image: prom/prometheus:v3.1.0
+    expose:
+      - "9090"
     volumes:
       - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
@@ -115,16 +80,13 @@ services:
     networks:
       - gateway-net
 
-  # ==========================================================
-  # Grafana — 可视化面板
-  # ==========================================================
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:11.5.0
     ports:
       - "3001:3000"
     environment:
-      - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD}
       - GF_USERS_ALLOW_SIGN_UP=false
     volumes:
       - grafana-data:/var/lib/grafana
@@ -144,4 +106,4 @@ volumes:
   qdrant-data:
   grafana-data:
   prometheus-data:
-  code_graphs_data:            # Code RAG: 每仓库一份 CodeGraph SQLite 图谱库
+  code_graphs_data:
