@@ -273,10 +273,15 @@ class DraftGeneratorPlugin:
         if not api_key_id and ctx.user_id:
             api_key_id = ctx.user_id
 
+        # media_type 由意图分类的 pipeline_kind 决定（generation:video → video）
+        # 否则 GenerationRequest 默认 "image"，confirm_draft 永远走图片放大分支。
+        media_type = "video" if ctx.pipeline_kind == "generation:video" else "image"
+
         return GenerationRequest(
             prompt=prompt,
             target_resolution=target_resolution,
             target_fps=target_fps,
+            media_type=media_type,
             api_key_id=api_key_id or "",
             request_id=ctx.request_id,
         )
