@@ -21,15 +21,6 @@ services:
       redis:
         condition: service_healthy
     restart: unless-stopped
-#    # GPU 透传（需宿主装 NVIDIA 驱动 + nvidia-container-toolkit）：
-#    # 让容器内 torch.cuda 可见 Tesla T4，用于 L3 向量计算 / prompt_compress。
-#    deploy:
-#      resources:
-#        reservations:
-#          devices:
-#            - driver: nvidia
-#              count: all
-#              capabilities: [gpu]
     networks:
       - gateway-net
 
@@ -74,38 +65,6 @@ services:
     networks:
       - gateway-net
 
-  prometheus:
-    image: prom/prometheus:v3.1.0
-    expose:
-      - "9090"
-    volumes:
-      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus-data:/prometheus
-    command:
-      - "--config.file=/etc/prometheus/prometheus.yml"
-      - "--storage.tsdb.retention.time=30d"
-      - "--storage.tsdb.path=/prometheus"
-    restart: unless-stopped
-    networks:
-      - gateway-net
-
-  grafana:
-    image: grafana/grafana:11.5.0
-    ports:
-      - "3001:3000"
-    environment:
-      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
-      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
-      - GF_USERS_ALLOW_SIGN_UP=false
-    volumes:
-      - grafana-data:/var/lib/grafana
-      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
-    depends_on:
-      - prometheus
-    restart: unless-stopped
-    networks:
-      - gateway-net
-
 networks:
   gateway-net:
     driver: bridge
@@ -113,6 +72,4 @@ networks:
 volumes:
   redis-data:
   qdrant-data:
-  grafana-data:
-  prometheus-data:
   code_graphs_data:
