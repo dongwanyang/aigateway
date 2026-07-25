@@ -143,7 +143,7 @@ def sweep_orphaned_tasks(app_state: Any) -> int:
     # 记录删了哪些,debug 级别可追溯(避免静默删错)。
     import glob
     swept_dirs: list[str] = []
-    for pattern in ("/tmp/code_rag_folder_*",):
+    for pattern in (str(Path(tempfile.gettempdir()) / "code_rag_folder_*"),):
         for d in glob.glob(pattern):
             shutil.rmtree(d, ignore_errors=True)
             if not Path(d).exists():

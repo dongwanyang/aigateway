@@ -420,10 +420,16 @@ class RequestDispatcher:
         group_id = ""
         if hasattr(request.state, "api_key_data") and request.state.api_key_data:
             group_id = request.state.api_key_data.get("group_id") or ""
+        pipeline_version = "1"
+        if self.config_manager is not None:
+            pipeline_version = str(
+                self.config_manager.get("cache.pipeline_version", "1") or "1"
+            )
         cache_key = cache_manager.generate_cache_key(
             normalized_prompt=normalized_messages,
             model=body.model,
             pipeline_kind="understanding",
+            pipeline_version=pipeline_version,
             cache_scope=cache_scope,
             user_id=user_id or "",
             group_id=group_id,

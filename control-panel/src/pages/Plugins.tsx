@@ -28,17 +28,18 @@ export default function Plugins() {
   const [showKeyInput, setShowKeyInput] = useState(false)
   const [savedKey, setSavedKey] = useState(getSavedApiKey())
 
-  useEffect(() => {
-    setApiKeyInput(savedKey ?? '')
-  }, [savedKey])
-
-  const handleSaveKey = () => {
+  const handleSaveKey = async () => {
     if (apiKeyInput.trim()) {
-      saveApiKey(apiKeyInput.trim())
-      setSavedKey(apiKeyInput.trim())
-      setShowKeyInput(false)
-      setError(null)
-      loadData()
+      try {
+        await saveApiKey(apiKeyInput.trim())
+        setApiKeyInput('')
+        setSavedKey('1')
+        setShowKeyInput(false)
+        setError(null)
+        await loadData()
+      } catch {
+        setError('API Key 无效，请重新输入')
+      }
     }
   }
 
@@ -166,7 +167,7 @@ export default function Plugins() {
             <p className="text-sm mb-6" style={{ color: 'var(--color-text-tertiary)' }}>
               请输入管理员 API Key 以查看和管理插件配置。
               <br />
-              密钥将保存在浏览器本地存储中。
+              密钥只用于创建 HttpOnly 会话，不会保存到浏览器存储。
             </p>
             <button
               onClick={() => setShowKeyInput(true)}
@@ -213,7 +214,7 @@ export default function Plugins() {
                 value={apiKeyInput}
                 onChange={e => setApiKeyInput(e.target.value)}
                 placeholder="gw-xxxxxxxx..."
-                onKeyDown={e => { if (e.key === 'Enter') handleSaveKey() }}
+                onKeyDown={e => { if (e.key === 'Enter') void handleSaveKey() }}
                 style={{
                   flex: 1,
                   padding: '10px 14px',
@@ -227,7 +228,7 @@ export default function Plugins() {
                 autoFocus
               />
               <button
-                onClick={handleSaveKey}
+                onClick={() => void handleSaveKey()}
                 disabled={!apiKeyInput.trim()}
                 style={{
                   display: 'inline-flex',
@@ -247,7 +248,7 @@ export default function Plugins() {
                 保存
               </button>
               <button
-                onClick={() => { setShowKeyInput(false); setApiKeyInput(savedKey ?? '') }}
+                onClick={() => { setShowKeyInput(false); setApiKeyInput('') }}
                 style={{
                   display: 'inline-flex',
                   alignItems: 'center',
@@ -281,7 +282,7 @@ export default function Plugins() {
             {plugins.filter(p => p.enabled).length}/{plugins.length} 已启用
           </span>
           <button
-            onClick={() => { setShowKeyInput(true); setApiKeyInput(savedKey ?? '') }}
+            onClick={() => { setShowKeyInput(true); setApiKeyInput('') }}
             style={{
               display: 'inline-flex',
               alignItems: 'center',

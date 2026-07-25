@@ -23,6 +23,7 @@ from fastapi import Header, HTTPException, Request, status
 from starlette.responses import JSONResponse
 
 logger = logging.getLogger(__name__)
+SESSION_COOKIE_NAME = "aigateway_session"
 
 
 def _extract_api_key(
@@ -61,6 +62,31 @@ def _hash_key(key_value: str) -> str:
     return hashlib.sha256(key_value.encode("utf-8")).hexdigest()
 
 
+def _get_session_cookie(request: Request) -> Optional[str]:
+    cookies = getattr(request, "cookies", None)
+    if cookies is None or not hasattr(cookies, "get"):
+        return None
+    value = cookies.get(SESSION_COOKIE_NAME)
+    return value if isinstance(value, str) and value else None
+
+
+def require_scope(key_data: Dict[str, Any], scope: str) -> None:
+    """Reject a valid key that lacks the endpoint's explicit scope."""
+    scopes = key_data.get("scopes") or []
+    if isinstance(scopes, str):
+        scopes = [item.strip() for item in scopes.split(",")]
+    if scope not in scopes:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error": {
+                    "code": "insufficient_scope",
+                    "message": f"API key requires '{scope}' scope",
+                }
+            },
+        )
+
+
 async def authenticate(
     request: Request,
     api_key: Optional[str] = Header(None, alias="x-api-key"),
@@ -87,7 +113,7 @@ async def authenticate(
         HTTPException 401: Key 缺失或无效。
         HTTPException 403: Key 已被撤销。
     """
-    key_value = _extract_api_key(authorization, api_key)
+    key_value = _extract_api_key(authorization, api_key) or _get_session_cookie(request)
 
     if not key_value:
         raise HTTPException(
@@ -141,6 +167,16 @@ async def authenticate(
                     }
                 },
             )
+        if "expired" in error_msg.lower() or "expiration" in error_msg.lower():
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "error": {
+                        "code": "key_expired",
+                        "message": "API key has expired",
+                    }
+                },
+            )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={
@@ -191,7 +227,7 @@ async def authenticate_admin(request: Request) -> Optional[Dict[str, Any]]:
     key_value = _extract_api_key(
         request.headers.get("authorization"),
         request.headers.get("x-api-key"),
-    )
+    ) or _get_session_cookie(request)
 
     if not key_value:
         raise HTTPException(
@@ -242,6 +278,16 @@ async def authenticate_admin(request: Request) -> Optional[Dict[str, Any]]:
                     }
                 },
             )
+        if "expired" in error_msg.lower() or "expiration" in error_msg.lower():
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "error": {
+                        "code": "key_expired",
+                        "message": "API key has expired",
+                    }
+                },
+            )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={
@@ -263,17 +309,7 @@ async def authenticate_admin(request: Request) -> Optional[Dict[str, Any]]:
             },
         )
 
-    # Admin endpoints require explicit is_admin flag
-    if not key_data.get("is_admin"):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={
-                "error": {
-                    "code": "forbidden",
-                    "message": "Admin privileges required",
-                }
-            },
-        )
+    require_scope(key_data, "admin")
 
     request.state.api_key_data = key_data
     request.state.api_key_value = key_value
@@ -296,7 +332,7 @@ async def require_api_key(request: Request) -> None:
     api_key = request.headers.get("x-api-key")
     authorization = request.headers.get("authorization")
 
-    key_value = _extract_api_key(authorization, api_key)
+    key_value = _extract_api_key(authorization, api_key) or _get_session_cookie(request)
 
     if not key_value:
         raise HTTPException(

@@ -6,6 +6,7 @@ remains in ``aigateway_api.streaming.create_sse_response``.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -35,9 +36,15 @@ class SSEGenerator:
         ``\\n``，导致客户端 JSON 解析后得到字面 "反斜杠 n" 而非换行，
         破坏代码块等含换行的内容。
         """
+        emit_done = True
         try:
             async for chunk in self.completion_gen:
                 yield "data: " + json.dumps(chunk, ensure_ascii=False) + "\n\n"
+        except (asyncio.CancelledError, GeneratorExit):
+            # Client disconnects must propagate cancellation to Starlette and
+            # must not be converted into an SSE error event.
+            emit_done = False
+            raise
         except Exception as exc:
             logger.error("SSE stream generation error: %s", exc)
             error_chunk = {
@@ -45,4 +52,14 @@ class SSEGenerator:
             }
             yield "data: " + json.dumps(error_chunk, ensure_ascii=False) + "\n\n"
         finally:
+            close = getattr(self.completion_gen, "aclose", None)
+            if callable(close):
+                try:
+                    await close()
+                except (asyncio.CancelledError, GeneratorExit):
+                    raise
+                except Exception as exc:
+                    logger.warning("Failed to close upstream SSE generator: %s", exc)
+
+        if emit_done:
             yield "data: [DONE]\n\n"

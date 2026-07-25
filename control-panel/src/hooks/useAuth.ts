@@ -8,12 +8,11 @@ interface AuthState {
 }
 
 /**
- * Auth persistence hook — manages API key in localStorage with auto-401 handling.
+ * Auth hook backed by an HttpOnly browser session.
  *
  * Features:
- * - Persist API key in localStorage
- * - Auto-detect existing key on mount
- * - Show first 8 chars as prefix indicator
+ * - Exchange API key for an HttpOnly, SameSite cookie
+ * - Persist only a non-secret session marker
  * - Login/logout helpers
  */
 export function useAuth() {
@@ -22,19 +21,19 @@ export function useAuth() {
     return {
       apiKey: saved,
       isAuthenticated: !!saved,
-      keyPrefix: saved && saved.length >= 8 ? saved.substring(0, 8) : null,
+      keyPrefix: null,
     }
   })
 
   // Listen for storage changes (e.g., another tab)
   useEffect(() => {
     const handleStorage = (e: StorageEvent) => {
-      if (e.key === 'aigateway_api_key') {
+      if (e.key === 'aigateway_session_active') {
         const newKey = e.newValue
         setState({
           apiKey: newKey,
           isAuthenticated: !!newKey,
-          keyPrefix: newKey && newKey.length >= 8 ? newKey.substring(0, 8) : null,
+          keyPrefix: null,
         })
       }
     }
@@ -42,17 +41,17 @@ export function useAuth() {
     return () => window.removeEventListener('storage', handleStorage)
   }, [])
 
-  const login = useCallback((key: string) => {
-    saveApiKey(key)
+  const login = useCallback(async (key: string) => {
+    await saveApiKey(key)
     setState({
-      apiKey: key,
+      apiKey: null,
       isAuthenticated: true,
       keyPrefix: key.length >= 8 ? key.substring(0, 8) : key,
     })
   }, [])
 
-  const logout = useCallback(() => {
-    clearApiKey()
+  const logout = useCallback(async () => {
+    await clearApiKey()
     setState({
       apiKey: null,
       isAuthenticated: false,

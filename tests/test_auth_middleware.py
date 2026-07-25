@@ -78,7 +78,7 @@ class TestHashKey:
         from aigateway_api.auth_middleware import _hash_key
         # Verify deterministic output
         result = _hash_key("test-key-123")
-        assert len(result) == 16
+        assert len(result) == 64
         assert all(c in "0123456789abcdef" for c in result)
 
     def test_same_input_same_output(self):
@@ -96,12 +96,12 @@ class TestHashKey:
     def test_empty_key(self):
         from aigateway_api.auth_middleware import _hash_key
         result = _hash_key("")
-        assert len(result) == 16
+        assert len(result) == 64
 
     def test_unicode_key(self):
         from aigateway_api.auth_middleware import _hash_key
         result = _hash_key("key-with-unicode-é-ñ-中文")
-        assert len(result) == 16
+        assert len(result) == 64
 
 
 class TestAuthenticateMiddleware:
@@ -241,7 +241,11 @@ class TestAuthenticateAdmin:
         from aigateway_api.auth_middleware import authenticate_admin
 
         key_store = AsyncMock()
-        key_store.validate = AsyncMock(return_value={"key_id": "admin-key", "user_id": "admin", "is_admin": True})
+        key_store.validate = AsyncMock(return_value={
+            "key_id": "admin-key",
+            "user_id": "admin",
+            "scopes": ["admin", "chat", "embedding"],
+        })
         request_mock = MagicMock()
         request_mock.headers = {"authorization": "Bearer admin-key", "x-api-key": ""}
         request_mock.app.state.key_store = key_store
@@ -249,7 +253,7 @@ class TestAuthenticateAdmin:
         result = await authenticate_admin(request_mock)
         assert result["key_id"] == "admin-key"
         assert result["user_id"] == "admin"
-        assert result["is_admin"] is True
+        assert "admin" in result["scopes"]
 
     @pytest.mark.asyncio
     async def test_admin_missing_key_raises_401(self):

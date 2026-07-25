@@ -72,7 +72,16 @@ curl http://localhost:8000/health   # 应返回 {"data":{"status":"healthy",...}
 | API Gateway | http://localhost:8000 |
 | 控制面板 | http://localhost:3000 |
 | Prometheus | http://localhost:9090 |
-| Grafana | http://localhost:3001 (admin/admin) |
+| Grafana | http://localhost:3001（密码由 `GRAFANA_ADMIN_PASSWORD` 注入） |
+
+生产环境必须使用 TLS 覆盖配置（80 端口仅返回 308 跳转）：
+
+```bash
+export TLS_CERT_PATH=/absolute/path/fullchain.pem
+export TLS_KEY_PATH=/absolute/path/privkey.pem
+export GRAFANA_ADMIN_PASSWORD='use-a-secret-manager'
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+```
 
 ---
 

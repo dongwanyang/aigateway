@@ -33,29 +33,45 @@ import type {
 // ------------------------------------------------------------------
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? ''
+const SESSION_MARKER = 'aigateway_session_active'
+// Purge secrets written by pre-session releases. Users must log in once to
+// exchange the key for the HttpOnly cookie.
+if (typeof window !== 'undefined') {
+  window.localStorage.removeItem('aigateway_api_key')
+}
 
 async function ensureAuthHeaders(): Promise<Record<string, string>> {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-  const apiKey = localStorage.getItem('aigateway_api_key')
-  if (apiKey) {
-    headers['Authorization'] = `Bearer ${apiKey}`
+  return { 'Content-Type': 'application/json' }
+}
+
+/** Exchange an API key for an HttpOnly browser session. */
+export async function saveApiKey(key: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/auth/session`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ api_key: key }),
+  })
+  if (!res.ok) {
+    throw new Error('Invalid API key')
   }
-  return headers
-}
-
-/** 保存 API Key 到 localStorage */
-export function saveApiKey(key: string): void {
-  localStorage.setItem('aigateway_api_key', key)
-}
-
-/** 清除已保存的 API Key */
-export function clearApiKey(): void {
   localStorage.removeItem('aigateway_api_key')
+  localStorage.setItem(SESSION_MARKER, '1')
 }
 
-/** 获取已保存的 API Key（不含） */
+/** Clear the HttpOnly browser session and its non-secret UI marker. */
+export async function clearApiKey(): Promise<void> {
+  await fetch(`${API_BASE}/auth/session`, {
+    method: 'DELETE',
+    credentials: 'include',
+  })
+  localStorage.removeItem('aigateway_api_key')
+  localStorage.removeItem(SESSION_MARKER)
+}
+
+/** Return a non-secret marker for legacy callers that only need a boolean. */
 export function getSavedApiKey(): string | null {
-  return localStorage.getItem('aigateway_api_key')
+  return localStorage.getItem(SESSION_MARKER)
 }
 
 async function fetchJson<T>(
@@ -65,6 +81,7 @@ async function fetchJson<T>(
   const headers = await ensureAuthHeaders()
   const res = await fetch(`${API_BASE}${path}`, {
     ...options,
+    credentials: 'include',
     headers: { ...headers, ...(options.headers ?? {}) },
   })
 
@@ -127,6 +144,7 @@ export async function requestChatCompletion(
   const headers = await ensureAuthHeaders()
   const res = await fetch(`${API_BASE}/v1/chat/completions`, {
     method: 'POST',
+    credentials: 'include',
     headers: { ...headers, 'Accept': 'text/event-stream' },
     body: JSON.stringify({ ...body, stream: true }),
     signal,

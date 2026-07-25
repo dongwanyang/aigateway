@@ -480,6 +480,7 @@ class CacheManager:
         normalized_prompt: str,
         model: str,
         pipeline_kind: str = "understanding",
+        pipeline_version: str = "1",
         cache_scope: str = "group",
         user_id: str = "",
         group_id: str = "",
@@ -502,6 +503,8 @@ class CacheManager:
         - pipeline_kind: understanding / generation strictly isolated, preventing
           cross-pipeline result contamination (generation image description
           hit by understanding text = disaster).
+        - pipeline_version: explicitly invalidates responses when prompt/RAG/
+          routing semantics change without changing the public model name.
         - cache_scope=group (default): includes group_id, shared among group
           members. scope=private: includes user_id, strict per-user isolation
           (e.g. PII-bearing requests). scope=public: no user/group id, shared
@@ -514,6 +517,7 @@ class CacheManager:
                 run `_normalize_prompt(system + tail N turns)`).
             model: model name, internally converted to family.
             pipeline_kind: "understanding" | "generation", default understanding.
+            pipeline_version: deployment-controlled pipeline contract version.
             cache_scope: "private" | "group" | "public", default "group".
             user_id: user ID, only included when scope=private.
             group_id: group ID, only included when scope=group.
@@ -541,6 +545,7 @@ class CacheManager:
         parts: List[str] = [
             "v2",  # schema version, for smooth future v3 upgrade
             pipeline_kind or "understanding",
+            pipeline_version or "1",
             family,
             temp_bucket,
             mt_bucket,

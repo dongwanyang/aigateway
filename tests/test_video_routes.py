@@ -55,7 +55,9 @@ class TestRetrieveVideoHandler:
         request = await _mock_request()
 
         with patch("aigateway_api.video_routes.get_state", return_value=state):
-            response = await retrieve_video(video_id="test-video-id", request=request, _auth={})
+            response = await retrieve_video(
+                video_id="test-video-id", request=request, _auth={"scopes": ["chat"]}
+            )
 
         assert response.status_code == 503
         assert response.body == b'{"error":{"code":"bridge_unavailable","message":"LiteLLM bridge not initialized"}}'
@@ -76,7 +78,9 @@ class TestRetrieveVideoHandler:
         request = await _mock_request()
 
         with patch("aigateway_api.video_routes.get_state", return_value=state):
-            response = await retrieve_video(video_id="vid-123", request=request, _auth={})
+            response = await retrieve_video(
+                video_id="vid-123", request=request, _auth={"scopes": ["chat"]}
+            )
 
         assert response.status_code == 200
         data = json.loads(response.body)
@@ -98,7 +102,9 @@ class TestRetrieveVideoHandler:
         request = await _mock_request()
 
         with patch("aigateway_api.video_routes.get_state", return_value=state):
-            response = await retrieve_video(video_id="vid-error", request=request, _auth={})
+            response = await retrieve_video(
+                video_id="vid-error", request=request, _auth={"scopes": ["chat"]}
+            )
 
         assert response.status_code == 502
         data = json.loads(response.body)
@@ -128,7 +134,9 @@ class TestRetrieveVideoHandler:
         request = await _mock_request()
 
         with patch("aigateway_api.video_routes.get_state", return_value=state):
-            response = await retrieve_video(video_id="vid-debug", request=request, _auth={})
+            response = await retrieve_video(
+                video_id="vid-debug", request=request, _auth={"scopes": ["chat"]}
+            )
 
         assert response.status_code == 502
         data = json.loads(response.body)

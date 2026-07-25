@@ -191,7 +191,7 @@ sudo DOCKER_BUILDKIT=1 docker compose up -d --build control-panel   # frontend
 docker compose up -d      # start all 6
 docker compose down
 ```
-`.dockerignore` keeps context <10MB. Or `set -a && source .env.docker && set +a` to skip the BuildKit prefix. Services: gateway `:8000`, panel `:3000`, prometheus `:9090`, grafana `:3001` (admin/admin).
+`.dockerignore` keeps context <10MB. Or `set -a && source .env.docker && set +a` to skip the BuildKit prefix. Services: gateway `:8000`, panel `:3000`, prometheus `:9090`, grafana `:3001` (`GRAFANA_ADMIN_PASSWORD` required).
 
 ### Testing
 ```bash

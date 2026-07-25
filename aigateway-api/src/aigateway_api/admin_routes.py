@@ -30,6 +30,7 @@ from .auth_middleware import authenticate_admin
 
 # 模块级 Embedding 模型缓存（避免每次请求重新加载）
 _embedding_model_cache: dict = {}
+RAG_INGESTION_VERSION = "1"
 
 
 def _detect_image_mime(data: bytes) -> str:
@@ -55,6 +56,25 @@ def _get_embedding_model():
 def _set_embedding_model(model):
     """缓存 embedding 模型实例。"""
     _embedding_model_cache["model"] = model
+
+
+def _rag_document_identity(
+    content: str,
+    *,
+    chunk_strategy: str,
+    chunk_size: int,
+    chunk_overlap: int,
+) -> tuple[str, str]:
+    """Return stable content hash and versioned document ID for idempotent ingest."""
+    import hashlib
+
+    content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    identity = (
+        f"{RAG_INGESTION_VERSION}\0{content_hash}\0{chunk_strategy}"
+        f"\0{chunk_size}\0{chunk_overlap}"
+    )
+    document_hash = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    return content_hash, f"doc_{document_hash[:16]}"
 
 
 async def _compute_embeddings_via_litellm(texts: List[str]) -> Optional[List[List[float]]]:
@@ -251,6 +271,21 @@ class CreateApiKeyRequest(BaseModel):
     rate_limit_tpm: Optional[int] = Field(default=None, description="每分钟 token 数上限")
     group_id: Optional[str] = Field(default=None, description="用户组 ID（grp-*）")
     cache_scope: Optional[str] = Field(default=None, description="缓存范围: private/group/public")
+    scopes: List[str] = Field(
+        default_factory=lambda: ["chat", "embedding"],
+        description="权限范围: admin/chat/embedding",
+    )
+    expires_at: Optional[str] = Field(
+        default=None, description="ISO-8601 到期时间；为空表示不过期"
+    )
+
+
+class RotateApiKeyRequest(BaseModel):
+    """POST /admin/api-keys/{key_id}/rotate 请求体。"""
+
+    expires_at: Optional[str] = Field(
+        default=None, description="替换 Key 的 ISO-8601 到期时间"
+    )
 
 
 class UpdateQuotaRequest(BaseModel):
@@ -320,6 +355,10 @@ def _format_quota_item(
     rpm_current = int(key_data.get("rpm_window_count", 0))
     tpm_current = int(key_data.get("tpm_window_count", 0))
 
+    scopes = key_data.get("scopes") or "chat,embedding"
+    if isinstance(scopes, str):
+        scopes = [scope.strip() for scope in scopes.split(",") if scope.strip()]
+
     return {
         "id": key_data.get("key_id", ""),
         "key_prefix": key_data.get("key_prefix", ""),
@@ -329,6 +368,10 @@ def _format_quota_item(
         "cache_scope": key_data.get("cache_scope", "group") or "group",
         "created_at": key_data.get("created_at", ""),
         "last_used_at": key_data.get("last_used_at") or None,
+        "expires_at": key_data.get("expires_at") or None,
+        "rotated_at": key_data.get("rotated_at") or None,
+        "revoked_at": key_data.get("revoked_at") or None,
+        "scopes": scopes,
         "status": key_data.get("status", "active"),
         "quotas": {
             "daily_tokens_used": daily_used,
@@ -449,6 +492,7 @@ async def create_api_key(
         cache_scope = body.cache_scope or "group"
         result = await key_store.create(
             user_id=body.user_id, quotas=quotas, group_id=group_id, cache_scope=cache_scope,
+            scopes=body.scopes, expires_at=body.expires_at,
         )
     except ValueError as exc:
         # 检查是否是重复 user_id
@@ -476,13 +520,13 @@ async def delete_api_key(
     _auth: Dict[str, Any] = Depends(authenticate_admin),
 ):
 
-    """删除指定的 API Key（从 Redis 中完全移除）。"""
+    """撤销指定 API Key，并保留审计元数据。"""
     key_store, _ = _get_keystore_and_metrics(request)
 
     if not key_id.startswith("key_"):
         raise HTTPException(status_code=400, detail={"error": {"code": "validation_error", "message": "Invalid key_id format"}})
 
-    success = await key_store.delete_permanently(key_id)
+    success = await key_store.revoke(key_id)
     if not success:
         raise HTTPException(status_code=404, detail={"error": {"code": "not_found", "message": f"API key '{key_id}' not found"}})
 
@@ -491,11 +535,31 @@ async def delete_api_key(
     return {
         "data": {
             "id": key_id,
-            "status": "deleted",
-            "deleted_at": now_iso,
+            "status": "revoked",
+            "revoked_at": now_iso,
         },
         "message": "success",
     }
+
+
+@router.post("/api-keys/{key_id}/rotate")
+async def rotate_api_key(
+    request: Request,
+    key_id: str,
+    body: RotateApiKeyRequest,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+    """原子撤销旧 Key 并签发继承权限和配额的新 Key。"""
+    key_store, _ = _get_keystore_and_metrics(request)
+    try:
+        result = await key_store.rotate(key_id, expires_at=body.expires_at)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"code": "not_found", "message": str(exc)}},
+        )
+    result["warning"] = "API key shown only once after rotation. Copy it now."
+    return {"data": result, "message": "success"}
 
 
 # ------------------------------------------------------------------
@@ -1657,7 +1721,12 @@ async def import_rag_document(
         raise HTTPException(status_code=400, detail={"error": {"code": "validation_error", "message": "Content too short to create chunks"}})
 
     # 计算 embeddings 并存入 Qdrant
-    doc_id = f"doc_{uuid.uuid4().hex[:8]}"
+    content_hash, doc_id = _rag_document_identity(
+        content,
+        chunk_strategy=chunk_strategy,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+    )
     total_tokens = 0
     stored_count = 0
 
@@ -1701,9 +1770,16 @@ async def import_rag_document(
             vectors_list = await _compute_embeddings_via_litellm(chunks)
 
         for i, (chunk_text, vector) in enumerate(zip(chunks, vectors_list)):
-            point_id = str(uuid.uuid4())
+            point_id = str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"aigateway:{RAG_INGESTION_VERSION}:{doc_id}:{i}",
+                )
+            )
             payload = {
                 "document_id": doc_id,
+                "document_hash": content_hash,
+                "document_version": RAG_INGESTION_VERSION,
                 "filename": filename,
                 "chunk_index": i,
                 "chunk_text": chunk_text,
@@ -1733,6 +1809,8 @@ async def import_rag_document(
     # 保存文档元数据到 Redis
     doc_meta = {
         "doc_id": doc_id,
+        "document_hash": content_hash,
+        "document_version": RAG_INGESTION_VERSION,
         "filename": filename,
         "file_type": "url" if url else "text",
         "chunk_count": stored_count,
@@ -1745,11 +1823,23 @@ async def import_rag_document(
     }
 
     if redis_mgr and redis_mgr.redis:
+        # Replace metadata for the stable document ID instead of appending a
+        # duplicate entry on every retry.
+        raw_list = await redis_mgr.redis.lrange("aigateway:rag:documents", 0, -1)
+        for item in raw_list:
+            try:
+                old = json.loads(item.decode() if isinstance(item, bytes) else item)
+            except Exception:
+                continue
+            if old.get("doc_id") == doc_id:
+                await redis_mgr.redis.lrem("aigateway:rag:documents", 0, item)
         await redis_mgr.redis.rpush("aigateway:rag:documents", json.dumps(doc_meta))
 
     return {
         "data": {
             "doc_id": doc_id,
+            "document_hash": content_hash,
+            "document_version": RAG_INGESTION_VERSION,
             "filename": filename,
             "chunk_count": stored_count,
             "total_tokens": total_tokens,

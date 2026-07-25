@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
 from .app_state import get_state
-from .auth_middleware import authenticate
+from .auth_middleware import authenticate, require_scope
 
 router = APIRouter()
 
@@ -22,6 +22,7 @@ async def retrieve_video(
     _auth: Dict[str, Any] = Depends(authenticate),
 ) -> JSONResponse:
     """轮询视频任务状态."""
+    require_scope(_auth, "chat")
     state = get_state()
     bridge = getattr(state, "litellm_bridge", None)
     if bridge is None:

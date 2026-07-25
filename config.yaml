@@ -33,7 +33,11 @@ auth:
   api_keys:
   - key: gw-rRIop4dpcyJJNUTJbHmHpr9Bj3M11s5o
     user_id: admin
-    is_admin: true
+    scopes:
+    - admin
+    - chat
+    - embedding
+    expires_at: null
     group: admin-team
     quotas:
       daily_tokens: 1000000
@@ -216,6 +220,7 @@ infrastructure:
     hnsw_m: 16
     hnsw_ef_construct: 128
 cache:
+  pipeline_version: "1"
   l1:
     max_entries: 1000
     max_value_bytes: 102400

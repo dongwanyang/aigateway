@@ -653,7 +653,7 @@ async def create_embeddings(
 def _setup_router() -> Any:
     """创建并配置 FastAPI router。"""
     from fastapi import APIRouter, Depends, Request
-    from .auth_middleware import authenticate
+    from .auth_middleware import authenticate, require_scope
 
     router_obj = APIRouter()
 
@@ -663,6 +663,7 @@ def _setup_router() -> Any:
         request: Request,
         _auth: Dict[str, Any] = Depends(authenticate),
     ):
+        require_scope(_auth, "chat")
         # 总分总架构：所有请求经 RequestDispatcher 分流到理解/生成管道，
         # 两条管道跑完插件链后统一从 LiteLLMBridge 出口调下游。
         from aigateway_api.dispatcher import RequestDispatcher
@@ -680,6 +681,7 @@ def _setup_router() -> Any:
         request: Request,
         _auth: Dict[str, Any] = Depends(authenticate),
     ):
+        require_scope(_auth, "embedding")
         return await create_embeddings(body, request)
 
     return router_obj

@@ -47,7 +47,8 @@ auth:
   api_keys:                  # API Key 列表（启动时导入 Redis）
     - key: ${ADMIN_API_KEY:-sk-your-admin-key-here}  # API Key 值（建议用环境变量）
       user_id: admin         # 关联的用户 ID
-      is_admin: true         # 是否为管理员（可访问 /admin/* 接口）
+      scopes: [admin, chat, embedding]  # 显式权限范围
+      expires_at: null       # ISO-8601；生产环境建议设置并定期 rotate
       group: admin-team      # 可选: API Key 分组标签（用于成本追踪指标聚合，不影响资源隔离）
       quotas:                # 该 Key 的配额限制
         daily_tokens: 1000000      # 每日 token 上限
@@ -220,6 +221,7 @@ infrastructure:
 # 缓存配置
 # ==========================
 cache:
+  pipeline_version: "1"       # 管道语义变化时递增，强制失效旧响应
   l1:                        # L1 进程内 LRU 缓存
     max_entries: 1000        # 最大条目数（LRU 淘汰）
     max_value_bytes: 102400  # 单条最大字节数（100KB），超过不进 L1

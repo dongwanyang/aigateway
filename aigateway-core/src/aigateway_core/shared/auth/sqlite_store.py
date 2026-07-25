@@ -42,6 +42,10 @@ CREATE TABLE IF NOT EXISTS api_keys (
     status TEXT DEFAULT 'active',
     created_at TEXT,
     last_used_at TEXT,
+    expires_at TEXT,
+    rotated_at TEXT,
+    revoked_at TEXT,
+    scopes TEXT DEFAULT 'chat,embedding',
     group_id TEXT DEFAULT '',
     cache_scope TEXT DEFAULT 'group',
     daily_tokens_limit INTEGER DEFAULT 1000000,
@@ -195,6 +199,43 @@ def _quota_base() -> dict[str, str]:
     }
 
 
+def _normalize_scopes(value: Any, *, is_admin: bool = False) -> list[str]:
+    """Return canonical API-key scopes in stable order.
+
+    Existing databases only have ``is_admin``.  Treat that flag as a migration
+    input, not an authorization decision: once loaded, callers consume scopes.
+    """
+    if isinstance(value, str):
+        raw = [item.strip().lower() for item in value.split(",")]
+    elif isinstance(value, (list, tuple, set)):
+        raw = [str(item).strip().lower() for item in value]
+    else:
+        raw = []
+    allowed = ("admin", "chat", "embedding")
+    normalized = [scope for scope in allowed if scope in raw]
+    if is_admin and "admin" not in normalized:
+        normalized.insert(0, "admin")
+    if not normalized:
+        normalized = ["chat", "embedding"]
+    return normalized
+
+
+def _serialize_scopes(value: Any, *, is_admin: bool = False) -> str:
+    return ",".join(_normalize_scopes(value, is_admin=is_admin))
+
+
+def _validate_expiry(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("expires_at must be a valid ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        raise ValueError("expires_at must include a timezone")
+    return str(value)
+
+
 # ── Connection helper ───────────────────────────────────────────────
 
 class _Conn:
@@ -290,6 +331,35 @@ class SQLiteStore:
             if stmt:
                 conn.execute(stmt)
         conn.commit()
+        # CREATE TABLE IF NOT EXISTS does not add columns to existing databases.
+        # Keep migrations idempotent so upgrades preserve all existing keys.
+        existing_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(api_keys)").fetchall()
+        }
+        lifecycle_columns = {
+            "expires_at": "TEXT",
+            "rotated_at": "TEXT",
+            "revoked_at": "TEXT",
+            "scopes": "TEXT DEFAULT 'chat,embedding'",
+        }
+        for column, definition in lifecycle_columns.items():
+            if column not in existing_columns:
+                conn.execute(f"ALTER TABLE api_keys ADD COLUMN {column} {definition}")
+        conn.execute(
+            """UPDATE api_keys
+               SET scopes=CASE
+                   WHEN is_admin=1 THEN 'admin,chat,embedding'
+                   ELSE 'chat,embedding'
+               END
+               WHERE scopes IS NULL OR TRIM(scopes)=''"""
+        )
+        conn.execute(
+            """UPDATE api_keys
+               SET scopes='admin,chat,embedding'
+               WHERE is_admin=1
+                 AND ',' || scopes || ',' NOT LIKE '%,admin,%'"""
+        )
+        conn.commit()
         # Check migration version
         row = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
         if row is None:
@@ -319,6 +389,10 @@ class SQLiteStore:
         # Convert is_admin from int to bool
         if "is_admin" in d:
             d["is_admin"] = bool(d["is_admin"])
+        if "scopes" in d:
+            d["scopes"] = _normalize_scopes(
+                d.get("scopes"), is_admin=bool(d.get("is_admin"))
+            )
         return d
 
     def _api_key_row(self, kh: str) -> sqlite3.Row | None:
@@ -435,9 +509,24 @@ class SQLiteStore:
         if status == "suspended":
             from aigateway_core.shared.exceptions import AuthError
             raise AuthError(f"API key '{data.get('key_id')}' is suspended")
+        expires_at = data.get("expires_at")
+        if expires_at:
+            try:
+                expiry = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+                if expiry.tzinfo is None:
+                    expiry = expiry.replace(tzinfo=timezone.utc)
+                if expiry <= datetime.now(timezone.utc):
+                    from aigateway_core.shared.exceptions import AuthError
+                    raise AuthError(f"API key '{data.get('key_id')}' has expired")
+            except ValueError:
+                from aigateway_core.shared.exceptions import AuthError
+                raise AuthError(
+                    f"API key '{data.get('key_id')}' has invalid expiration metadata"
+                )
 
-        # Normalize is_admin
-        data["is_admin"] = bool(data.get("is_admin", 0))
+        data["scopes"] = _normalize_scopes(
+            data.get("scopes"), is_admin=bool(data.get("is_admin"))
+        )
         # Update last_used_at
         now = _now_iso()
         data["last_used_at"] = now
@@ -481,9 +570,18 @@ class SQLiteStore:
         quotas: Optional[Dict[str, Any]] = None,
         group_id: str = "",
         cache_scope: str = "group",
+        scopes: Optional[List[str]] = None,
+        expires_at: Optional[str] = None,
     ) -> Dict[str, Any]:
         if not user_id:
             raise ValueError("user_id is required")
+        requested_scopes = [str(scope).strip().lower() for scope in (scopes or [])]
+        invalid_scopes = set(requested_scopes) - {"admin", "chat", "embedding"}
+        if invalid_scopes:
+            raise ValueError(
+                f"Unsupported scopes: {', '.join(sorted(invalid_scopes))}"
+            )
+        expires_at = _validate_expiry(expires_at)
 
         raw_key = f"gw-{''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(32))}"
         key_hash = _hash_key(raw_key)
@@ -508,16 +606,18 @@ class SQLiteStore:
             tx.execute(
                 """INSERT INTO api_keys
                    (key_hash, key_id, key_prefix, user_id, status,
-                    created_at, last_used_at, group_id, cache_scope,
+                    created_at, last_used_at, expires_at, scopes,
+                    group_id, cache_scope,
                     daily_tokens_limit, daily_tokens_used,
                     monthly_cost_limit, monthly_cost_used,
                     rate_limit_rpm, rate_limit_tpm,
                     rpm_window_start, rpm_window_count,
                     tpm_window_start, tpm_window_count)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     key_hash, key_id, key_prefix, user_id, "active",
-                    now_iso, "", group_id or "", cache_scope or "group",
+                    now_iso, "", expires_at, _serialize_scopes(scopes),
+                    group_id or "", cache_scope or "group",
                     daily_tokens, 0,
                     monthly_cost, 0.0,
                     rate_rpm, rate_tpm,
@@ -584,6 +684,8 @@ class SQLiteStore:
             "user_id": user_id,
             "group_id": group_id or "",
             "cache_scope": cache_scope or "group",
+            "scopes": _normalize_scopes(scopes),
+            "expires_at": expires_at,
             "created_at": now_iso,
             "status": "active",
             "quotas": {
@@ -614,6 +716,8 @@ class SQLiteStore:
             key_prefix = raw_key[:8]
             quotas = cfg.get("quotas", {})
             is_admin = bool(cfg.get("is_admin", False))
+            scopes = _serialize_scopes(cfg.get("scopes"), is_admin=is_admin)
+            expires_at = cfg.get("expires_at") or None
             cfg_group = cfg.get("group") or ""
             if cfg_group:
                 slug = _slugify(cfg_group.replace("grp-", ""))
@@ -647,12 +751,13 @@ class SQLiteStore:
 
                     tx.execute(
                         """UPDATE api_keys SET user_id=?, status=?, is_admin=?,
+                           scopes=?, expires_at=?,
                            group_id=?, cache_scope=?,
                            daily_tokens_limit=?, monthly_cost_limit=?,
                            rate_limit_rpm=?, rate_limit_tpm=?
                            WHERE key_hash=?""",
                         (
-                            user_id, "active", int(is_admin),
+                            user_id, "active", int(is_admin), scopes, expires_at,
                             existing_d["group_id"], existing_d["cache_scope"],
                             existing_d["daily_tokens_limit"], existing_d["monthly_cost_limit"],
                             existing_d["rate_limit_rpm"], existing_d["rate_limit_tpm"],
@@ -664,16 +769,17 @@ class SQLiteStore:
                     tx.execute(
                         """INSERT INTO api_keys
                            (key_hash, key_id, key_prefix, user_id, status,
-                            created_at, last_used_at, group_id, cache_scope,
+                            created_at, last_used_at, expires_at, scopes,
+                            group_id, cache_scope,
                             daily_tokens_limit, daily_tokens_used,
                             monthly_cost_limit, monthly_cost_used,
                             rate_limit_rpm, rate_limit_tpm,
                             rpm_window_start, rpm_window_count,
                             tpm_window_start, tpm_window_count, is_admin)
-                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (
                             key_hash, f"key_{uuid.uuid4().hex[:8]}", key_prefix,
-                            user_id, "active", now_iso, "",
+                            user_id, "active", now_iso, "", expires_at, scopes,
                             cfg_group, "group",
                             quotas.get("daily_tokens", self.DEFAULT_DAILY_TOKENS), 0,
                             quotas.get("monthly_cost", self.DEFAULT_MONTHLY_COST), 0.0,
@@ -739,7 +845,9 @@ class SQLiteStore:
         key_prefix = ""
         for kh in hashes:
             self.conn.execute(
-                "UPDATE api_keys SET status='revoked', last_used_at=? WHERE key_hash=?",
+                """UPDATE api_keys
+                   SET status='revoked', revoked_at=?
+                   WHERE key_hash=?""",
                 (now_iso, kh),
             )
             # Clean up group membership when revoking
@@ -766,6 +874,94 @@ class SQLiteStore:
 
         logger.info("API Key 已撤销: key_id=%s", key_id)
         return True
+
+    async def rotate(
+        self, key_id: str, *, expires_at: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Atomically revoke an active key and issue its replacement."""
+        if not key_id.startswith("key_"):
+            raise ValueError("Invalid key_id format, should be key_xxx")
+        hashes = self._lookup_by_id(key_id)
+        if not hashes:
+            raise ValueError(f"API key '{key_id}' not found")
+        old_hash = hashes[0]
+        old_row = self._api_key_row(old_hash)
+        if old_row is None or old_row["status"] != "active":
+            raise ValueError(f"API key '{key_id}' is not active")
+
+        old = dict(old_row)
+        raw_key = f"gw-{''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(32))}"
+        new_hash = _hash_key(raw_key)
+        new_id = f"key_{uuid.uuid4().hex[:8]}"
+        now_iso = _now_iso()
+        now_unix = _now_unix()
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        month = datetime.now(timezone.utc).strftime("%Y-%m")
+        new_expiry = (
+            _validate_expiry(expires_at)
+            if expires_at is not None
+            else old.get("expires_at")
+        )
+
+        with self.conn.transaction() as tx:
+            tx.execute(
+                """UPDATE api_keys
+                   SET status='revoked', rotated_at=?, revoked_at=?
+                   WHERE key_hash=?""",
+                (now_iso, now_iso, old_hash),
+            )
+            tx.execute(
+                """INSERT INTO api_keys
+                   (key_hash, key_id, key_prefix, user_id, status,
+                    created_at, last_used_at, expires_at, scopes,
+                    group_id, cache_scope,
+                    daily_tokens_limit, daily_tokens_used,
+                    monthly_cost_limit, monthly_cost_used,
+                    rate_limit_rpm, rate_limit_tpm,
+                    rpm_window_start, rpm_window_count,
+                    tpm_window_start, tpm_window_count, is_admin)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    new_hash, new_id, _prefix_key(raw_key), old["user_id"], "active",
+                    now_iso, "", new_expiry, old.get("scopes") or "chat,embedding",
+                    old.get("group_id") or "", old.get("cache_scope") or "group",
+                    old["daily_tokens_limit"], 0,
+                    old["monthly_cost_limit"], 0.0,
+                    old["rate_limit_rpm"], old["rate_limit_tpm"],
+                    now_unix, 0, now_unix, 0, int(bool(old.get("is_admin"))),
+                ),
+            )
+            tx.execute(
+                "UPDATE group_members SET key_hash=? WHERE key_hash=?",
+                (new_hash, old_hash),
+            )
+            qb = _quota_base()
+            for period_type, period_value in (("daily", today), ("monthly", month)):
+                tx.execute(
+                    """INSERT INTO quota_records
+                       (entity_type, entity_id, period_type, period_value,
+                        tokens_in, tokens_out, cost_usd, request_count, model_usage)
+                       VALUES ('key', ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        new_hash, period_type, period_value,
+                        qb["tokens_in"], qb["tokens_out"], qb["cost_usd"],
+                        qb["request_count"], qb["model_usage"],
+                    ),
+                )
+
+        return {
+            "id": new_id,
+            "key": raw_key,
+            "key_prefix": _prefix_key(raw_key),
+            "user_id": old["user_id"],
+            "scopes": _normalize_scopes(
+                old.get("scopes"), is_admin=bool(old.get("is_admin"))
+            ),
+            "expires_at": new_expiry,
+            "rotated_from": key_id,
+            "rotated_at": now_iso,
+            "status": "active",
+        }
 
     async def delete_permanently(self, key_id: str) -> bool:
         if not key_id.startswith("key_"):

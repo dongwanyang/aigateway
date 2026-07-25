@@ -163,7 +163,8 @@ def test_post_code_import_server_path_returns_task_id(monkeypatch: pytest.Monkey
     assert state, "import 端点没有把 task 状态写入 SQLite"
     assert state.get("status") == "pending"
     assert state.get("source_type") == "server_path"
-    assert state.get("source_label") == "server_path:///tmp"
+    source_path = (state.get("source_label") or "").removeprefix("server_path://")
+    assert Path(source_path).resolve() == Path("/tmp").resolve()
     assert state.get("embedding_model") == "Qwen/Qwen3-Embedding-0.6B"
     # created_at 必须是个正整数时间戳(证明 _write_task_state 真的写了 time.time())
     created_at = int(state.get("created_at") or 0)

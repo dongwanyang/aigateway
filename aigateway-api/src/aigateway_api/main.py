@@ -214,7 +214,7 @@ def _create_app() -> "FastAPI":
         RateLimiterMiddleware,
         max_requests=_rl_max_requests,
         window_seconds=_rl_window_seconds,
-        protected_prefixes=("/admin",),
+        protected_prefixes=("/admin", "/auth"),
         exempt_paths={"/health", "/metrics"},
     )
 
@@ -866,7 +866,17 @@ def _configure_cors(app: "FastAPI", config_manager: "ConfigManager") -> None:
 
 def _mount_routes(app: "FastAPI") -> None:
     """挂载所有路由到 FastAPI 应用。"""
-    from . import admin_routes, code_rag_routes, openai_compat, routes, template_routes
+    from . import (
+        admin_routes,
+        auth_routes,
+        code_rag_routes,
+        openai_compat,
+        routes,
+        template_routes,
+    )
+
+    # /auth/session — control-panel HttpOnly session exchange
+    app.include_router(auth_routes.router, prefix="/auth", tags=["Browser session"])
 
     # /v1/* — OpenAI 兼容接口（需要鉴权）
     app.include_router(openai_compat.router, prefix="/v1", tags=["OpenAI 兼容接口"])

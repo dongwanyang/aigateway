@@ -92,7 +92,7 @@ docker compose up -d --build
 # API Gateway:   http://localhost:8000
 # 控制面板:      http://localhost:3000
 # Prometheus:    http://localhost:9090
-# Grafana:       http://localhost:3001 (admin/admin)
+# Grafana:       http://localhost:3001（需设置 GRAFANA_ADMIN_PASSWORD）
 ```
 
 > 💡 **不填 API Key 也能启动**：`config.yaml` 中所有密钥用 `${VAR:-}` 引用，未设时优雅降级为空。Gateway 能正常启动（插件 fail-open），但调用 LLM 会鉴权失败 —— 填好 `.env` 后 `docker compose restart gateway` 即可。
@@ -359,7 +359,7 @@ generation_optimization:
 | redis | 6379 | 缓存 + Draft 暂存 |
 | qdrant | 6333 | 向量数据库 (语义缓存 + RAG) |
 | prometheus | 9090 | 指标采集 (30 天保留) |
-| grafana | 3001 | 可视化面板 (admin/admin) |
+| grafana | 3001 | 可视化面板（密码由 Secret 注入） |
 
 ---
 
