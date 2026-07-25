@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.1.1.0] - 2026-07-25
+
+### Added
+- **Chat-window video generation**: Sending a video prompt (e.g. "生成一段日落海面的视频") in the Control Panel `/chat` page now produces a video. The draft-confirm flow calls the Agnes `/videos` endpoint asynchronously, returns a `video_id`, and the chat message polls `GET /v1/videos/{id}` until the video is ready, then renders it inline.
+- **Video draft-confirm path**: `confirm_draft` dispatches on `media_type` — video drafts call `_confirm_video_draft` → `LiteLLMBridge._do_video_generation`, persist the `video_id` alongside the draft, and return `{video_id, status, media_type}` to the frontend.
+- **Video intent heuristics**: The intent classifier now recognizes Chinese and English video-generation phrasing so requests route to `generation:video` even when the LLM judge is unavailable (timeout fallback).
+- **Frontend video playback**: `MediaVideo` accepts explicit `videoId`/`videoUrl` props, polls the video-status endpoint, and treats `status='completed'` as terminal.
+
+### Fixed
+- **Video drafts silently routed to image upscale**: `DraftGeneratorPlugin._build_generation_request` always set `media_type='image'`, so `generation:video` drafts hit the image-upscale branch in confirm. `media_type` is now derived from `ctx.pipeline_kind` (`generation:video`→`video`, else `image`).
+- **Completed videos never rendered**: Agnes `/v1/videos/{id}` returns the finished URL in `metadata.url`, not the top-level `url`/`video.url` fields the extractor checked. `extractVideoUrl` now tries all three locations; without this, completed tasks resolved to `null` and `MediaVideo` stayed stuck polling forever.
+- **Broken `<video>` in unconfirmed draft preview**: `DraftCard` rendered a `<video>` tag for a keyframe image. It now uses the image lightbox for the keyframe preview.
+- **Silent `confirm_draft` 400s**: The `confirm_draft` exception handler re-raised as 400 without logging, leaving no traceback. It now logs `logger.error(..., exc_info=True)`.
+
+### Changed
+- **Provider model config migrated to `capabilities`**: All providers in `config.yaml` now use the multi-select `capabilities: [text,image,video]` form (replacing `modality` strings). A backward-compat shim (`_normalize_model_capabilities`) lets legacy `modality` configs still route correctly.
+
 ## [0.1.0.1] - 2026-07-24
 
 ### Fixed
