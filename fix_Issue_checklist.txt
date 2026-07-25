@@ -1,0 +1,321 @@
+AI Gateway 修复实施计划（Issue / PR Checklist）
+
+项目： dongwanyang/aigateway
+
+目标： 根据代码审计报告、Bug扫描报告以及完整 Bug Audit
+Report，拆分为可直接进入 GitHub Issue / Pull Request 的开发任务。
+
+范围： 单组织 AI Gateway（暂不包含多租户设计）。
+
+================================================== 一、执行原则
+==================================================
+
+P0： 影响系统可用性、成本、安全，需要优先修复。
+
+P1： 生产环境强烈建议修复。
+
+P2： 优化项，可按版本规划。
+
+每个 Issue 建议独立 PR，避免大范围修改。
+
+================================================== 二、GitHub Issue / PR
+Checklist ==================================================
+
+Issue 1
+
+文件： aigateway-api/main.py
+
+函数/模块： lifespan
+
+问题： FastAPI lifespan 定义但挂载风险，启动初始化链可能未执行。
+
+风险： Redis、Qdrant、KeyStore、PluginRegistry 未初始化导致运行异常。
+
+修复方案： FastAPI 创建时显式绑定 lifespan；增加 startup 测试。
+
+优先级： P0
+
+预计修改量： 小（1-2小时）
+
+------------------------------------------------------------------------
+
+Issue 2
+
+文件： aigateway-core/plugins/*
+
+函数/模块： Plugin execute / registry
+
+问题： 插件缺少统一 timeout 和异常隔离。
+
+风险： 单插件阻塞整个 Gateway 请求链路。
+
+修复方案： 增加 PluginContext、async timeout、failure policy。
+
+优先级： P0
+
+预计修改量： 中（1-2天）
+
+------------------------------------------------------------------------
+
+Issue 3
+
+文件： aigateway-core/route/*
+
+函数/模块： LiteLLMBridge retry logic
+
+问题： Client、Gateway、Provider 多层 retry 叠加。
+
+风险： Token 消耗放大，成本异常增长。
+
+修复方案： 增加统一 retry budget：
+max_attempts、max_time、max_fallback。
+
+优先级： P0
+
+预计修改量： 中（1-2天）
+
+------------------------------------------------------------------------
+
+Issue 4
+
+文件： aigateway-core/dispatch/*
+
+函数/模块： RequestDispatcher
+
+问题： 缺少请求级 deadline。
+
+风险： 请求链路长期占用资源。
+
+修复方案： 增加 RequestContext.deadline，并向 Plugin/LLM 传播。
+
+优先级： P0
+
+预计修改量： 中（1-2天）
+
+------------------------------------------------------------------------
+
+Issue 5
+
+文件： aigateway-api/frontend/control-panel
+
+函数/模块： Auth storage
+
+问题： API Key 保存 localStorage。
+
+风险： XSS 可读取 API Key。
+
+修复方案： 短期增加 CSP；长期改 HttpOnly Session。
+
+优先级： P1
+
+预计修改量： 中（2-3天）
+
+------------------------------------------------------------------------
+
+Issue 6
+
+文件： aigateway-core/auth/*
+
+函数/模块： KeyStore
+
+问题： API Key 缺少生命周期管理。
+
+风险： 泄露 Key 长期有效。
+
+修复方案： 增加 expires_at、rotated_at、last_used_at、revoked_at。
+
+优先级： P1
+
+预计修改量： 中（1-2天）
+
+------------------------------------------------------------------------
+
+Issue 7
+
+文件： aigateway-api/admin_routes.py
+
+函数/模块： admin authentication
+
+问题： Admin 权限依赖 is_admin metadata。
+
+风险： Key 配置错误可能扩大权限。
+
+修复方案： 增加 scope 模型：admin/chat/embedding。
+
+优先级： P1
+
+预计修改量： 中（2天）
+
+------------------------------------------------------------------------
+
+Issue 8
+
+文件： nginx/*
+
+函数/模块： nginx.conf
+
+问题： HTTP 未强制 HTTPS。
+
+风险： Authorization/API Key 可能明文传输。
+
+修复方案： 增加 80->443 redirect，启用安全 Header。
+
+优先级： P1
+
+预计修改量： 小（半天）
+
+------------------------------------------------------------------------
+
+Issue 9
+
+文件： docker-compose.yml
+
+函数/模块： grafana configuration
+
+问题： 默认 admin/admin。
+
+风险： 生产环境后台暴露风险。
+
+修复方案： 改为 Secret 注入，禁止默认密码。
+
+优先级： P0
+
+预计修改量： 小（半天）
+
+------------------------------------------------------------------------
+
+Issue 10
+
+文件： sse streaming module
+
+函数/模块： stream generator
+
+问题： disconnect 后未取消下游 LLM。
+
+风险： 用户关闭页面后模型继续生成并计费。
+
+修复方案： 捕获 CancelledError，关闭 upstream generator。
+
+优先级： P1
+
+预计修改量： 中（1天）
+
+------------------------------------------------------------------------
+
+Issue 11
+
+文件： aigateway-core/cache/*
+
+函数/模块： semantic cache
+
+问题： Cache Key 信息不足。
+
+风险： 不同上下文可能错误命中。
+
+修复方案： 加入 model、system prompt、pipeline version 等维度。
+
+优先级： P1
+
+预计修改量： 中（1-2天）
+
+------------------------------------------------------------------------
+
+Issue 12
+
+文件： aigateway-core/rag/*
+
+函数/模块： ingestion pipeline
+
+问题： 文档 ingestion 非幂等。
+
+风险： 重复 vector 数据。
+
+修复方案： 增加 document hash 和 version。
+
+优先级： P1
+
+预计修改量： 中（2天）
+
+------------------------------------------------------------------------
+
+Issue 13
+
+文件： agent/runtime/*
+
+函数/模块： agent loop
+
+问题： Agent 缺少最大执行步数。
+
+风险： 无限循环导致成本爆炸。
+
+修复方案： 增加 max_steps、timeout、token budget。
+
+优先级： P0
+
+预计修改量： 中（1-2天）
+
+------------------------------------------------------------------------
+
+Issue 14
+
+文件： agent/tools/*
+
+函数/模块： tool executor
+
+问题： Tool Calling 缺少权限和 schema 校验。
+
+风险： 危险操作可能直接执行。
+
+修复方案： 增加 JSON Schema 校验、权限声明、timeout。
+
+优先级： P1
+
+预计修改量： 中（2-3天）
+
+------------------------------------------------------------------------
+
+Issue 15
+
+文件： ci/*
+
+函数/模块： GitHub Actions
+
+问题： 缺少安全扫描。
+
+风险： Secret泄露、依赖漏洞进入生产。
+
+修复方案： 增加 gitleaks、trivy、依赖锁定检查。
+
+优先级： P1
+
+预计修改量： 中（1天）
+
+================================================== 三、推荐 PR 顺序
+==================================================
+
+PR-01 Runtime Stability
+
+包含： - lifespan - deadline - plugin timeout
+
+PR-02 Cost Guard
+
+包含： - retry budget - token limit - agent limit
+
+PR-03 Auth Security
+
+包含： - API Key lifecycle - scope - admin isolation
+
+PR-04 Streaming Reliability
+
+包含： - cancel - heartbeat - error protocol
+
+PR-05 RAG Safety
+
+包含： - version - trust boundary - ingestion idempotency
+
+PR-06 Observability
+
+包含： - trace - usage - cost tracking
+
+================================================== 结束
+==================================================
