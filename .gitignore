@@ -63,3 +63,6 @@ benchmarks/datasets/*.jsonl
 benchmarks/__pycache__/
 benchmarks/scenarios/__pycache__/
 benchmarks/scripts/__pycache__/
+
+# Local-only docker override (e.g. GPU driver workaround) — never ship
+docker-compose.override.yml
