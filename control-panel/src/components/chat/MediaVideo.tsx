@@ -17,13 +17,24 @@ const TIMEOUT_MS = 120000
  * 解析视频任务 id。要求内容包含 "id=<vid>" 且后续出现 "poll /v1/videos/"，
  * 避免把普通文本中的 "id=xxx" 误判为视频任务。
  */
-function parseVideoId(content: string): string | null {
+export function parseVideoId(content: string): string | null {
   const m = content.match(/id=([\w-]+).*poll\s+\/v1\/videos\//)
   return m ? m[1] : null
 }
 
-function extractVideoUrl(status: { url?: string; video?: { url?: string } }): string | null {
-  return status.video?.url || status.url || null
+/**
+ * 从视频状态响应中提取可播放 URL。
+ *
+ * Agnes /v1/videos/{id} 响应把成品 URL 放在 metadata.url（顶层无 url/video.url），
+ * 因此三种位置都要尝试，否则 completed 状态下 resolvedUrl 为 null，
+ * MediaVideo 会卡在 polling phase 永不渲染 <video>。
+ */
+export function extractVideoUrl(status: {
+  url?: string
+  video?: { url?: string }
+  metadata?: { url?: string }
+}): string | null {
+  return status.video?.url || status.url || status.metadata?.url || null
 }
 
 export default function MediaVideo({ content, videoId: initialVideoId, videoUrl: initialVideoUrl, done }: MediaVideoProps) {
