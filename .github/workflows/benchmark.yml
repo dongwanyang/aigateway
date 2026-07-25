@@ -42,7 +42,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
+          pip install -r aigateway-api/requirements.txt
           pip install -e aigateway-core
           pip install -e aigateway-api
           pip install -e aigateway-cli
