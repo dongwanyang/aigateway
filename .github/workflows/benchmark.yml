@@ -32,10 +32,10 @@ jobs:
       AI_GATEWAY_ENV: test
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
           cache: 'pip'
@@ -54,37 +54,44 @@ jobs:
 
       - name: Start gateway
         run: |
-          uvicorn src.aigateway_api.main:create_app --factory --host 0.0.0.0 --port 8000 &
-          # Wait for healthy
+          uvicorn aigateway_api.main:create_app --factory --host 0.0.0.0 --port 8000 &
           for i in $(seq 1 30); do
             curl -sf http://localhost:8000/health && break
             sleep 2
           done
+          curl --fail --show-error http://localhost:8000/health
 
       - name: Run benchmark (text only)
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && !inputs.with_media)
+        env:
+          SCENARIOS: ${{ inputs.scenarios || 'text_qa,long_conversation' }}
         run: |
+          IFS=',' read -ra scenario_args <<< "$SCENARIOS"
           python benchmarks/benchmark.py \
-            --scenarios ${{ github.event.inputs.scenarios || 'text_qa,long_conversation' }} \
+            --scenarios "${scenario_args[@]}" \
             --judge \
             --concurrency 1
 
       - name: Run benchmark (with media)
         if: github.event_name == 'workflow_dispatch' && inputs.with_media
+        env:
+          SCENARIOS: ${{ inputs.scenarios || 'text_qa,long_conversation' }}
         run: |
+          IFS=',' read -ra scenario_args <<< "$SCENARIOS"
           python benchmarks/benchmark.py \
-            --scenarios ${{ github.event.inputs.scenarios }},multimedia_gen \
+            --scenarios "${scenario_args[@]}" \
             --with-media \
             --judge \
             --concurrency 1
 
       - name: Check drift against expected results
         run: |
-          python benchmarks/compare_to_expected.py \
-            --current benchmarks/reports/report-$(date +%Y-%m-%d).md
+          report="benchmarks/reports/report-$(date -u +%Y-%m-%d).md"
+          test -f "$report"
+          python benchmarks/compare_to_expected.py --current "$report"
 
       - name: Upload report artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: benchmark-report

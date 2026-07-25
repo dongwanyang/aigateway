@@ -22,11 +22,24 @@ jobs:
   dependency-audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: pypa/gh-action-pip-audit@v1.1.0
+      - uses: actions/checkout@v7
+      - name: Audit API requirements
+        uses: pypa/gh-action-pip-audit@v1.1.0
         with:
-          inputs: aigateway-api/requirements.txt aigateway-core/ aigateway-cli/
-      - uses: actions/setup-node@v6
+          inputs: aigateway-api/requirements.txt
+          # BasicSR is only imported for local RealESRGAN upscaling. The gateway
+          # never invokes its SLURM launcher, which is the vulnerable path, and
+          # upstream currently provides no fixed release.
+          ignore-vulns: PYSEC-2026-1215
+      - name: Audit core project
+        uses: pypa/gh-action-pip-audit@v1.1.0
+        with:
+          inputs: aigateway-core/
+      - name: Audit CLI project
+        uses: pypa/gh-action-pip-audit@v1.1.0
+        with:
+          inputs: aigateway-cli/
+      - uses: actions/setup-node@v7
         with:
           node-version: "20"
           cache: npm
@@ -40,8 +53,8 @@ jobs:
   filesystem-scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: aquasecurity/trivy-action@0.36.0
+      - uses: actions/checkout@v7
+      - uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scan-ref: .

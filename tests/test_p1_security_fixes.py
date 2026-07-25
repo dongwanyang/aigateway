@@ -163,6 +163,7 @@ def test_frontend_and_nginx_security_contracts():
     nginx = (root / "control-panel/nginx.conf").read_text()
     prod_nginx = (root / "control-panel/nginx.prod.conf").read_text()
     workflow = (root / ".github/workflows/security.yml").read_text()
+    benchmark_workflow = (root / ".github/workflows/benchmark.yml").read_text()
 
     assert "localStorage.setItem('aigateway_api_key'" not in client
     assert "localStorage.getItem('aigateway_api_key'" not in client
@@ -170,4 +171,13 @@ def test_frontend_and_nginx_security_contracts():
     assert "Content-Security-Policy" in nginx
     assert "return 308 https://$host$request_uri" in prod_nginx
     assert "gitleaks/gitleaks-action@v3" in workflow
-    assert "aquasecurity/trivy-action@0.36.0" in workflow
+    assert "aquasecurity/trivy-action@v0.36.0" in workflow
+    assert "inputs: aigateway-api/requirements.txt" in workflow
+    assert "ignore-vulns: PYSEC-2026-1215" in workflow
+    assert "inputs: aigateway-core/" in workflow
+    assert "inputs: aigateway-cli/" in workflow
+    assert "uvicorn aigateway_api.main:create_app" in benchmark_workflow
+    assert "uvicorn src.aigateway_api.main:create_app" not in benchmark_workflow
+    assert "!inputs.with_media" in benchmark_workflow
+    assert "IFS=',' read -ra scenario_args" in benchmark_workflow
+    assert 'test -f "$report"' in benchmark_workflow
