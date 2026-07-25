@@ -30,6 +30,7 @@ from typing import Any, Dict, Optional, Tuple
 from aigateway_core.pipelines.generation._common.config import DraftWorkflowConfig
 from aigateway_core.pipelines.generation._common.exceptions import DraftWorkflowError
 from aigateway_core.pipelines.generation._common.models import (
+    DRAFT_STATUS_CONFIRMING,
     DRAFT_STATUS_CONFIRMED,
     DRAFT_STATUS_GENERATING,
     DRAFT_STATUS_PENDING,
@@ -121,6 +122,7 @@ class DraftGeneratorStrategy:
         # 共享张量导致输出损坏或崩溃。enhance 在线程池执行，故用 threading.Lock
         # （而非 asyncio.Lock）保护线程内的临界区。
         self._sr_infer_lock = threading.Lock()
+        self._draft_state_lock = asyncio.Lock()
         # In-memory fallback when no Redis client is provided (for testing)
         self._memory_store: Dict[str, str] = {}
         # session → set(draft_id) 的内存镜像（无 Redis 时测试用）
@@ -407,13 +409,32 @@ class DraftGeneratorStrategy:
         Raises:
             DraftWorkflowError: 草图不存在、已过期或状态非 pending
         """
-        draft = await self._load_draft(draft_id)
+        draft = await self._claim_draft_confirmation(draft_id)
         if draft is None:
             raise DraftWorkflowError(
                 f"Draft not found or expired: {draft_id}"
             )
 
-        if draft.status != DRAFT_STATUS_PENDING:
+        if draft.status == DRAFT_STATUS_CONFIRMED:
+            if draft.media_type == "video" and draft.video_id:
+                return VideoSubmitResult(draft_id=draft.draft_id, video_id=draft.video_id, status="generating")
+            if draft.media_type != "video":
+                draft_dir = self._draft_dir(draft.session_id, draft_id)
+                output_data = self._read_result_bytes(draft_dir)
+                if output_data is not None:
+                    return UpscaleResult(
+                        draft_id=draft_id,
+                        output_data=output_data,
+                        target_resolution=self._get_target_resolution(draft),
+                        algorithm_used=draft.generation_params.get("confirmed_algorithm", self._config.upscale_algorithm),
+                        duration_ms=0.0,
+                    )
+            raise DraftWorkflowError(
+                f"Draft cannot be confirmed: status is '{draft.status}', "
+                f"but no persisted result exists. draft_id={draft_id}"
+            )
+
+        if draft.status != DRAFT_STATUS_CONFIRMING:
             raise DraftWorkflowError(
                 f"Draft cannot be confirmed: status is '{draft.status}', "
                 f"expected 'pending'. draft_id={draft_id}"
@@ -425,39 +446,42 @@ class DraftGeneratorStrategy:
                 f"Draft has expired: {draft_id}"
             )
 
-        # Update status to confirmed
-        draft.status = DRAFT_STATUS_CONFIRMED
-        ttl_remaining = max(1, int(draft.expires_at - time.time()))
-        await self._store_draft(draft, ttl_remaining)
-
         # 视频草稿:调 bridge 提交 Agnes /videos 异步任务,返回 video_id。
         # 不走图片放大路径。
         if draft.media_type == "video":
-            return await self._confirm_video_draft(draft)
+            try:
+                return await self._confirm_video_draft(draft)
+            except Exception:
+                await self._mark_draft_confirmation_failed(draft, "video confirmation failed")
+                raise
 
         # Upscale to target resolution via pixel-level super-resolution
         target_resolution = self._get_target_resolution(draft)
         start_time = time.monotonic()
 
         # Try pixel-level super-resolution (RealESRGAN) first
-        sr_result = await self._super_resolve(draft, target_resolution)
-        if sr_result is not None:
-            output_data = sr_result.output_bytes
-            # 超分按等比放大到长边 4096，实际输出尺寸可能与 target_resolution 不同，
-            # 用真实输出尺寸覆盖，避免 UpscaleResult.target_resolution 撒谎。
-            actual_resolution = sr_result.output_resolution or target_resolution
-            algorithm_used = "real-esrgan"
-        else:
-            # Fallback to ComfyUI upscale
-            comfyui_result = await self._upscale_with_comfyui(draft, target_resolution)
-            if comfyui_result is not None:
-                output_data = comfyui_result
-                actual_resolution = target_resolution
-                algorithm_used = "comfyui"
+        try:
+            sr_result = await self._super_resolve(draft, target_resolution)
+            if sr_result is not None:
+                output_data = sr_result.output_bytes
+                # 超分按等比放大到长边 4096，实际输出尺寸可能与 target_resolution 不同，
+                # 用真实输出尺寸覆盖，避免 UpscaleResult.target_resolution 撒谎。
+                actual_resolution = sr_result.output_resolution or target_resolution
+                algorithm_used = "real-esrgan"
             else:
-                output_data = self._simulate_upscale(draft, target_resolution)
-                actual_resolution = target_resolution
-                algorithm_used = self._config.upscale_algorithm
+                # Fallback to ComfyUI upscale
+                comfyui_result = await self._upscale_with_comfyui(draft, target_resolution)
+                if comfyui_result is not None:
+                    output_data = comfyui_result
+                    actual_resolution = target_resolution
+                    algorithm_used = "comfyui"
+                else:
+                    output_data = self._simulate_upscale(draft, target_resolution)
+                    actual_resolution = target_resolution
+                    algorithm_used = self._config.upscale_algorithm
+        except Exception:
+            await self._mark_draft_confirmation_failed(draft, "image confirmation failed")
+            raise
 
         duration_ms = (time.monotonic() - start_time) * 1000.0
 
@@ -474,6 +498,10 @@ class DraftGeneratorStrategy:
         try:
             draft_dir = self._ensure_draft_dir(draft.session_id, draft_id)
             self._write_result_bytes(draft_dir, output_data)
+            draft.status = DRAFT_STATUS_CONFIRMED
+            draft.generation_params["confirmed_algorithm"] = algorithm_used
+            ttl_remaining = max(1, int(draft.expires_at - time.time()))
+            await self._store_draft(draft, ttl_remaining)
         except Exception as exc:  # noqa: BLE001
             logger.warning("draft result persist failed (draft_id=%s): %s", draft_id, exc)
 
@@ -488,6 +516,83 @@ class DraftGeneratorStrategy:
         )
 
         return result
+
+    async def _claim_draft_confirmation(self, draft_id: str) -> Optional[DraftResult]:
+        """Atomically move a pending draft to confirming.
+
+        This is the idempotency gate for confirm actions. Only the first caller
+        is allowed to leave ``pending`` and invoke the expensive upstream work.
+        Later retries either reuse a persisted confirmed result or get a state
+        conflict without submitting another video/upscale task.
+        """
+        key = self._make_redis_key(draft_id)
+
+        if self._redis_client is None:
+            async with self._draft_state_lock:
+                draft = await self._load_draft(draft_id)
+                if draft is None:
+                    return None
+                if draft.status == DRAFT_STATUS_PENDING and time.time() <= draft.expires_at:
+                    draft.status = DRAFT_STATUS_CONFIRMING
+                    ttl_remaining = max(1, int(draft.expires_at - time.time()))
+                    await self._store_draft(draft, ttl_remaining)
+                return draft
+
+        script = """
+local raw = redis.call('GET', KEYS[1])
+if not raw then return {0, ''} end
+local data = cjson.decode(raw)
+if tonumber(ARGV[1]) > tonumber(data['expires_at'] or '0') then
+  return {2, raw}
+end
+if data['status'] == ARGV[2] then
+  data['status'] = ARGV[3]
+  redis.call('SET', KEYS[1], cjson.encode(data), 'EX', tonumber(ARGV[4]))
+  return {1, cjson.encode(data)}
+end
+return {3, raw}
+"""
+        now = time.time()
+        existing = await self._load_draft(draft_id)
+        ttl_remaining = max(1, int(existing.expires_at - now)) if existing else 1
+        redis_conn = getattr(self._redis_client, "redis", self._redis_client)
+        try:
+            result = await redis_conn.eval(
+                script,
+                1,
+                key,
+                now,
+                DRAFT_STATUS_PENDING,
+                DRAFT_STATUS_CONFIRMING,
+                ttl_remaining,
+            )
+        except (AttributeError, TypeError):
+            async with self._draft_state_lock:
+                draft = await self._load_draft(draft_id)
+                if draft is None:
+                    return None
+                if draft.status == DRAFT_STATUS_PENDING and now <= draft.expires_at:
+                    draft.status = DRAFT_STATUS_CONFIRMING
+                    ttl_remaining = max(1, int(draft.expires_at - now))
+                    await self._store_draft(draft, ttl_remaining)
+                return draft
+
+        code = int(result[0])
+        raw = result[1]
+        if code == 0:
+            return None
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        if raw:
+            data = json.loads(raw)
+            return self._draft_from_serialized(draft_id, data)
+        return await self._load_draft(draft_id)
+
+    async def _mark_draft_confirmation_failed(self, draft: DraftResult, reason: str) -> None:
+        draft.status = DRAFT_STATUS_PENDING
+        draft.generation_params["last_confirm_error"] = reason
+        ttl_remaining = max(1, int(draft.expires_at - time.time()))
+        await self._store_draft(draft, ttl_remaining)
 
     async def _confirm_video_draft(self, draft: DraftResult) -> VideoSubmitResult:
         """视频草稿确认:调 bridge._do_video_generation 提交 Agnes /videos 任务。
@@ -541,6 +646,7 @@ class DraftGeneratorStrategy:
 
         # 持久化 video_id 到 draft,刷新后前端凭此重新轮询
         draft.video_id = video_id
+        draft.status = DRAFT_STATUS_CONFIRMED
         ttl_remaining = max(1, int(draft.expires_at - time.time()))
         await self._store_draft(draft, ttl_remaining)
 
@@ -1846,6 +1952,9 @@ class DraftGeneratorStrategy:
             )
             return None
 
+        return self._draft_from_serialized(draft_id, data)
+
+    def _draft_from_serialized(self, draft_id: str, data: Dict[str, Any]) -> DraftResult:
         media_type = data.get("media_type", "image")
         draft_dir = data.get("store_dir") or self._draft_dir(data.get("session_id"), draft_id)
 
@@ -1992,4 +2101,3 @@ class DraftGeneratorStrategy:
             extra={"session_id": session_id, "deleted_count": deleted},
         )
         return deleted
-

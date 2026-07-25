@@ -54,7 +54,7 @@ def set_l3_device(device: str) -> None:
     logger.info("L3 embedding device 设为: %s", dev)
 
 
-async def _compute_l3_vector(text: str) -> Optional[list]:
+async def _compute_l3_vector(text: str, *, load_if_missing: bool = True) -> Optional[list]:
     """使用 Qwen/Qwen3-Embedding-0.6B 计算 1024 维 embedding 向量。
 
     使用 transformers + torch 直接加载（无需 sentence_transformers）。
@@ -62,6 +62,8 @@ async def _compute_l3_vector(text: str) -> Optional[list]:
 
     Args:
         text: 待嵌入的文本（通常是 normalized_messages）。
+        load_if_missing: False 时，若模型尚未加载则直接跳过，避免请求路径首
+            次加载大模型阻塞单 worker。
 
     Returns:
         1024 维归一化向量列表，失败返回 None。
@@ -74,6 +76,8 @@ async def _compute_l3_vector(text: str) -> Optional[list]:
 
         # 从模块级缓存获取或加载模型
         if "tokenizer" not in _l3_model_cache:
+            if not load_if_missing:
+                return None
             logger.info("Loading L3 embedding model: %s", model_name)
             _l3_model_cache["tokenizer"] = AutoTokenizer.from_pretrained(
                 model_name, trust_remote_code=True

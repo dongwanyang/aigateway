@@ -306,13 +306,14 @@ class TestConfirmDraft:
     async def test_confirm_already_confirmed_raises_error(
         self, strategy, image_request, default_config
     ):
-        """Confirming an already confirmed draft should raise error."""
+        """Confirming an already confirmed draft returns the persisted result."""
         draft = await strategy.generate_draft(image_request, default_config)
         await _await_generating(strategy, draft.draft_id)
-        await strategy.confirm_draft(draft.draft_id)
+        first = await strategy.confirm_draft(draft.draft_id)
 
-        with pytest.raises(DraftWorkflowError, match="cannot be confirmed"):
-            await strategy.confirm_draft(draft.draft_id)
+        second = await strategy.confirm_draft(draft.draft_id)
+        assert isinstance(second, UpscaleResult)
+        assert second.draft_id == first.draft_id
 
     @pytest.mark.asyncio
     async def test_confirm_respects_max_resolution(self, strategy, default_config):
@@ -489,6 +490,39 @@ async def test_confirm_video_draft_calls_bridge_and_returns_video_id(strategy, v
     assert reloaded is not None
     assert reloaded.video_id == "vid_test_123"
     assert reloaded.status == DRAFT_STATUS_CONFIRMED
+
+
+@pytest.mark.asyncio
+async def test_confirm_video_draft_is_idempotent_under_concurrency(strategy, video_request, default_config):
+    """Concurrent confirm calls should submit at most one provider video task."""
+    result = await strategy.generate_draft(video_request, default_config)
+    draft = await _await_generating(strategy, result.draft_id)
+
+    from unittest.mock import AsyncMock
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def submit_once(**_kwargs):
+        started.set()
+        await release.wait()
+        return {"_meta": {"video_id": "vid_once"}, "usage": {}}
+
+    strategy._litellm_bridge = AsyncMock()
+    strategy._litellm_bridge._do_video_generation = AsyncMock(side_effect=submit_once)
+
+    first_task = asyncio.create_task(strategy.confirm_draft(draft.draft_id))
+    await started.wait()
+    second_task = asyncio.create_task(strategy.confirm_draft(draft.draft_id))
+    await asyncio.sleep(0)
+    release.set()
+
+    first = await first_task
+    second = await second_task
+    assert isinstance(first, VideoSubmitResult)
+    assert first.video_id == "vid_once"
+    assert isinstance(second, VideoSubmitResult)
+    assert second.video_id == "vid_once"
+    strategy._litellm_bridge._do_video_generation.assert_awaited_once()
 
 
 @pytest.mark.asyncio

@@ -128,7 +128,25 @@ class RAGRetrieverPlugin:
         self._config = config or RAGRetrieverConfig()
         self._is_available: bool = False
         self._index: Any = None  # VectorStoreIndex instance
-        self._initialize_index()
+        self._init_attempted: bool = False
+
+    def _ensure_index(self, *, load_if_missing: bool = True) -> bool:
+        """Return whether the vector index is ready.
+
+        Request-time retrieval passes ``load_if_missing=False`` so a cold RAG
+        model cannot block the single gateway worker. Write paths such as
+        ingestion may still initialize the index.
+        """
+        if self._is_available and self._index is not None:
+            return True
+        if not hasattr(self, "_init_attempted"):
+            return self._is_available and self._index is not None
+        if not load_if_missing:
+            return False
+        if not self._init_attempted:
+            self._init_attempted = True
+            self._initialize_index()
+        return self._is_available and self._index is not None
 
     def _initialize_index(self) -> None:
         """初始化 LlamaIndex VectorStoreIndex + QdrantVectorStore。
@@ -275,7 +293,7 @@ class RAGRetrieverPlugin:
         Returns:
             更新后的上下文（含检索结果）或原始上下文（passthrough）。
         """
-        if not self._is_available:
+        if not self._ensure_index(load_if_missing=False):
             return ctx
 
         # 提取用户查询：取最后一条 role=user 的消息内容
@@ -757,7 +775,7 @@ class RAGRetrieverPlugin:
         Returns:
             {"status": "success", "num_documents": N, "num_chunks": M}
         """
-        if not self._is_available:
+        if not self._ensure_index(load_if_missing=True):
             return {"status": "unavailable", "reason": "llama_index not installed"}
 
         try:

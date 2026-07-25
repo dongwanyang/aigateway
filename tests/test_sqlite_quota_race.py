@@ -15,6 +15,30 @@ from aigateway_core.shared.auth.sqlite_store import SQLiteStore, _hash_key
 
 
 @pytest.mark.asyncio
+async def test_sqlite_migrate_groups_can_use_self_store():
+    """Startup uses SQLiteStore for both keys and groups."""
+    db_path = f"/tmp/test_sqlite_migrate_self_{os.getpid()}.db"
+    try:
+        store = SQLiteStore(db_path=db_path)
+        result = await store.create(
+            user_id="test-user-groupless",
+            group_id="",
+            cache_scope="group",
+        )
+        kh = _hash_key(result["key"])
+
+        migrated = await store.migrate_groups()
+
+        data = store._row_to_dict(store._api_key_row(kh))
+        assert migrated == 1
+        assert data["group_id"] == SQLiteStore.DEFAULT_GROUP_ID
+        assert kh in await store._get_members(SQLiteStore.DEFAULT_GROUP_ID)
+    finally:
+        if os.path.exists(db_path):
+            os.remove(db_path)
+
+
+@pytest.mark.asyncio
 async def test_concurrent_quota_check_prevents_overuse():
     """Multiple concurrent quota checks should not allow over-quota usage."""
     db_path = f"/tmp/test_quota_race_{os.getpid()}.db"
@@ -147,6 +171,43 @@ async def test_sequential_quota_exhaustion():
         assert ok3 is False
         assert "Daily" in reason
 
+    finally:
+        if os.path.exists(db_path):
+            os.remove(db_path)
+
+
+@pytest.mark.asyncio
+async def test_release_reserved_usage_rolls_back_sqlite_key_and_group():
+    """Failed provider calls release SQLite pre-flight quota reservations."""
+    db_path = f"/tmp/test_sqlite_release_reserved_{os.getpid()}.db"
+    try:
+        store = SQLiteStore(db_path=db_path)
+        group = await store.create_group(
+            "ReleaseGroup",
+            {"daily_tokens": 100, "rate_limit_tpm": 1000, "monthly_cost": 10.0},
+        )
+        gid = group["group_id"]
+        result = await store.create(
+            user_id="test-release-user",
+            quotas={"daily_tokens": 100, "rate_limit_tpm": 1000, "monthly_cost": 10.0},
+            group_id=gid,
+            cache_scope="group",
+        )
+        kh = _hash_key(result["key"])
+
+        ok, reason, _ = await store.check_quota(key_hash=kh, tokens=50, cost=2.0)
+        assert ok is True, reason
+
+        await store.release_reserved_usage(kh, reserved_tokens=50, reserved_cost=2.0)
+
+        key_data = store._row_to_dict(store._api_key_row(kh))
+        group_data = dict(store.conn.fetchone("SELECT * FROM groups WHERE group_id=?", (gid,)))
+        assert int(key_data["daily_tokens_used"]) == 0
+        assert int(key_data["tpm_window_count"]) == 0
+        assert float(key_data["monthly_cost_used"]) == 0.0
+        assert int(group_data["daily_tokens_used"]) == 0
+        assert int(group_data["tpm_window_count"]) == 0
+        assert float(group_data["monthly_cost_used"]) == 0.0
     finally:
         if os.path.exists(db_path):
             os.remove(db_path)

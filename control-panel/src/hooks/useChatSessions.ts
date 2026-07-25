@@ -312,21 +312,20 @@ export function useChatSessions(): UseChatSessions {
 
   const patchActiveMessages = useCallback(
     (updater: (msgs: ChatPageMessage[]) => ChatPageMessage[]) => {
-      setSessions(prev => {
-        const next = prev.map(s => {
-          if (s.id !== activeId) return s
-          const messages = updater(s.messages)
-          const title = s.title === '新对话' && messages.some(m => m.role === 'user')
-            ? titleFromMessages(messages)
-            : s.title
-          return { ...s, messages, title, updatedAt: Date.now() }
-        })
-        // 同步更新 ref,使同一事件循环内的 flushToStorage/pagehide 能读到最新状态。
-        // 否则 React 的 useEffect 写 ref 发生在渲染后,500ms debounce 或立即 flush
-        // 可能读到旧状态,导致 draft/incomplete 等关键标记丢失(刷新后误续传)。
-        sessionsRef.current = next
-        return next
+      const base = sessionsRef.current
+      const next = base.map(s => {
+        if (s.id !== activeId) return s
+        const messages = updater(s.messages)
+        const title = s.title === '新对话' && messages.some(m => m.role === 'user')
+          ? titleFromMessages(messages)
+          : s.title
+        return { ...s, messages, title, updatedAt: Date.now() }
       })
+      // 同步更新 ref,使同一事件循环内的 flushToStorage/pagehide 能读到最新状态。
+      // 否则 React 的 useEffect 写 ref 发生在渲染后,500ms debounce 或立即 flush
+      // 可能读到旧状态,导致 draft/incomplete 等关键标记丢失(刷新后误续传)。
+      sessionsRef.current = next
+      setSessions(next)
     },
     [activeId],
   )
@@ -433,12 +432,14 @@ export function useChatSessions(): UseChatSessions {
           patchMessage(msgId, m => owns(m)
             ? { ...m, draft: { ...m.draft, status: 'pending', previewDataUrl: r.previewDataUrl, errorMessage: undefined }, awaitingDraft: false }
             : m)
+          flushToStorage()
           break
         }
         // 200 但无 data URL:异常,按 error 处理
         patchMessage(msgId, m => owns(m)
           ? { ...m, draft: { ...m.draft, status: 'error', errorMessage: '预览响应缺少 data URL' }, awaitingDraft: false }
           : m)
+        flushToStorage()
         break
       } catch (e) {
         const code = e instanceof Error ? e.message : '预览加载失败'
@@ -447,12 +448,14 @@ export function useChatSessions(): UseChatSessions {
           patchMessage(msgId, m => owns(m)
             ? { ...m, draft: { ...m.draft, status: 'expired', errorMessage: code }, awaitingDraft: false }
             : m)
+          flushToStorage()
           break
         }
         if (code.includes('draft_failed')) {
           patchMessage(msgId, m => owns(m)
             ? { ...m, draft: { ...m.draft, status: 'error', errorMessage: code }, awaitingDraft: false }
             : m)
+          flushToStorage()
           break
         }
         // 网络错误等瞬时失败:继续重试,不立即判定失败
@@ -465,10 +468,11 @@ export function useChatSessions(): UseChatSessions {
       patchMessage(msgId, m => owns(m)
         ? { ...m, draft: { ...m.draft, status: 'expired', errorMessage: '草稿生成超时' }, awaitingDraft: false }
         : m)
+      flushToStorage()
     }
 
     pollingDraftIds.delete(draftId)
-  }, [patchMessage])
+  }, [patchMessage, flushToStorage])
 
   /** 核心:发送一条用户消息。resume=true 时不重复追加 user 消息(续传场景)。
    *  dropLastAssistant=true:wire 历史去掉末尾那条 assistant(用于 incomplete 续传——
@@ -525,6 +529,11 @@ export function useChatSessions(): UseChatSessions {
     // 续传 send:记录 session id,供 StrictMode 卸载时判断是否需从 resumedSessionIds 移除。
     if (isResume) resumeSessionRef.current = activeId
     let reader: ReadableStreamDefaultReader<Uint8Array> | null = null
+    const finishCurrentStream = () => {
+      setStreaming(false)
+      setPendingAssistantId(null)
+      flushToStorage()
+    }
 
     try {
       const resp = await requestChatCompletion(
@@ -577,7 +586,7 @@ export function useChatSessions(): UseChatSessions {
           if (!line.startsWith('data:')) continue
           const payload = line.slice(5).trim()
           if (payload === '[DONE]') {
-            setStreaming(false)
+            finishCurrentStream()
             abortRef.current = null
             inflightRef.current = false
             // 注意:不在此处 reader.releaseLock() —— finally 会统一释放,
@@ -588,7 +597,13 @@ export function useChatSessions(): UseChatSessions {
             const chunk = JSON.parse(payload)
             const delta = chunk?.choices?.[0]?.delta
             const meta = chunk?._meta?.routed_to
-            const isErr = !!chunk?.error
+            const streamError = chunk?.error
+            const isErr = !!streamError
+            const errorMessage = typeof streamError?.message === 'string'
+              ? streamError.message
+              : typeof streamError?.code === 'string'
+                ? streamError.code
+                : '请求失败'
             patchMessage(assistantId, m => {
               const next: ChatPageMessage = { ...m }
               if (delta?.content) {
@@ -600,15 +615,22 @@ export function useChatSessions(): UseChatSessions {
               // 提取视频生成任务的 ID，用于刷新后轮询恢复
               const videoId = chunk?._meta?.video_id
               if (videoId && !next.videoId) next.videoId = videoId
-              if (isErr) next.error = true
+              if (isErr) {
+                next.error = true
+                if (!next.content) next.content = errorMessage
+              }
               return next
             })
+            if (isErr) {
+              setError(errorMessage)
+              setPendingAssistantId(null)
+            }
           } catch {
             // 非 JSON 帧,跳过
           }
         }
       }
-      setStreaming(false)
+      finishCurrentStream()
     } catch (e) {
       if (controller.signal.aborted) {
         // 标记 incomplete(刷新续传依据)。reader 释放交给 finally,避免重复 releaseLock 抛 TypeError。
@@ -630,11 +652,11 @@ export function useChatSessions(): UseChatSessions {
       } else {
         const msg = e instanceof Error ? e.message : '请求失败'
         setError(msg)
+        setPendingAssistantId(null)
         // 移除空占位
-        setSessions(prev => prev.map(s => s.id === activeId
-          ? { ...s, messages: s.messages.filter(m => !(m.id === assistantId && m.content === '' && !m.draft)) }
-          : s))
+        patchActiveMessages(msgs => msgs.filter(m => !(m.id === assistantId && m.content === '' && !m.draft)))
         setStreaming(false)
+        flushToStorage()
       }
     } finally {
       // 释放 reader 锁。流已关闭/出错时 releaseLock 可能抛 TypeError,吞掉即可。
@@ -649,7 +671,7 @@ export function useChatSessions(): UseChatSessions {
         if (isResume) resumeSessionRef.current = null
       }
     }
-  }, [streaming, activeId, patchActiveMessages, patchMessage, pollDraftPreview, setPendingAssistantId])
+  }, [streaming, activeId, patchActiveMessages, patchMessage, pollDraftPreview, setPendingAssistantId, flushToStorage])
 
   // sendRef:resume effect 通过它调用 send,而不把 send 放进 effect 依赖数组。
   // 否则 send 依赖 streaming,setStreaming(true) 时 send 引用变化 → effect 重跑 →
@@ -797,6 +819,7 @@ export function useChatSessions(): UseChatSessions {
               intent: 'generation:video',
               model: 'video',
             }))
+            flushToStorage()
           } else if (status.status === 'failed' || status.status === 'error') {
             // 视频生成失败
             const errorMsg = status.error?.message || '视频生成失败'
@@ -805,6 +828,7 @@ export function useChatSessions(): UseChatSessions {
               content: `Video generation failed: ${errorMsg}`,
               error: true,
             }))
+            flushToStorage()
           }
           break
         }
@@ -817,7 +841,7 @@ export function useChatSessions(): UseChatSessions {
     }
 
     pollingVideoIds.delete(videoId)
-  }, [patchMessage])
+  }, [patchMessage, flushToStorage])
 
   const confirmDraftMsg = useCallback(async (msgId: string) => {
     const s = sessions.find(x => x.id === activeId)
@@ -826,6 +850,7 @@ export function useChatSessions(): UseChatSessions {
     // 防连点:status 已是 confirming/rejecting 时直接返回(按钮 disable 依赖 re-render,有窗口期)。
     if (msg.draft.status === 'confirming' || msg.draft.status === 'rejecting') return
     patchMessage(msgId, m => m.draft ? { ...m, draft: { ...m.draft, status: 'confirming', errorMessage: undefined } } : m)
+    flushToStorage()
     try {
       const result = await confirmDraft(msg.draft.draftId)
       if (result.mediaType === 'video') {
@@ -839,12 +864,14 @@ export function useChatSessions(): UseChatSessions {
           intent: 'generation:video',
           model: 'video',
         }))
+        flushToStorage()
         void pollVideoStatus(result.videoId, msgId)
       } else {
         // 图片草稿确认:高清放大结果挂到 draft.resultDataUrl。
         patchMessage(msgId, m => m.draft
           ? { ...m, draft: { ...m.draft, status: 'confirmed', resultDataUrl: result.upscaledUrl, errorMessage: undefined } }
           : m)
+        flushToStorage()
       }
     } catch (e) {
       const code = e instanceof Error ? e.message : '确认失败'
@@ -852,8 +879,9 @@ export function useChatSessions(): UseChatSessions {
       patchMessage(msgId, m => m.draft
         ? { ...m, draft: { ...m.draft, status: expired ? 'expired' : 'error', errorMessage: code } }
         : m)
+      flushToStorage()
     }
-  }, [sessions, activeId, patchMessage, pollVideoStatus])
+  }, [sessions, activeId, patchMessage, pollVideoStatus, flushToStorage])
 
   const rejectDraftMsg = useCallback(async (msgId: string) => {
     const s = sessions.find(x => x.id === activeId)
@@ -861,6 +889,7 @@ export function useChatSessions(): UseChatSessions {
     if (!msg?.draft) return
     if (msg.draft.status === 'confirming' || msg.draft.status === 'rejecting') return
     patchMessage(msgId, m => m.draft ? { ...m, draft: { ...m.draft, status: 'rejecting', errorMessage: undefined } } : m)
+    flushToStorage()
     try {
       const { newDraftId, previewUrl } = await rejectDraft(msg.draft.draftId)
       // 后端异步生成新草稿:立即切到 generating,清旧预览,启动轮询(同 send 草稿分支)。
@@ -868,6 +897,7 @@ export function useChatSessions(): UseChatSessions {
       patchMessage(msgId, m => m.draft
         ? { ...m, draft: { ...m.draft, draftId: newDraftId, previewUrl, status: 'generating', previewDataUrl: undefined, resultDataUrl: undefined, errorMessage: undefined }, awaitingDraft: true, awaitingDraftSince: Date.now() }
         : m)
+      flushToStorage()
       void pollDraftPreview(newDraftId, msgId)
     } catch (e) {
       const code = e instanceof Error ? e.message : '重新生成失败'
@@ -875,8 +905,9 @@ export function useChatSessions(): UseChatSessions {
       patchMessage(msgId, m => m.draft
         ? { ...m, draft: { ...m.draft, status: expired ? 'expired' : 'error', errorMessage: code } }
         : m)
+      flushToStorage()
     }
-  }, [sessions, activeId, patchMessage, pollDraftPreview])
+  }, [sessions, activeId, patchMessage, pollDraftPreview, flushToStorage])
 
   /** 刷新后自动轮询未完成的视频任务。 */
   useEffect(() => {

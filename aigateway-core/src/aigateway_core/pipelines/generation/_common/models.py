@@ -163,6 +163,7 @@ class DraftResult:
         status: 草图状态
             "generating" — 后台生成中（异步任务未完成）
             "pending" — 等待用户确认
+            "confirming" — 用户已确认，正在提交/生成最终结果
             "confirmed" — 已确认，可执行放大
             "rejected" — 已拒绝，可重新生成
             "expired" — 已过期，资源已释放
@@ -191,12 +192,14 @@ class DraftResult:
 # DraftResult 合法状态值
 DRAFT_STATUS_GENERATING = "generating"
 DRAFT_STATUS_PENDING = "pending"
+DRAFT_STATUS_CONFIRMING = "confirming"
 DRAFT_STATUS_CONFIRMED = "confirmed"
 DRAFT_STATUS_REJECTED = "rejected"
 DRAFT_STATUS_EXPIRED = "expired"
 DRAFT_VALID_STATUSES = (
     DRAFT_STATUS_GENERATING,
     DRAFT_STATUS_PENDING,
+    DRAFT_STATUS_CONFIRMING,
     DRAFT_STATUS_CONFIRMED,
     DRAFT_STATUS_REJECTED,
     DRAFT_STATUS_EXPIRED,

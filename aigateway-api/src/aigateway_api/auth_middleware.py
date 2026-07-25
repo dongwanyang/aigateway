@@ -48,7 +48,7 @@ def _extract_api_key(
 
 
 def _hash_key(key_value: str) -> str:
-    """计算 API Key 的 SHA-256 哈希（取前 16 位 hex）。
+    """计算 API Key 的 SHA-256 哈希。
 
     与 KeyStore._hash_key 保持一致。
 
@@ -56,9 +56,9 @@ def _hash_key(key_value: str) -> str:
         key_value: 完整 API Key 字符串。
 
     Returns:
-        16 位 hex 哈希字符串。
+        64 位 hex 哈希字符串。
     """
-    return hashlib.sha256(key_value.encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha256(key_value.encode("utf-8")).hexdigest()
 
 
 async def authenticate(

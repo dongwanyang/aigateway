@@ -1,6 +1,7 @@
 """Regression tests for dispatcher post-processing paths."""
 
 import json
+import hashlib
 import os
 import sys
 from types import SimpleNamespace
@@ -12,6 +13,21 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-api", "src"))
 
 from aigateway_core.dispatch.dispatcher import RequestDispatcher
+
+
+def test_resolve_identity_uses_full_sha256_key_hash():
+    request = SimpleNamespace(
+        state=SimpleNamespace(
+            api_key_data={"user_id": "user-1"},
+            api_key_value="gw-test-secret",
+        )
+    )
+
+    user_id, key_hash = RequestDispatcher._resolve_identity(request)
+
+    assert user_id == "user-1"
+    assert key_hash == hashlib.sha256(b"gw-test-secret").hexdigest()
+    assert len(key_hash) == 64
 
 
 class _FakeCache:

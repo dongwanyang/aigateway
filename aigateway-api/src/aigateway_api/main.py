@@ -336,7 +336,7 @@ async def lifespan(app: "FastAPI"):
                         except ValueError:
                             pass
                 # Migrate groupless keys to default group
-                await sqlite_store.migrate_groups(group_store)
+                await sqlite_store.migrate_groups()
                 logger.info("SQLiteStore 组初始化完成")
             except Exception as exc:
                 logger.warning("SQLiteStore 组初始化失败: %s", exc)

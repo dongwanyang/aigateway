@@ -1148,6 +1148,89 @@ class SQLiteStore:
                     self._upsert_quota_record("group", group_id, "daily", today, gdaily_q)
                     self._upsert_quota_record("group", group_id, "monthly", month, gmonthly_q)
 
+    async def release_reserved_usage(
+        self,
+        key_hash: str,
+        *,
+        reserved_tokens: int = 0,
+        reserved_cost: float = 0.0,
+    ) -> None:
+        """Release a pre-flight quota reservation when no billable result exists."""
+        if reserved_tokens <= 0 and reserved_cost <= 0:
+            return
+
+        row = self._api_key_row(key_hash)
+        if not row:
+            return
+        data = self._row_to_dict(row)
+        group_id = data.get("group_id") or ""
+        now_unix = _now_unix()
+
+        with self.conn.transaction() as tx:
+            key_updates = self._compute_reconciled_updates(
+                data,
+                -reserved_tokens,
+                -reserved_cost,
+                now_unix,
+            )
+            if key_updates:
+                self._apply_counter_updates(tx, "api_keys", "key_hash", key_hash, key_updates)
+
+            if group_id:
+                g_row = tx.execute(
+                    "SELECT * FROM groups WHERE group_id=?", (group_id,)
+                ).fetchone()
+                if g_row:
+                    group_updates = self._compute_reconciled_updates(
+                        dict(g_row),
+                        -reserved_tokens,
+                        -reserved_cost,
+                        now_unix,
+                    )
+                    if group_updates:
+                        self._apply_counter_updates(tx, "groups", "group_id", group_id, group_updates)
+
+    @staticmethod
+    def _compute_reconciled_updates(
+        data: Dict[str, Any],
+        token_delta: int,
+        cost_delta: float,
+        now_unix: int,
+    ) -> Dict[str, Any]:
+        """Compute counter updates for a delta between actual and reserved usage."""
+        updates: Dict[str, Any] = {}
+
+        if token_delta != 0:
+            daily_used = max(0, int(data.get("daily_tokens_used", "0")) + token_delta)
+            updates["daily_tokens_used"] = daily_used
+
+            tpm_window_start = int(data.get("tpm_window_start", "0"))
+            if now_unix - tpm_window_start < 60:
+                tpm_window_count = max(0, int(data.get("tpm_window_count", "0")) + token_delta)
+                updates["tpm_window_count"] = tpm_window_count
+
+        if cost_delta != 0:
+            monthly_used = max(0.0, float(data.get("monthly_cost_used", "0.0")) + cost_delta)
+            updates["monthly_cost_used"] = round(monthly_used, 4)
+
+        return updates
+
+    @staticmethod
+    def _apply_counter_updates(tx, table: str, id_col: str, id_value: str, updates: Dict[str, Any]) -> None:
+        if (table, id_col) not in {("api_keys", "key_hash"), ("groups", "group_id")}:
+            raise ValueError("unsupported quota counter target")
+        allowed = {"daily_tokens_used", "monthly_cost_used", "tpm_window_count"}
+        fields = [k for k in updates.keys() if k in allowed]
+        if not fields:
+            return
+        assignments = ", ".join(f"{field}=?" for field in fields)
+        params = [updates[field] for field in fields]
+        params.append(id_value)
+        tx.execute(
+            f"UPDATE {table} SET {assignments} WHERE {id_col}=?",
+            tuple(params),
+        )
+
     async def _check_duplicate_user_key(self, user_id: str) -> None:
         if self._duplicate_user_key(user_id):
             row = self.conn.fetchone(
@@ -1159,8 +1242,9 @@ class SQLiteStore:
     async def _find_key_hashes_by_id(self, key_id: str) -> List[str]:
         return self._lookup_by_id(key_id)
 
-    async def migrate_groups(self, group_store) -> int:
+    async def migrate_groups(self, group_store=None) -> int:
         """Assign groupless keys to the default group."""
+        group_store = group_store or self
         default_id = await group_store.ensure_default_group()
         migrated = 0
         rows = self.conn.fetchall(

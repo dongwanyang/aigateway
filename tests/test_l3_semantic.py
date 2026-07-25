@@ -97,6 +97,18 @@ class TestComputeL3Vector:
         assert result is None
         assert not l3_semantic._l3_model_cache
 
+    @pytest.mark.asyncio
+    async def test_lookup_can_skip_cold_model_load(self):
+        """Request-time L3 lookup must not cold-load the embedding model."""
+        l3_semantic._l3_model_cache.clear()
+
+        result = await l3_semantic._compute_l3_vector(
+            "test", load_if_missing=False
+        )
+
+        assert result is None
+        assert l3_semantic._l3_model_cache == {}
+
 
 # ==================================================================
 # _safe_l3_backfill 测试

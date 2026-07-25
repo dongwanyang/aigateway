@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from aigateway_core.dispatch.context import PipelineContext
 from aigateway_core.pipelines.understanding.rag.rag_retriever_plugin import (
     RAGRetrieverPlugin,
     _dedupe_hits_by_identity,
@@ -79,6 +80,32 @@ def _make_plugin_without_init(**cfg_overrides: Any) -> RAGRetrieverPlugin:
         setattr(plugin._config, k, v)
     plugin._is_available = True
     return plugin
+
+
+def test_constructor_does_not_eager_initialize_index() -> None:
+    """Startup must not load the heavy embedding model before /health is live."""
+    with patch.object(RAGRetrieverPlugin, "_initialize_index") as init:
+        plugin = RAGRetrieverPlugin(config=None)
+
+    init.assert_not_called()
+    assert plugin._is_available is False
+    assert plugin._index is None
+
+
+@pytest.mark.asyncio
+async def test_execute_does_not_cold_initialize_index() -> None:
+    """Request-time RAG retrieval should fail open instead of loading embeddings."""
+    plugin = RAGRetrieverPlugin(config=None)
+    ctx = PipelineContext(
+        request={"messages": [{"role": "user", "content": "hello"}]},
+        trace_id="trace-rag-cold",
+    )
+
+    with patch.object(plugin, "_initialize_index") as init:
+        result = await plugin.execute(ctx)
+
+    init.assert_not_called()
+    assert result is ctx
 
 
 def test_code_rag_disabled_skips_code_hit_retrieval() -> None:

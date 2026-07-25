@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-api"
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 
 class TestSplitText:
@@ -242,6 +242,49 @@ class TestGetAuthDefaults:
             defaults = _get_auth_defaults()
             assert defaults["daily_tokens"] == 1000000
             assert defaults["monthly_cost"] == 50.0  # default
+
+
+class TestCreateApiKeyRoute:
+    @pytest.mark.asyncio
+    async def test_create_api_key_returns_one_time_raw_key(self):
+        from aigateway_api import admin_routes
+        from aigateway_api.admin_routes import CreateApiKeyRequest, create_api_key
+
+        key_store = MagicMock()
+        key_store.create = AsyncMock(return_value={
+            "id": "key_123",
+            "key": "gw-secret-value",
+            "key_prefix": "gw-secr",
+            "user_id": "test-user",
+            "group_id": "",
+            "cache_scope": "group",
+            "created_at": "2026-01-01T00:00:00Z",
+            "status": "active",
+            "quotas": {
+                "daily_tokens": 1000000,
+                "monthly_cost": 50.0,
+                "rate_limit_rpm": 60,
+                "rate_limit_tpm": 100000,
+            },
+        })
+
+        with (
+            patch.object(admin_routes, "_get_keystore_and_metrics", return_value=(key_store, None)),
+            patch.object(admin_routes, "_get_auth_defaults", return_value={
+                "daily_tokens": 1000000,
+                "monthly_cost": 50.0,
+                "rate_limit_rpm": 60,
+                "rate_limit_tpm": 100000,
+            }),
+        ):
+            resp = await create_api_key(
+                request=MagicMock(),
+                body=CreateApiKeyRequest(user_id="test-user"),
+                _auth={"is_admin": True},
+            )
+
+        assert resp["data"]["key"] == "gw-secret-value"
+        assert resp["data"]["warning"] == "API key shown only once at creation time. Copy it now."
 
 
 class TestFormatQuotaItem:

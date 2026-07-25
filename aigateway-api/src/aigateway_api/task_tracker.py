@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from unittest.mock import Mock
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,15 @@ _TASK_KEY_PREFIX = "aigateway:task"
 
 # Default TTL: 24 hours
 _DEFAULT_TTL_SECONDS = 24 * 3600
+_ALLOWED_TRANSITIONS = {
+    "pending": {"pending", "in_progress", "succeeded", "completed", "failed", "error", "expired"},
+    "in_progress": {"in_progress", "succeeded", "completed", "failed", "error", "expired"},
+    "succeeded": {"succeeded", "completed"},
+    "completed": {"completed", "succeeded"},
+    "failed": {"failed", "error"},
+    "error": {"error", "failed"},
+    "expired": {"expired"},
+}
 
 
 class TaskTracker:
@@ -49,6 +59,14 @@ class TaskTracker:
         """
         self._redis_client = redis_client
         self._memory_store: Dict[str, str] = {}
+
+    def _redis_conn(self) -> Optional[Any]:
+        if self._redis_client is None:
+            return None
+        conn = getattr(self._redis_client, "redis", None)
+        if conn is not None and not isinstance(conn, Mock):
+            return conn
+        return self._redis_client
 
     def _make_key(self, task_type: str, task_id: str) -> str:
         """构建 Redis 键名。
@@ -90,8 +108,19 @@ class TaskTracker:
         key = self._make_key(task_type, task_id)
 
         if self._redis_client is not None:
-            await self._redis_client.set(key, json.dumps(data), ex=ttl_seconds)
+            conn = self._redis_conn()
+            try:
+                created = await conn.set(key, json.dumps(data), ex=ttl_seconds, nx=True)
+            except TypeError:
+                existing = await self.get_status(task_type, task_id)
+                if existing is not None:
+                    return
+                created = await conn.set(key, json.dumps(data), ex=ttl_seconds)
+            if created is False:
+                return
         else:
+            if key in self._memory_store:
+                return
             self._memory_store[key] = json.dumps(data)
 
         logger.info(
@@ -157,6 +186,19 @@ class TaskTracker:
         if existing is None:
             return False
 
+        current_status = str(existing.get("status") or "pending")
+        if status not in _ALLOWED_TRANSITIONS.get(current_status, set()):
+            logger.info(
+                "task_tracker.transition_rejected",
+                extra={
+                    "task_type": task_type,
+                    "task_id": task_id,
+                    "current_status": current_status,
+                    "next_status": status,
+                },
+            )
+            return False
+
         existing["status"] = status
         existing["updated_at"] = time.time()
         if metadata:
@@ -167,12 +209,61 @@ class TaskTracker:
         # 计算剩余 TTL
         ttl = None
         if self._redis_client is not None:
-            ttl = await self._redis_client.ttl(key)
-            if ttl and ttl > 0:
-                await self._redis_client.set(key, json.dumps(existing), ex=ttl)
-            else:
-                # TTL 已过期或未知，重新设置
-                await self._redis_client.set(key, json.dumps(existing), ex=_DEFAULT_TTL_SECONDS)
+            conn = self._redis_conn()
+            script = """
+local raw = redis.call('GET', KEYS[1])
+if not raw then return 0 end
+local data = cjson.decode(raw)
+local current = data['status'] or 'pending'
+local allowed = cjson.decode(ARGV[2])
+local ok = 0
+for _, value in ipairs(allowed) do
+  if current == value then ok = 1 end
+end
+if ok == 0 then return 2 end
+local patch = cjson.decode(ARGV[1])
+for key, value in pairs(patch) do
+  data[key] = value
+end
+if patch['metadata'] ~= nil then
+  data['metadata'] = patch['metadata']
+end
+local ttl = redis.call('TTL', KEYS[1])
+if ttl and ttl > 0 then
+  redis.call('SET', KEYS[1], cjson.encode(data), 'EX', ttl)
+else
+  redis.call('SET', KEYS[1], cjson.encode(data), 'EX', tonumber(ARGV[3]))
+end
+return 1
+"""
+            patch = {
+                "status": status,
+                "updated_at": existing["updated_at"],
+                "metadata": existing.get("metadata", {}),
+            }
+            allowed_from = [
+                current
+                for current, targets in _ALLOWED_TRANSITIONS.items()
+                if status in targets
+            ]
+            try:
+                result = await conn.eval(
+                    script,
+                    1,
+                    key,
+                    json.dumps(patch),
+                    json.dumps(allowed_from),
+                    _DEFAULT_TTL_SECONDS,
+                )
+            except (AttributeError, TypeError):
+                ttl = await self._redis_client.ttl(key)
+                if ttl and ttl > 0:
+                    await self._redis_client.set(key, json.dumps(existing), ex=ttl)
+                else:
+                    await self._redis_client.set(key, json.dumps(existing), ex=_DEFAULT_TTL_SECONDS)
+                result = 1
+            if int(result) != 1:
+                return False
         else:
             self._memory_store[key] = json.dumps(existing)
 

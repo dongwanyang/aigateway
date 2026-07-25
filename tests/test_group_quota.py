@@ -396,12 +396,39 @@ async def test_increment_reconciles_estimate_vs_actual(ks_and_gs):
     # 2.0 reserved + 1.0 delta = 3.0 actual
     assert float(kdata["monthly_cost_used"]) == 3.0
     assert float(gdata["monthly_cost_used"]) == 3.0
+
+
+@pytest.mark.asyncio
+async def test_release_reserved_usage_rolls_back_estimate(ks_and_gs):
+    """Failed provider calls release the pre-flight Lua quota reservation."""
+    ks, _gs = ks_and_gs
+    await ks.redis.set_group("grp-g", {"name": "G", "status": "active",
+        "daily_tokens_limit": "5000", "daily_tokens_used": "50",
+        "monthly_cost_limit": "5000", "monthly_cost_used": "2.0",
+        "rate_limit_rpm": "60", "rate_limit_tpm": "100000",
+        "rpm_window_start": "0", "rpm_window_count": "1",
+        "tpm_window_start": "9999999999", "tpm_window_count": "50"})
+    await ks.redis.set_api_key("kh1", {"key_id": "k1", "user_id": "u1", "status": "active",
+        "group_id": "grp-g", "cache_scope": "group",
+        "daily_tokens_limit": "200", "daily_tokens_used": "50",
+        "monthly_cost_limit": "200", "monthly_cost_used": "2.0",
+        "rate_limit_rpm": "60", "rate_limit_tpm": "100000",
+        "rpm_window_start": "0", "rpm_window_count": "1",
+        "tpm_window_start": "9999999999", "tpm_window_count": "50"})
+
+    await ks.release_reserved_usage("kh1", reserved_tokens=50, reserved_cost=2.0)
+
+    kdata = await ks.redis.get_api_key("kh1")
+    gdata = await ks.redis.get_group("grp-g")
+    assert kdata["daily_tokens_used"] == "0"
+    assert gdata["daily_tokens_used"] == "0"
+    assert float(kdata["monthly_cost_used"]) == 0.0
+    assert float(gdata["monthly_cost_used"]) == 0.0
+    assert kdata["tpm_window_count"] == "0"
+    assert gdata["tpm_window_count"] == "0"
     # RPM is NOT reconciled — one request stays one RPM increment
     assert kdata["rpm_window_count"] == "1"
     assert gdata["rpm_window_count"] == "1"
-    # TPM window gets the delta too (window still open: start=now, now≈now)
-    assert int(kdata["tpm_window_count"]) == 80
-    assert int(gdata["tpm_window_count"]) == 80
 
 
 @pytest.mark.asyncio

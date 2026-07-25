@@ -165,6 +165,28 @@ class TestUpdateStatus:
         assert status["metadata"]["result"] == "ok"
 
     @pytest.mark.asyncio
+    async def test_terminal_status_cannot_be_overwritten(self):
+        """A completed task must not be overwritten by a later timeout/failure race."""
+        tracker = _memory_tracker()
+        await tracker.register("video", "v1")
+        assert await tracker.update_status("video", "v1", "succeeded", {"url": "https://cdn.example/v.mp4"})
+        assert not await tracker.update_status("video", "v1", "expired", {"error": "timeout"})
+        status = await tracker.get_status("video", "v1")
+        assert status["status"] == "succeeded"
+        assert status["metadata"]["url"] == "https://cdn.example/v.mp4"
+
+    @pytest.mark.asyncio
+    async def test_register_is_idempotent_in_memory(self):
+        """Registering the same task twice must not reset status or metadata."""
+        tracker = _memory_tracker()
+        await tracker.register("video", "v1", {"first": True})
+        await tracker.update_status("video", "v1", "in_progress")
+        await tracker.register("video", "v1", {"second": True})
+        status = await tracker.get_status("video", "v1")
+        assert status["status"] == "in_progress"
+        assert status["metadata"] == {"first": True}
+
+    @pytest.mark.asyncio
     async def test_update_redis_preserves_ttl(self):
         """Redis 模式下更新时查询剩余 TTL 并在 set 时保留（ex=）。"""
         tracker, redis = _redis_tracker()

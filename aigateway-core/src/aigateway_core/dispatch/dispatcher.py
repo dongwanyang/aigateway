@@ -345,7 +345,7 @@ class RequestDispatcher:
                 user_id = key_data.get("user_id") or None
                 raw_key = getattr(request.state, "api_key_value", "")
                 if raw_key:
-                    key_hash = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()[:16]
+                    key_hash = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
         if not user_id and hasattr(request.state, "user_id"):
             user_id = request.state.user_id
         return user_id, key_hash
@@ -416,7 +416,7 @@ class RequestDispatcher:
         }
         if cache_manager._qdrant_client is not None:
             from aigateway_core.prefix.cache.l3_semantic import _compute_l3_vector
-            l3_vec = await _compute_l3_vector(normalized_messages)
+            l3_vec = await _compute_l3_vector(normalized_messages, load_if_missing=False)
             if l3_vec is not None:
                 cache_kwargs["vector"] = l3_vec
 
@@ -815,6 +815,7 @@ class RequestDispatcher:
                 extra_headers=extra_headers,
             )
         except Exception as exc:
+            await self._release_quota_reservation(request, key_store, key_hash)
             _llm_fail_ms = round((time.time() - request_start_time) * 1000, 2)
             plugin_trace.append({"plugin_name": "llm_completion",
                                  "duration_ms": _llm_fail_ms,
@@ -839,6 +840,7 @@ class RequestDispatcher:
 
         # bridge 返回错误
         if "error" in result and "data" not in result:
+            await self._release_quota_reservation(request, key_store, key_hash)
             if tracker:
                 tracker.__exit__(None, None, None)
             error_info = result.get("error", {})
@@ -1175,6 +1177,7 @@ class RequestDispatcher:
             logger.warning("流式请求日志写入失败: %s", exc)
 
         if not usage:
+            await self._release_quota_reservation(request, key_store, key_hash)
             return
 
         # metrics — 优先用 bridge 末块真实成本(与非流式路径一致),否则内置表估算
@@ -1273,6 +1276,23 @@ class RequestDispatcher:
                     )
             except Exception as exc:
                 logger.warning("流式缓存回填失败: %s", exc)
+
+    async def _release_quota_reservation(self, request, key_store, key_hash: Optional[str]) -> None:
+        if not key_hash or not key_store:
+            return
+        if not getattr(request.state, "_lua_quota_reserved", False):
+            return
+        try:
+            await key_store.release_reserved_usage(
+                key_hash,
+                reserved_tokens=getattr(request.state, "_lua_reserved_tokens", 0),
+                reserved_cost=getattr(request.state, "_lua_reserved_cost", 0.0),
+            )
+            request.state._lua_quota_reserved = False
+            request.state._lua_reserved_tokens = 0
+            request.state._lua_reserved_cost = 0.0
+        except Exception as exc:
+            logger.warning("quota reservation release failed: %s", exc)
 
     # ------------------------------------------------------------------
     # 缓存命中处理

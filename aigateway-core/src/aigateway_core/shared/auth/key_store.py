@@ -981,6 +981,53 @@ return {1, '', '0'}
             except Exception as exc:
                 logger.warning("组级 increment_usage 失败 group=%s: %s", group_id, exc)
 
+    async def release_reserved_usage(
+        self,
+        key_hash: str,
+        *,
+        reserved_tokens: int = 0,
+        reserved_cost: float = 0.0,
+    ) -> None:
+        """Release a pre-flight quota reservation when no billable result exists.
+
+        ``check_quota`` reserves estimated tokens before the provider call so
+        concurrent requests see the in-flight usage. If the upstream call fails
+        before returning billable usage, the caller must release that estimate
+        or users lose quota for failed requests.
+        """
+        if reserved_tokens <= 0 and reserved_cost <= 0:
+            return
+
+        data = await self.redis.get_api_key(key_hash)
+        if not data:
+            return
+
+        now_unix = self._now_unix()
+        updates = self._compute_reconciled_updates(
+            data,
+            -reserved_tokens,
+            -reserved_cost,
+            now_unix,
+        )
+        if updates:
+            await self.redis.set_api_key(key_hash, updates)
+
+        group_id = data.get("group_id") or ""
+        if group_id:
+            try:
+                gdata = await self.redis.get_group(group_id)
+                if gdata:
+                    gupdates = self._compute_reconciled_updates(
+                        gdata,
+                        -reserved_tokens,
+                        -reserved_cost,
+                        now_unix,
+                    )
+                    if gupdates:
+                        await self.redis.set_group(group_id, gupdates)
+            except Exception as exc:
+                logger.warning("release_reserved_usage group rollback failed group=%s: %s", group_id, exc)
+
     @staticmethod
     def _compute_reconciled_updates(
         data: Dict[str, Any], token_delta: int, cost_delta: float, now_unix: int,

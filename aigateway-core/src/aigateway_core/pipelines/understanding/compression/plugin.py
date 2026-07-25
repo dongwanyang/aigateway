@@ -45,9 +45,15 @@ class PromptCompressPlugin:
         self._is_available: bool = False
         self._initialized: bool = False
 
-    def _ensure_compressor_loaded(self) -> None:
-        """延迟初始化 LLMLingua-2 压缩器（首次请求时加载，避免阻塞启动）."""
+    def _ensure_compressor_loaded(self, *, load_if_missing: bool = True) -> None:
+        """Initialize LLMLingua-2 when explicitly allowed.
+
+        Request-time execution passes ``load_if_missing=False`` so a cold
+        compression model cannot block the single gateway worker.
+        """
         if self._initialized:
+            return
+        if not load_if_missing:
             return
         self._initialized = True
         self._init_compressor()
@@ -120,7 +126,7 @@ class PromptCompressPlugin:
         if not messages:
             return ctx
 
-        self._ensure_compressor_loaded()
+        self._ensure_compressor_loaded(load_if_missing=False)
 
         if not self._is_available:
             return ctx

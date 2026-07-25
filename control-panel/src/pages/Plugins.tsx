@@ -212,7 +212,7 @@ export default function Plugins() {
                 type="password"
                 value={apiKeyInput}
                 onChange={e => setApiKeyInput(e.target.value)}
-                placeholder="sk-xxxxxxxx..."
+                placeholder="gw-xxxxxxxx..."
                 onKeyDown={e => { if (e.key === 'Enter') handleSaveKey() }}
                 style={{
                   flex: 1,
@@ -264,7 +264,7 @@ export default function Plugins() {
               </button>
             </div>
             <p className="text-xs mt-3" style={{ color: 'var(--color-text-tertiary)' }}>
-              默认管理员 Key: sk-a1b2c3d4e5f6XDFDDSF12nco
+              管理员 Key 请以 config.yaml auth.api_keys 中配置的 gw-* 密钥为准。
             </p>
           </div>
         </Card>

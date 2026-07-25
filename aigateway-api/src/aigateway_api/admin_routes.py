@@ -459,11 +459,9 @@ async def create_api_key(
         logger.error("Failed to create API key: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Failed to create API key"}})
 
-    # Remove raw key from response to prevent exposure via logs/proxies
-    safe_result = {k: v for k, v in result.items() if k != "key"}
-    safe_result["warning"] = "API key shown only once at creation time. Copy it now."
+    result["warning"] = "API key shown only once at creation time. Copy it now."
 
-    return {"data": safe_result, "message": "success"}
+    return {"data": result, "message": "success"}
 
 
 # ------------------------------------------------------------------
