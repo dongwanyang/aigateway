@@ -409,10 +409,16 @@ class DraftGeneratorStrategy:
         Raises:
             DraftWorkflowError: 草图不存在、已过期或状态非 pending
         """
-        draft = await self._claim_draft_confirmation(draft_id)
+        draft, claimed = await self._claim_draft_confirmation(draft_id)
         if draft is None:
             raise DraftWorkflowError(
                 f"Draft not found or expired: {draft_id}"
+            )
+
+        # Check if draft has expired
+        if time.time() > draft.expires_at:
+            raise DraftWorkflowError(
+                f"Draft has expired: {draft_id}"
             )
 
         if draft.status == DRAFT_STATUS_CONFIRMED:
@@ -434,16 +440,10 @@ class DraftGeneratorStrategy:
                 f"but no persisted result exists. draft_id={draft_id}"
             )
 
-        if draft.status != DRAFT_STATUS_CONFIRMING:
+        if not claimed or draft.status != DRAFT_STATUS_CONFIRMING:
             raise DraftWorkflowError(
                 f"Draft cannot be confirmed: status is '{draft.status}', "
                 f"expected 'pending'. draft_id={draft_id}"
-            )
-
-        # Check if draft has expired
-        if time.time() > draft.expires_at:
-            raise DraftWorkflowError(
-                f"Draft has expired: {draft_id}"
             )
 
         # 视频草稿:调 bridge 提交 Agnes /videos 异步任务,返回 video_id。
@@ -517,7 +517,7 @@ class DraftGeneratorStrategy:
 
         return result
 
-    async def _claim_draft_confirmation(self, draft_id: str) -> Optional[DraftResult]:
+    async def _claim_draft_confirmation(self, draft_id: str) -> tuple[Optional[DraftResult], bool]:
         """Atomically move a pending draft to confirming.
 
         This is the idempotency gate for confirm actions. Only the first caller
@@ -531,12 +531,13 @@ class DraftGeneratorStrategy:
             async with self._draft_state_lock:
                 draft = await self._load_draft(draft_id)
                 if draft is None:
-                    return None
+                    return None, False
                 if draft.status == DRAFT_STATUS_PENDING and time.time() <= draft.expires_at:
                     draft.status = DRAFT_STATUS_CONFIRMING
                     ttl_remaining = max(1, int(draft.expires_at - time.time()))
                     await self._store_draft(draft, ttl_remaining)
-                return draft
+                    return draft, True
+                return draft, False
 
         script = """
 local raw = redis.call('GET', KEYS[1])
@@ -570,23 +571,24 @@ return {3, raw}
             async with self._draft_state_lock:
                 draft = await self._load_draft(draft_id)
                 if draft is None:
-                    return None
+                    return None, False
                 if draft.status == DRAFT_STATUS_PENDING and now <= draft.expires_at:
                     draft.status = DRAFT_STATUS_CONFIRMING
                     ttl_remaining = max(1, int(draft.expires_at - now))
                     await self._store_draft(draft, ttl_remaining)
-                return draft
+                    return draft, True
+                return draft, False
 
         code = int(result[0])
         raw = result[1]
         if code == 0:
-            return None
+            return None, False
         if isinstance(raw, bytes):
             raw = raw.decode("utf-8")
         if raw:
             data = json.loads(raw)
-            return self._draft_from_serialized(draft_id, data)
-        return await self._load_draft(draft_id)
+            return self._draft_from_serialized(draft_id, data), code == 1
+        return await self._load_draft(draft_id), False
 
     async def _mark_draft_confirmation_failed(self, draft: DraftResult, reason: str) -> None:
         draft.status = DRAFT_STATUS_PENDING

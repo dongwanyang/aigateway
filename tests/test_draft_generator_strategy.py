@@ -517,11 +517,15 @@ async def test_confirm_video_draft_is_idempotent_under_concurrency(strategy, vid
     release.set()
 
     first = await first_task
-    second = await second_task
     assert isinstance(first, VideoSubmitResult)
     assert first.video_id == "vid_once"
-    assert isinstance(second, VideoSubmitResult)
-    assert second.video_id == "vid_once"
+    with pytest.raises(DraftWorkflowError, match="cannot be confirmed"):
+        await second_task
+    strategy._litellm_bridge._do_video_generation.assert_awaited_once()
+
+    retry = await strategy.confirm_draft(draft.draft_id)
+    assert isinstance(retry, VideoSubmitResult)
+    assert retry.video_id == "vid_once"
     strategy._litellm_bridge._do_video_generation.assert_awaited_once()
 
 
