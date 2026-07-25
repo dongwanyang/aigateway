@@ -113,3 +113,79 @@ async def test_confirm_video_record_log_success_path(monkeypatch, monkeypatched_
     assert "/admin/draft/" in call_kwargs["endpoint"]
     assert call_kwargs["status_code"] == 200
     assert call_kwargs["model"] == "agnes-video-v2.0"
+
+
+@pytest.mark.asyncio
+async def test_confirm_video_upstream_503_returns_502(monkeypatch):
+    """上游 Agnes /videos 返回 503(瞬时不可用) → 502 upstream_unavailable + retryable,
+    而非 400 draft_confirm_failed。400 会误导前端"请求非法不要重试"。
+
+    strategy.confirm_draft 抛出的 DraftWorkflowError 带 upstream_status 属性
+    (由 _confirm_video_draft 在 httpx.HTTPStatusError 503 时打上)。
+    """
+    from aigateway_api import admin_routes
+    from aigateway_core.pipelines.generation._common.exceptions import (
+        DraftWorkflowError,
+    )
+
+    err = DraftWorkflowError(
+        "upstream_unavailable: Agnes /videos submission failed: 503"
+    )
+    err.upstream_status = 503
+
+    strategy = AsyncMock()
+    strategy.get_draft = AsyncMock(return_value=_FakeDraft())
+    strategy.confirm_draft = AsyncMock(side_effect=err)
+    monkeypatch.setattr(admin_routes, "_get_draft_strategy", lambda: strategy)
+
+    with patch.object(admin_routes.logger, "warning") as mock_warn:
+        with patch.object(admin_routes.logger, "error") as mock_error:
+            with pytest.raises(Exception) as exc_info:
+                await admin_routes.confirm_draft(
+                    "d_up", _FakeRequest(), {"user_id": "", "group_id": ""}
+                )
+    raised = exc_info.value
+    assert raised.status_code == 502
+    assert raised.detail["error"]["code"] == "upstream_unavailable"
+    assert raised.detail["error"]["retryable"] is True
+    assert raised.detail["error"]["upstream_status"] == 503
+    # 上游瞬时故障走 warning(不是 error),不带 exc_info 噪音
+    assert mock_warn.called
+    # 关键:瞬时上游故障不应触发 error 级日志(那是真正失败/需排查的信号)
+    mock_error.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_confirm_video_network_error_returns_502(monkeypatch):
+    """上游 Agnes 完全连不上(ConnectError,无 HTTP 响应)→ 502 upstream_unavailable + retryable,
+    而非 400。DraftWorkflowError 仅带 upstream_unavailable 标记(无 upstream_status)。
+    """
+    from aigateway_api import admin_routes
+    from aigateway_core.pipelines.generation._common.exceptions import (
+        DraftWorkflowError,
+    )
+
+    err = DraftWorkflowError(
+        "upstream_unavailable: Agnes /videos submission failed (network error): connect refused"
+    )
+    err.upstream_unavailable = True  # 不设 upstream_status
+
+    strategy = AsyncMock()
+    strategy.get_draft = AsyncMock(return_value=_FakeDraft())
+    strategy.confirm_draft = AsyncMock(side_effect=err)
+    monkeypatch.setattr(admin_routes, "_get_draft_strategy", lambda: strategy)
+
+    with patch.object(admin_routes.logger, "warning") as mock_warn:
+        with patch.object(admin_routes.logger, "error") as mock_error:
+            with pytest.raises(Exception) as exc_info:
+                await admin_routes.confirm_draft(
+                    "d_net", _FakeRequest(), {"user_id": "", "group_id": ""}
+                )
+    raised = exc_info.value
+    assert raised.status_code == 502
+    assert raised.detail["error"]["code"] == "upstream_unavailable"
+    assert raised.detail["error"]["retryable"] is True
+    # 网络故障无状态码,不应在 detail 里塞 upstream_status
+    assert "upstream_status" not in raised.detail["error"]
+    assert mock_warn.called
+    mock_error.assert_not_called()

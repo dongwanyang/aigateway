@@ -52,6 +52,46 @@ _DRAFT_SESSION_KEY_PREFIX = "aigateway:draft:session"
 _DEFAULT_NEGATIVE_PROMPT = "ugly, blurry, low quality, distorted, deformed"
 
 
+def _upstream_http_status(exc: BaseException) -> Optional[int]:
+    """从异常链中提取上游 HTTP 状态码。
+
+    httpx.HTTPStatusError 携带 response.status_code;ConnectError/ReadTimeout 等网络
+    故障无状态码(返回 None),但同样视为瞬时/可重试,由 _is_upstream_network_error 判定。
+    """
+    cur: Optional[BaseException] = exc
+    visited: set = set()
+    while cur is not None and id(cur) not in visited:
+        visited.add(id(cur))
+        code = getattr(getattr(cur, "response", None), "status_code", None)
+        if isinstance(code, int):
+            return code
+        cur = cur.__cause__ or cur.__context__
+    return None
+
+
+def _is_upstream_network_error(exc: BaseException) -> bool:
+    """是否为上游网络故障(连不上/读超时/写超时等无 HTTP 响应的瞬时故障)。
+
+    httpx.TransportError 覆盖 ConnectError/ReadError/WriteError 以及所有超时
+    (httpx.TimeoutException 是 TransportError 的子类,所以 ConnectTimeout/
+    ReadTimeout/PoolTimeout 已被涵盖)。这些都没有 HTTP 响应体,但语义上等同
+    "上游暂时不可达,可重试"。
+    """
+    try:
+        import httpx
+    except ImportError:  # pragma: no cover - httpx 是核心依赖,缺失时桥本身也跑不起来
+        return False
+    network_exc_type = httpx.TransportError
+    cur: Optional[BaseException] = exc
+    visited: set = set()
+    while cur is not None and id(cur) not in visited:
+        visited.add(id(cur))
+        if isinstance(cur, network_exc_type):
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
 @dataclass
 class _SuperResolveResult:
     """像素级超分辨率结果（内部类型）.
@@ -638,6 +678,21 @@ return {3, raw}
         except DraftWorkflowError:
             raise
         except Exception as exc:
+            # 区分上游瞬时不可用(5xx 或网络故障)与真正的客户端错误。
+            # 上游瞬时故障是服务端临时问题,可重试,不应被路由映射成 400(客户端错误)。
+            # 5xx: 有 HTTP 响应码,附 upstream_status; 网络故障(ConnectError/Timeout): 无码,
+            # 但语义等同"上游暂时不可达",同样标 upstream_unavailable,confirm 路由据此返回 502 retryable。
+            upstream_status = _upstream_http_status(exc)
+            is_network_err = _is_upstream_network_error(exc)
+            if (upstream_status is not None and upstream_status >= 500) or is_network_err:
+                reason = "network error" if is_network_err and upstream_status is None else f"upstream {upstream_status}"
+                err = DraftWorkflowError(
+                    f"upstream_unavailable: Agnes /videos submission failed ({reason}): {exc}"
+                )
+                err.upstream_unavailable = True
+                if upstream_status is not None:
+                    err.upstream_status = upstream_status
+                raise err from exc
             raise DraftWorkflowError(f"Agnes /videos submission failed: {exc}") from exc
 
         video_id = (vid_result.get("_meta") or {}).get("video_id", "")
