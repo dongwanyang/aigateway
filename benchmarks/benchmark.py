@@ -176,13 +176,6 @@ async def main_async(args: argparse.Namespace) -> int:
 
     base_url = args.base_url or gateway_cfg.get("base_url", "http://localhost:8000")
 
-    # Validate gateway is reachable
-    try:
-        await wait_for_healthy(base_url, timeout=gateway_cfg.get("health_timeout", 60))
-    except Exception as e:
-        logger.error(f"Gateway not healthy: {e}")
-        return 1
-
     # Build scenario list
     scenarios_to_run = args.scenarios
     if args.with_media and "multimedia_gen" not in scenarios_to_run:
@@ -210,6 +203,14 @@ async def main_async(args: argparse.Namespace) -> int:
                 module = importlib.import_module(adapter_module_path)
                 logger.info(f"✓ {name}: {adapter_module_path} loaded")
         return 0
+
+    # Live runs require a reachable gateway. Dry runs intentionally stop before
+    # this point so CI can validate scenarios when provider secrets are absent.
+    try:
+        await wait_for_healthy(base_url, timeout=gateway_cfg.get("health_timeout", 60))
+    except Exception as e:
+        logger.error(f"Gateway not healthy: {e}")
+        return 1
 
     # Run scenarios sequentially (D12)
     all_results: Dict[str, Tuple[GroupStats, GroupStats, Dict[str, Any]]] = {}

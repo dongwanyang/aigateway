@@ -183,4 +183,7 @@ def test_frontend_and_nginx_security_contracts():
     assert "'.github/workflows/benchmark.yml'" in benchmark_workflow
     assert "!inputs.with_media" in benchmark_workflow
     assert "IFS=',' read -ra scenario_args" in benchmark_workflow
+    assert "BENCHMARK_LIVE:" in benchmark_workflow
+    assert "--dry-run" in benchmark_workflow
+    assert "AI_GATEWAY_REDIS_URL: redis://localhost:6379/0" in benchmark_workflow
     assert 'test -f "$report"' in benchmark_workflow
