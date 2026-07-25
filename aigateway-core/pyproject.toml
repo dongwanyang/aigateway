@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "aigateway-core"
-version = "0.1.0"
+version = "0.1.1.0"
 description = "AI Gateway core library — pipeline engine, plugins, media processing, and configuration management."
 # 上界 <3.14：paddleocr → paddlepaddle 目前（3.3.1）未发布 cp313/cp314 wheel，
 # llama-index-vector-stores-qdrant >=0.2 同样锁 <3.14。放开上界会让 all-integrations 无法安装。
@@ -18,8 +18,8 @@ dependencies = [
     "httpx>=0.24.0",
     "redis>=5.0.0",
     "structlog>=23.1.0",
-    "lz4>=4.0.0",           # caching.py: L2 Redis 缓存压缩
-    "cachetools>=5.0.0",    # caching.py: L1 LRUCache
+    "lz4>=4.0.0",
+    "cachetools>=5.0.0",
 ]
 
 [project.optional-dependencies]
