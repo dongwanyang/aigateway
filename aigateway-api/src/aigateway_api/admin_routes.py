@@ -2782,6 +2782,7 @@ async def confirm_draft(
     try:
         result = await strategy.confirm_draft(draft_id)
     except Exception as exc:
+        logger.error("draft confirm failed: %s :: %s", type(exc).__name__, exc, exc_info=True)
         raise HTTPException(status_code=400, detail={"error": {"code": "draft_confirm_failed", "message": str(exc)}})
 
     # 视频草稿:返回 video_id,前端轮询 /v1/videos/{id}
