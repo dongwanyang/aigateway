@@ -25,6 +25,16 @@
 ### Code RAG
 - Atomic cancel and auto-delete completed tasks — **Completed:** 0.1.0.0 (2026-07-21)
 
+### Video generation in chat window (0.1.1.0)
+- Chat-window video generation via draft-confirm + Agnes /videos — **Completed:** 0.1.1.0 (2026-07-25)
+- Video draft-confirm path dispatching on media_type — **Completed:** 0.1.1.0 (2026-07-25)
+- Video intent heuristics (Chinese/English phrasing recognition) — **Completed:** 0.1.1.0 (2026-07-25)
+- Frontend MediaVideo with explicit videoId/videoUrl props and polling — **Completed:** 0.1.1.0 (2026-07-25)
+- Fix: video drafts silently routed to image upscale (media_type from pipeline_kind) — **Completed:** 0.1.1.0 (2026-07-25)
+- Fix: completed videos never rendered (extractVideoUrl tries metadata.url) — **Completed:** 0.1.1.0 (2026-07-25)
+- Fix: broken <video> tag in DraftCard keyframe preview — **Completed:** 0.1.1.0 (2026-07-25)
+- Fix: silent confirm_draft 400s now log traceback — **Completed:** 0.1.1.0 (2026-07-25)
+
 ### Code RAG v2 (0.1.0.1)
 - SQLite task state replacing Redis keys with history retention and pagination — **Completed:** 0.1.0.1 (2026-07-24)
 - Startup orphan task sweep marking non-terminal tasks as failed — **Completed:** 0.1.0.1 (2026-07-24)

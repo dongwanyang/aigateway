@@ -305,6 +305,17 @@ generation_optimization:
 
 ---
 
+## 基准测试
+
+项目附带一套自验证基准测试套件，用于测量 token 节省、响应质量和可观测性。详见 [benchmarks/README.md](benchmarks/README.md)。
+
+```bash
+./benchmarks/run_benchmark.sh          # 运行全部文本场景
+./benchmarks/run_benchmark.sh --judge   # 加入 LLM-as-judge 质量评分
+```
+
+---
+
 ## API 接口
 
 ### OpenAI 兼容
@@ -322,7 +333,8 @@ generation_optimization:
 |------|------|------|
 | GET/POST/PUT/DELETE | `/admin/api-keys` | API Key CRUD |
 | POST/GET/PUT/DELETE | `/templates` | Prompt 模板 CRUD |
-| POST | `/admin/drafts/{draft_id}/action` | Draft 确认/拒绝 |
+| POST | `/admin/draft/{draft_id}/confirm` | Draft 确认 |
+| POST | `/admin/draft/{draft_id}/reject` | Draft 拒绝 |
 | GET | `/admin/chat/tasks` | 异步任务列表 |
 | GET | `/admin/logs` | 请求日志 |
 | GET/PUT/DELETE | `/admin/cache/l3/*` | L3 语义缓存管理 |
