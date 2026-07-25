@@ -472,15 +472,10 @@ class TestCreateEmbeddings:
     def _isolate_st_cache(self):
         """Isolate _st_model_cache from leaking between tests."""
         import aigateway_api.openai_compat as oc_module
-        self._saved_cache = None
-        if hasattr(oc_module, '_st_model_cache'):
-            self._saved_cache = oc_module._st_model_cache
-            delattr(oc_module, '_st_model_cache')
+        self._saved_cache = dict(getattr(oc_module, '_st_model_cache', {}))
+        oc_module._st_model_cache = {}
         yield
-        if self._saved_cache is not None:
-            oc_module._st_model_cache = self._saved_cache
-        elif hasattr(oc_module, '_st_model_cache'):
-            delattr(oc_module, '_st_model_cache')
+        oc_module._st_model_cache = self._saved_cache
     @pytest.mark.asyncio
     async def test_empty_input_returns_400(self):
         body = MagicMock()
@@ -557,22 +552,14 @@ class TestCreateEmbeddings:
             with patch('aigateway_api.app_state.get_state', return_value=fs):
                 import aigateway_api.openai_compat as oc_module
                 # Always clean and reset the cache
-                if hasattr(oc_module, '_st_model_cache'):
-                    delattr(oc_module, '_st_model_cache')
                 oc_module._st_model_cache = {"all-MiniLM-L6-v2": st_instance}
-                had_openai_compat = hasattr(oc_module, 'openai_compat')
-                if not had_openai_compat:
-                    oc_module.openai_compat = oc_module
                 try:
                     result = await openai_compat.create_embeddings(body, req)
                     assert result.status_code == 200
                     content = json.loads(result.body)
                     assert content["data"]["object"] == "list"
                 finally:
-                    if not had_openai_compat:
-                        delattr(oc_module, 'openai_compat')
-                    if hasattr(oc_module, '_st_model_cache'):
-                        delattr(oc_module, '_st_model_cache')
+                    oc_module._st_model_cache = {}
 
     @pytest.mark.asyncio
     async def test_unknown_backend_returns_400(self):

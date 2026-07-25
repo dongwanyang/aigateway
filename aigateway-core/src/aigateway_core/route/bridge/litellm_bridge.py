@@ -674,7 +674,8 @@ class LiteLLMBridge:
             )
             # Track usage from video gen response (usually zero tokens)
             request_cost = self._track_usage(model, vid_result)
-            return {"data": vid_result, "_meta": {"routed_to": {"model": model, "intent": intent}, "cost": request_cost},
+            video_id = (vid_result.get("_meta") or {}).get("video_id", "")
+            return {"data": vid_result, "_meta": {"routed_to": {"model": model, "intent": intent}, "cost": request_cost, "video_id": video_id},
                     "usage": {}}
 
         # 构建尝试模型列表：先尝试指定 model，再走 fallback

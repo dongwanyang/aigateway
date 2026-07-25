@@ -25,6 +25,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
+_st_model_cache: Dict[str, Any] = {}
 
 # ------------------------------------------------------------------
 # 请求/响应模型
@@ -522,9 +523,8 @@ async def create_embeddings(
         try:
             from sentence_transformers import SentenceTransformer
             # 模块级缓存，避免每请求加载模型
-            if not hasattr(openai_compat, "_st_model_cache"):
-                openai_compat._st_model_cache: Dict[str, Any] = {}  # type: ignore[attr-defined]
-            _cache = getattr(openai_compat, "_st_model_cache")  # type: ignore[attr-defined]
+            global _st_model_cache
+            _cache = _st_model_cache
             st_model = _cache.get(embedding_model)
             if st_model is None:
                 st_model = SentenceTransformer(embedding_model)

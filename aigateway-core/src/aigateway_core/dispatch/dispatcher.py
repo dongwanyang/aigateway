@@ -881,7 +881,12 @@ class RequestDispatcher:
         # 供前端通过 GET /admin/chat/tasks 查询未完成视频轮询。
         if self.task_tracker is not None:
             meta = result.get("_meta") or {}
-            video_id = meta.get("video_id") if isinstance(meta, dict) else None
+            data_meta = (result.get("data") or {}).get("_meta") if isinstance(result.get("data"), dict) else {}
+            video_id = None
+            if isinstance(meta, dict):
+                video_id = meta.get("video_id")
+            if not video_id and isinstance(data_meta, dict):
+                video_id = data_meta.get("video_id")
             if video_id:
                 try:
                     await self.task_tracker.register(
@@ -1041,7 +1046,7 @@ class RequestDispatcher:
         completion_gen = self._wrap_stream_full(
             completion_gen, metrics_collector, cache_manager, key_store,
             request, body.model, user_id, key_hash, cache_key, normalized_messages, llm_start,
-            group_id, pipeline_kind,
+            group_id, pipeline_kind, cache_scope, l2_scope_id,
         )
 
         _stream_ms = round((time.time() - llm_start) * 1000, 2)
@@ -1064,7 +1069,7 @@ class RequestDispatcher:
     async def _wrap_stream_full(
         self, gen, metrics_collector, cache_manager, key_store, request,
         model, user_id, key_hash, cache_key, normalized_messages, llm_start,
-        group_id="", pipeline_kind="understanding",
+        group_id="", pipeline_kind="understanding", cache_scope="group", l2_scope_id="",
     ):
         """流式包装器:透传 chunk + 末尾做配额/缓存/metrics。
 
@@ -1203,7 +1208,7 @@ class RequestDispatcher:
         if key_hash and key_store and tt > 0:
             try:
                 await key_store.increment_usage(
-                    key_hash, tokens=tt, cost=_estimate_cost(logged_model, tt),
+                    key_hash, tokens=tt, cost=final_cost,
                     model=logged_model, tokens_in=pt, tokens_out=ct,
                     _lua_already_incr=getattr(request.state, "_lua_quota_reserved", False),
                     _reserved_tokens=getattr(request.state, "_lua_reserved_tokens", 0),
@@ -1248,7 +1253,7 @@ class RequestDispatcher:
                         meta={
                             "normalized_prompt": normalized_messages,
                             "pipeline_kind": "understanding",
-                            "model_family": _cache_model_family(body.model),
+                            "model_family": _cache_model_family(model),
                             "cache_scope": cache_scope,
                             "scope_id": l2_scope_id,
                         },

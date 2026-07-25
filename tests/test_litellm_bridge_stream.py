@@ -289,3 +289,4 @@ class TestCompletionImageVideoIntent:
         assert "data" in result
         assert result["data"]["choices"][0]["message"]["content"] == "ok"
         assert result["_meta"]["routed_to"]["intent"] == "generation:video"
+        assert result["_meta"]["video_id"] == "vid_123"
