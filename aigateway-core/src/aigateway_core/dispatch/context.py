@@ -11,6 +11,7 @@ PipelineContext — 共享状态
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
@@ -31,6 +32,26 @@ NS_MEDIA_OPTIMIZATION = "media_optimization"
 NS_GENERATION_PIPELINE = "generation_pipeline"
 NS_RAG_RETRIEVER = "rag_retriever"
 NS_CONV_COMPRESSOR = "conv_compressor"
+
+
+@dataclass(frozen=True)
+class RequestContext:
+    """Request-scoped execution deadline shared by plugins and upstream calls."""
+
+    deadline: float
+
+    @classmethod
+    def with_timeout(cls, timeout_seconds: float) -> "RequestContext":
+        timeout = max(0.001, float(timeout_seconds))
+        return cls(deadline=time.monotonic() + timeout)
+
+    @property
+    def remaining_seconds(self) -> float:
+        return max(0.0, self.deadline - time.monotonic())
+
+    @property
+    def expired(self) -> bool:
+        return self.remaining_seconds <= 0
 
 
 @dataclass
@@ -67,6 +88,7 @@ class PipelineContext:
     pipeline_kind: str = "understanding"
     is_multimodal: bool = False
     total_token_savings: int = 0
+    request_context: Optional[RequestContext] = None
 
     @property
     def prompt_compress(self) -> Dict[str, Any]:
@@ -325,3 +347,9 @@ class PipelineContext:
             "response_exists": self.response is not None,
             "extra_namespaces": list(self.extra.keys()),
         }
+
+
+# Plugins and pipeline code share the same mutable state object.  Exporting the
+# semantic name makes the plugin contract explicit without breaking existing
+# plugins that annotate/return PipelineContext.
+PluginContext = PipelineContext

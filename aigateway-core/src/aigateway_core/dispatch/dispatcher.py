@@ -31,7 +31,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from aigateway_core.dispatch.classifier import classify_request
-from aigateway_core.dispatch.context import PipelineContext
+from aigateway_core.dispatch.context import PipelineContext, RequestContext
 from aigateway_core.prefix.cache.cache_keys import _model_family as _cache_model_family
 
 logger = logging.getLogger(__name__)
@@ -237,6 +237,38 @@ class RequestDispatcher:
     # ------------------------------------------------------------------
 
     async def dispatch(self, body: Any, request: Request) -> JSONResponse:
+        """Run the complete request orchestration inside one hard deadline."""
+        configured_timeout = 120.0
+        if self.config_manager is not None:
+            configured_timeout = float(
+                self.config_manager.get("server.request_timeout_seconds", configured_timeout)
+            )
+        request_context = RequestContext.with_timeout(configured_timeout)
+        request.state.request_context = request_context
+
+        try:
+            async with asyncio.timeout(request_context.remaining_seconds):
+                return await self._dispatch(body, request)
+        except TimeoutError:
+            await self._release_quota_reservation(
+                request, self.key_store, self._resolve_identity(request)[1]
+            )
+            logger.error(
+                "request deadline exceeded: trace_id=%s timeout=%.3fs",
+                getattr(request.state, "trace_id", ""),
+                configured_timeout,
+            )
+            return JSONResponse(
+                content={
+                    "error": {
+                        "code": "request_deadline_exceeded",
+                        "message": "Gateway request deadline exceeded",
+                    }
+                },
+                status_code=504,
+            )
+
+    async def _dispatch(self, body: Any, request: Request) -> JSONResponse:
         """分发请求到对应管道。
 
         总分总架构（采纳 C.3 决策 1「共用前置」+ auto 解析下沉到 LiteLLM）:
@@ -509,6 +541,7 @@ class RequestDispatcher:
                     trace_id=request.state.trace_id,
                     pipeline_kind="understanding",
                     user_id=user_id,
+                    request_context=getattr(request.state, "request_context", None),
                 )
                 ctx.extra["cache_scope"] = cache_scope
                 ctx.extra["group_id"] = group_id
@@ -665,6 +698,7 @@ class RequestDispatcher:
                     trace_id=request.state.trace_id,
                     pipeline_kind=pipeline_kind,
                     user_id=user_id,
+                    request_context=getattr(request.state, "request_context", None),
                 )
                 ctx.extra["cache_scope"] = resolved_scope
                 ctx.extra["group_id"] = group_id
@@ -813,6 +847,7 @@ class RequestDispatcher:
                 intent=pipeline_kind,
                 model_hint=hint,
                 extra_headers=extra_headers,
+                request_context=getattr(request.state, "request_context", None),
             )
         except Exception as exc:
             await self._release_quota_reservation(request, key_store, key_hash)
@@ -1042,6 +1077,7 @@ class RequestDispatcher:
             intent=pipeline_kind,
             model_hint=hint,
             extra_headers=extra_headers,
+            request_context=getattr(request.state, "request_context", None),
         )
 
         # 包装生成器：消费完后做配额扣减 + 缓存回填 + metrics（修正后行为）
@@ -1415,33 +1451,6 @@ class RequestDispatcher:
         Engine 本身没有 skip 机制，这里临时把 _ordered_plugins 里在 skip 集合的
         插件过滤掉再执行，避免与辅助函数重复执行 pii/cache 等。
         """
-        import time as _time
-        skip = getattr(ctx, "_skip_names", set())
-        if not skip or engine is None or not getattr(engine, "_initialized", False):
-            if engine is not None:
-                return await engine.execute_ctx(ctx)
+        if engine is None:
             return ctx
-
-        pipeline_start = _time.monotonic()
-        # Snapshot ordered plugins to protect against in-flight mutation
-        # (e.g. a plugin unregistering itself during hot-reload).
-        for plugin in list(engine._ordered_plugins):
-            if ctx.should_stop:
-                break
-            if plugin.name in skip:
-                continue
-            pstart = _time.monotonic()
-            try:
-                ctx = await plugin.execute(ctx)
-            except Exception as exc:
-                elapsed = (_time.monotonic() - pstart) * 1000
-                # error 事件:耗时+状态始终显示,错误原因走 debug 维度
-                _emit_plugin(ctx.trace_id, plugin.name, elapsed, "error")
-                _emit_plugin_debug(ctx.trace_id, plugin.name, elapsed, "error",
-                                   {"reason": _sanitize_exc(exc, 500)})
-                logger.warning("插件 %s 执行失败（fail-open）: %s", plugin.name, exc)
-                continue
-            # ok 事件:耗时+状态始终显示(无 payload)
-            elapsed = (_time.monotonic() - pstart) * 1000
-            _emit_plugin(ctx.trace_id, plugin.name, elapsed, "ok")
-        return ctx
+        return await engine.execute_ctx(ctx)

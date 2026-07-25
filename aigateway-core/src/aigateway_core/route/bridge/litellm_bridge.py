@@ -14,6 +14,7 @@ runtime structure refactor (Task 4). Behavior is unchanged.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any, AsyncIterator, Dict, List, Optional
@@ -21,6 +22,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 import httpx
 
 from .cooldown import ProviderCooldownTracker
+from aigateway_core.dispatch.context import RequestContext
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +68,7 @@ class LiteLLMBridge:
         self.cost_tracker: Any = None
         self._fallback_chain: List[str] = []
         self._model_alias_map: Dict[str, str] = {}  # 裸模型名 -> Router 注册名
+        self._model_fallbacks: Dict[str, List[str]] = {}  # 裸模型名 -> ordered fallbacks
         self._model_capabilities: Dict[str, List[str]] = {}  # 裸模型名 -> capabilities 列表
         self._model_pricing: Dict[str, Dict[str, float]] = {}  # litellm_model -> {prompt, completion}
         # auto 模型解析器(可选,由 main.py 注入)
@@ -175,9 +178,9 @@ class LiteLLMBridge:
             self.router = Router(
                 model_list=model_list,
                 routing_strategy=routing_strategy_config,
-                num_retries=getattr(self.config, "num_retries", 3)
-                if hasattr(self.config, "num_retries")
-                else 3,
+                # Retry ownership lives in this bridge.  Keeping Router retries
+                # disabled prevents provider + Router + gateway amplification.
+                num_retries=0,
                 allowed_fails=allowed_fails,
                 cooldown_time=cooldown_time,
             )
@@ -258,7 +261,7 @@ class LiteLLMBridge:
             api_key = provider_cfg.get("api_key", "")
             base_url = provider_cfg.get("base_url", None)
             model_grouper = provider_cfg.get("model_grouper", [])
-            num_retries = provider_cfg.get("num_retries", 3)
+            num_retries = 0
             retry_after = provider_cfg.get("retry_after", 1000)
             timeout = provider_cfg.get("timeout", 120)
 
@@ -300,6 +303,7 @@ class LiteLLMBridge:
 
                         # 记录 capabilities
                         self._model_capabilities[model_name] = model_caps
+                        self._model_fallbacks[model_name] = list(fallback_models)
 
                         # 生效的 base_url：优先 per-model，回退 provider 级别
                         effective_base_url = model_base_url or base_url
@@ -324,7 +328,9 @@ class LiteLLMBridge:
                                 "retry_after": retry_after,
                                 "timeout": timeout,
                             },
-                            "fallbacks": fallback_models,
+                            # Router-level fallback is deliberately disabled;
+                            # the bridge enforces the request retry budget.
+                            "fallbacks": [],
                         }
 
                         # 注册定价信息到 LiteLLM cost map，抑制告警
@@ -575,6 +581,7 @@ class LiteLLMBridge:
         model_hint: Optional[str] = None,
         # 过渡别名:Task 6 之前 dispatcher 仍传 pipeline_kind=,Task 6 后移除。
         pipeline_kind: Optional[str] = None,
+        request_context: Optional[RequestContext] = None,
     ) -> Dict[str, Any]:
         """发送聊天补全请求到下游 LLM。
 
@@ -608,7 +615,15 @@ class LiteLLMBridge:
         """
         import time as _time
         _start = _time.monotonic()
-        max_retries = max_retries or 3
+        budget_cfg = self.config.get("retry_budget", {}) or {}
+        configured_attempts = max(1, int(budget_cfg.get("max_attempts", 3)))
+        requested_attempts = max_retries + 1 if max_retries is not None else configured_attempts
+        max_attempts = min(configured_attempts, max(1, requested_attempts))
+        max_time = max(0.001, float(budget_cfg.get("max_time_seconds", 30.0)))
+        max_fallback = max(0, int(budget_cfg.get("max_fallback", 1)))
+        budget_deadline = _time.monotonic() + max_time
+        if request_context is not None:
+            budget_deadline = min(budget_deadline, request_context.deadline)
         attempts = 0
         last_error: Optional[Exception] = None
         fallback_used: List[str] = []
@@ -680,14 +695,25 @@ class LiteLLMBridge:
 
         # 构建尝试模型列表：先尝试指定 model，再走 fallback
         candidates = [model]
-        if fallback_chain:
-            for fb in fallback_chain:
+        effective_fallback_chain = (
+            fallback_chain
+            if fallback_chain is not None
+            else self._model_fallbacks.get(model, [])
+        )
+        if effective_fallback_chain:
+            for fb in effective_fallback_chain:
+                if len(candidates) - 1 >= max_fallback:
+                    break
                 if isinstance(fb, dict):
-                    candidates.append(fb.get("model", ""))
+                    fallback_model = fb.get("model", "")
                 elif isinstance(fb, str):
-                    candidates.append(fb)
+                    fallback_model = fb
+                else:
+                    fallback_model = ""
+                if fallback_model and fallback_model not in candidates:
+                    candidates.append(fallback_model)
 
-        while attempts <= max_retries:
+        while attempts < max_attempts and _time.monotonic() < budget_deadline:
             current_model = candidates[attempts % len(candidates)] if candidates else model
 
             # 记录 fallback
@@ -695,21 +721,25 @@ class LiteLLMBridge:
                 fallback_used.append(current_model)
 
             try:
-                result = await self._do_completion(
-                    messages=messages,
-                    model=current_model,
-                    user_id=user_id,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    top_p=top_p,
-                    frequency_penalty=frequency_penalty,
-                    presence_penalty=presence_penalty,
-                    stream=stream,
-                    tools=tools,
-                    tool_choice=tool_choice,
-                    stop=stop,
-                    extra_headers=extra_headers,
-                )
+                remaining = budget_deadline - _time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("retry time budget exhausted")
+                async with asyncio.timeout(remaining):
+                    result = await self._do_completion(
+                        messages=messages,
+                        model=current_model,
+                        user_id=user_id,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        top_p=top_p,
+                        frequency_penalty=frequency_penalty,
+                        presence_penalty=presence_penalty,
+                        stream=stream,
+                        tools=tools,
+                        tool_choice=tool_choice,
+                        stop=stop,
+                        extra_headers=extra_headers,
+                    )
 
                 # 成功：记录用量，获取本次请求成本
                 request_cost = self._track_usage(current_model, result)
@@ -738,12 +768,13 @@ class LiteLLMBridge:
                     "模型 %s 调用失败 (尝试 %d/%d): %s",
                     current_model,
                     attempts,
-                    max_retries + 1,
+                    max_attempts,
                     exc,
                 )
 
-                if attempts <= max_retries:
-                    await asyncio_sleep(retry_delay * attempts)  # 递增退避
+                remaining = budget_deadline - _time.monotonic()
+                if attempts < max_attempts and remaining > 0:
+                    await asyncio_sleep(min(retry_delay * attempts, remaining))
 
         # 全部重试和 fallback 均失败
         logger.error(
@@ -1241,6 +1272,7 @@ class LiteLLMBridge:
         model_hint: Optional[str] = None,
         # 过渡别名:Task 6 之前 dispatcher 仍传 pipeline_kind=,Task 6 后移除。
         pipeline_kind: Optional[str] = None,
+        request_context: Optional[RequestContext] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
         """流式发送聊天补全请求到下游 LLM。
 
@@ -1368,19 +1400,38 @@ class LiteLLMBridge:
                 }
             return
 
-        max_retries = max_retries or 3
+        budget_cfg = self.config.get("retry_budget", {}) or {}
+        configured_attempts = max(1, int(budget_cfg.get("max_attempts", 3)))
+        requested_attempts = max_retries + 1 if max_retries is not None else configured_attempts
+        max_attempts = min(configured_attempts, max(1, requested_attempts))
+        max_time = max(0.001, float(budget_cfg.get("max_time_seconds", 30.0)))
+        max_fallback = max(0, int(budget_cfg.get("max_fallback", 1)))
+        budget_deadline = time.monotonic() + max_time
+        if request_context is not None:
+            budget_deadline = min(budget_deadline, request_context.deadline)
         attempts = 0
         last_error: Optional[Exception] = None
 
         candidates = [model]
-        if fallback_chain:
-            for fb in fallback_chain:
+        effective_fallback_chain = (
+            fallback_chain
+            if fallback_chain is not None
+            else self._model_fallbacks.get(model, [])
+        )
+        if effective_fallback_chain:
+            for fb in effective_fallback_chain:
+                if len(candidates) - 1 >= max_fallback:
+                    break
                 if isinstance(fb, dict):
-                    candidates.append(fb.get("model", ""))
+                    fallback_model = fb.get("model", "")
                 elif isinstance(fb, str):
-                    candidates.append(fb)
+                    fallback_model = fb
+                else:
+                    fallback_model = ""
+                if fallback_model and fallback_model not in candidates:
+                    candidates.append(fallback_model)
 
-        while attempts <= max_retries:
+        while attempts < max_attempts and time.monotonic() < budget_deadline:
             current_model = candidates[attempts % len(candidates)] if candidates else model
             # 解析裸模型名为 Router 注册的全名
             resolved_model = self.resolve_model(current_model)
@@ -1405,19 +1456,24 @@ class LiteLLMBridge:
                 if self.router is None:
                     raise RuntimeError("LiteLLM Router not initialized")
 
-                response = await self.router.acompletion(**params)
-                async for chunk in response:
-                    chunk_data = chunk.dict() if hasattr(chunk, "dict") else dict(chunk)
-                    yield chunk_data
+                remaining = budget_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("retry time budget exhausted")
+                async with asyncio.timeout(remaining):
+                    response = await self.router.acompletion(**params)
+                    async for chunk in response:
+                        chunk_data = chunk.dict() if hasattr(chunk, "dict") else dict(chunk)
+                        yield chunk_data
 
                 return  # 成功完成
             except Exception as exc:
                 last_error = exc
                 attempts += 1
                 retry_delay = self.config.get("retry_delay_ms", 1000) / 1000.0
-                logger.warning("模型 %s 流式调用失败 (尝试 %d/%d): %s", current_model, attempts, max_retries + 1, exc)
-                if attempts <= max_retries:
-                    await asyncio_sleep(retry_delay * attempts)
+                logger.warning("模型 %s 流式调用失败 (尝试 %d/%d): %s", current_model, attempts, max_attempts, exc)
+                remaining = budget_deadline - time.monotonic()
+                if attempts < max_attempts and remaining > 0:
+                    await asyncio_sleep(min(retry_delay * attempts, remaining))
 
         # 全部失败
         yield {"error": {"code": "upstream_timeout", "message": f"All stream models failed: {last_error}"}}

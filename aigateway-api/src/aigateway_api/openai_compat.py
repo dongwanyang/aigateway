@@ -216,13 +216,15 @@ async def _apply_media_optimization(
 
     try:
         from aigateway_core.dispatch.context import PipelineContext
+        from aigateway_core.dispatch.pipeline_engine import execute_plugin
 
         ctx = PipelineContext(request={"messages": body.messages, "model": body.model},
-                              trace_id=request.state.trace_id)
+                              trace_id=request.state.trace_id,
+                              request_context=getattr(request.state, "request_context", None))
         if hasattr(request.state, "user_id"):
             ctx.user_id = request.state.user_id
 
-        ctx = await mol_plugin.execute(ctx)
+        ctx = await execute_plugin(mol_plugin, ctx)
 
         optimized_messages = ctx.request.get("messages", body.messages)
         mol_ns = ctx.extra.get("media_optimization", {})
@@ -268,13 +270,15 @@ async def _apply_pii_detection(
 
     try:
         from aigateway_core.dispatch.context import PipelineContext
+        from aigateway_core.dispatch.pipeline_engine import execute_plugin
 
         ctx = PipelineContext(request={"messages": body.messages, "model": body.model},
-                              trace_id=request.state.trace_id)
+                              trace_id=request.state.trace_id,
+                              request_context=getattr(request.state, "request_context", None))
         if hasattr(request.state, "user_id"):
             ctx.user_id = request.state.user_id
 
-        ctx = await pii_plugin.execute(ctx)
+        ctx = await execute_plugin(pii_plugin, ctx)
 
         pii_ns = ctx.pii_detector
         result["meta"] = {
@@ -405,10 +409,12 @@ async def _apply_prompt_compression(
 
     try:
         from aigateway_core.dispatch.context import PipelineContext
+        from aigateway_core.dispatch.pipeline_engine import execute_plugin
 
         ctx = PipelineContext(request={"messages": body.messages, "model": body.model},
-                              trace_id=request.state.trace_id)
-        ctx = await compress_plugin.execute(ctx)
+                              trace_id=request.state.trace_id,
+                              request_context=getattr(request.state, "request_context", None))
+        ctx = await execute_plugin(compress_plugin, ctx)
 
         pc_ns = ctx.prompt_compress
         result["meta"] = {

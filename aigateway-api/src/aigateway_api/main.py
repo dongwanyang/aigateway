@@ -185,7 +185,7 @@ def _create_app() -> "FastAPI":
         title="AI Gateway API",
         description="OpenAI 兼容的多模型路由网关",
         version="1.0.0",
-        lifespan=None,  # 使用自定义 lifespan
+        lifespan=lifespan,
     )
 
     # CORS 中间件必须在 app 启动前添加
@@ -395,7 +395,34 @@ async def lifespan(app: "FastAPI"):
     await l3_scheduler.start()
 
     # 初始化 PluginRegistry
-    plugin_registry = PluginRegistry()
+    plugin_runtime_cfg = config_manager.get("plugin_runtime", {}) or {}
+    plugin_registry = PluginRegistry(
+        default_timeout_seconds=float(
+            plugin_runtime_cfg.get("default_timeout_seconds", 30.0)
+        ),
+        default_failure_policy=str(
+            plugin_runtime_cfg.get("default_failure_policy", "continue")
+        ),
+        policies=plugin_runtime_cfg.get("plugins", {}) or {},
+    )
+
+    def _apply_runtime_policy(plugin: Any, name: str) -> Any:
+        policies = plugin_runtime_cfg.get("plugins", {}) or {}
+        policy = policies.get(name, {}) if isinstance(policies, dict) else {}
+        plugin.timeout_seconds = float(
+            policy.get(
+                "timeout_seconds",
+                plugin_runtime_cfg.get("default_timeout_seconds", 30.0),
+            )
+        )
+        plugin.failure_policy = str(
+            policy.get(
+                "failure_policy",
+                plugin_runtime_cfg.get("default_failure_policy", "continue"),
+            )
+        )
+        return plugin
+
     _register_default_plugins(plugin_registry, config_manager)
     logger.info("PluginRegistry 初始化完成: %d 个插件已注册", len(plugin_registry.get_all()))
 
@@ -411,7 +438,10 @@ async def lifespan(app: "FastAPI"):
             if redis_mgr is not None:
                 media_cache = MediaCacheManager(redis_client=redis_mgr)
 
-            mol_plugin = MediaOptimizationPlugin(config=mol_cfg, media_cache=media_cache)
+            mol_plugin = _apply_runtime_policy(
+                MediaOptimizationPlugin(config=mol_cfg, media_cache=media_cache),
+                "media_optimizer",
+            )
             media_optimization_layer = mol_plugin
             logger.info(
                 "Media Optimization Layer 初始化完成: media_cache=%s",
@@ -431,7 +461,10 @@ async def lifespan(app: "FastAPI"):
                 pii_cfg = pcfg.get("config", pii_cfg)
                 break
 
-        pii_detector_plugin = PIIDetectorPlugin(strategy=pii_cfg.get("strategy", "sanitize"))
+        pii_detector_plugin = _apply_runtime_policy(
+            PIIDetectorPlugin(strategy=pii_cfg.get("strategy", "sanitize")),
+            "pii_detector",
+        )
         logger.info("PIIDetectorPlugin 初始化完成: strategy=%s", pii_cfg.get("strategy", "sanitize"))
     except Exception as exc:
         logger.warning("PIIDetectorPlugin 初始化失败（PII 检测将不可用）: %s", exc)
@@ -472,8 +505,11 @@ async def lifespan(app: "FastAPI"):
                 pc_cfg = pcfg.get("config", {})
                 break
 
-        prompt_compress_plugin = PromptCompressPlugin(
-            compression_ratio=pc_cfg.get("compression_ratio", 0.5),
+        prompt_compress_plugin = _apply_runtime_policy(
+            PromptCompressPlugin(
+                compression_ratio=pc_cfg.get("compression_ratio", 0.5),
+            ),
+            "prompt_compress",
         )
         logger.info("PromptCompressPlugin 初始化完成: compression_ratio=%.2f", pc_cfg.get("compression_ratio", 0.5))
     except Exception as exc:
@@ -874,11 +910,8 @@ def create_app() -> "FastAPI":
     Returns:
         已配置好 lifespan 的 FastAPI 实例。
     """
-    app = _create_app()
-    app.router.lifespan_context = lifespan
-    return app
+    return _create_app()
 
 
 # 直接创建全局应用实例
 app = _create_app()
-app.router.lifespan_context = lifespan

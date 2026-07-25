@@ -21,9 +21,24 @@
 server:
   host: 0.0.0.0              # 监听地址（0.0.0.0 表示所有网卡）
   port: 8000                 # 监听端口（1024-65535）
+  request_timeout_seconds: 120 # 整条请求链硬 deadline（含插件、重试、上游）
   cors_origins:              # CORS 允许的来源列表
     - http://localhost:3000
     - http://localhost:5173
+
+# 插件统一执行隔离；单个 plugins[] 条目可用 timeout_seconds / failure_policy 覆盖。
+plugin_runtime:
+  default_timeout_seconds: 30
+  default_failure_policy: continue # continue | fail_fast
+  plugins:
+    draft_generator:
+      timeout_seconds: 110   # 单插件覆盖，须小于 request_timeout_seconds
+
+# Gateway 是唯一重试所有者；LiteLLM Router/provider 内层重试已关闭。
+retry_budget:
+  max_attempts: 3            # 含首次调用的总尝试次数
+  max_time_seconds: 30       # 所有尝试和退避共享的时间预算
+  max_fallback: 1            # 单请求最多切换的 fallback 模型数
 
 # ==========================
 # 认证与配额

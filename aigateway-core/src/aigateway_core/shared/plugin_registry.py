@@ -47,6 +47,8 @@ class PluginRegistration:
         priority: int = 0,
         config: Optional[Dict[str, Any]] = None,
         pipeline_kind: str = "understanding",
+        timeout_seconds: float = 10.0,
+        failure_policy: str = "continue",
     ) -> None:
         self.name = name
         self.plugin_class = plugin_class
@@ -57,6 +59,10 @@ class PluginRegistration:
         # 管道归属："understanding" | "generation"。
         # get_all(pipeline_kind=...) 按此过滤，PipelineEngine 按此装载插件链。
         self.pipeline_kind = pipeline_kind
+        self.timeout_seconds = max(0.001, float(timeout_seconds))
+        if failure_policy not in {"continue", "fail_fast"}:
+            raise ValueError("failure_policy must be 'continue' or 'fail_fast'")
+        self.failure_policy = failure_policy
 
 
 # ------------------------------------------------------------------
@@ -74,9 +80,20 @@ class PluginRegistry:
         _registrations: 已注册的插件信息字典，key 为插件名。
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        default_timeout_seconds: float = 30.0,
+        default_failure_policy: str = "continue",
+        policies: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> None:
         self._registrations: Dict[str, PluginRegistration] = {}
         self._lock = threading.Lock()
+        self.default_timeout_seconds = max(0.001, float(default_timeout_seconds))
+        if default_failure_policy not in {"continue", "fail_fast"}:
+            raise ValueError("default_failure_policy must be 'continue' or 'fail_fast'")
+        self.default_failure_policy = default_failure_policy
+        self.policies = policies or {}
 
     # ------------------------------------------------------------------
     # 注册
@@ -91,6 +108,8 @@ class PluginRegistry:
         priority: int = 0,
         config: Optional[Dict[str, Any]] = None,
         pipeline_kind: str = "understanding",
+        timeout_seconds: Optional[float] = None,
+        failure_policy: Optional[str] = None,
     ) -> None:
         """注册一个插件。
 
@@ -114,6 +133,17 @@ class PluginRegistry:
             # where two callers both pass the existence check above.
             if name in self._registrations:
                 raise ValueError(f"插件 '{name}' 已注册，不能重复注册")
+            policy = self.policies.get(name, {})
+            effective_timeout = (
+                timeout_seconds
+                if timeout_seconds is not None
+                else policy.get("timeout_seconds", self.default_timeout_seconds)
+            )
+            effective_failure_policy = (
+                failure_policy
+                or policy.get("failure_policy")
+                or self.default_failure_policy
+            )
             self._registrations[name] = PluginRegistration(
                 name=name,
                 plugin_class=plugin_class,
@@ -122,6 +152,8 @@ class PluginRegistry:
                 priority=priority,
                 config=config,
                 pipeline_kind=pipeline_kind,
+                timeout_seconds=effective_timeout,
+                failure_policy=effective_failure_policy,
             )
 
         logger.info(
@@ -194,6 +226,8 @@ class PluginRegistry:
                 instance.enabled = reg.enabled  # type: ignore[attr-defined]
                 instance.depends_on = reg.depends_on  # type: ignore[attr-defined]
                 instance.pipeline_kind = reg.pipeline_kind  # type: ignore[attr-defined]
+                instance.timeout_seconds = reg.timeout_seconds  # type: ignore[attr-defined]
+                instance.failure_policy = reg.failure_policy  # type: ignore[attr-defined]
                 instances.append(instance)
             except TypeError as exc:
                 logger.warning(

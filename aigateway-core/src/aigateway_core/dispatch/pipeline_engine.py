@@ -10,12 +10,13 @@ PipelineEngine — 异步插件管线引擎
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
 from typing import Any, Dict, List, Protocol
 
-from .context import PipelineContext
+from .context import PipelineContext, RequestContext
 from aigateway_core.shared.plugin_registry import PluginRegistry
 from aigateway_core.shared.trace_event import TraceCollector, TraceEvent
 
@@ -45,6 +46,23 @@ class Plugin(Protocol):
 
     async def execute(self, ctx: PipelineContext) -> PipelineContext:
         ...
+
+
+async def execute_plugin(plugin: Plugin, ctx: PipelineContext) -> PipelineContext:
+    """Execute one plugin within both its own timeout and the request deadline."""
+
+    plugin_timeout = max(
+        0.001, float(getattr(plugin, "timeout_seconds", 30.0))
+    )
+    if isinstance(ctx.request_context, RequestContext):
+        plugin_timeout = min(
+            plugin_timeout,
+            ctx.request_context.remaining_seconds,
+        )
+    if plugin_timeout <= 0:
+        raise TimeoutError("request deadline exceeded before plugin execution")
+    async with asyncio.timeout(plugin_timeout):
+        return await plugin.execute(ctx)
 
 
 class PipelineEngine:
@@ -88,6 +106,9 @@ class PipelineEngine:
 
         try:
             for plugin in self._ordered_plugins:
+                skip_names = getattr(ctx, "_skip_names", set())
+                if plugin.name in skip_names:
+                    continue
                 if ctx.should_stop:
                     collector = TraceCollector.current()
                     if collector:
@@ -119,7 +140,7 @@ class PipelineEngine:
                 plugin_start = time.monotonic()
 
                 try:
-                    ctx = await plugin.execute(ctx)
+                    ctx = await execute_plugin(plugin, ctx)
                 except Exception as exc:
                     elapsed_ms = (time.monotonic() - plugin_start) * 1000
                     collector = TraceCollector.current()
@@ -147,6 +168,10 @@ class PipelineEngine:
                         exc,
                         ctx.request_id,
                     )
+                    if getattr(plugin, "failure_policy", "continue") == "fail_fast":
+                        ctx.should_stop = True
+                        ctx.extra.setdefault("pipeline_error", _sanitize_exc(exc, 500))
+                        break
                     continue
 
                 elapsed_ms = (time.monotonic() - plugin_start) * 1000

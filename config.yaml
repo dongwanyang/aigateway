@@ -1,9 +1,20 @@
 server:
   host: 0.0.0.0
   port: 8000
+  request_timeout_seconds: 120
   cors_origins:
   - http://localhost:3000
   - http://localhost:5173
+plugin_runtime:
+  default_timeout_seconds: 30
+  default_failure_policy: continue
+  plugins:
+    draft_generator:
+      timeout_seconds: 110
+retry_budget:
+  max_attempts: 3
+  max_time_seconds: 30
+  max_fallback: 1
 intent_classifier:
   model: agnes-2.0-flash
   timeout_seconds: 60

@@ -121,12 +121,16 @@ def _register_builtin_plugins(registry: PluginRegistry, config_manager: Any = No
 
         enabled = True
         priority = 0
+        timeout_seconds = None
+        failure_policy = None
         depends_on: list[str] = getattr(plugin_cls, "depends_on", [])
         plugin_config: dict = {}
 
         if cfg:
             enabled = cfg.get("enabled", True)
             priority = cfg.get("priority", 0)
+            timeout_seconds = cfg.get("timeout_seconds")
+            failure_policy = cfg.get("failure_policy")
             depends_on = cfg.get("depends_on", depends_on)
             plugin_config = cfg.get("config", {})
 
@@ -142,6 +146,8 @@ def _register_builtin_plugins(registry: PluginRegistry, config_manager: Any = No
             depends_on=depends_on,
             priority=priority,
             config=merged_config,
+            timeout_seconds=timeout_seconds,
+            failure_policy=failure_policy,
         )
 
     # 注册 Generation Optimization Plugins（6 个优化插件）

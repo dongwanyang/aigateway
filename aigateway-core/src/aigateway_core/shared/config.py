@@ -47,6 +47,17 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
         "host": "0.0.0.0",
         "port": 8000,
         "workers": 1,
+        "request_timeout_seconds": 120,
+    },
+    "plugin_runtime": {
+        "default_timeout_seconds": 30,
+        "default_failure_policy": "continue",
+        "plugins": {},
+    },
+    "retry_budget": {
+        "max_attempts": 3,
+        "max_time_seconds": 30,
+        "max_fallback": 1,
     },
     "auth": {
         "distributed_mode": False,
@@ -221,6 +232,7 @@ class ConfigManager:
             "observability", "hot_reload", "debug_mode", "debug", "infrastructure",
             "cache", "media_optimization", "circuit_breaker", "rate_limiter",
             "streaming", "generation_optimization", "code_rag",
+            "plugin_runtime", "retry_budget",
         }
 
         # 环境变量覆盖产生的扁平键（AI_GATEWAY_* 去前缀后的小写形式）
@@ -600,6 +612,7 @@ class ConfigManager:
                 "server", "auth", "plugins", "providers",
                 "embedding", "observability", "infrastructure",
                 "hot_reload", "debug_mode", "debug", "cache",
+                "plugin_runtime", "retry_budget",
             }
             clean_config = {k: v for k, v in self._config.items() if k in writable_keys}
             with open(self.config_path, 'w', encoding='utf-8') as f:
@@ -782,6 +795,7 @@ class ConfigManager:
             "observability", "hot_reload", "debug_mode", "debug", "infrastructure",
             "cache", "media_optimization", "circuit_breaker", "rate_limiter",
             "streaming", "generation_optimization", "code_rag",
+            "plugin_runtime", "retry_budget",
         }
 
         # 检查未识别的顶层字段
