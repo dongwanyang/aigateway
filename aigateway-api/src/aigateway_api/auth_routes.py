@@ -9,7 +9,7 @@ from typing import Any, Dict
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 
-from .auth_middleware import SESSION_COOKIE_NAME, _hash_key
+from .auth_middleware import SESSION_COOKIE_NAME
 from .browser_auth import get_browser_auth_store
 
 router = APIRouter()
@@ -67,47 +67,12 @@ def _initial_admin_password() -> str:
     return ""
 
 
-def _initial_admin_key(request: Request) -> str:
-    """Find the legacy installer admin API key for one-time migrations.
-
-    New installations should use AI_GATEWAY_INITIAL_ADMIN_PASSWORD instead. This
-    fallback preserves the old auto-prefill/first-login behavior for existing
-    installations whose installer only produced ADMIN_API_KEY or config.yaml
-    auth.api_keys.
-    """
-    env_key = os.environ.get("ADMIN_API_KEY", "").strip()
-    if env_key:
-        return env_key
-
-    config_manager = getattr(request.app.state, "config_manager", None)
-    if config_manager is None:
-        return ""
-    try:
-        auth_config = config_manager.get("auth", {}) or {}
-        for entry in auth_config.get("api_keys", []) or []:
-            if not isinstance(entry, dict):
-                continue
-            scopes = entry.get("scopes", [])
-            if isinstance(scopes, str):
-                scopes = [item.strip() for item in scopes.split(",")]
-            if (
-                entry.get("user_id") == "admin"
-                and "admin" in scopes
-                and isinstance(entry.get("key"), str)
-            ):
-                return entry["key"].strip()
-    except Exception:
-        return ""
-    return ""
-
-
 def _scrub_initial_password_from_env() -> None:
     """Best-effort removal of one-time console passwords from .env.
 
-    This mirrors the old force-reset safety property: after the operator has set
-    the real admin password, a future DB wipe should not silently resurrect the
-    installer temporary password from plaintext config. ADMIN_API_KEY is not
-    removed here because API keys are now separate machine credentials.
+    After the operator sets the real admin password, a future DB wipe should not
+    silently resurrect the installer temporary password from plaintext config.
+    API keys are separate machine credentials and are intentionally not touched.
     """
     env_path = os.path.join(os.getcwd(), ".env")
     if not os.path.isfile(env_path):
@@ -138,103 +103,39 @@ def _scrub_initial_password_from_env() -> None:
 
 
 class CreateSessionRequest(BaseModel):
-    username: str | None = Field(default=None, min_length=1)
-    password: str | None = Field(default=None, min_length=1)
-    # Deprecated compatibility field. It is disabled by default so raw API keys
-    # are not accepted as console sessions unless an operator explicitly opts in.
-    api_key: str | None = Field(default=None, min_length=1)
+    username: str = Field(..., min_length=1)
+    password: str = Field(..., min_length=1)
+
+    class Config:
+        extra = "forbid"
 
 
 class ResetPasswordRequest(BaseModel):
-    new_password: str | None = Field(default=None, min_length=12)
-    # Deprecated JSON field kept so an already-open old control panel can still
-    # complete first-login migration after the backend is upgraded.
-    new_api_key: str | None = Field(default=None, min_length=12)
+    new_password: str = Field(..., min_length=12)
 
-    def password_value(self) -> str:
-        return (self.new_password or self.new_api_key or "").strip()
+    class Config:
+        extra = "forbid"
 
 
-async def _legacy_admin_key(request: Request, candidate: str, *, require_default: bool) -> bool:
-    key_store = getattr(request.app.state, "key_store", None)
-    if key_store is None:
-        return False
-    try:
-        key_data = await key_store.validate(candidate)
-    except Exception:
-        return False
-    scopes = key_data.get("scopes", []) if key_data else []
-    if isinstance(scopes, str):
-        scopes = [item.strip() for item in scopes.split(",")]
-    if not key_data or "admin" not in scopes:
-        return False
-    if require_default:
-        try:
-            check = getattr(key_store, "check_is_default", None)
-            return bool(check and await check(_hash_key(candidate)))
-        except Exception:
-            return False
-    return True
-
-
-async def _legacy_default_key_available(request: Request, candidate: str) -> bool:
-    """Read-only check used by /bootstrap before exposing legacy credentials."""
-    key_store = getattr(request.app.state, "key_store", None)
-    check = getattr(key_store, "check_is_default", None) if key_store is not None else None
-    if check is None:
-        return False
-    try:
-        return bool(await check(_hash_key(candidate)))
-    except Exception:
-        return False
-
-
-async def _is_valid_initial_secret(request: Request, candidate: str) -> bool:
+def _matches_initial_password(candidate: str) -> bool:
     configured_password = _initial_admin_password()
-    if configured_password:
-        try:
-            return secrets.compare_digest(
-                candidate.encode("utf-8"), configured_password.encode("utf-8")
-            )
-        except Exception:
-            return False
-    # Existing deployments did not have an admin-password env var. For the
-    # first login only, accept the still-active default admin API key as a
-    # temporary console password and force a password change immediately.
-    legacy_key = _initial_admin_key(request)
-    if not legacy_key:
+    if not configured_password:
         return False
     try:
-        if not secrets.compare_digest(candidate.encode("utf-8"), legacy_key.encode("utf-8")):
-            return False
+        return secrets.compare_digest(
+            candidate.encode("utf-8"), configured_password.encode("utf-8")
+        )
     except Exception:
         return False
-    return await _legacy_admin_key(request, candidate, require_default=True)
 
 
 @router.post("/session")
 async def create_session(
     request: Request, response: Response, body: CreateSessionRequest
 ) -> Dict[str, Any]:
-    username = (body.username or os.environ.get("AI_GATEWAY_ADMIN_USERNAME", "admin")).strip()
+    username = body.username.strip()
     password = body.password
-
-    if body.api_key:
-        if not _truthy(os.environ.get("AI_GATEWAY_ALLOW_API_KEY_CONSOLE_LOGIN")):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={
-                    "error": {
-                        "code": "api_key_login_disabled",
-                        "message": "API Key login is disabled. Use the administrator account.",
-                    }
-                },
-            )
-        # Explicit emergency compatibility: treat api_key as a temporary password
-        # only for first-login migration, never as a cookie value.
-        password = body.api_key
-
-    if not password:
+    if not username or not password:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error": {"code": "validation_error", "message": "Provide username and password"}},
@@ -251,7 +152,7 @@ async def create_session(
             )
         except Exception:
             username_ok = False
-        if username_ok and await _is_valid_initial_secret(request, password):
+        if username_ok and _matches_initial_password(password):
             user = store.provision_admin(username, password)
 
     if user is None:
@@ -290,24 +191,13 @@ async def get_bootstrap_credentials(request: Request, response: Response) -> Dic
         return {"data": {"available": False}, "message": "success"}
 
     initial_password = _initial_admin_password()
-    if initial_password:
-        return {
-            "data": {
-                "available": True,
-                "username": os.environ.get("AI_GATEWAY_ADMIN_USERNAME", "admin"),
-                "initial_password": initial_password,
-            },
-            "message": "success",
-        }
-
-    legacy_key = _initial_admin_key(request)
-    if not legacy_key or not await _legacy_default_key_available(request, legacy_key):
+    if not initial_password:
         return {"data": {"available": False}, "message": "success"}
     return {
         "data": {
             "available": True,
             "username": os.environ.get("AI_GATEWAY_ADMIN_USERNAME", "admin"),
-            "initial_password": legacy_key,
+            "initial_password": initial_password,
         },
         "message": "success",
     }
@@ -348,7 +238,7 @@ async def reset_password(
     response: Response,
     body: ResetPasswordRequest,
 ) -> Dict[str, Any]:
-    new_password = body.password_value()
+    new_password = body.new_password.strip()
     if not new_password:
         raise HTTPException(
             status_code=400,
