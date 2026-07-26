@@ -44,8 +44,8 @@ async function ensureAuthHeaders(): Promise<Record<string, string>> {
   return { 'Content-Type': 'application/json' }
 }
 
-/** Exchange an API key for an HttpOnly browser session. */
-export async function saveApiKey(key: string): Promise<void> {
+/** Exchange an API key for an HttpOnly browser session. Returns { key_prefix, force_reset }. */
+export async function saveApiKey(key: string): Promise<{ key_prefix: string; force_reset?: boolean }> {
   const res = await fetch(`${API_BASE}/auth/session`, {
     method: 'POST',
     credentials: 'include',
@@ -53,10 +53,24 @@ export async function saveApiKey(key: string): Promise<void> {
     body: JSON.stringify({ api_key: key }),
   })
   if (!res.ok) {
-    throw new Error('Invalid API key')
+    let message = 'Invalid API key'
+    try {
+      const body = await res.json()
+      message = body.error?.message ?? message
+    } catch {
+      // Non-JSON error response (e.g., HTML nginx page)
+    }
+    const err = new Error(message)
+    ;(err as any).status = res.status
+    throw err
   }
   localStorage.removeItem('aigateway_api_key')
   localStorage.setItem(SESSION_MARKER, '1')
+  const data = await res.json()
+  return {
+    key_prefix: data.data?.key_prefix ?? key.substring(0, 8),
+    force_reset: data.data?.force_reset,
+  }
 }
 
 /** Clear the HttpOnly browser session and its non-secret UI marker. */
@@ -72,6 +86,39 @@ export async function clearApiKey(): Promise<void> {
 /** Return a non-secret marker for legacy callers that only need a boolean. */
 export function getSavedApiKey(): string | null {
   return localStorage.getItem(SESSION_MARKER)
+}
+
+export interface BrowserSession {
+  authenticated: boolean
+  key_prefix?: string
+  scopes?: string[]
+  force_reset?: boolean
+}
+
+/** Verify the HttpOnly browser session without exposing the underlying key. */
+export async function getBrowserSession(): Promise<BrowserSession> {
+  return (await fetchJson<BrowserSession>('/auth/session')).data
+}
+
+/** Reset the default admin API key (force-reset flow). */
+export async function resetPassword(newKey: string): Promise<{ data: { new_api_key: string; warning: string } }> {
+  const res = await fetch(`${API_BASE}/auth/reset-password`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ new_api_key: newKey }),
+  })
+  if (!res.ok) {
+    let message = '重置失败'
+    try {
+      const body = await res.json()
+      message = body.error?.message ?? body.detail ?? message
+    } catch {}
+    const err = new Error(message)
+    ;(err as any).status = res.status
+    throw err
+  }
+  return res.json()
 }
 
 async function fetchJson<T>(
@@ -443,6 +490,19 @@ export async function deleteApiKey(keyId: string): Promise<ApiResponse<RevokedKe
   return fetchJson<RevokedKeyData>(`/admin/api-keys/${encodeURIComponent(keyId)}`, {
     method: 'DELETE',
   })
+}
+
+/** Rotate an existing API key — revokes old key and issues a replacement. */
+export async function rotateApiKey(
+  keyId: string,
+): Promise<{ data: { key: string; warning: string } }> {
+  return fetchJson<{ key: string; warning: string }>(
+    `/admin/api-keys/${encodeURIComponent(keyId)}/rotate`,
+    {
+    method: 'POST',
+      body: JSON.stringify({}),
+    },
+  )
 }
 
 export interface UpdateQuotaRequest {

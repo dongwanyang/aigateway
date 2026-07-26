@@ -1,23 +1,22 @@
-import { getSavedApiKey } from '@/api/client'
 import { useChatSessions } from '@/hooks/useChatSessions'
+import { useAuth } from '@/contexts/AuthContext'
 import SessionList from '@/components/chat/SessionList'
 import ChatTimeline from '@/components/chat/ChatTimeline'
 import ChatComposer from '@/components/chat/ChatComposer'
 import { Trash2 } from 'lucide-react'
 
 export default function Chat() {
+  const { isAuthenticated } = useAuth()
   const {
     sessions, activeId, active, streaming, error, pendingAssistantId,
     newSession, selectSession, deleteSession,
     send, stop, clearActive,
     confirmDraftMsg, rejectDraftMsg,
   } = useChatSessions()
-  const hasKey = !!getSavedApiKey()
-
   // 聊天区高度:视口 - 56px 顶栏 - 48px(上下 padding,Layout main padding 24*2)
   const chatHeight = 'calc(100vh - 56px - 48px)'
 
-  if (!hasKey) {
+  if (!isAuthenticated) {
     return (
       <div className="flex items-center justify-center" style={{ height: chatHeight }}>
         <div className="text-center" style={{ color: 'var(--color-text-secondary)' }}>

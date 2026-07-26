@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import type { ReactElement } from 'react'
 import { Trash2, X, Code2, FolderOpen, Server, GitBranch, Package, Loader2, XCircle, CheckCircle, PlayCircle, RefreshCw, GitCompareArrows } from 'lucide-react'
 import Card from '@/components/Card'
 import CodeRelationPanel from './CodeRelationPanel'
@@ -24,7 +25,7 @@ const SOURCE_LABEL: Record<CodeImportSourceType, string> = {
   zip: 'ZIP 上传',
 }
 
-const SOURCE_ICON: Record<CodeImportSourceType, JSX.Element> = {
+const SOURCE_ICON: Record<CodeImportSourceType, ReactElement> = {
   folder: <FolderOpen size={14} />,
   server_path: <Server size={14} />,
   git: <GitBranch size={14} />,
@@ -42,7 +43,7 @@ const STATUS_LABEL: Record<CodeImportTask['status'], string> = {
   cancelled: '已取消',
 }
 
-const STATUS_ICON: Record<CodeImportTask['status'], JSX.Element> = {
+const STATUS_ICON: Record<CodeImportTask['status'], ReactElement> = {
   pending: <Loader2 size={14} className="animate-spin" />,
   scanning: <Loader2 size={14} className="animate-spin" />,
   splitting: <Loader2 size={14} className="animate-spin" />,

@@ -1,63 +1,27 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 import {
   requestChatCompletion,
-  getDraftPreview,
   getDraftResult,
   confirmDraft,
   rejectDraft,
   deleteSessionDrafts,
-  getVideoStatus,
 } from '@/api/client'
-import type { ChatPageMessage, ChatMessage, ChatSession, ChatDraftState, VideoStatusResponse } from '@/types'
-
-const SESSIONS_KEY = 'aigateway:chat:sessions'
-const ACTIVE_KEY = 'aigateway:chat:active'
-const LEGACY_MESSAGES_KEY = 'aigateway:chat:messages'
-
-let idCounter = 0
-function nextId(): string {
-  idCounter += 1
-  return `msg-${Date.now()}-${idCounter}`
-}
-
-/** 已处理过刷新续传的会话 ID 集合(模块级)。 */
-const resumedSessionIds = new Set<string>()
-
-/** 正在轮询的视频任务 ID 集合，防止重复轮询。 */
-const pollingVideoIds = new Set<string>()
-
-/** 正在轮询的草稿 ID 集合，防止重复轮询（同 pollingVideoIds 模式）。 */
-const pollingDraftIds = new Set<string>()
-
-/** 视频轮询间隔（毫秒） */
-const VIDEO_POLL_INTERVAL_MS = 5000
-
-/** 视频轮询最大次数，超时后停止（约 30 分钟） */
-const VIDEO_POLL_MAX_ATTEMPTS = 360
-
-/** 草稿预览轮询间隔（毫秒）—— 后台 ComfyUI 生成通常数秒内完成。 */
-const DRAFT_POLL_INTERVAL_MS = 1000
-
-/** 草稿预览轮询最大次数，超时（120s）后标记 expired。
- *  模型生成图片较慢（ComfyUI 队列 + 放大），60s 常超时，放宽到 120s。 */
-const DRAFT_POLL_MAX_ATTEMPTS = 120
-
-/** 清理所有正在进行的视频轮询 */
-function clearAllPolling() {
-  pollingVideoIds.clear()
-  pollingDraftIds.clear()
-}
-
-function newSessionId(): string {
-  return `sess-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-}
-
-function titleFromMessages(messages: ChatPageMessage[]): string {
-  const firstUser = messages.find(m => m.role === 'user')
-  if (!firstUser) return '新对话'
-  const t = firstUser.content.trim().slice(0, 20)
-  return t || '新对话'
-}
+import type { ChatPageMessage, ChatMessage, ChatSession, ChatDraftState } from '@/types'
+import { useChatStore } from '@/stores/chatStore'
+import {
+  persistActiveId,
+  persistSessions,
+  titleFromMessages,
+} from '@/services/chatStorage'
+import {
+  clearAllChatPolling,
+  consumeChatEventStream,
+  newSessionId,
+  nextMessageId,
+  pollDraftUntilSettled,
+  pollVideoUntilTerminal,
+  resumedSessionIds,
+} from '@/services/chatRuntime'
 
 /** 判断消息是否包含活跃的异步任务（视频/草稿）。 */
 function hasActiveAsyncTask(msg: ChatPageMessage): boolean {
@@ -66,76 +30,6 @@ function hasActiveAsyncTask(msg: ChatPageMessage): boolean {
   // 草稿任务：generating(后台生成中)/pending/confirming/rejecting 状态
   if (msg.draft && ['generating', 'pending', 'confirming', 'rejecting'].includes(msg.draft.status)) return true
   return false
-}
-
-/** 判断视频任务是否已完成（成功或失败）。 */
-function isVideoTerminal(status: string | undefined): boolean {
-  return status === 'succeeded' || status === 'completed' || status === 'failed' || status === 'error' || status === 'expired'
-}
-
-/** 从 localStorage 加载 sessions,无则迁移旧单会话 key,再无则空数组。 */
-function loadSessions(): ChatSession[] {
-  try {
-    const raw = localStorage.getItem(SESSIONS_KEY)
-    if (raw) {
-      const parsed = JSON.parse(raw)
-      if (Array.isArray(parsed)) return parsed as ChatSession[]
-    }
-  } catch {
-    // 损坏,继续走迁移
-  }
-  // 迁移旧 aigateway:chat:messages(单会话)→ 单个 session
-  try {
-    const legacyRaw = localStorage.getItem(LEGACY_MESSAGES_KEY)
-    if (legacyRaw) {
-      const legacy = JSON.parse(legacyRaw)
-      if (Array.isArray(legacy) && legacy.length > 0) {
-        const now = Date.now()
-        const migrated: ChatSession = {
-          id: 'migrated',
-          title: titleFromMessages(legacy as ChatPageMessage[]),
-          messages: legacy as ChatPageMessage[],
-          createdAt: now,
-          updatedAt: now,
-        }
-        // 落盘 + 清旧 key
-        try {
-          localStorage.setItem(SESSIONS_KEY, JSON.stringify([migrated]))
-          localStorage.setItem(ACTIVE_KEY, migrated.id)
-          localStorage.removeItem(LEGACY_MESSAGES_KEY)
-        } catch {
-          // quota,忽略
-        }
-        return [migrated]
-      }
-    }
-  } catch {
-    // 旧数据损坏,丢弃
-  }
-  return []
-}
-
-function loadActiveId(sessions: ChatSession[]): string | null {
-  try {
-    const id = localStorage.getItem(ACTIVE_KEY)
-    if (id && sessions.some(s => s.id === id)) return id
-  } catch {
-    // ignore
-  }
-  return sessions[0]?.id ?? null
-}
-
-/** 序列化 sessions 时剥离 draft 的 data URL(体积大,localStorage 装不下)。 */
-function serializeSessions(sessions: ChatSession[]): string {
-  const stripped = sessions.map(s => ({
-    ...s,
-    messages: s.messages.map(m => {
-      if (!m.draft) return m
-      const { previewDataUrl: _p, resultDataUrl: _r, ...draftRest } = m.draft
-      return { ...m, draft: draftRest as ChatDraftState }
-    }),
-  }))
-  return JSON.stringify(stripped)
 }
 
 export interface UseChatSessions {
@@ -156,16 +50,23 @@ export interface UseChatSessions {
 }
 
 export function useChatSessions(): UseChatSessions {
-  const [sessions, setSessions] = useState<ChatSession[]>(loadSessions)
-  const [activeId, setActiveId] = useState<string | null>(() => loadActiveId(loadSessions()))
-  const [streaming, setStreaming] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const sessions = useChatStore(state => state.sessions)
+  const activeId = useChatStore(state => state.activeId)
+  const streaming = useChatStore(state => state.streaming)
+  const error = useChatStore(state => state.error)
+  const pendingAssistantId = useChatStore(state => state.pendingAssistantId)
+  const resumePollingKey = useChatStore(state => state.resumePollingKey)
+  const setSessions = useChatStore(state => state.setSessions)
+  const setActiveId = useChatStore(state => state.setActiveId)
+  const setStreaming = useChatStore(state => state.setStreaming)
+  const setError = useChatStore(state => state.setError)
+  const setPendingAssistantIdState = useChatStore(state => state.setPendingAssistantId)
+  const setResumePollingKey = useChatStore(state => state.setResumePollingKey)
   // 当前正在等待回复的助手消息 ID(空 content 占位)。用于在切换会话后仍能在
   // 原会话上显示三点动画——streaming=false 不代表该消息不需要提示。
   // ref + state 双轨:ref 供 send/resume 同步读取(避免状态异步更新导致的孤儿窗口——
   // 切换会话频繁时 state 还没 flush,读到的旧 id 已对应被 slice 掉的占位,三点闪烁/失效);
   // state 供 MessageBubble re-render。两者始终同步写入。
-  const [pendingAssistantId, setPendingAssistantIdState] = useState<string | null>(null)
   const pendingAssistantIdRef = useRef<string | null>(null)
   const setPendingAssistantId = useCallback((id: string | null) => {
     pendingAssistantIdRef.current = id
@@ -174,7 +75,6 @@ export function useChatSessions(): UseChatSessions {
   const abortRef = useRef<AbortController | null>(null)
   const inflightRef = useRef(false)
   // 用于触发轮询恢复：每次 activeId 变化时递增，确保刷新/切换会话后轮询 effect 重新运行
-  const [resumePollingKey, setResumePollingKey] = useState(0)
   // 若当前 in-flight send 是刷新续传,记录其 session id。StrictMode 卸载时 abort 会中断它,
   // 此时需把该 id 从 resumedSessionIds 移除,让重挂载后的 effect 能重新续传(否则 Set 永久阻塞 → dev 下续传永不触发)。
   const resumeSessionRef = useRef<string | null>(null)
@@ -221,7 +121,7 @@ export function useChatSessions(): UseChatSessions {
   useEffect(() => {
     const t = setTimeout(() => {
       try {
-        localStorage.setItem(SESSIONS_KEY, serializeSessions(sessions))
+        persistSessions(sessions)
       } catch {
         // quota / 序列化失败,静默
       }
@@ -257,7 +157,7 @@ export function useChatSessions(): UseChatSessions {
   const flushToStorage = useCallback((retryCount = 0) => {
     const MAX_RETRIES = 3
     try {
-      localStorage.setItem(SESSIONS_KEY, serializeSessions(sessionsRef.current))
+      persistSessions(sessionsRef.current)
       // 成功则清除重试定时器
       if (flushRetryTimerRef.current) {
         clearTimeout(flushRetryTimerRef.current)
@@ -295,7 +195,7 @@ export function useChatSessions(): UseChatSessions {
             return s
           })
         }
-        localStorage.setItem(SESSIONS_KEY, serializeSessions(toFlush))
+        persistSessions(toFlush)
       } catch {
         // ignore
       }
@@ -306,7 +206,7 @@ export function useChatSessions(): UseChatSessions {
 
   useEffect(() => {
     if (activeId) {
-      try { localStorage.setItem(ACTIVE_KEY, activeId) } catch { /* ignore */ }
+      try { persistActiveId(activeId) } catch { /* ignore */ }
     }
   }, [activeId])
 
@@ -399,79 +299,47 @@ export function useChatSessions(): UseChatSessions {
   /** 轮询草稿预览图，直到就绪/失败/超时。
    *
    * 后台 ComfyUI 生成是异步的:preview 端点先返回 202(generating),生成完成后 200。
-   * 用 pollingDraftIds Set 去重(同 pollingVideoIds 模式),保证同一 draft 只有一个轮询在跑
-   * ——send 发起 + resume effect 恢复都调本函数,幂等。
+   * runtime service 负责请求循环、重试和去重；本函数只把终态写回 store。
    *
    * 终态处理:
    * - 200 + previewDataUrl → status='pending' + previewDataUrl + awaitingDraft=false
    * - 4xx(not_found/expired/draft_failed) → status='expired'/'error'
-   * - 60s 超时 → status='expired' + errorMessage
-   */
+   * - 超时 → status='expired' + errorMessage
+  */
   const pollDraftPreview = useCallback(async (draftId: string, msgId: string) => {
-    if (pollingDraftIds.has(draftId)) return
-    pollingDraftIds.add(draftId)
-
     // 防御性守卫:patch 前确认消息当前 draftId 仍是本轮轮询的 draftId。
     // reject 会替换 draftId 并起新轮询;若旧轮询仍 in-flight,其 patch 不应
     // 覆盖新草稿的 generating 状态(返回 m 即 no-op)。
     const owns = (m: ChatPageMessage): m is ChatPageMessage & { draft: ChatDraftState } =>
       m.draft?.draftId === draftId
 
-    let attempts = 0
-    while (attempts < DRAFT_POLL_MAX_ATTEMPTS) {
-      attempts++
-      await new Promise(resolve => setTimeout(resolve, DRAFT_POLL_INTERVAL_MS))
-
-      try {
-        const r = await getDraftPreview(draftId)
-        if (r.status === 'generating') {
-          continue // 202:后台仍在生成,继续轮询
+    const result = await pollDraftUntilSettled(draftId)
+    if (result.kind === 'duplicate') return
+    patchMessage(msgId, message => {
+      if (!owns(message)) return message
+      if (result.kind === 'ready') {
+        return {
+          ...message,
+          draft: {
+            ...message.draft,
+            status: 'pending',
+            previewDataUrl: result.previewDataUrl,
+            errorMessage: undefined,
+          },
+          awaitingDraft: false,
         }
-        // 200:预览就绪
-        if (r.previewDataUrl) {
-          patchMessage(msgId, m => owns(m)
-            ? { ...m, draft: { ...m.draft, status: 'pending', previewDataUrl: r.previewDataUrl, errorMessage: undefined }, awaitingDraft: false }
-            : m)
-          flushToStorage()
-          break
-        }
-        // 200 但无 data URL:异常,按 error 处理
-        patchMessage(msgId, m => owns(m)
-          ? { ...m, draft: { ...m.draft, status: 'error', errorMessage: '预览响应缺少 data URL' }, awaitingDraft: false }
-          : m)
-        flushToStorage()
-        break
-      } catch (e) {
-        const code = e instanceof Error ? e.message : '预览加载失败'
-        // 4xx 终态:不再轮询
-        if (code.includes('not_found') || code.includes('expired')) {
-          patchMessage(msgId, m => owns(m)
-            ? { ...m, draft: { ...m.draft, status: 'expired', errorMessage: code }, awaitingDraft: false }
-            : m)
-          flushToStorage()
-          break
-        }
-        if (code.includes('draft_failed')) {
-          patchMessage(msgId, m => owns(m)
-            ? { ...m, draft: { ...m.draft, status: 'error', errorMessage: code }, awaitingDraft: false }
-            : m)
-          flushToStorage()
-          break
-        }
-        // 网络错误等瞬时失败:继续重试,不立即判定失败
-        console.warn(`Failed to poll draft preview for ${draftId}:`, e)
       }
-    }
-
-    // 超时:仍未取到预览
-    if (attempts >= DRAFT_POLL_MAX_ATTEMPTS) {
-      patchMessage(msgId, m => owns(m)
-        ? { ...m, draft: { ...m.draft, status: 'expired', errorMessage: '草稿生成超时' }, awaitingDraft: false }
-        : m)
-      flushToStorage()
-    }
-
-    pollingDraftIds.delete(draftId)
+      return {
+        ...message,
+        draft: {
+          ...message.draft,
+          status: result.kind,
+          errorMessage: result.message,
+        },
+        awaitingDraft: false,
+      }
+    })
+    flushToStorage()
   }, [patchMessage, flushToStorage])
 
   /** 核心:发送一条用户消息。resume=true 时不重复追加 user 消息(续传场景)。
@@ -488,9 +356,9 @@ export function useChatSessions(): UseChatSessions {
     if (!isResume && activeId) resumedSessionIds.delete(activeId)
 
     const userMsg: ChatPageMessage = {
-      id: nextId(), role: 'user', content: trimmed, ts: Date.now(),
+      id: nextMessageId(), role: 'user', content: trimmed, ts: Date.now(),
     }
-    const assistantId = nextId()
+    const assistantId = nextMessageId()
     const assistantMsg: ChatPageMessage = {
       id: assistantId, role: 'assistant', content: '', ts: Date.now(),
     }
@@ -528,7 +396,6 @@ export function useChatSessions(): UseChatSessions {
     abortRef.current = controller
     // 续传 send:记录 session id,供 StrictMode 卸载时判断是否需从 resumedSessionIds 移除。
     if (isResume) resumeSessionRef.current = activeId
-    let reader: ReadableStreamDefaultReader<Uint8Array> | null = null
     const finishCurrentStream = () => {
       setStreaming(false)
       setPendingAssistantId(null)
@@ -570,70 +437,38 @@ export function useChatSessions(): UseChatSessions {
         return
       }
 
-      // 流式分支:按 SSE 帧累加
-      reader = resp.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        let idx: number
-        while ((idx = buffer.indexOf('\n\n')) !== -1) {
-          const frame = buffer.slice(0, idx)
-          buffer = buffer.slice(idx + 2)
-          const line = frame.trim()
-          if (!line.startsWith('data:')) continue
-          const payload = line.slice(5).trim()
-          if (payload === '[DONE]') {
-            finishCurrentStream()
-            abortRef.current = null
-            inflightRef.current = false
-            // 注意:不在此处 reader.releaseLock() —— finally 会统一释放,
-            // 重复 releaseLock 会抛 TypeError(ReadableStream spec)→ unhandled rejection。
-            return
+      // 流式 I/O 与 SSE 解帧由 runtime service 负责；hook 只处理业务状态转换。
+      await consumeChatEventStream(resp.body, chunk => {
+        const delta = chunk.choices?.[0]?.delta
+        const meta = chunk._meta?.routed_to
+        const streamError = chunk.error
+        const isErr = Boolean(streamError)
+        const errorMessage = streamError?.message ?? streamError?.code ?? '请求失败'
+        patchMessage(assistantId, message => {
+          const next: ChatPageMessage = { ...message }
+          if (delta?.content) {
+            next.content += delta.content
+            setPendingAssistantId(null)
           }
-          try {
-            const chunk = JSON.parse(payload)
-            const delta = chunk?.choices?.[0]?.delta
-            const meta = chunk?._meta?.routed_to
-            const streamError = chunk?.error
-            const isErr = !!streamError
-            const errorMessage = typeof streamError?.message === 'string'
-              ? streamError.message
-              : typeof streamError?.code === 'string'
-                ? streamError.code
-                : '请求失败'
-            patchMessage(assistantId, m => {
-              const next: ChatPageMessage = { ...m }
-              if (delta?.content) {
-                next.content += delta.content
-                setPendingAssistantId(null)
-              }
-              if (meta?.intent && !next.intent) next.intent = meta.intent
-              if (meta?.model && !next.model) next.model = meta.model
-              // 提取视频生成任务的 ID，用于刷新后轮询恢复
-              const videoId = chunk?._meta?.video_id
-              if (videoId && !next.videoId) next.videoId = videoId
-              if (isErr) {
-                next.error = true
-                if (!next.content) next.content = errorMessage
-              }
-              return next
-            })
-            if (isErr) {
-              setError(errorMessage)
-              setPendingAssistantId(null)
-            }
-          } catch {
-            // 非 JSON 帧,跳过
+          if (meta?.intent && !next.intent) next.intent = meta.intent
+          if (meta?.model && !next.model) next.model = meta.model
+          const videoId = chunk._meta?.video_id
+          if (videoId && !next.videoId) next.videoId = videoId
+          if (isErr) {
+            next.error = true
+            if (!next.content) next.content = errorMessage
           }
+          return next
+        })
+        if (isErr) {
+          setError(errorMessage)
+          setPendingAssistantId(null)
         }
-      }
+      })
       finishCurrentStream()
     } catch (e) {
       if (controller.signal.aborted) {
-        // 标记 incomplete(刷新续传依据)。reader 释放交给 finally,避免重复 releaseLock 抛 TypeError。
+        // 标记 incomplete(刷新续传依据)。
         patchMessage(assistantId, m => (m.content ? { ...m, incomplete: true } : m))
         setStreaming(false)
         // 中断时一个 token 都没收到(空占位):必须清 pendingAssistantId。
@@ -659,8 +494,6 @@ export function useChatSessions(): UseChatSessions {
         flushToStorage()
       }
     } finally {
-      // 释放 reader 锁。流已关闭/出错时 releaseLock 可能抛 TypeError,吞掉即可。
-      try { reader?.releaseLock() } catch { /* reader 已释放或流已关闭 */ }
       // 所有权检查:仅当当前 send 仍持有 controller 时才清 ref。
       // draft 分支会提前清 ref 并 return,期间用户可能已发起 Send B(设了新 controller/inflightRef=true),
       // 无条件覆写会把 B 的 ref 冲掉 → stop() 失效 + 并发流污染。
@@ -795,52 +628,26 @@ export function useChatSessions(): UseChatSessions {
 
   /** 轮询视频任务状态，完成后更新消息内容。 */
   const pollVideoStatus = useCallback(async (videoId: string, msgId: string) => {
-    if (pollingVideoIds.has(videoId)) return
-    pollingVideoIds.add(videoId)
-
-    let attempts = 0
-    while (attempts < VIDEO_POLL_MAX_ATTEMPTS) {
-      attempts++
-      await new Promise(resolve => setTimeout(resolve, VIDEO_POLL_INTERVAL_MS))
-
-      try {
-        const status: VideoStatusResponse = await getVideoStatus(videoId)
-        const terminalStatus = isVideoTerminal(status.status)
-
-        if (terminalStatus) {
-          pollingVideoIds.delete(videoId)
-          const resolvedUrl = status.video?.url || status.url
-          if ((status.status === 'succeeded' || status.status === 'completed') && resolvedUrl) {
-            // 视频生成成功：保留消息的 videoId，并把最终 URL 单独挂到 message 上。
-            // 不再把 content 改写成纯 URL 文本，否则 MessageBubble 会走到错误的 media 分支。
-            patchMessage(msgId, m => ({
-              ...m,
-              videoUrl: resolvedUrl,
-              intent: 'generation:video',
-              model: 'video',
-            }))
-            flushToStorage()
-          } else if (status.status === 'failed' || status.status === 'error') {
-            // 视频生成失败
-            const errorMsg = status.error?.message || '视频生成失败'
-            patchMessage(msgId, m => ({
-              ...m,
-              content: `Video generation failed: ${errorMsg}`,
-              error: true,
-            }))
-            flushToStorage()
-          }
-          break
-        }
-
-        // 仍在进行中，继续轮询
-      } catch (e) {
-        // 网络错误或 API 调用失败，继续重试
-        console.warn(`Failed to poll video status for ${videoId}:`, e)
-      }
+    const status = await pollVideoUntilTerminal(videoId)
+    if (!status) return
+    const resolvedUrl = status.video?.url || status.url
+    if ((status.status === 'succeeded' || status.status === 'completed') && resolvedUrl) {
+      patchMessage(msgId, message => ({
+        ...message,
+        videoUrl: resolvedUrl,
+        intent: 'generation:video',
+        model: 'video',
+      }))
+      flushToStorage()
+    } else if (status.status === 'failed' || status.status === 'error') {
+      const errorMessage = status.error?.message || '视频生成失败'
+      patchMessage(msgId, message => ({
+        ...message,
+        content: `Video generation failed: ${errorMessage}`,
+        error: true,
+      }))
+      flushToStorage()
     }
-
-    pollingVideoIds.delete(videoId)
   }, [patchMessage, flushToStorage])
 
   const confirmDraftMsg = useCallback(async (msgId: string) => {
@@ -936,7 +743,7 @@ export function useChatSessions(): UseChatSessions {
   /** 组件卸载时清理所有轮询。 */
   useEffect(() => {
     return () => {
-      clearAllPolling()
+      clearAllChatPolling()
     }
   }, [])
 

@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
-import { Plus, Trash2, Eye, Search, Copy, AlertTriangle, Edit3 } from 'lucide-react'
+import { Plus, Trash2, Eye, Search, Copy, AlertTriangle, Edit3, RotateCw } from 'lucide-react'
 import Card from '@/components/Card'
 import {
-  listApiKeys, deleteApiKey, createApiKey, updateApiKeyQuota,
+  listApiKeys, deleteApiKey, createApiKey, updateApiKeyQuota, rotateApiKey,
   listGroups, createGroup, updateGroup, deleteGroup, assignKeyGroup,
 } from '@/api/client'
 import type {
@@ -110,6 +110,19 @@ export default function Quotas() {
       setKeys(prev => prev.filter(k => k.id !== keyId))
     } catch {
       alert('撤销失败')
+    }
+  }
+
+  const handleRotate = async (keyId: string, userId: string) => {
+    if (!confirm(`确定旋转用户 ${userId} 的 API Key？旧密钥将立即失效，新密钥仅显示一次。`)) return
+    try {
+      const resp = await rotateApiKey(keyId)
+      const newKey = resp.data.key
+      alert(`新密钥（仅显示一次）：\n\n${newKey}\n\n请妥善保存！`)
+      const r = await listApiKeys()
+      setKeys(r.data.items)
+    } catch (err: any) {
+      alert(err.message || '密钥旋转失败')
     }
   }
 
@@ -460,6 +473,11 @@ export default function Quotas() {
                             <button className="p-1.5 rounded cursor-pointer transition-colors" style={{ color: 'var(--color-text-tertiary)' }} title="修改配额" onClick={() => handleStartEdit(key)}>
                               <Edit3 size={16} />
                             </button>
+                            {key.status === 'active' && (
+                              <button className="p-1.5 rounded cursor-pointer transition-colors" style={{ color: 'var(--color-info)' }} title="旋转密钥" onClick={() => handleRotate(key.id, key.user_id)}>
+                                <RotateCw size={16} />
+                              </button>
+                            )}
                             <button className="p-1.5 rounded cursor-pointer transition-colors" style={{ color: 'var(--color-text-tertiary)' }} title="查看详情">
                               <Eye size={16} />
                             </button>

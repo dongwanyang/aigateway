@@ -1,7 +1,9 @@
 import { LayoutDashboard, Puzzle, DollarSign, Shield, Database, FileText, Sun, Moon, BookOpen, Settings, Bot, MessageSquare } from 'lucide-react'
-import { Link, useLocation } from 'react-router-dom'
+import { Link, useLocation } from 'react-router'
 import { useTheme } from '@/hooks/useTheme'
+import { useAuth } from '@/contexts/AuthContext'
 import CapabilityBanner from '@/components/CapabilityBanner'
+import { LogOut } from 'lucide-react'
 
 const navItems = [
   { path: '/', label: '概览', icon: LayoutDashboard },
@@ -19,6 +21,11 @@ const navItems = [
 export default function Layout({ children }: { children: React.ReactNode }) {
   const location = useLocation()
   const { toggleTheme, isDark } = useTheme()
+  const { state, logout } = useAuth()
+
+  async function handleLogout() {
+    await logout()
+  }
 
   return (
     <div className="min-h-screen" style={{ backgroundColor: 'var(--color-bg-base)', color: 'var(--color-text-primary)' }}>
@@ -37,6 +44,27 @@ export default function Layout({ children }: { children: React.ReactNode }) {
           {isDark ? <Sun size={16} /> : <Moon size={16} />}
           <span>{isDark ? '亮色' : '暗色'}</span>
         </button>
+        {state.isAuthenticated && (
+          <div className="flex items-center gap-2">
+            {state.keyPrefix && (
+              <span className="text-xs px-2 py-1 rounded" style={{
+                backgroundColor: 'var(--color-bg-overlay)',
+                color: 'var(--color-text-secondary)',
+                fontFamily: 'var(--font-mono)',
+              }}>
+                ...{String(state.keyPrefix).slice(-4)}
+              </span>
+            )}
+            <button
+              onClick={handleLogout}
+              className="flex items-center gap-1 px-2 py-1 rounded cursor-pointer text-sm transition-colors"
+              style={{ color: 'var(--color-text-secondary)', backgroundColor: 'var(--color-bg-overlay)' }}
+              title="退出登录"
+            >
+              <LogOut size={14} />
+            </button>
+          </div>
+        )}
       </header>
 
       {/* 侧边栏 */}

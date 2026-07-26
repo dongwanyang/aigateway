@@ -199,6 +199,42 @@ ${sourceMode
     : '接下来请选择要部署的能力。安装器可重复运行，不会自动删除数据卷。'}
 
 `)
+
+  // ---- Generate default admin API key (first-time only) ----
+  const envPath = join(installDirectory, '.env')
+  let adminKeyGenerated = false
+  try {
+    const envContent = existsSync(envPath) ? readFileSync(envPath, 'utf8') : ''
+    if (!envContent.includes('ADMIN_API_KEY=')) {
+      const ADMIN_KEY = `gw-${require('crypto').randomBytes(24).toString('hex')}`
+      require('fs').appendFileSync(envPath, `\nADMIN_API_KEY=${ADMIN_KEY}\n`)
+
+      // Update config.yaml placeholder — fail loudly if file is missing
+      const configPath = join(installDirectory, 'config.yaml')
+      if (existsSync(configPath)) {
+        let configContent = readFileSync(configPath, 'utf8')
+        configContent = configContent.replace(
+          /key:\s*\$\{ADMIN_API_KEY:-[^}]*\}/,
+          `key: ${ADMIN_KEY}`
+        )
+        writeFileSync(configPath, configContent)
+      } else {
+        console.error(`ERROR: config.yaml not found at ${configPath} — cannot embed admin key`)
+        process.exit(1)
+      }
+
+      console.log(`\n==========================================`)
+      console.log(`  默认管理员凭据（请妥善保存！）`)
+      console.log(`==========================================`)
+      console.log(`  API Key : ${ADMIN_KEY}`)
+      console.log(`==========================================`)
+      console.log('')
+      process.stderr.write(`\x1b[1;33m[!] 这是默认管理员密钥，首次登录后请务必重置！\x1b[0m\n\n`)
+      adminKeyGenerated = true
+    }
+  } catch {
+    // Non-fatal: continue with installer even if key generation fails
+  }
   const result = run(
     'bash',
     [installerScript, ...parsed.installerArgs],

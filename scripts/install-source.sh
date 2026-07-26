@@ -119,6 +119,29 @@ if [[ ! -f "$ROOT_DIR/.env" && -f "$ROOT_DIR/.env.example" ]]; then
   warn "已创建 .env；请在其中配置至少一个模型提供商 API Key"
 fi
 
+# ---- Generate default admin API key (first-time only) ----
+if ! grep -q '^ADMIN_API_KEY=' "$ROOT_DIR/.env" 2>/dev/null; then
+  ADMIN_KEY="gw-$(openssl rand -hex 24)"
+  echo "ADMIN_API_KEY=${ADMIN_KEY}" >> "$ROOT_DIR/.env"
+
+  # Replace placeholder in config.yaml — fail loudly if config doesn't exist
+  if [[ -f "$ROOT_DIR/config.yaml" ]]; then
+    sed -i -E "s|key:[[:space:]]*\$\{ADMIN_API_KEY:-[^}]*\}|key: ${ADMIN_KEY}|g" "$ROOT_DIR/config.yaml"
+  else
+    error "config.yaml not found at $ROOT_DIR/config.yaml — cannot embed admin key"
+    exit 1
+  fi
+
+  echo ""
+  echo "=========================================="
+  echo "  默认管理员凭据（请妥善保存！）"
+  echo "=========================================="
+  echo "  API Key : ${ADMIN_KEY}"
+  echo "=========================================="
+  echo ""
+  warn "这是默认管理员密钥，首次登录后请务必重置！"
+fi
+
 echo
 info "源码安装完成"
 echo "激活环境 : source \"$VENV_DIR/bin/activate\""

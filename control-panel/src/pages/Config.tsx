@@ -1,39 +1,43 @@
 import { useEffect, useState } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Save, RefreshCw, AlertTriangle } from 'lucide-react'
 import Card from '@/components/Card'
 import { getFullConfig, updateFullConfig } from '@/api/client'
+import { queryKeys } from '@/query/keys'
 
 export default function Config() {
-  const [config, setConfig] = useState<Record<string, unknown> | null>(null)
+  const queryClient = useQueryClient()
   const [editText, setEditText] = useState('')
-  const [loading, setLoading] = useState(true)
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [localError, setLocalError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
   const [hasChanges, setHasChanges] = useState(false)
+  const configQuery = useQuery({
+    queryKey: queryKeys.config.full,
+    queryFn: async () => (await getFullConfig()).data as Record<string, unknown>,
+  })
+  const saveMutation = useMutation({
+    mutationFn: updateFullConfig,
+  })
+  const config = configQuery.data ?? null
+  const loading = configQuery.isLoading
+  const saving = saveMutation.isPending
+  const remoteError = configQuery.error ?? saveMutation.error
+  const error = localError ?? (remoteError instanceof Error ? remoteError.message : null)
 
   useEffect(() => {
-    loadConfig()
-  }, [])
+    if (config && !hasChanges) {
+      setEditText(JSON.stringify(config, null, 2))
+    }
+  }, [config, hasChanges])
 
   async function loadConfig() {
-    setLoading(true)
-    setError(null)
-    try {
-      const r = await getFullConfig()
-      setConfig(r.data as Record<string, unknown>)
-      const formatted = JSON.stringify(r.data, null, 2)
-      setEditText(formatted)
-      setHasChanges(false)
-    } catch (e: any) {
-      setError(e.message || '加载配置失败')
-    } finally {
-      setLoading(false)
-    }
+    setLocalError(null)
+    setHasChanges(false)
+    await configQuery.refetch()
   }
 
   async function handleSave() {
-    setError(null)
+    setLocalError(null)
     setSuccess(null)
 
     // 验证 JSON 格式
@@ -41,21 +45,18 @@ export default function Config() {
     try {
       parsed = JSON.parse(editText)
     } catch {
-      setError('JSON 格式无效，请检查语法')
+      setLocalError('JSON 格式无效，请检查语法')
       return
     }
 
-    setSaving(true)
     try {
-      await updateFullConfig(parsed)
+      await saveMutation.mutateAsync(parsed)
+      queryClient.setQueryData(queryKeys.config.full, parsed)
       setSuccess('配置已保存并生效')
-      setConfig(parsed)
       setHasChanges(false)
       setTimeout(() => setSuccess(null), 3000)
-    } catch (e: any) {
-      setError(e.message || '保存失败')
-    } finally {
-      setSaving(false)
+    } catch (exc) {
+      setLocalError(exc instanceof Error ? exc.message : '保存失败')
     }
   }
 

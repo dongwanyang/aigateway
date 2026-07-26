@@ -58,7 +58,8 @@ CREATE TABLE IF NOT EXISTS api_keys (
     rpm_window_count INTEGER DEFAULT 0,
     tpm_window_start INTEGER DEFAULT 0,
     tpm_window_count INTEGER DEFAULT 0,
-    is_admin INTEGER DEFAULT 0
+    is_admin INTEGER DEFAULT 0,
+    is_default INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS quota_records (
@@ -341,6 +342,7 @@ class SQLiteStore:
             "rotated_at": "TEXT",
             "revoked_at": "TEXT",
             "scopes": "TEXT DEFAULT 'chat,embedding'",
+            "is_default": "INTEGER DEFAULT 0",
         }
         for column, definition in lifecycle_columns.items():
             if column not in existing_columns:
@@ -704,6 +706,8 @@ class SQLiteStore:
         now_iso = _now_iso()
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         month = datetime.now(timezone.utc).strftime("%Y-%m")
+        # Mark only the first admin-scoped key as "default" for force-reset flow
+        default_admin_marked = False
 
         for cfg in keys_config:
             raw_key = cfg.get("key", "")
@@ -715,8 +719,12 @@ class SQLiteStore:
             key_hash = _hash_key(raw_key)
             key_prefix = raw_key[:8]
             quotas = cfg.get("quotas", {})
-            is_admin = bool(cfg.get("is_admin", False))
-            scopes = _serialize_scopes(cfg.get("scopes"), is_admin=is_admin)
+            configured_is_admin = bool(cfg.get("is_admin", False))
+            normalized_scopes = _normalize_scopes(
+                cfg.get("scopes"), is_admin=configured_is_admin
+            )
+            is_admin = "admin" in normalized_scopes
+            scopes = ",".join(normalized_scopes)
             expires_at = cfg.get("expires_at") or None
             cfg_group = cfg.get("group") or ""
             if cfg_group:
@@ -732,8 +740,15 @@ class SQLiteStore:
                     # Only update structural fields, preserve runtime-modified quotas
                     existing_d = dict(existing)
                     existing_d["user_id"] = user_id
-                    existing_d["status"] = "active"
+                    # Revocation/suspension is runtime security state. Re-seeding
+                    # config on restart must not silently reactivate the key.
+                    existing_d["status"] = existing_d.get("status") or "active"
                     existing_d["is_admin"] = int(is_admin)
+                    # Mark first admin-scoped key as default for force-reset flow
+                    is_default = 0
+                    if not default_admin_marked and is_admin and user_id == "admin":
+                        is_default = 1
+                        default_admin_marked = True
                     if cfg_group:
                         existing_d["group_id"] = cfg_group
                     if "group_id" not in existing_d or not existing_d["group_id"]:
@@ -750,14 +765,14 @@ class SQLiteStore:
                         existing_d["rate_limit_tpm"] = str(quotas.get("rate_limit_tpm", self.DEFAULT_RATE_LIMIT_TPM))
 
                     tx.execute(
-                        """UPDATE api_keys SET user_id=?, status=?, is_admin=?,
+                        """UPDATE api_keys SET user_id=?, status=?, is_admin=?, is_default=?,
                            scopes=?, expires_at=?,
                            group_id=?, cache_scope=?,
                            daily_tokens_limit=?, monthly_cost_limit=?,
                            rate_limit_rpm=?, rate_limit_tpm=?
                            WHERE key_hash=?""",
                         (
-                            user_id, "active", int(is_admin), scopes, expires_at,
+                            user_id, existing_d["status"], int(is_admin), is_default, scopes, expires_at,
                             existing_d["group_id"], existing_d["cache_scope"],
                             existing_d["daily_tokens_limit"], existing_d["monthly_cost_limit"],
                             existing_d["rate_limit_rpm"], existing_d["rate_limit_tpm"],
@@ -766,9 +781,14 @@ class SQLiteStore:
                     )
                     logger.info("API Key 已更新: user_id=%s, key_hash=%s", user_id, key_hash)
                 else:
+                    # Mark first admin-scoped key as default for force-reset flow
+                    is_default = 0
+                    if not default_admin_marked and is_admin and user_id == "admin":
+                        is_default = 1
+                        default_admin_marked = True
                     tx.execute(
                         """INSERT INTO api_keys
-                           (key_hash, key_id, key_prefix, user_id, status,
+                           (key_hash, key_id, key_prefix, user_id, status, is_default,
                             created_at, last_used_at, expires_at, scopes,
                             group_id, cache_scope,
                             daily_tokens_limit, daily_tokens_used,
@@ -776,10 +796,10 @@ class SQLiteStore:
                             rate_limit_rpm, rate_limit_tpm,
                             rpm_window_start, rpm_window_count,
                             tpm_window_start, tpm_window_count, is_admin)
-                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (
                             key_hash, f"key_{uuid.uuid4().hex[:8]}", key_prefix,
-                            user_id, "active", now_iso, "", expires_at, scopes,
+                            user_id, "active", is_default, now_iso, "", expires_at, scopes,
                             cfg_group, "group",
                             quotas.get("daily_tokens", self.DEFAULT_DAILY_TOKENS), 0,
                             quotas.get("monthly_cost", self.DEFAULT_MONTHLY_COST), 0.0,
@@ -830,6 +850,13 @@ class SQLiteStore:
             imported += 1
 
         return imported
+
+    async def check_is_default(self, key_hash: str) -> bool:
+        """Return True if the given key is the default admin key from config.yaml."""
+        def _lookup():
+            row = self.conn.fetchone("SELECT is_default FROM api_keys WHERE key_hash=?", (key_hash,))
+            return bool(row and row["is_default"])
+        return await self._db(_lookup)
 
     async def revoke(self, key_id: str) -> bool:
         if not key_id.startswith("key_"):

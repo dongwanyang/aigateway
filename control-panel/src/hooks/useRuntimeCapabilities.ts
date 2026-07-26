@@ -1,70 +1,24 @@
-import { useCallback, useEffect, useState } from 'react'
-import { getRuntimeCapabilities, getSavedApiKey } from '@/api/client'
-import type { RuntimeCapabilities } from '@/api/client'
-
-let cachedCapabilities: RuntimeCapabilities | null = null
-let pendingRequest: Promise<RuntimeCapabilities> | null = null
-
-async function loadCapabilities(): Promise<RuntimeCapabilities> {
-  if (cachedCapabilities) return cachedCapabilities
-  if (!pendingRequest) {
-    pendingRequest = getRuntimeCapabilities()
-      .then(response => {
-        cachedCapabilities = response.data
-        return response.data
-      })
-      .finally(() => {
-        pendingRequest = null
-      })
-  }
-  return pendingRequest
-}
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { getRuntimeCapabilities } from '@/api/client'
+import { queryKeys } from '@/query/keys'
+import { useAuthStore } from '@/stores/authStore'
 
 export function useRuntimeCapabilities() {
-  const [data, setData] = useState<RuntimeCapabilities | null>(cachedCapabilities)
-  const [loading, setLoading] = useState(Boolean(getSavedApiKey()) && !cachedCapabilities)
-  const [error, setError] = useState<string | null>(null)
+  const queryClient = useQueryClient()
+  const isAuthenticated = useAuthStore(state => state.isAuthenticated)
+  const query = useQuery({
+    queryKey: queryKeys.runtime.capabilities,
+    queryFn: async () => (await getRuntimeCapabilities()).data,
+    enabled: isAuthenticated,
+    staleTime: 60_000,
+  })
 
-  const refresh = useCallback(async () => {
-    if (!getSavedApiKey()) {
-      setLoading(false)
-      return
-    }
-    cachedCapabilities = null
-    setLoading(true)
-    setError(null)
-    try {
-      setData(await loadCapabilities())
-    } catch (exc) {
-      setError(exc instanceof Error ? exc.message : '能力状态加载失败')
-    } finally {
-      setLoading(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    if (!getSavedApiKey() || data) {
-      setLoading(false)
-      return
-    }
-    let cancelled = false
-    void loadCapabilities()
-      .then(result => {
-        if (!cancelled) setData(result)
-      })
-      .catch(exc => {
-        if (!cancelled) {
-          setError(exc instanceof Error ? exc.message : '能力状态加载失败')
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [data])
-
-  return { data, loading, error, refresh }
+  return {
+    data: query.data ?? null,
+    loading: query.isLoading,
+    error: query.error instanceof Error ? query.error.message : null,
+    refresh: async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.runtime.capabilities })
+    },
+  }
 }
-

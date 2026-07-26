@@ -7,14 +7,14 @@ import {
   getGlobalConfig,
   updateGlobalConfig,
   setPluginDebug,
-  saveApiKey,
-  getSavedApiKey,
   getDebugConfig,
   updateDebugSection,
 } from '@/api/client'
 import type { PluginConfigItem, DebugConfig } from '@/api/client'
+import { useAuth } from '@/contexts/AuthContext'
 
 export default function Plugins() {
+  const { isAuthenticated, login } = useAuth()
   const [plugins, setPlugins] = useState<PluginConfigItem[]>([])
   const [loading, setLoading] = useState(true)
   const [globalConfig, setGlobalConfig] = useState({ hot_reload: false })
@@ -26,14 +26,13 @@ export default function Plugins() {
   // --- API Key 管理 ---
   const [apiKeyInput, setApiKeyInput] = useState('')
   const [showKeyInput, setShowKeyInput] = useState(false)
-  const [savedKey, setSavedKey] = useState(getSavedApiKey())
+  const savedKey = isAuthenticated ? '1' : null
 
   const handleSaveKey = async () => {
     if (apiKeyInput.trim()) {
       try {
-        await saveApiKey(apiKeyInput.trim())
+        await login(apiKeyInput.trim())
         setApiKeyInput('')
-        setSavedKey('1')
         setShowKeyInput(false)
         setError(null)
         await loadData()

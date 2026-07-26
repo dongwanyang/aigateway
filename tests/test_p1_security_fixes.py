@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "aigateway-api/src"))
@@ -86,6 +87,7 @@ def test_browser_session_cookie_is_httponly_and_secret_not_returned():
         "key_prefix": "gw-test1",
         "scopes": ["admin", "chat", "embedding"],
     }
+    app.state.key_store.check_is_default.return_value = False
     app.include_router(auth_router, prefix="/auth")
 
     response = TestClient(app).post(
@@ -96,6 +98,63 @@ def test_browser_session_cookie_is_httponly_and_secret_not_returned():
     assert "httponly" in cookie
     assert "samesite=strict" in cookie
     assert "gw-test1-secret" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_default_admin_reset_survives_session_refresh_and_reseed(tmp_path: Path):
+    old_key = "gw-default-admin-key-1234567890"
+    new_key = "gw-replacement-admin-key-0987654321"
+    config = [{
+        "key": old_key,
+        "user_id": "admin",
+        "scopes": ["admin", "chat", "embedding"],
+        "group": "admin-team",
+    }]
+    store = SQLiteStore(str(tmp_path / "session-auth.db"))
+    # Keep DB operations deterministic within this in-process ASGI test.
+    async def inline_db(fn):
+        return fn()
+
+    store._db = inline_db
+    await store.seed_from_config(config)
+
+    app = FastAPI()
+    app.state.key_store = store
+    app.include_router(auth_router, prefix="/auth")
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        login = await client.post("/auth/session", json={"api_key": old_key})
+        assert login.status_code == 200
+        assert login.json()["data"]["force_reset"] is True
+
+        refreshed = await client.get("/auth/session")
+        assert refreshed.json()["data"]["force_reset"] is True
+
+        reset = await client.post(
+            "/auth/reset-password",
+            json={"new_api_key": new_key},
+        )
+        assert reset.status_code == 200
+        assert reset.json()["data"]["new_api_key"] == new_key
+
+        refreshed = await client.get("/auth/session")
+        assert refreshed.status_code == 200
+        assert refreshed.json()["data"]["authenticated"] is True
+        assert refreshed.json()["data"]["force_reset"] is False
+
+    with pytest.raises(AuthError, match="revoked"):
+        await store.validate(old_key)
+    assert (await store.validate(new_key))["scopes"] == [
+        "admin", "chat", "embedding",
+    ]
+
+    # Startup config seeding must not resurrect the revoked bootstrap key.
+    await store.seed_from_config(config)
+    with pytest.raises(AuthError, match="revoked"):
+        await store.validate(old_key)
 
 
 class _ClosableUpstream:

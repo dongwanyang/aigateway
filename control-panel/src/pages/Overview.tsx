@@ -1,9 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area } from 'recharts'
 import { Activity, Clock, DollarSign, Zap, TrendingDown } from 'lucide-react'
 import Card from '@/components/Card'
 import { getHealth, parseMetrics, getMetricsText } from '@/api/client'
-import type { HealthData } from '@/types'
+import { queryKeys } from '@/query/keys'
 
 const statCards = [
   { icon: Activity, label: '总请求数', value: '0', unit: 'requests', color: '--color-primary' },
@@ -13,156 +13,97 @@ const statCards = [
   { icon: TrendingDown, label: 'Token 节省', value: '0', unit: 'tokens', color: '--color-success' },
 ]
 
+async function loadOverviewMetrics() {
+  const samples = parseMetrics(await getMetricsText())
+  const sumByMetric = (name: string) =>
+    samples.filter(sample => sample.name === name).reduce((sum, sample) => sum + sample.value, 0)
+  const totalRequests = sumByMetric('gateway_http_requests_total')
+  const totalCost = sumByMetric('gateway_cost_by_model_total')
+  const totalCacheHits = sumByMetric('gateway_cache_hits_total')
+  const cacheMisses = sumByMetric('gateway_cache_misses_total')
+  const totalCache = totalCacheHits + cacheMisses
+  const hitRate = totalCache > 0 ? Math.round((totalCacheHits / totalCache) * 100) : 0
+  const tokensSaved = sumByMetric('gateway_tokens_saved_total')
+  const costByUser = samples
+    .filter(sample => sample.name === 'gateway_cost_by_user_total')
+    .map(sample => ({ user: sample.labels.user_id || 'unknown', cost: sample.value }))
+    .sort((left, right) => right.cost - left.cost)
+    .slice(0, 5)
+
+  const countSamples = samples.filter(sample => sample.name === 'gateway_request_duration_seconds_count')
+  const sumSamples = samples.filter(sample => sample.name === 'gateway_request_duration_seconds_sum')
+  const totalDuration = sumSamples.reduce((sum, sample) => sum + sample.value, 0)
+  const totalCount = countSamples.reduce((sum, sample) => sum + sample.value, 0)
+  const avgLatency = totalCount > 0 ? Math.round((totalDuration / totalCount) * 1000) : 0
+
+  const buckets = new Map<string, Record<string, number>>()
+  for (const sample of samples.filter(item => item.name === 'gateway_request_duration_seconds_bucket')) {
+    const labels = { ...sample.labels }
+    delete labels.le
+    const key = JSON.stringify(labels)
+    const entry = buckets.get(key) ?? {}
+    entry[sample.labels.le ?? ''] = sample.value
+    buckets.set(key, entry)
+  }
+
+  const percentile = (entry: Record<string, number>, count: number, pct: number) => {
+    const limits = Object.keys(entry).filter(Boolean).sort((a, b) => Number(a) - Number(b))
+    const matched = limits.find(limit => (entry[limit] ?? 0) >= (pct / 100) * count)
+    const limit = matched ?? limits[limits.length - 1]
+    return limit ? Math.round(Number(limit) * 1000) : 0
+  }
+  const first = [...buckets.entries()]
+    .map(([key, entry]) => {
+      const count = countSamples.find(sample => JSON.stringify(sample.labels) === key)?.value ?? 0
+      return count > 0 ? {
+        p50: percentile(entry, count, 50),
+        p90: percentile(entry, count, 90),
+        p99: percentile(entry, count, 99),
+      } : null
+    })
+    .find(Boolean)
+
+  const latencyData = first
+    ? [
+        { time: 'P50', p50: first.p50 || avgLatency, p99: first.p99 || avgLatency * 3 },
+        { time: 'P90', p50: first.p90 || avgLatency * 2, p99: first.p99 || avgLatency * 4 },
+        { time: 'P99', p50: first.p99 || avgLatency * 3, p99: first.p99 || avgLatency * 5 },
+      ]
+    : ['00:00', '08:00', '16:00', '24:00'].map(time => ({
+        time,
+        p50: avgLatency,
+        p99: avgLatency * 3,
+      }))
+
+  return {
+    stats: [
+      { ...statCards[0], value: Math.round(totalRequests).toLocaleString() },
+      { ...statCards[1], value: avgLatency > 0 ? String(avgLatency) : '—' },
+      { ...statCards[2], value: `$${totalCost < 0.01 ? totalCost.toFixed(4) : totalCost.toFixed(2)}` },
+      { ...statCards[3], value: String(hitRate) },
+      { ...statCards[4], value: tokensSaved > 0 ? Math.round(tokensSaved).toLocaleString() : '0' },
+    ],
+    costByUser,
+    latencyData,
+  }
+}
+
 export default function Overview() {
-  const [health, setHealth] = useState<HealthData | null>(null)
-  const [healthLoading, setHealthLoading] = useState(true)
-  const [stats, setStats] = useState(statCards)
-  const [costByUser, setCostByUser] = useState<{ user: string; cost: number }[]>([])
-  const [latencyData, setLatencyData] = useState<{ time: string; p50: number; p99: number }[]>([])
-
-  useEffect(() => {
-    getHealth()
-      .then(r => { setHealth(r.data) })
-      .catch(() => {})
-      .finally(() => setHealthLoading(false))
-  }, [])
-
-  useEffect(() => {
-    let cancelled = false
-
-    async function load() {
-      // 从 Prometheus 指标获取数据
-      try {
-        const text = await getMetricsText()
-        const samples = parseMetrics(text)
-
-        // 聚合 multiprocess gauges（按名称求和，忽略 pid 标签）
-        function sumByMetric(samples: Array<{name: string; labels: Record<string, string>; value: number}>, name: string): number {
-          return samples.filter(s => s.name === name).reduce((sum: number, s: {value: number}) => sum + s.value, 0)
-        }
-
-        const totalRequests = samples.filter(s => s.name === 'gateway_http_requests_total').reduce((sum, s) => sum + s.value, 0)
-        // 使用 Counter 类型的 gateway_cost_by_model_total 而非 Gauge 类型的 gateway_cost_total
-        // Gauge 在 multiprocess 场景下每个 worker 独立 set()，会被覆盖；Counter 是 inc()，正确累加
-        const totalCost = sumByMetric(samples, 'gateway_cost_by_model_total')
-        const cacheHits = samples.filter(s => s.name === 'gateway_cache_hits_total')
-        const cacheMisses = samples.find(s => s.name === 'gateway_cache_misses_total')?.value ?? 0
-
-        const totalCacheHits = cacheHits.reduce((s, c) => s + c.value, 0)
-        const totalCache = totalCacheHits + cacheMisses
-        const hitRate = totalCache > 0 ? Math.round((totalCacheHits / totalCache) * 100) : 0
-
-        // Token 节省
-        const tokensSaved = samples.find(s => s.name === 'gateway_tokens_saved_total')?.value ?? 0
-
-        // 按用户的成本分布
-        const userSamples = samples.filter(s => s.name === 'gateway_cost_by_user_total')
-        const userCosts = userSamples.map(s => ({
-          user: s.labels.user_id || 'unknown',
-          cost: s.value,
-        })).sort((a, b) => b.cost - a.cost).slice(0, 5)
-
-        // 延迟数据 — 从 histogram bucket 计算 P50/P90/P99
-        const bucketSamples = samples.filter(s => s.name === 'gateway_request_duration_seconds_bucket')
-        // 按 endpoint 分组（去掉 le 标签后作为 key）
-        const leMap = new Map<string, Record<string, number>>()
-        for (const s of bucketSamples) {
-          const groupLabels = { ...s.labels }
-          delete groupLabels.le
-          const key = JSON.stringify(groupLabels)
-          if (!leMap.has(key)) leMap.set(key, {})
-          const entry = leMap.get(key)!
-          entry[s.labels.le ?? ''] = s.value
-        }
-
-        // 也取 count/sum 用于算均值
-        const countSamples = samples.filter(s => s.name === 'gateway_request_duration_seconds_count')
-        const sumSamples = samples.filter(s => s.name === 'gateway_request_duration_seconds_sum')
-
-        function computePercentiles(leMapEntry: Record<string, number>, countVal: number): { p50: number; p90: number; p99: number } {
-          const les = Object.keys(leMapEntry)
-            .filter(k => k !== '')
-            .sort((a, b) => parseFloat(a) - parseFloat(b))
-
-          if (les.length === 0 || countVal <= 0) {
-            return { p50: 0, p90: 0, p99: 0 }
-          }
-
-          function findPct(pct: number): number {
-            const target = (pct / 100) * countVal
-            for (const le of les) {
-              if ((leMapEntry[le] ?? 0) >= target) {
-                return Math.round(parseFloat(le) * 1000) // seconds → ms
-              }
-            }
-            // 超出最大 bucket，用最大值外推
-            return Math.round((parseFloat(les[les.length - 1]) * 1.5) * 1000)
-          }
-
-          return { p50: findPct(50), p90: findPct(90), p99: findPct(99) }
-        }
-
-        // 平均延迟（聚合所有 endpoint）
-        let totalDuration = 0
-        let totalCount = 0
-        for (const dur of sumSamples) {
-          totalDuration += dur.value
-        }
-        for (const cnt of countSamples) {
-          totalCount += cnt.value
-        }
-        const avgLatency = totalCount > 0 ? Math.round((totalDuration / totalCount) * 1000) : 0
-
-        // 生成分位数时间序列（基于 histogram 的分桶区间）
-        const latencyBuckets = []
-        for (const [key, leMapEntry] of leMap.entries()) {
-          if (!leMapEntry) continue
-          // key 现在是 endpoint 标签 JSON（不含 le），与 count labels 一致
-          const countVal = countSamples.find(c => JSON.stringify(c.labels) === key)?.value ?? 0
-          if (countVal > 0) {
-            const pcts = computePercentiles(leMapEntry, countVal)
-            latencyBuckets.push(pcts)
-          }
-        }
-
-        // 如果有 histogram 数据，用实际分位数；否则 fallback 到 avgLatency
-        let displayLatencyData
-        if (latencyBuckets.length > 0) {
-          const base = latencyBuckets[0]
-          displayLatencyData = [
-            { time: 'P50', p50: base.p50 || avgLatency, p99: base.p99 || avgLatency * 3 },
-            { time: 'P90', p50: base.p90 || avgLatency * 2, p99: base.p99 || avgLatency * 4 },
-            { time: 'P99', p50: base.p99 || avgLatency * 3, p99: base.p99 || avgLatency * 5 },
-          ]
-        } else {
-          displayLatencyData = [
-            { time: '00:00', p50: avgLatency, p99: avgLatency * 3 },
-            { time: '08:00', p50: avgLatency, p99: avgLatency * 3 },
-            { time: '16:00', p50: avgLatency, p99: avgLatency * 3 },
-            { time: '24:00', p50: avgLatency, p99: avgLatency * 3 },
-          ]
-        }
-
-        if (!cancelled) {
-          setStats([
-            { ...statCards[0], value: Math.round(totalRequests).toLocaleString(), unit: 'requests' },
-            { ...statCards[1], value: avgLatency > 0 ? avgLatency.toString() : '—', unit: 'ms' },
-            { ...statCards[2], value: `$${totalCost < 0.01 ? totalCost.toFixed(4) : totalCost.toFixed(2)}`, unit: 'USD' },
-            { ...statCards[3], value: hitRate.toString(), unit: '%' },
-            { ...statCards[4], value: tokensSaved > 0 ? Math.round(tokensSaved).toLocaleString() : '0', unit: 'tokens' },
-          ])
-          setCostByUser(userCosts)
-          setLatencyData(displayLatencyData)
-        }
-      } catch {
-        // ignore
-      }
-    }
-
-    load()
-    const interval = setInterval(load, 10000)
-    return () => { cancelled = true; clearInterval(interval) }
-  }, [])
+  const healthQuery = useQuery({
+    queryKey: queryKeys.overview.health,
+    queryFn: async () => (await getHealth()).data,
+    refetchInterval: 30_000,
+  })
+  const metricsQuery = useQuery({
+    queryKey: queryKeys.overview.metrics,
+    queryFn: loadOverviewMetrics,
+    refetchInterval: 10_000,
+  })
+  const health = healthQuery.data ?? null
+  const healthLoading = healthQuery.isLoading
+  const stats = metricsQuery.data?.stats ?? statCards
+  const costByUser = metricsQuery.data?.costByUser ?? []
+  const latencyData = metricsQuery.data?.latencyData ?? []
 
   // 成本分布数据（至少显示一个占位）
   const displayCostData = costByUser.length > 0 ? costByUser : [{ user: '暂无数据', cost: 0 }]

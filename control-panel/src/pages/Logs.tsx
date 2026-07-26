@@ -1,8 +1,12 @@
 import { useEffect, useState, useCallback, useMemo, memo, Fragment } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Search, Filter, Trash2, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, X, Bug, Activity, Clock } from 'lucide-react'
 import Card from '@/components/Card'
 import { getRequestLogs, deleteAllLogs, batchDeleteLogs, getTraceDetail } from '@/api/client'
 import type { LogEntry, TraceDetail, TraceEvent } from '@/api/client'
+import { queryKeys } from '@/query/keys'
+
+const EMPTY_LOGS: LogEntry[] = []
 
 const statusColor = (status: number) => {
   if (status >= 200 && status < 300) return 'badge-success'
@@ -195,21 +199,38 @@ const LogRow = memo(function LogRow({
 
 
 export default function Logs() {
-  const [logs, setLogs] = useState<LogEntry[]>([])
-  const [loading, setLoading] = useState(true)
+  const queryClient = useQueryClient()
   const [searchInput, setSearchInput] = useState('')          // 受控输入
   const [searchTerm, setSearchTerm] = useState('')            // debounce 后
   const [filterStatus, setFilterStatus] = useState<string>('all')
   const [filterCache, setFilterCache] = useState<boolean>(false)
   const [page, setPage] = useState(1)
-  const [total, setTotal] = useState(0)
   const [expandedRow, setExpandedRow] = useState<string | null>(null)
   const [copyFeedback, setCopyFeedback] = useState<string | null>(null)
   const [traceDetail, setTraceDetail] = useState<TraceDetail | null>(null)
   const [traceLoading, setTraceLoading] = useState(false)
   const [selected, setSelected] = useState<Set<string>>(new Set())
-  const [batchDeleting, setBatchDeleting] = useState(false)
   const pageSize = 50
+  const queryParams = { page, pageSize, status: filterStatus, cacheOnly: filterCache }
+  const logsQuery = useQuery({
+    queryKey: queryKeys.logs.list(queryParams),
+    queryFn: async () => {
+      const response = await getRequestLogs({
+        page,
+        pageSize,
+        status: filterStatus === 'all' ? undefined : filterStatus,
+        cache_only: filterCache || undefined,
+      })
+      return response.data
+    },
+    placeholderData: previous => previous,
+  })
+  const deleteAllMutation = useMutation({ mutationFn: deleteAllLogs })
+  const batchDeleteMutation = useMutation({ mutationFn: batchDeleteLogs })
+  const logs = logsQuery.data?.items ?? EMPTY_LOGS
+  const total = logsQuery.data?.pagination.total ?? 0
+  const loading = logsQuery.isLoading || logsQuery.isFetching
+  const batchDeleting = batchDeleteMutation.isPending
 
   // 搜索输入 debounce 200ms:输入法组合期间不触发 filter 重算,避免每敲一个
   // 字符都重刷 50 行表格(卡顿的第二大来源)。
@@ -218,30 +239,10 @@ export default function Logs() {
     return () => clearTimeout(t)
   }, [searchInput])
 
-  const loadLogs = useCallback(async () => {
-    setLoading(true)
-    try {
-      const params: Record<string, unknown> = { page, pageSize }
-      if (filterStatus !== 'all') params.status = filterStatus
-      if (filterCache) params.cache_only = true
-      const r = await getRequestLogs(params as any)
-      setLogs(r.data.items)
-      setTotal(r.data.pagination.total)
-      // 换页/换筛选后,清掉不在当前视图的选中项(避免"选中一堆但翻页看不到")
-      setSelected(prev => {
-        const visible = new Set(r.data.items.map(x => x.request_id))
-        const kept = new Set<string>()
-        prev.forEach(id => { if (visible.has(id)) kept.add(id) })
-        return kept
-      })
-    } catch {
-      // ignore
-    } finally {
-      setLoading(false)
-    }
-  }, [page, filterStatus, filterCache])
-
-  useEffect(() => { loadLogs() }, [loadLogs])
+  useEffect(() => {
+    const visible = new Set(logs.map(item => item.request_id))
+    setSelected(previous => new Set([...previous].filter(id => visible.has(id))))
+  }, [logs])
 
   // 搜索过滤:用 useMemo 缓存,避免每次父组件 render 都重新 filter
   const filtered = useMemo(() => {
@@ -276,11 +277,10 @@ export default function Logs() {
   const handleDeleteAll = async () => {
     if (!confirm('确定清空所有请求日志？此操作不可撤销。')) return
     try {
-      await deleteAllLogs()
-      setLogs([])
-      setTotal(0)
+      await deleteAllMutation.mutateAsync()
       setPage(1)
       setSelected(new Set())
+      await queryClient.invalidateQueries({ queryKey: queryKeys.logs.all })
     } catch {
       alert('清空日志失败')
     }
@@ -290,24 +290,18 @@ export default function Logs() {
     const ids = Array.from(selected)
     if (ids.length === 0) return
     if (!confirm(`确定删除选中的 ${ids.length} 条请求日志？此操作不可撤销。`)) return
-    setBatchDeleting(true)
     try {
-      const resp = await batchDeleteLogs(ids)
-      const deleted = resp.data.deleted
-      // 从本地列表移除,不用重新拉全表
-      setLogs(prev => prev.filter(l => !selected.has(l.request_id)))
-      setTotal(t => Math.max(0, t - deleted))
+      await batchDeleteMutation.mutateAsync(ids)
       setSelected(new Set())
       // 如果当前页删空了,自动回退一页
       if (filtered.length === ids.length && page > 1) {
         setPage(p => p - 1)
       } else {
-        loadLogs()  // 后端拉最新一页,补齐显示条数
+        await logsQuery.refetch()
       }
+      await queryClient.invalidateQueries({ queryKey: queryKeys.logs.all })
     } catch {
       alert('批量删除失败')
-    } finally {
-      setBatchDeleting(false)
     }
   }
 
@@ -338,8 +332,12 @@ export default function Logs() {
   const handleTraceClick = useCallback(async (traceId: string) => {
     setTraceLoading(true)
     try {
-      const r = await getTraceDetail(traceId)
-      setTraceDetail(r.data)
+      const detail = await queryClient.fetchQuery({
+        queryKey: queryKeys.logs.trace(traceId),
+        queryFn: async () => (await getTraceDetail(traceId)).data,
+        staleTime: 30_000,
+      })
+      setTraceDetail(detail)
     } catch {
       const matched = logs.filter(l => l.trace_id === traceId)
       if (matched.length > 0) {
@@ -363,7 +361,7 @@ export default function Logs() {
     } finally {
       setTraceLoading(false)
     }
-  }, [logs])
+  }, [logs, queryClient])
 
   const toggleExpand = useCallback((requestId: string) => {
     setExpandedRow(prev => prev === requestId ? null : requestId)
