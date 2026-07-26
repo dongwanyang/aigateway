@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router'
 import { AlertTriangle, Eye, EyeOff, RefreshCw, Shield, User } from 'lucide-react'
 import Card from '@/components/Card'
 import { useAuth } from '@/contexts/AuthContext'
-import { getBootstrapCredentials, resetPassword } from '@/api/client'
+import { getBootstrapCredentials, resetPassword } from '@/api/authSession'
 
 export default function Login() {
   const { login, isLoading, forceReset, logout, completeForceReset } = useAuth()
@@ -40,7 +40,7 @@ export default function Login() {
     setSubmitting(true)
     setError(null)
     try {
-      const result = await login(password, username)
+      const result = await login(username, password)
       if (!result.forceReset) navigate('/', { replace: true })
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '登录失败，请检查用户名和密码')
@@ -88,7 +88,7 @@ export default function Login() {
             <AlertTriangle size={48} style={{ color: 'var(--color-warning)', margin: '0 auto' }} />
             <h1 className="text-xl font-bold mt-4">设置独立管理员密码</h1>
             <p className="text-sm mt-1" style={{ color: 'var(--color-text-tertiary)' }}>
-              初始密码或旧默认管理员 API Key 只用于首次迁移。设置后，控制台登录将使用独立管理员密码。
+              初始密码仅用于首次进入控制台。设置后，控制台登录与 API Key 完全分离。
             </p>
           </div>
           <form onSubmit={handleReset} className="space-y-4">
@@ -99,7 +99,6 @@ export default function Login() {
                 className="input w-full"
                 type="password"
                 autoComplete="new-password"
-                placeholder="输入新的管理员密码"
                 value={newPassword}
                 onChange={event => { setNewPassword(event.target.value); setResetError(null) }}
                 disabled={resetSubmitting}
@@ -111,18 +110,13 @@ export default function Login() {
                 className="input w-full"
                 type="password"
                 autoComplete="new-password"
-                placeholder="再次输入管理员密码"
                 value={confirmPassword}
                 onChange={event => { setConfirmPassword(event.target.value); setResetError(null) }}
                 disabled={resetSubmitting}
               />
             </div>
             {resetError && <div className="text-sm" style={{ color: 'var(--color-danger)' }}>{resetError}</div>}
-            <button
-              type="submit"
-              className="btn btn-primary w-full justify-center"
-              disabled={resetSubmitting || !newPassword.trim() || !confirmPassword.trim()}
-            >
+            <button type="submit" className="btn btn-primary w-full justify-center" disabled={resetSubmitting}>
               {resetSubmitting ? '设置中...' : '设置管理员密码'}
             </button>
           </form>
@@ -158,7 +152,6 @@ export default function Login() {
                 style={{ paddingLeft: '38px' }}
                 type="text"
                 autoComplete="username"
-                placeholder="管理员用户名"
                 value={username}
                 onChange={event => { credentialsTouched.current = true; setUsername(event.target.value); setError(null) }}
                 disabled={submitting}
@@ -173,7 +166,6 @@ export default function Login() {
                 style={{ paddingRight: '42px' }}
                 type={showSecret ? 'text' : 'password'}
                 autoComplete="current-password"
-                placeholder="管理员密码"
                 value={password}
                 onChange={event => { credentialsTouched.current = true; setPassword(event.target.value); setError(null) }}
                 disabled={submitting}
