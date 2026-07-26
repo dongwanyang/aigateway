@@ -25,22 +25,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Audit API project
-        # aigateway-api depends on the local aigateway-core workspace package,
-        # which isn't on PyPI — no-deps audits only the declared dependency
-        # versions without trying to resolve the local package.
-        uses: pypa/gh-action-pip-audit@v1.1.0
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          inputs: aigateway-api/
-          no-deps: true
-      - name: Audit core project
+          python-version: '3.12'
+      - name: Install local packages for audit
+        # Install the local workspace packages so pip-audit can resolve
+        # aigateway-api's dependency on aigateway-core (not on PyPI).
+        run: |
+          pip install -e aigateway-core
+          pip install -e aigateway-api
+          pip install -e aigateway-cli
+      - name: Audit installed environment
         uses: pypa/gh-action-pip-audit@v1.1.0
-        with:
-          inputs: aigateway-core/
-      - name: Audit CLI project
-        uses: pypa/gh-action-pip-audit@v1.1.0
-        with:
-          inputs: aigateway-cli/
       - uses: actions/setup-node@v7
         with:
           node-version: "20"
