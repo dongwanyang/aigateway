@@ -177,6 +177,18 @@ async def _legacy_admin_key(request: Request, candidate: str, *, require_default
     return True
 
 
+async def _legacy_default_key_available(request: Request, candidate: str) -> bool:
+    """Read-only check used by /bootstrap before exposing legacy credentials."""
+    key_store = getattr(request.app.state, "key_store", None)
+    check = getattr(key_store, "check_is_default", None) if key_store is not None else None
+    if check is None:
+        return False
+    try:
+        return bool(await check(_hash_key(candidate)))
+    except Exception:
+        return False
+
+
 async def _is_valid_initial_secret(request: Request, candidate: str) -> bool:
     configured_password = _initial_admin_password()
     if configured_password:
@@ -289,7 +301,7 @@ async def get_bootstrap_credentials(request: Request, response: Response) -> Dic
         }
 
     legacy_key = _initial_admin_key(request)
-    if not legacy_key or not await _legacy_admin_key(request, legacy_key, require_default=True):
+    if not legacy_key or not await _legacy_default_key_available(request, legacy_key):
         return {"data": {"available": False}, "message": "success"}
     return {
         "data": {
