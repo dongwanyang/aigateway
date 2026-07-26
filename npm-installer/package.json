@@ -1,6 +1,6 @@
 {
   "name": "aigateway-installer",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Interactive Docker installer for AI Gateway",
   "type": "module",
   "bin": {
