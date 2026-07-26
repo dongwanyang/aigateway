@@ -1,11 +1,11 @@
 import { createContext, useContext, useEffect, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  clearApiKey,
+  clearBrowserSession,
   getBrowserSession,
-  getSavedApiKey,
-  saveApiKey,
-} from '@/api/client'
+  getSavedSessionMarker,
+  loginWithPassword,
+} from '@/api/authSession'
 import { queryKeys } from '@/query/keys'
 import { useAuthStore } from '@/stores/authStore'
 
@@ -21,7 +21,7 @@ export interface AuthContextValue {
   keyPrefix: string | null
   forceReset: boolean
   isLoading: boolean
-  login: (key: string, username?: string) => Promise<{ forceReset: boolean }>
+  login: (username: string, password: string) => Promise<{ forceReset: boolean }>
   logout: () => Promise<void>
   completeForceReset: () => void
 }
@@ -49,15 +49,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         sessionQuery.data.key_prefix ?? '',
         Boolean(sessionQuery.data.force_reset),
       )
-      if (!getSavedApiKey()) localStorage.setItem('aigateway_session_active', '1')
+      if (!getSavedSessionMarker()) localStorage.setItem('aigateway_session_active', '1')
     } else if (sessionQuery.data || sessionQuery.isError) {
       localStorage.removeItem('aigateway_session_active')
       clear()
     }
   }, [clear, sessionQuery.data, sessionQuery.isError, setAuthenticated])
 
-  const login = async (key: string, username?: string) => {
-    const result = username ? await saveApiKey(key, username) : await saveApiKey(key)
+  const login = async (username: string, password: string) => {
+    const result = await loginWithPassword(username, password)
     const requiresReset = Boolean(result.force_reset)
     setAuthenticated(result.key_prefix, requiresReset)
     queryClient.setQueryData(queryKeys.auth.session, {
@@ -72,7 +72,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const logout = async () => {
     try {
-      await clearApiKey()
+      await clearBrowserSession()
     } finally {
       clear()
       queryClient.removeQueries({ queryKey: queryKeys.auth.session })
