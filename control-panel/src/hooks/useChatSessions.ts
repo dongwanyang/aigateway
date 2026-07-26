@@ -876,8 +876,12 @@ export function useChatSessions(): UseChatSessions {
     } catch (e) {
       const code = e instanceof Error ? e.message : '确认失败'
       const expired = code.includes('expired') || code.includes('not_found')
+      // 上游瞬时不可用(Agnes /videos 502/503):提示用户可重试,而非笼统的"操作失败"。
+      const friendly = code.includes('upstream_unavailable')
+        ? '视频生成上游暂时不可用,请稍后重试'
+        : code
       patchMessage(msgId, m => m.draft
-        ? { ...m, draft: { ...m.draft, status: expired ? 'expired' : 'error', errorMessage: code } }
+        ? { ...m, draft: { ...m.draft, status: expired ? 'expired' : 'error', errorMessage: friendly } }
         : m)
       flushToStorage()
     }

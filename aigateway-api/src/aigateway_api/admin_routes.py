@@ -2870,6 +2870,26 @@ async def confirm_draft(
     try:
         result = await strategy.confirm_draft(draft_id)
     except Exception as exc:
+        # 上游瞬时不可用(Agnes /videos 返回 5xx,或连不上/超时等网络故障):返回 502 + retryable,
+        # 而非 400。400 会误导前端"请求非法,不要重试",而真实情况是服务端临时故障。
+        upstream_status = getattr(exc, "upstream_status", None)
+        upstream_unavailable = getattr(exc, "upstream_unavailable", False)
+        if (isinstance(upstream_status, int) and upstream_status >= 500) or upstream_unavailable:
+            logger.warning(
+                "draft confirm upstream unavailable: %s :: %s (upstream %s)",
+                type(exc).__name__, exc,
+                upstream_status if isinstance(upstream_status, int) else "network error",
+            )
+            detail = {
+                "error": {
+                    "code": "upstream_unavailable",
+                    "message": "视频生成上游暂时不可用,请稍后重试。",
+                    "retryable": True,
+                }
+            }
+            if isinstance(upstream_status, int):
+                detail["error"]["upstream_status"] = upstream_status
+            raise HTTPException(status_code=502, detail=detail)
         logger.error("draft confirm failed: %s :: %s", type(exc).__name__, exc, exc_info=True)
         raise HTTPException(status_code=400, detail={"error": {"code": "draft_confirm_failed", "message": str(exc)}})
 

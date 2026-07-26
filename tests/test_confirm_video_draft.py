@@ -136,6 +136,86 @@ async def test_confirm_video_bridge_exception_wrapped(
 
 
 @pytest.mark.asyncio
+async def test_confirm_video_upstream_503_tagged_retryable(
+    strategy, video_request, default_config
+):
+    """上游 Agnes /videos 返回 503 → DraftWorkflowError 带 upstream_status=503 + upstream_unavailable 前缀。
+
+    confirm 路由据此返回 502 retryable 而非 400。用真实 httpx.HTTPStatusError 模拟,
+    验证 _upstream_http_status 能从异常链取出 response.status_code。
+    """
+    import httpx
+    from unittest.mock import AsyncMock
+
+    result = await strategy.generate_draft(video_request, default_config)
+    draft = await _await_generating(strategy, result.draft_id)
+    draft.generation_params.pop("model", None)
+    await strategy._store_draft(draft, ttl_seconds=60)
+
+    bridge = AsyncMock()
+    bridge._resolve_by_intent = AsyncMock(return_value={
+        "model": "agnes-video-v2.0",
+        "meta": {"reason": "pool_first"},
+    })
+    # 模拟 Agnes /videos 返回 503 —— _do_video_generation 内部 resp.raise_for_status() 抛的就是这个
+    req = httpx.Request("POST", "https://apihub.agnes-ai.com/v1/videos")
+    resp_503 = httpx.Response(status_code=503, request=req)
+    bridge._do_video_generation = AsyncMock(
+        side_effect=httpx.HTTPStatusError("503 Server Unavailable", request=req, response=resp_503)
+    )
+    strategy._litellm_bridge = bridge
+
+    with pytest.raises(DraftWorkflowError) as exc_info:
+        await strategy.confirm_draft(draft.draft_id)
+
+    err = exc_info.value
+    assert err.upstream_status == 503
+    assert err.upstream_unavailable is True
+    assert "upstream_unavailable" in str(err)
+
+
+@pytest.mark.asyncio
+async def test_confirm_video_network_error_tagged_retryable(
+    strategy, video_request, default_config
+):
+    """上游 Agnes 完全连不上(ConnectError,无 HTTP 响应)→ DraftWorkflowError 带
+    upstream_unavailable=True 但无 upstream_status。
+
+    confirm 路由据此仍返回 502 retryable 而非 400。验证 _is_upstream_network_error
+    能从异常链识别 httpx.TransportError/TimeoutException。
+    """
+    import httpx
+    from unittest.mock import AsyncMock
+
+    result = await strategy.generate_draft(video_request, default_config)
+    draft = await _await_generating(strategy, result.draft_id)
+    draft.generation_params.pop("model", None)
+    await strategy._store_draft(draft, ttl_seconds=60)
+
+    bridge = AsyncMock()
+    bridge._resolve_by_intent = AsyncMock(return_value={
+        "model": "agnes-video-v2.0",
+        "meta": {"reason": "pool_first"},
+    })
+    # 模拟 Agnes 完全不可达 —— _do_video_generation 内部 client.post 抛 ConnectError
+    req = httpx.Request("POST", "https://apihub.agnes-ai.com/v1/videos")
+    bridge._do_video_generation = AsyncMock(
+        side_effect=httpx.ConnectError("[Errno 111] Connection refused", request=req)
+    )
+    strategy._litellm_bridge = bridge
+
+    with pytest.raises(DraftWorkflowError) as exc_info:
+        await strategy.confirm_draft(draft.draft_id)
+
+    err = exc_info.value
+    # 网络故障:无 HTTP 状态码,但 upstream_unavailable 标记必须为 True
+    assert err.upstream_unavailable is True
+    assert not hasattr(err, "upstream_status")
+    assert "upstream_unavailable" in str(err)
+    assert "network error" in str(err)
+
+
+@pytest.mark.asyncio
 async def test_confirm_video_no_video_id_raises(
     strategy, video_request, default_config
 ):

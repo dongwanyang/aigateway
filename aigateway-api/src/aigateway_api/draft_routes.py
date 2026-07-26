@@ -155,6 +155,31 @@ async def draft_action(
     except Exception as exc:
         error_msg = str(exc)
 
+        # 上游瞬时不可用(Agnes /videos 5xx,或连不上/超时等网络故障):返回 502 + retryable,
+        # 而非落到 else → 500。与 admin_routes.confirm_draft 保持一致。
+        upstream_status = getattr(exc, "upstream_status", None)
+        upstream_unavailable = getattr(exc, "upstream_unavailable", False)
+        if (isinstance(upstream_status, int) and upstream_status >= 500) or upstream_unavailable:
+            logger.warning(
+                "generation_optimization.draft_action.upstream_unavailable",
+                extra={
+                    "draft_id": draft_id,
+                    "action": action,
+                    "upstream_status": upstream_status if isinstance(upstream_status, int) else None,
+                    "error": error_msg,
+                },
+            )
+            detail = {
+                "error": {
+                    "code": "upstream_unavailable",
+                    "message": "视频生成上游暂时不可用,请稍后重试。",
+                    "retryable": True,
+                }
+            }
+            if isinstance(upstream_status, int):
+                detail["error"]["upstream_status"] = upstream_status
+            raise HTTPException(status_code=502, detail=detail)
+
         # Map DraftWorkflowError messages to appropriate HTTP status codes
         if "not found or expired" in error_msg:
             raise HTTPException(
