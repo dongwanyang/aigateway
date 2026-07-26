@@ -9,6 +9,7 @@ def test_browser_session_is_opaque_and_revocable(tmp_path):
     store = BrowserAuthStore(str(tmp_path / "auth.db"))
     initial_password = "temporary-admin-password"
     user = store.provision_admin("admin", initial_password)
+    assert user is not None
 
     token = store.create_session(
         user["user_id"],
@@ -33,11 +34,23 @@ def test_browser_session_is_opaque_and_revocable(tmp_path):
     assert store.validate_session(token, idle_ttl_seconds=3600) is None
 
 
+def test_initial_admin_provisioning_is_single_winner(tmp_path):
+    store = BrowserAuthStore(str(tmp_path / "auth.db"))
+
+    first = store.provision_admin("admin", "temporary-admin-password")
+    second = store.provision_admin("admin", "temporary-admin-password")
+
+    assert first is not None
+    assert second is None
+    assert store.verify_credentials("admin", "temporary-admin-password") is not None
+
+
 def test_password_change_revokes_old_sessions(tmp_path):
     store = BrowserAuthStore(str(tmp_path / "auth.db"))
     initial_password = "temporary-admin-password"
     new_password = "a-new-independent-password"
     user = store.provision_admin("admin", initial_password)
+    assert user is not None
     token = store.create_session(
         user["user_id"], ttl_seconds=3600, absolute_ttl_seconds=7200
     )
