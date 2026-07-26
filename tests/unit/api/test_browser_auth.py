@@ -7,7 +7,8 @@ from aigateway_api.browser_auth import BrowserAuthStore
 
 def test_browser_session_is_opaque_and_revocable(tmp_path):
     store = BrowserAuthStore(str(tmp_path / "auth.db"))
-    user = store.provision_admin("admin", "legacy-admin-api-key")
+    initial_password = "temporary-admin-password"
+    user = store.provision_admin("admin", initial_password)
 
     token = store.create_session(
         user["user_id"],
@@ -17,7 +18,7 @@ def test_browser_session_is_opaque_and_revocable(tmp_path):
         user_agent="pytest",
     )
 
-    assert token != "legacy-admin-api-key"
+    assert token != initial_password
     assert store.validate_session(token, idle_ttl_seconds=3600) is not None
 
     with store._connect() as conn:
@@ -34,17 +35,19 @@ def test_browser_session_is_opaque_and_revocable(tmp_path):
 
 def test_password_change_revokes_old_sessions(tmp_path):
     store = BrowserAuthStore(str(tmp_path / "auth.db"))
-    user = store.provision_admin("admin", "legacy-admin-api-key")
+    initial_password = "temporary-admin-password"
+    new_password = "a-new-independent-password"
+    user = store.provision_admin("admin", initial_password)
     token = store.create_session(
         user["user_id"], ttl_seconds=3600, absolute_ttl_seconds=7200
     )
 
-    assert store.verify_credentials("admin", "legacy-admin-api-key") is not None
+    assert store.verify_credentials("admin", initial_password) is not None
 
-    store.change_password(user["user_id"], "a-new-independent-password")
+    store.change_password(user["user_id"], new_password)
 
-    assert store.verify_credentials("admin", "legacy-admin-api-key") is None
-    updated = store.verify_credentials("admin", "a-new-independent-password")
+    assert store.verify_credentials("admin", initial_password) is None
+    updated = store.verify_credentials("admin", new_password)
     assert updated is not None
     assert updated["requires_password_change"] == 0
     assert store.validate_session(token, idle_ttl_seconds=3600) is None
