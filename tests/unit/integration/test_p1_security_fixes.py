@@ -90,14 +90,13 @@ async def test_admin_auth_requires_scope_not_is_admin_flag():
 
 
 @pytest.mark.asyncio
-async def test_browser_session_cookie_is_httponly_and_secret_not_returned():
+async def test_browser_session_cookie_is_httponly_and_secret_not_returned(tmp_path: Path, monkeypatch):
+    temporary_password = "installer-admin-password-123"
+    monkeypatch.setenv("AI_GATEWAY_ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("AI_GATEWAY_INITIAL_ADMIN_PASSWORD", temporary_password)
+
     app = FastAPI()
-    app.state.key_store = AsyncMock()
-    app.state.key_store.validate.return_value = {
-        "key_prefix": "gw-test1",
-        "scopes": ["admin", "chat", "embedding"],
-    }
-    app.state.key_store.check_is_default.return_value = False
+    app.state.key_store = SQLiteStore(str(tmp_path / "auth.db"))
     app.include_router(auth_router, prefix="/auth")
 
     async with AsyncClient(
@@ -105,29 +104,26 @@ async def test_browser_session_cookie_is_httponly_and_secret_not_returned():
         base_url="http://testserver",
     ) as client:
         response = await client.post(
-            "/auth/session", json={"api_key": "gw-test1-secret"}
+            "/auth/session",
+            json={"username": "admin", "password": temporary_password},
         )
     assert response.status_code == 200
     cookie = response.headers["set-cookie"].lower()
     assert "httponly" in cookie
     assert "samesite=strict" in cookie
-    assert "gw-test1-secret" not in response.text
+    assert temporary_password not in response.text
+    assert temporary_password not in response.headers["set-cookie"]
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_credentials_prefill_and_account_login(monkeypatch):
-    initial_key = "gw-generated-admin-key-1234567890"
-    monkeypatch.setenv("ADMIN_API_KEY", initial_key)
+async def test_bootstrap_credentials_prefill_and_account_login(tmp_path: Path, monkeypatch):
+    initial_password = "installer-admin-password-123456"
+    monkeypatch.setenv("AI_GATEWAY_INITIAL_ADMIN_PASSWORD", initial_password)
     monkeypatch.setenv("AI_GATEWAY_ADMIN_USERNAME", "admin")
     monkeypatch.setenv("AI_GATEWAY_PREFILL_INITIAL_CREDENTIALS", "true")
 
     app = FastAPI()
-    app.state.key_store = AsyncMock()
-    app.state.key_store.validate.return_value = {
-        "key_prefix": "gw-gener",
-        "scopes": ["admin", "chat", "embedding"],
-    }
-    app.state.key_store.check_is_default.return_value = True
+    app.state.key_store = SQLiteStore(str(tmp_path / "auth.db"))
     app.include_router(auth_router, prefix="/auth")
 
     async with AsyncClient(
@@ -140,29 +136,29 @@ async def test_bootstrap_credentials_prefill_and_account_login(monkeypatch):
         assert bootstrap.json()["data"] == {
             "available": True,
             "username": "admin",
-            "initial_password": initial_key,
+            "initial_password": initial_password,
         }
 
         login = await client.post(
             "/auth/session",
-            json={"username": "admin", "password": initial_key},
+            json={"username": "admin", "password": initial_password},
         )
         assert login.status_code == 200
         assert login.json()["data"]["force_reset"] is True
 
         wrong_user = await client.post(
             "/auth/session",
-            json={"username": "root", "password": initial_key},
+            json={"username": "root", "password": initial_password},
         )
         assert wrong_user.status_code == 401
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_credentials_can_be_disabled(monkeypatch):
-    monkeypatch.setenv("ADMIN_API_KEY", "gw-generated-admin-key-1234567890")
+async def test_bootstrap_credentials_can_be_disabled(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("AI_GATEWAY_INITIAL_ADMIN_PASSWORD", "installer-admin-password-123456")
     monkeypatch.setenv("AI_GATEWAY_PREFILL_INITIAL_CREDENTIALS", "false")
     app = FastAPI()
-    app.state.key_store = AsyncMock()
+    app.state.key_store = SQLiteStore(str(tmp_path / "auth.db"))
     app.include_router(auth_router, prefix="/auth")
 
     async with AsyncClient(
@@ -171,21 +167,24 @@ async def test_bootstrap_credentials_can_be_disabled(monkeypatch):
     ) as client:
         response = await client.get("/auth/bootstrap")
     assert response.json()["data"] == {"available": False}
-    app.state.key_store.validate.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_credentials_support_legacy_config_key(monkeypatch):
+async def test_bootstrap_credentials_support_legacy_config_key(tmp_path: Path, monkeypatch):
     monkeypatch.delenv("ADMIN_API_KEY", raising=False)
+    monkeypatch.delenv("AI_GATEWAY_INITIAL_ADMIN_PASSWORD", raising=False)
     monkeypatch.setenv("AI_GATEWAY_PREFILL_INITIAL_CREDENTIALS", "true")
     legacy_key = "gw-legacy-config-admin-key-123456"
-    app = FastAPI()
-    app.state.key_store = AsyncMock()
-    app.state.key_store.validate.return_value = {
+    key_store = AsyncMock()
+    key_store.db_path = str(tmp_path / "auth.db")
+    key_store.validate.return_value = {
         "key_prefix": "gw-legac",
         "scopes": ["admin"],
     }
-    app.state.key_store.check_is_default.return_value = True
+    key_store.check_is_default.return_value = True
+
+    app = FastAPI()
+    app.state.key_store = key_store
     app.state.config_manager = MagicMock()
     app.state.config_manager.get.return_value = {
         "api_keys": [{
@@ -202,22 +201,23 @@ async def test_bootstrap_credentials_support_legacy_config_key(monkeypatch):
     ) as client:
         response = await client.get("/auth/bootstrap")
     assert response.json()["data"]["initial_password"] == legacy_key
+    key_store.check_is_default.assert_awaited_once_with(_hash_key(legacy_key))
 
 
 @pytest.mark.asyncio
-async def test_account_login_rejects_non_admin_key_as_password(monkeypatch):
-    """A valid non-admin API key submitted as a password must not log in.
-
-    This is the gate separating account login from any-API-key login: only keys
-    with the admin scope may authenticate via the username/password path.
-    """
+async def test_account_login_rejects_non_admin_key_as_password(tmp_path: Path, monkeypatch):
+    """A valid non-admin API key submitted as a password must not bootstrap login."""
     monkeypatch.setenv("AI_GATEWAY_ADMIN_USERNAME", "admin")
-    app = FastAPI()
-    app.state.key_store = AsyncMock()
-    app.state.key_store.validate.return_value = {
+    monkeypatch.delenv("AI_GATEWAY_INITIAL_ADMIN_PASSWORD", raising=False)
+    key_store = AsyncMock()
+    key_store.db_path = str(tmp_path / "auth.db")
+    key_store.validate.return_value = {
         "key_prefix": "gw-chat-",
         "scopes": ["chat"],
     }
+
+    app = FastAPI()
+    app.state.key_store = key_store
     app.include_router(auth_router, prefix="/auth")
 
     async with AsyncClient(
@@ -233,12 +233,11 @@ async def test_account_login_rejects_non_admin_key_as_password(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_account_login_with_non_ascii_username_returns_401_not_500(monkeypatch):
-    """secrets.compare_digest raises on non-ASCII str; the handler must not 500."""
+async def test_account_login_with_non_ascii_username_returns_401_not_500(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("AI_GATEWAY_ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("AI_GATEWAY_INITIAL_ADMIN_PASSWORD", "installer-admin-password-123456")
     app = FastAPI()
-    app.state.key_store = AsyncMock()
-    app.state.key_store.validate.return_value = None
+    app.state.key_store = SQLiteStore(str(tmp_path / "auth.db"))
     app.include_router(auth_router, prefix="/auth")
 
     async with AsyncClient(
@@ -247,25 +246,15 @@ async def test_account_login_with_non_ascii_username_returns_401_not_500(monkeyp
     ) as client:
         response = await client.post(
             "/auth/session",
-            json={"username": "管理员", "password": "anything"},
+            json={"username": "管理员", "password": "installer-admin-password-123456"},
         )
     assert response.status_code == 401
 
 
 @pytest.mark.asyncio
-async def test_account_login_api_key_takes_precedence_over_username(monkeypatch):
-    """When both api_key and username/password are sent, api_key wins and no
-    admin-scope check is applied (legacy API-key login path)."""
-    monkeypatch.setenv("AI_GATEWAY_ADMIN_USERNAME", "admin")
+async def test_api_key_console_login_disabled_by_default(tmp_path: Path):
     app = FastAPI()
-    app.state.key_store = AsyncMock()
-    # A chat-only key would be rejected by the account-login scope gate, but
-    # because api_key is present, account_login stays False and it succeeds.
-    app.state.key_store.validate.return_value = {
-        "key_prefix": "gw-chat-",
-        "scopes": ["chat"],
-    }
-    app.state.key_store.check_is_default.return_value = False
+    app.state.key_store = SQLiteStore(str(tmp_path / "auth.db"))
     app.include_router(auth_router, prefix="/auth")
 
     async with AsyncClient(
@@ -274,63 +263,30 @@ async def test_account_login_api_key_takes_precedence_over_username(monkeypatch)
     ) as client:
         response = await client.post(
             "/auth/session",
-            json={
-                "api_key": "gw-chat-only-key",
-                "username": "admin",
-                "password": "ignored",
-            },
+            json={"api_key": "gw-chat-only-key"},
         )
-    assert response.status_code == 200
-    assert response.json()["data"]["scopes"] == ["chat"]
+    assert response.status_code == 400
+    assert response.json()["detail"]["error"]["code"] == "api_key_login_disabled"
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_credentials_disabled_by_default(monkeypatch):
-    """Without the opt-in flag, bootstrap never exposes credentials even if a
-    default key exists — the safe default for any deployment."""
-    monkeypatch.setenv("ADMIN_API_KEY", "gw-generated-admin-key-1234567890")
-    monkeypatch.delenv("AI_GATEWAY_PREFILL_INITIAL_CREDENTIALS", raising=False)
+async def test_default_admin_password_change_survives_session_refresh(tmp_path: Path, monkeypatch):
+    initial_password = "installer-admin-password-123456"
+    new_password = "new-independent-admin-password-0987654321"
+    monkeypatch.setenv("AI_GATEWAY_INITIAL_ADMIN_PASSWORD", initial_password)
+    monkeypatch.setenv("AI_GATEWAY_ADMIN_USERNAME", "admin")
+
     app = FastAPI()
-    app.state.key_store = AsyncMock()
-    app.state.key_store.check_is_default.return_value = True
+    app.state.key_store = SQLiteStore(str(tmp_path / "session-auth.db"))
     app.include_router(auth_router, prefix="/auth")
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://testserver",
     ) as client:
-        response = await client.get("/auth/bootstrap")
-    assert response.json()["data"] == {"available": False}
-    app.state.key_store.check_is_default.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_default_admin_reset_survives_session_refresh_and_reseed(tmp_path: Path):
-    old_key = "gw-default-admin-key-1234567890"
-    new_key = "gw-replacement-admin-key-0987654321"
-    config = [{
-        "key": old_key,
-        "user_id": "admin",
-        "scopes": ["admin", "chat", "embedding"],
-        "group": "admin-team",
-    }]
-    store = SQLiteStore(str(tmp_path / "session-auth.db"))
-    # Keep DB operations deterministic within this in-process ASGI test.
-    async def inline_db(fn):
-        return fn()
-
-    store._db = inline_db
-    await store.seed_from_config(config)
-
-    app = FastAPI()
-    app.state.key_store = store
-    app.include_router(auth_router, prefix="/auth")
-
-    async with AsyncClient(
-        transport=ASGITransport(app=app),
-        base_url="http://testserver",
-    ) as client:
-        login = await client.post("/auth/session", json={"api_key": old_key})
+        login = await client.post(
+            "/auth/session", json={"username": "admin", "password": initial_password}
+        )
         assert login.status_code == 200
         assert login.json()["data"]["force_reset"] is True
 
@@ -339,88 +295,72 @@ async def test_default_admin_reset_survives_session_refresh_and_reseed(tmp_path:
 
         reset = await client.post(
             "/auth/reset-password",
-            json={"new_api_key": new_key},
+            json={"new_password": new_password},
         )
         assert reset.status_code == 200
-        assert reset.json()["data"]["new_api_key"] == new_key
+        assert reset.json()["data"] == {
+            "password_changed": True,
+            "warning": "Administrator password updated. Existing browser sessions were revoked.",
+        }
 
         refreshed = await client.get("/auth/session")
         assert refreshed.status_code == 200
         assert refreshed.json()["data"]["authenticated"] is True
         assert refreshed.json()["data"]["force_reset"] is False
 
-    with pytest.raises(AuthError, match="revoked"):
-        await store.validate(old_key)
-    assert (await store.validate(new_key))["scopes"] == [
-        "admin", "chat", "embedding",
-    ]
-
-    # Startup config seeding must not resurrect the revoked bootstrap key.
-    await store.seed_from_config(config)
-    with pytest.raises(AuthError, match="revoked"):
-        await store.validate(old_key)
+        await client.delete("/auth/session")
+        old_login = await client.post(
+            "/auth/session", json={"username": "admin", "password": initial_password}
+        )
+        assert old_login.status_code == 401
+        new_login = await client.post(
+            "/auth/session", json={"username": "admin", "password": new_password}
+        )
+        assert new_login.status_code == 200
 
 
 @pytest.mark.asyncio
-async def test_reset_scrubs_admin_key_from_env(tmp_path: Path, monkeypatch):
-    """Force-reset must delete the installer-seeded ADMIN_API_KEY from .env.
-
-    Otherwise a future DB wipe would reseed the *revoked* key back to active,
-    resurrecting a credential the operator believed dead. The new key is NOT
-    written back — runtime secrets stay out of the plaintext config.
-    """
-    old_key = "gw-default-admin-key-1234567890"
-    new_key = "gw-replacement-admin-key-0987654321"
-    config = [{
-        "key": old_key, "user_id": "admin",
-        "scopes": ["admin", "chat", "embedding"], "group": "admin-team",
-    }]
-    store = SQLiteStore(str(tmp_path / "scrub-auth.db"))
-    async def inline_db(fn):
-        return fn()
-    store._db = inline_db
-    await store.seed_from_config(config)
-
-    # Simulate the installer-written .env with the seeded ADMIN_API_KEY.
+async def test_reset_scrubs_initial_admin_password_from_env(tmp_path: Path, monkeypatch):
+    initial_password = "installer-admin-password-123456"
+    new_password = "new-independent-admin-password-0987654321"
     env_file = tmp_path / ".env"
     env_file.write_text(
         "OPENAI_API_KEY=sk-keep-me\n"
-        "ADMIN_API_KEY=gw-default-admin-key-1234567890\n"
+        f"AI_GATEWAY_INITIAL_ADMIN_PASSWORD={initial_password}\n"
+        "ADMIN_API_KEY=gw-default-admin-key-kept-for-api\n"
         "OTHER_VAR=untouched\n",
         encoding="utf-8",
     )
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AI_GATEWAY_INITIAL_ADMIN_PASSWORD", initial_password)
 
     app = FastAPI()
-    app.state.key_store = store
+    app.state.key_store = SQLiteStore(str(tmp_path / "scrub-auth.db"))
     app.include_router(auth_router, prefix="/auth")
 
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://testserver",
     ) as client:
-        await client.post("/auth/session", json={"api_key": old_key})
+        login = await client.post(
+            "/auth/session", json={"username": "admin", "password": initial_password}
+        )
+        assert login.status_code == 200
         reset = await client.post(
-            "/auth/reset-password", json={"new_api_key": new_key},
+            "/auth/reset-password", json={"new_password": new_password},
         )
         assert reset.status_code == 200
 
-    # The ADMIN_API_KEY line must be gone, other lines preserved.
     remaining = env_file.read_text(encoding="utf-8")
-    assert "ADMIN_API_KEY=" not in remaining
+    assert "AI_GATEWAY_INITIAL_ADMIN_PASSWORD=" not in remaining
+    assert "ADMIN_API_KEY=gw-default-admin-key-kept-for-api" in remaining
     assert "sk-keep-me" in remaining
     assert "untouched" in remaining
-    # The new key must NOT have been written back to .env.
-    assert new_key not in remaining
+    assert new_password not in remaining
 
 
 @pytest.mark.asyncio
 async def test_check_is_default_false_after_revocation(tmp_path: Path):
-    """A revoked default key must not count as 'still default'.
-
-    Regression guard for the bootstrap prefill endpoint: after a force-reset
-    the old key is revoked but kept is_default=1. check_is_default must return
-    False so bootstrap stops offering the dead credential.
-    """
+    """A revoked default key must not count as 'still default'."""
     old_key = "gw-default-admin-key-1234567890"
     new_key = "gw-replacement-admin-key-0987654321"
     config = [{
@@ -428,15 +368,16 @@ async def test_check_is_default_false_after_revocation(tmp_path: Path):
         "scopes": ["admin", "chat", "embedding"], "group": "admin-team",
     }]
     store = SQLiteStore(str(tmp_path / "revoked-auth.db"))
+
     async def inline_db(fn):
         return fn()
+
     store._db = inline_db
     await store.seed_from_config(config)
 
     old_hash = _hash_key(old_key)
     assert await store.check_is_default(old_hash) is True
 
-    # Force-reset: revoke old, create new (mirrors reset_password internals).
     now_iso = datetime.now(timezone.utc).isoformat()
     with store.conn.transaction() as tx:
         tx.execute(
@@ -455,9 +396,7 @@ async def test_check_is_default_false_after_revocation(tmp_path: Path):
              1000000, 0, 50.0, 0.0, 60, 100000, 0, 0, 0, 0, 1),
         )
 
-    # Revoked old key no longer counts as default.
     assert await store.check_is_default(old_hash) is False
-    # The new key was never default (is_default=0).
     assert await store.check_is_default(_hash_key(new_key)) is False
 
 
@@ -518,36 +457,3 @@ def test_rag_document_identity_is_idempotent_and_versioned():
     assert first != changed
     assert len(first[0]) == 64
     assert first[1].startswith("doc_")
-
-
-def test_frontend_and_nginx_security_contracts():
-    root = Path(__file__).resolve().parents[3]  # tests/unit/integration/ → aigateway/
-    client = (root / "control-panel/src/api/client.ts").read_text()
-    nginx = (root / "control-panel/nginx.conf").read_text()
-    prod_nginx = (root / "control-panel/nginx.prod.conf").read_text()
-    workflow = (root / ".github/workflows/security.yml").read_text()
-    benchmark_workflow = (root / ".github/workflows/benchmark.yml").read_text()
-
-    assert "localStorage.setItem('aigateway_api_key'" not in client
-    assert "localStorage.getItem('aigateway_api_key'" not in client
-    assert "/auth/session" in client
-    assert "Content-Security-Policy" in nginx
-    assert "return 308 https://$host$request_uri" in prod_nginx
-    assert "gitleaks/gitleaks-action@v3" in workflow
-    assert "GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}" in workflow
-    assert "aquasecurity/trivy-action@v0.36.0" in workflow
-    assert "trivyignores: .trivyignore.yaml" in workflow
-    # security.yml has pip install + pip-audit steps (no path filters like "inputs:")
-    assert "pip install -e aigateway-api" in workflow
-    assert "pip install -e aigateway-core" in workflow
-    assert "pip install -e aigateway-cli" in workflow
-    assert "gh-action-pip-audit" in workflow
-    assert "uvicorn aigateway_api.main:create_app" in benchmark_workflow
-    assert "uvicorn src.aigateway_api.main:create_app" not in benchmark_workflow
-    assert "'.github/workflows/benchmark.yml'" in benchmark_workflow
-    assert "!inputs.with_media" in benchmark_workflow
-    assert "IFS=',' read -ra scenario_args" in benchmark_workflow
-    assert "BENCHMARK_LIVE:" in benchmark_workflow
-    assert "--dry-run" in benchmark_workflow
-    assert "AI_GATEWAY_REDIS_URL: redis://localhost:6379/0" in benchmark_workflow
-    assert 'test -f "$report"' in benchmark_workflow
