@@ -88,7 +88,7 @@ export default function Login() {
             <AlertTriangle size={48} style={{ color: 'var(--color-warning)', margin: '0 auto' }} />
             <h1 className="text-xl font-bold mt-4">设置独立管理员密码</h1>
             <p className="text-sm mt-1" style={{ color: 'var(--color-text-tertiary)' }}>
-              旧管理员 API Key 仅用于本次迁移。设置后，控制台登录与 API Key 将完全分离。
+              初始密码或旧默认管理员 API Key 只用于首次迁移。设置后，控制台登录将使用独立管理员密码。
             </p>
           </div>
           <form onSubmit={handleReset} className="space-y-4">
@@ -99,6 +99,7 @@ export default function Login() {
                 className="input w-full"
                 type="password"
                 autoComplete="new-password"
+                placeholder="输入新的管理员密码"
                 value={newPassword}
                 onChange={event => { setNewPassword(event.target.value); setResetError(null) }}
                 disabled={resetSubmitting}
@@ -110,13 +111,18 @@ export default function Login() {
                 className="input w-full"
                 type="password"
                 autoComplete="new-password"
+                placeholder="再次输入管理员密码"
                 value={confirmPassword}
                 onChange={event => { setConfirmPassword(event.target.value); setResetError(null) }}
                 disabled={resetSubmitting}
               />
             </div>
             {resetError && <div className="text-sm" style={{ color: 'var(--color-danger)' }}>{resetError}</div>}
-            <button type="submit" className="btn btn-primary w-full justify-center" disabled={resetSubmitting}>
+            <button
+              type="submit"
+              className="btn btn-primary w-full justify-center"
+              disabled={resetSubmitting || !newPassword.trim() || !confirmPassword.trim()}
+            >
               {resetSubmitting ? '设置中...' : '设置管理员密码'}
             </button>
           </form>
@@ -152,6 +158,7 @@ export default function Login() {
                 style={{ paddingLeft: '38px' }}
                 type="text"
                 autoComplete="username"
+                placeholder="管理员用户名"
                 value={username}
                 onChange={event => { credentialsTouched.current = true; setUsername(event.target.value); setError(null) }}
                 disabled={submitting}
@@ -166,6 +173,7 @@ export default function Login() {
                 style={{ paddingRight: '42px' }}
                 type={showSecret ? 'text' : 'password'}
                 autoComplete="current-password"
+                placeholder="管理员密码"
                 value={password}
                 onChange={event => { credentialsTouched.current = true; setPassword(event.target.value); setError(null) }}
                 disabled={submitting}
