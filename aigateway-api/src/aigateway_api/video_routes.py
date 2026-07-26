@@ -23,7 +23,7 @@ async def retrieve_video(
 ) -> JSONResponse:
     """轮询视频任务状态."""
     require_scope(_auth, "chat")
-    state = get_state()
+    state = get_state(request)
     bridge = getattr(state, "litellm_bridge", None)
     if bridge is None:
         return JSONResponse(

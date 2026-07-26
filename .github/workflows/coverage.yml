@@ -1,0 +1,94 @@
+name: Test Coverage
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  python-coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install -e aigateway-core
+          pip install -e "aigateway-api[all]"
+          pip install -r tests/requirements-test.txt
+
+      - name: Audit test authenticity
+        run: python scripts/audit_tests.py
+
+      - name: Run unit and integration tests with coverage
+        env:
+          AI_GATEWAY_REDIS_URL: redis://localhost:6379/0
+        run: |
+          python -m pytest tests/unit/ \
+            --cov=aigateway_api \
+            --cov=aigateway_core \
+            --cov-config=.coveragerc \
+            --cov-report=term-missing \
+            --cov-report=xml \
+            --strict-markers \
+            --max-warnings=0 \
+            -W error::RuntimeWarning \
+            -q
+
+      - name: Enforce API coverage (>= 80%)
+        run: |
+          coverage report \
+            --include='*/aigateway_api/*' \
+            --fail-under=80
+
+      - name: Enforce core router coverage (>= 90%)
+        run: |
+          coverage report \
+            --include='*/aigateway_core/route/model_resolution/*' \
+            --fail-under=90
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: ./coverage.xml
+          fail_if_ci_error: false
+
+  ui-coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: control-panel
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: control-panel/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run UI tests and enforce coverage (>= 70%)
+        run: npm run test:coverage

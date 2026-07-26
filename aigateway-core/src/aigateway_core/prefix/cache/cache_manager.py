@@ -154,6 +154,7 @@ class CacheManager:
         model_family: str,
         cache_scope: str,
         scope_id: str,
+        pipeline_version: str = "1",
         top_k: int = l2_search.L2_DEFAULT_TOP_K,
         min_score: float = l2_search.L2_DEFAULT_MIN_SCORE,
     ) -> Optional[str]:
@@ -176,6 +177,7 @@ class CacheManager:
             self._redis_client.redis,
             normalized_prompt=normalized_prompt,
             pipeline_kind=pipeline_kind,
+            pipeline_version=pipeline_version,
             model_family=model_family,
             cache_scope=cache_scope,
             scope_id=scope_id,
@@ -225,6 +227,7 @@ class CacheManager:
                 value=value,
                 normalized_prompt=meta.get("normalized_prompt", ""),
                 pipeline_kind=meta.get("pipeline_kind", "understanding"),
+                pipeline_version=meta.get("pipeline_version", "1"),
                 model_family=meta.get("model_family", ""),
                 cache_scope=meta.get("cache_scope", "group"),
                 scope_id=meta.get("scope_id", ""),
@@ -244,6 +247,7 @@ class CacheManager:
         threshold: float = 0.95,
         limit: int = 1,
         user_id: Optional[str] = None,
+        pipeline_version: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Qdrant vector similarity search (L3 semantic cache).
 
@@ -272,6 +276,11 @@ class CacheManager:
             limit=limit,
             score_threshold=threshold,
             user_id=user_id,
+            payload_filters=(
+                {"pipeline_version": pipeline_version}
+                if pipeline_version is not None
+                else None
+            ),
         )
 
         if result is None:
@@ -280,6 +289,13 @@ class CacheManager:
 
         # Extract cached response from payload
         payload = result.get("payload", {})
+        if pipeline_version is not None and payload.get("pipeline_version") != pipeline_version:
+            logger.debug(
+                "L3 缓存策略版本不匹配: cached=%r expected=%r",
+                payload.get("pipeline_version"),
+                pipeline_version,
+            )
+            return None
         response_json = payload.get("response_json", "")
 
         # Check TTL expiry (defensive)
@@ -320,6 +336,7 @@ class CacheManager:
         ttl: Optional[int] = None,
         embedding_model: str = "Qwen/Qwen3-Embedding-0.6B",
         management_mode: str = "auto",
+        pipeline_version: str = "1",
     ) -> None:
         """Store cache result to L3 Qdrant.
 
@@ -345,6 +362,7 @@ class CacheManager:
             "cache_tier": "L3",
             "embedding_model": embedding_model,
             "management_mode": management_mode,
+            "pipeline_version": pipeline_version,
         }
 
         await self._qdrant_client.store_embedding(
@@ -408,6 +426,7 @@ class CacheManager:
                 self._safe_l3_backfill(
                     key, response_json, normalized_prompt,
                     model, user_id, token_count, compute_embedding_fn,
+                    (meta or {}).get("pipeline_version", "1"),
                 )
             )
         else:
@@ -426,6 +445,7 @@ class CacheManager:
         user_id: str,
         token_count: int,
         compute_embedding_fn: Callable[[str], Awaitable[List[float]]],
+        pipeline_version: str = "1",
     ) -> None:
         """L3 async backfill; failure doesn't affect main flow."""
         try:
@@ -438,6 +458,7 @@ class CacheManager:
                 user_id=user_id,
                 token_count=token_count,
                 vector=vector,
+                pipeline_version=pipeline_version,
             )
         except Exception as exc:
             logger.warning("L3 backfill failed: %s", exc)
@@ -527,7 +548,7 @@ class CacheManager:
         Returns:
             64-hex-char SHA-256 hash string. Used as cache key for L1 and
             for L2 BM25 index entry identification (Redis Stack Hash key is
-            ``aigateway:cache:v2search:{key}``).
+            ``aigateway:cache:v3search:{key}``).
         """
         # Bucket sampling params
         temperature = params.pop("temperature", None)
@@ -604,6 +625,7 @@ class CacheManager:
             l2_value = await self.l2_search_get(
                 normalized_prompt=l2_search_meta["normalized_prompt"],
                 pipeline_kind=l2_search_meta.get("pipeline_kind", "understanding"),
+                pipeline_version=l2_search_meta.get("pipeline_version", "1"),
                 model_family=l2_search_meta.get("model_family", ""),
                 cache_scope=l2_search_meta.get("cache_scope", "group"),
                 scope_id=l2_search_meta.get("scope_id", ""),
@@ -622,6 +644,7 @@ class CacheManager:
                 vector=params["vector"],
                 threshold=params.get("threshold", 0.95),
                 user_id=params.get("user_id"),
+                pipeline_version=params.get("pipeline_version"),
             )
             if l3_result is not None:
                 response_json = l3_result.get("response_json", "")
@@ -647,6 +670,7 @@ class CacheManager:
                     l2_meta = {
                         "normalized_prompt": l2_search_meta["normalized_prompt"],
                         "pipeline_kind": l2_search_meta.get("pipeline_kind", "understanding"),
+                        "pipeline_version": l2_search_meta.get("pipeline_version", "1"),
                         "model_family": l2_search_meta.get("model_family", ""),
                         "cache_scope": l2_search_meta.get("cache_scope", "group"),
                         "scope_id": l2_search_meta.get("scope_id", ""),

@@ -23,6 +23,13 @@ import httpx
 
 from .cooldown import ProviderCooldownTracker
 from aigateway_core.dispatch.context import RequestContext
+from aigateway_core.route.model_resolution.policy_engine import (
+    NoModelSatisfiesPolicy,
+    RoutingPolicyConfigError,
+    RoutingPolicyEngine,
+)
+from aigateway_core.route.model_resolution.runtime_router import RuntimeModelRouter
+from aigateway_core.route.model_resolution.task_classifier import TaskClassifier, TaskProfile
 
 logger = logging.getLogger(__name__)
 
@@ -68,9 +75,28 @@ class LiteLLMBridge:
         self.cost_tracker: Any = None
         self._fallback_chain: List[str] = []
         self._model_alias_map: Dict[str, str] = {}  # 裸模型名 -> Router 注册名
+        self._model_providers: Dict[str, str] = {}  # 裸模型名 -> configured provider
         self._model_fallbacks: Dict[str, List[str]] = {}  # 裸模型名 -> ordered fallbacks
         self._model_capabilities: Dict[str, List[str]] = {}  # 裸模型名 -> capabilities 列表
+        self._model_tasks: Dict[str, List[str]] = {}  # 裸模型名 -> task capability 列表
+        self._model_features: Dict[str, List[str]] = {}  # 裸模型名 -> runtime features
         self._model_pricing: Dict[str, Dict[str, float]] = {}  # litellm_model -> {prompt, completion}
+        self._model_latency_ms: Dict[str, float] = {}  # 裸模型名 -> EWMA latency
+        self._task_classifier = TaskClassifier()
+        self._policy_engine = RoutingPolicyEngine(self.config.get("task_routing", {}))
+        self._expose_routing_metadata = (
+            self._policy_engine.expose_debug_metadata
+        )
+        self._runtime_router = RuntimeModelRouter()
+        router_cfg = (
+            (self.config.get("generation_optimization", {}) or {}).get(
+                "model_router", {}
+            )
+            or {}
+        )
+        self._model_quality_scores: Dict[str, int] = dict(
+            router_cfg.get("model_capabilities", {}) or {}
+        )
         # auto 模型解析器(可选,由 main.py 注入)
         # 留作后续复杂度评分接入点; 当前 _resolve_by_intent 不依赖它
         # (ModelRouterStrategy 内部仍用旧 llm/mllm/generative 分类, 见 Task 9)。
@@ -89,6 +115,9 @@ class LiteLLMBridge:
         self,
         intent: str,
         model_hint: Optional[str],
+        messages: Optional[List[Dict[str, Any]]] = None,
+        apply_task_policy: bool = False,
+        task_profile: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """按意图对应能力过滤候选池, 选最佳模型.
 
@@ -96,13 +125,14 @@ class LiteLLMBridge:
             intent: "understanding" | "generation:image" | "generation:video"
             model_hint: 客户端/预判指定的模型名(裸名), 可为 None.
                 若在候选池内则优先选它; 否则忽略.
+            messages: 原始消息，启用任务策略时供 TaskClassifier 使用.
+            apply_task_policy: 是否执行 TaskClassifier -> Policy Engine.
 
         Returns:
             {"model": <resolved>, "meta": {...}} 或 {"error": {...}} (池空).
 
-        Note: 不调 _auto_resolver —— ModelRouterStrategy 内部仍用旧 llm/mllm/generative
-        分类(见 Task 9 才迁移 capabilities), 取值与本函数的 text/image/video 不匹配,
-        调用会选不到模型。池内选首 + hint 优先即可; 复杂度评分留作后续接入点。
+        Note: 先按 text/image/video capability 建池。文本请求可再按 task
+        标签与策略缩小候选范围；未启用或低置信度时回退到 hint/池首。
         """
         required_capability = _INTENT_TO_CAPABILITY.get(intent, "text")
 
@@ -118,6 +148,63 @@ class LiteLLMBridge:
                     "message": f"No model with capability '{required_capability}' for intent '{intent}'",
                 }
             }
+
+        # 文本请求可启用 Task Classifier -> Policy Engine。生成请求仍由
+        # image/video capability 池处理，避免混淆任务类型与调用 endpoint。
+        if (
+            apply_task_policy
+            and intent == "understanding"
+            and self._policy_engine.enabled
+        ):
+            if isinstance(task_profile, TaskProfile):
+                profile = task_profile
+            elif isinstance(task_profile, dict):
+                try:
+                    profile = TaskProfile.from_dict(task_profile)
+                except ValueError:
+                    profile = self._task_classifier.classify(messages or [])
+            else:
+                profile = self._task_classifier.classify(messages or [])
+            try:
+                constraints = self._policy_engine.constrain(
+                    profile=profile,
+                    candidates=pool,
+                    model_hint=model_hint,
+                    model_tasks=self._model_tasks,
+                    model_features=self._model_features,
+                )
+            except NoModelSatisfiesPolicy as exc:
+                return {
+                    "error": {
+                        "code": "no_model_for_policy",
+                        "message": str(exc),
+                    }
+                }
+            health: Dict[str, Dict[str, Any]] = {}
+            if self._cooldown_tracker is not None:
+                try:
+                    raw_health = self._cooldown_tracker.get_all_status() or {}
+                    for health_model, status in raw_health.items():
+                        health[health_model] = status
+                        health[str(health_model).split("/")[-1]] = status
+                except Exception as exc:
+                    logger.warning("task router health snapshot failed: %s", exc)
+            decision = self._runtime_router.route(
+                constraints=constraints,
+                health=health,
+                pricing=self._model_pricing,
+                capability_scores=self._model_quality_scores,
+                latency_ms=self._model_latency_ms,
+            )
+            meta = constraints.as_dict()
+            meta.update(decision.as_dict())
+            meta.update({
+                "intent": intent,
+                "task": profile.as_dict(),
+                "policy_applied": True,
+                "policy_version": self._policy_engine.version,
+            })
+            return {"model": decision.model, "meta": meta}
 
         # hint 在池内 -> 优先
         if model_hint and model_hint in pool:
@@ -160,6 +247,11 @@ class LiteLLMBridge:
 
             # 构建 LiteLLM Router 需要的 model_list 格式
             model_list = self._build_model_list(providers)
+            self._policy_engine.validate_models(
+                self.get_registered_models(),
+                self._model_tasks,
+                self._model_features,
+            )
             routing_strategy_config = self._build_routing_strategy(providers)
 
             # 读取 circuit_breaker 段(向前兼容),映射到 litellm cooldown 参数
@@ -206,6 +298,22 @@ class LiteLLMBridge:
                     model = kwargs.get("model", "") or (kwargs.get("litellm_params") or {}).get("model", "")
                     if tracker_ref is not None:
                         tracker_ref.on_success(model)
+                    bare_model = str(model).split("/")[-1]
+                    elapsed_ms: Optional[float] = None
+                    try:
+                        elapsed_ms = float((end_time - start_time).total_seconds() * 1000)
+                    except Exception:
+                        try:
+                            elapsed_ms = float(end_time - start_time) * 1000
+                        except Exception:
+                            pass
+                    if elapsed_ms is not None and elapsed_ms >= 0:
+                        previous = self._model_latency_ms.get(bare_model)
+                        self._model_latency_ms[bare_model] = (
+                            elapsed_ms
+                            if previous is None
+                            else 0.2 * elapsed_ms + 0.8 * previous
+                        )
                 except Exception as exc:
                     logger.warning("cooldown tracker on_success 异常: %s", exc)
 
@@ -280,6 +388,8 @@ class LiteLLMBridge:
                             model_base_url = model_entry.get("base_url") or None
                             raw_caps = model_entry.get("capabilities")
                             raw_modality = model_entry.get("modality")
+                            raw_tasks = model_entry.get("tasks", [])
+                            raw_features = model_entry.get("features", [])
                             model_caps = self._normalize_model_capabilities(
                                 model_name=model_name,
                                 raw_caps=raw_caps,
@@ -293,6 +403,8 @@ class LiteLLMBridge:
                                 )
                         elif isinstance(model_entry, str):
                             model_name = model_entry
+                            raw_tasks = []
+                            raw_features = []
                             model_caps = self._normalize_model_capabilities(
                                 model_name=model_name,
                                 raw_caps=None,
@@ -303,6 +415,24 @@ class LiteLLMBridge:
 
                         # 记录 capabilities
                         self._model_capabilities[model_name] = model_caps
+                        if isinstance(raw_tasks, list):
+                            self._model_tasks[model_name] = [
+                                str(task) for task in raw_tasks if task
+                            ]
+                        else:
+                            raise RoutingPolicyConfigError(
+                                f"model '{model_name}' tasks must be a list, "
+                                f"got {type(raw_tasks).__name__}"
+                            )
+                        if isinstance(raw_features, list):
+                            self._model_features[model_name] = [
+                                str(feature) for feature in raw_features if feature
+                            ]
+                        else:
+                            raise RoutingPolicyConfigError(
+                                f"model '{model_name}' features must be a list, "
+                                f"got {type(raw_features).__name__}"
+                            )
                         self._model_fallbacks[model_name] = list(fallback_models)
 
                         # 生效的 base_url：优先 per-model，回退 provider 级别
@@ -317,6 +447,7 @@ class LiteLLMBridge:
                             litellm_model = f"{provider_name}/{model_name}"
                         # 建立裸模型名 -> 完整名的映射
                         self._model_alias_map[model_name] = litellm_model
+                        self._model_providers[model_name] = provider_name
 
                         entry = {
                             "model_name": litellm_model,
@@ -348,6 +479,7 @@ class LiteLLMBridge:
                         else:
                             fb_litellm_model = f"{provider_name}/{fb_model_name}"
                         self._model_alias_map[fb_model_name] = fb_litellm_model
+                        self._model_providers[fb_model_name] = provider_name
 
                         fb_entry = {
                             "model_name": fb_litellm_model,
@@ -579,6 +711,8 @@ class LiteLLMBridge:
         extra_headers: Optional[Dict[str, str]] = None,
         intent: str = "understanding",
         model_hint: Optional[str] = None,
+        apply_task_routing: bool = False,
+        task_profile: Optional[Any] = None,
         # 过渡别名:Task 6 之前 dispatcher 仍传 pipeline_kind=,Task 6 后移除。
         pipeline_kind: Optional[str] = None,
         request_context: Optional[RequestContext] = None,
@@ -632,7 +766,6 @@ class LiteLLMBridge:
         # 把旧值映射到 intent; 显式 intent= 优先,仅当 intent 取默认值且 pipeline_kind 显式传入时采用 pipeline_kind。
         _PIPELINE_KIND_TO_INTENT = {
             "understanding": "understanding",
-            "generation": "generation:image",
             "generation:video": "generation:video",
         }
         if pipeline_kind is not None and intent == "understanding":
@@ -643,15 +776,50 @@ class LiteLLMBridge:
         required_capability = _INTENT_TO_CAPABILITY.get(intent, "text")
 
         explicit_model = model if (model and model != "auto") else None
+        if (
+            apply_task_routing
+            and self._policy_engine.model_selection_mode == "strict"
+            and explicit_model
+        ):
+            if not self.is_model_registered(explicit_model):
+                return {
+                    "error": {
+                        "code": "model_not_found",
+                        "message": f"Strict model '{explicit_model}' is not registered",
+                    }
+                }
+            if required_capability not in self._model_capabilities.get(
+                explicit_model, []
+            ):
+                return {
+                    "error": {
+                        "code": "model_incompatible",
+                        "message": (
+                            f"Strict model '{explicit_model}' does not support "
+                            f"capability '{required_capability}'"
+                        ),
+                    }
+                }
         # 显式模型已注册 AND 具备本次意图所需 capability -> 直连(内部调用/合法 hint 走此路径)
-        if explicit_model and self.is_model_registered(explicit_model) \
+        if not apply_task_routing and explicit_model and self.is_model_registered(explicit_model) \
                 and required_capability in self._model_capabilities.get(explicit_model, []):
             # 不触发智能路由(预判/ai_director 内部调用也走此路径)
             pass
         else:
             # 显式模型不具备所需能力(如传 text 模型却意图 image) -> 忽略它作 hint, 走池解析
-            hint = model_hint or explicit_model
-            resolved = await self._resolve_by_intent(intent=intent, model_hint=hint)
+            hint = (
+                explicit_model
+                if self._policy_engine.model_selection_mode == "strict"
+                and explicit_model
+                else model_hint or explicit_model
+            )
+            resolved = await self._resolve_by_intent(
+                intent=intent,
+                model_hint=hint,
+                messages=messages,
+                apply_task_policy=apply_task_routing,
+                task_profile=task_profile,
+            )
             if "error" in resolved:
                 return {"error": resolved["error"]}
             model = resolved["model"]
@@ -700,6 +868,16 @@ class LiteLLMBridge:
             if fallback_chain is not None
             else self._model_fallbacks.get(model, [])
         )
+        policy_fallbacks = (
+            (auto_router_meta or {}).get("fallback_models", [])
+            if auto_router_meta
+            else []
+        )
+        if fallback_chain is None and policy_fallbacks:
+            effective_fallback_chain = [
+                *policy_fallbacks,
+                *list(effective_fallback_chain or []),
+            ]
         if effective_fallback_chain:
             for fb in effective_fallback_chain:
                 if len(candidates) - 1 >= max_fallback:
@@ -1169,8 +1347,7 @@ class LiteLLMBridge:
         price_per_token = builtin_pricing.get(base_model, 0.000001)
         return round(total_tokens * price_per_token, 6)
 
-    @staticmethod
-    def _extract_provider(model: str) -> str:
+    def _extract_provider(self, model: str) -> str:
         """从模型名提取提供商标识。
 
         Args:
@@ -1179,6 +1356,10 @@ class LiteLLMBridge:
         Returns:
             提供商标识，如 "openai"。
         """
+        bare_model = model.split("/")[-1]
+        configured = self._model_providers.get(bare_model)
+        if configured:
+            return configured
         if "/" in model:
             return model.split("/")[0]
         # 根据模型名猜测提供商
@@ -1270,6 +1451,8 @@ class LiteLLMBridge:
         extra_headers: Optional[Dict[str, str]] = None,
         intent: str = "understanding",
         model_hint: Optional[str] = None,
+        apply_task_routing: bool = False,
+        task_profile: Optional[Any] = None,
         # 过渡别名:Task 6 之前 dispatcher 仍传 pipeline_kind=,Task 6 后移除。
         pipeline_kind: Optional[str] = None,
         request_context: Optional[RequestContext] = None,
@@ -1286,7 +1469,6 @@ class LiteLLMBridge:
         # 把旧值映射到 intent; 显式 intent= 优先,仅当 intent 取默认值且 pipeline_kind 显式传入时采用 pipeline_kind。
         _PIPELINE_KIND_TO_INTENT = {
             "understanding": "understanding",
-            "generation": "generation:image",
             "generation:video": "generation:video",
         }
         if pipeline_kind is not None and intent == "understanding":
@@ -1297,12 +1479,49 @@ class LiteLLMBridge:
 
         explicit_model = model if (model and model != "auto") else None
         auto_router_meta: Optional[Dict[str, Any]] = None
-        if explicit_model and self.is_model_registered(explicit_model) \
+        if (
+            apply_task_routing
+            and self._policy_engine.model_selection_mode == "strict"
+            and explicit_model
+        ):
+            if not self.is_model_registered(explicit_model):
+                yield {
+                    "error": {
+                        "code": "model_not_found",
+                        "message": f"Strict model '{explicit_model}' is not registered",
+                    }
+                }
+                return
+            if required_capability not in self._model_capabilities.get(
+                explicit_model, []
+            ):
+                yield {
+                    "error": {
+                        "code": "model_incompatible",
+                        "message": (
+                            f"Strict model '{explicit_model}' does not support "
+                            f"capability '{required_capability}'"
+                        ),
+                    }
+                }
+                return
+        if not apply_task_routing and explicit_model and self.is_model_registered(explicit_model) \
                 and required_capability in self._model_capabilities.get(explicit_model, []):
             pass
         else:
-            hint = model_hint or explicit_model
-            resolved = await self._resolve_by_intent(intent=intent, model_hint=hint)
+            hint = (
+                explicit_model
+                if self._policy_engine.model_selection_mode == "strict"
+                and explicit_model
+                else model_hint or explicit_model
+            )
+            resolved = await self._resolve_by_intent(
+                intent=intent,
+                model_hint=hint,
+                messages=messages,
+                apply_task_policy=apply_task_routing,
+                task_profile=task_profile,
+            )
             if "error" in resolved:
                 yield {"error": resolved["error"]}
                 return
@@ -1418,6 +1637,16 @@ class LiteLLMBridge:
             if fallback_chain is not None
             else self._model_fallbacks.get(model, [])
         )
+        policy_fallbacks = (
+            (auto_router_meta or {}).get("fallback_models", [])
+            if auto_router_meta
+            else []
+        )
+        if fallback_chain is None and policy_fallbacks:
+            effective_fallback_chain = [
+                *policy_fallbacks,
+                *list(effective_fallback_chain or []),
+            ]
         if effective_fallback_chain:
             for fb in effective_fallback_chain:
                 if len(candidates) - 1 >= max_fallback:
@@ -1461,8 +1690,24 @@ class LiteLLMBridge:
                     raise TimeoutError("retry time budget exhausted")
                 async with asyncio.timeout(remaining):
                     response = await self.router.acompletion(**params)
+                    first_chunk = True
                     async for chunk in response:
                         chunk_data = chunk.dict() if hasattr(chunk, "dict") else dict(chunk)
+                        if first_chunk:
+                            chunk_meta = dict(chunk_data.get("_meta") or {})
+                            chunk_meta.update({
+                                "routed_to": {
+                                    "model": current_model,
+                                    "provider": self._extract_provider(current_model),
+                                },
+                                "model_router": (
+                                    auto_router_meta
+                                    if self._expose_routing_metadata
+                                    else None
+                                ),
+                            })
+                            chunk_data["_meta"] = chunk_meta
+                            first_chunk = False
                         yield chunk_data
 
                 return  # 成功完成

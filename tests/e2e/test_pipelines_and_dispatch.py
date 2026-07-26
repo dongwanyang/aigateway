@@ -54,7 +54,7 @@ def test_c1_understanding_dispatch(user_client, trace_helpers):
     )
     # 502 表示上游不可用，trace 链路无法验证，跳过而非假装通过
     if r.status_code == 502:
-        pytest.skip("Upstream returned 502 — trace chain unverifiable")
+        pytest.fail("Upstream returned 502 — trace chain unverifiable")
     assert r.status_code in (200, 402, 429), f"Unexpected status {r.status_code}"
     evs = trace_helpers.wait(tid, timeout=5.0)
     assert len(evs) > 0, f"No events for understanding request"
@@ -83,9 +83,9 @@ def test_c2_generation_routed_by_intent(user_client, trace_helpers):
             timeout=120,
         )
     except (httpx.ReadTimeout, httpx.TimeoutException):
-        pytest.skip("Request timed out — LLM intent classifier unavailable")
+        pytest.fail("Request timed out — LLM intent classifier unavailable")
     if r.status_code == 502:
-        pytest.skip("Upstream returned 502 — trace chain unverifiable")
+        pytest.fail("Upstream returned 502 — trace chain unverifiable")
     evs = trace_helpers.wait(tid, timeout=5.0)
     assert len(evs) > 0, f"No events for generation request"
     plugin_names = {e.get("name") for e in evs if e.get("kind") == "plugin"}
@@ -94,7 +94,7 @@ def test_c2_generation_routed_by_intent(user_client, trace_helpers):
         # 分类器误判为 understanding (LLM 不可靠) —— skip 而非假绿
         stage_names = {e.get("name") for e in evs if e.get("kind") == "stage"}
         if "prompt_cache.lookup" in stage_names:
-            pytest.skip(
+            pytest.fail(
                 f"Intent classifier routed to understanding (no gen-opt plugins). "
                 f"This is classifier nondeterminism, not a bug. Plugins: {plugin_names}"
             )
@@ -131,11 +131,11 @@ def test_c3_generation_modality_inferred_image(user_client, trace_helpers):
         resp = user_client.post("/v1/chat/completions", json=body,
                          headers={"X-Trace-Id": tid}, timeout=60)
     except (httpx.ReadTimeout, httpx.TimeoutException) as exc:
-        pytest.skip(f"Request timed out: {exc}")
+        pytest.fail(f"Request timed out: {exc}")
     else:
         # 502 = upstream unavailable, trace chain unverifiable
         if resp.status_code == 502:
-            pytest.skip("Upstream returned 502 — trace chain unverifiable")
+            pytest.fail("Upstream returned 502 — trace chain unverifiable")
     # 请求可能因上游拒绝而 4xx/5xx,但 media/pii 都已埋点、finally 已 flush
     evs = trace_helpers.wait(tid, timeout=30.0)
     assert evs, f"No events for multimodal request"
@@ -163,14 +163,14 @@ def test_c4_generation_by_model_name(user_client, trace_helpers):
         timeout=120,
     )
     if r.status_code == 502:
-        pytest.skip("Upstream returned 502 — trace chain unverifiable")
+        pytest.fail("Upstream returned 502 — trace chain unverifiable")
     evs = trace_helpers.wait(tid, timeout=5.0)
     assert len(evs) > 0, f"No events for image model request"
     plugin_names = {e.get("name") for e in evs if e.get("kind") == "plugin"}
     if not (plugin_names & _GEN_OPT_PLUGINS):
         stage_names = {e.get("name") for e in evs if e.get("kind") == "stage"}
         if "prompt_cache.lookup" in stage_names:
-            pytest.skip(
+            pytest.fail(
                 f"Intent classifier routed to understanding despite image model. "
                 f"Classifier nondeterminism. Plugins: {plugin_names}"
             )
@@ -195,7 +195,7 @@ def test_c5_auto_understanding(user_client, trace_helpers):
         timeout=120,
     )
     if r.status_code == 502:
-        pytest.skip("Upstream returned 502 — trace chain unverifiable")
+        pytest.fail("Upstream returned 502 — trace chain unverifiable")
     evs = trace_helpers.wait(tid, timeout=5.0)
     assert len(evs) > 0, f"No events for auto-understanding request"
     stage_names = {e.get("name") for e in evs if e.get("kind") == "stage"}
@@ -220,14 +220,14 @@ def test_c6_auto_generation(user_client, trace_helpers):
         timeout=120,
     )
     if r.status_code == 502:
-        pytest.skip("Upstream returned 502 — trace chain unverifiable")
+        pytest.fail("Upstream returned 502 — trace chain unverifiable")
     evs = trace_helpers.wait(tid, timeout=5.0)
     assert len(evs) > 0, f"No events for auto-generation request"
     plugin_names = {e.get("name") for e in evs if e.get("kind") == "plugin"}
     if not (plugin_names & _GEN_OPT_PLUGINS):
         stage_names = {e.get("name") for e in evs if e.get("kind") == "stage"}
         if "prompt_cache.lookup" in stage_names:
-            pytest.skip(
+            pytest.fail(
                 f"auto+image-prompt routed to understanding. Classifier nondeterminism. "
                 f"Plugins: {plugin_names}"
             )
@@ -287,12 +287,12 @@ def test_c8_generation_skips_prompt_cache(user_client, trace_helpers):
         timeout=120,
     )
     if r.status_code == 502:
-        pytest.skip("Upstream returned 502 — trace chain unverifiable")
+        pytest.fail("Upstream returned 502 — trace chain unverifiable")
     evs = trace_helpers.wait(tid, timeout=5.0)
     plugin_names = {e.get("name") for e in evs if e.get("kind") == "plugin"}
     # 必须先确认走了 generation 管道, 否则 prompt_cache 断言无意义
     if not (plugin_names & _GEN_OPT_PLUGINS):
-        pytest.skip(
+        pytest.fail(
             f"Not routed to generation (classifier nondeterminism); "
             f"prompt_cache assertion only meaningful for generation pipeline. Plugins: {plugin_names}"
         )
@@ -318,7 +318,7 @@ def test_c9_model_router_plugin_is_skipped(user_client, trace_helpers):
         timeout=120,
     )
     if r.status_code == 502:
-        pytest.skip("Upstream returned 502 — trace chain unverifiable")
+        pytest.fail("Upstream returned 502 — trace chain unverifiable")
     evs = trace_helpers.wait(tid, timeout=5.0)
     plugin_events = [e for e in evs if e.get("kind") == "plugin"]
     assert not any("model_router" in (e.get("name") or "") for e in plugin_events), \

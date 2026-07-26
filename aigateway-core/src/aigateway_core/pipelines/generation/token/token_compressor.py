@@ -25,6 +25,7 @@ import asyncio
 import hashlib
 import io
 import logging
+import threading
 import time
 from typing import Any, List, Optional
 
@@ -75,13 +76,17 @@ class TokenCompressorStrategy:
         self._clip_available: bool = False
         self._clip_loaded: bool = False
         self._device: str = self._clip_config.device
+        self._clip_lock = threading.Lock()
 
     def _ensure_clip_loaded(self) -> None:
         """延迟加载 CLIP 模型（首次调用时加载，避免阻塞启动）."""
         if self._clip_loaded:
             return
-        self._clip_loaded = True
-        self._load_clip_model()
+        with self._clip_lock:
+            if self._clip_loaded:
+                return
+            self._clip_loaded = True
+            self._load_clip_model()
 
     def _load_clip_model(self) -> None:
         """初始化时加载 CLIP 模型（一次性）.
@@ -137,9 +142,6 @@ class TokenCompressorStrategy:
             CompressionResult 包含 feature_vector 和 token 节省信息
         """
         start_time = time.monotonic()
-
-        # Lazy load CLIP model on first use (avoids blocking startup)
-        self._ensure_clip_loaded()
 
         # Check format support
         if not self._is_format_supported(image, config):
@@ -259,6 +261,22 @@ class TokenCompressorStrategy:
         Returns:
             CompressionResult
         """
+        # Model loading, URL download, PIL decoding and inference are all
+        # synchronous. Keep the complete work unit outside the event loop.
+        return await asyncio.to_thread(
+            self._do_compress_sync,
+            image,
+            config,
+        )
+
+    def _do_compress_sync(
+        self,
+        image: MediaContent,
+        config: TokenCompressorConfig,
+    ) -> CompressionResult:
+        """同步压缩实现，由 ``_do_compress`` 在线程池中调用。"""
+        self._ensure_clip_loaded()
+
         # Calculate original token count: file_size_bytes / 4
         original_token_count = image.size_bytes // 4
 

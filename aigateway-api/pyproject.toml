@@ -37,3 +37,31 @@ all = ["aigateway-core[rag,vision,gpu]>=0.1.1.0"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/aigateway_api"]
+
+[tool.coverage.run]
+source = ["aigateway_api", "aigateway_core"]
+omit = [
+    "*/tests/*",
+    "*/__pycache__/*",
+    "*/aigateway_api/main.py",
+    "*/aigateway_cli/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .-__main__.",
+    "def __repr__",
+    "raise NotImplementedError",
+    "@abstractmethod",
+]
+show_missing = true
+fail_under = 50
+precision = 2
+skip_empty = true
+
+[tool.coverage.xml]
+output = "coverage.xml"
+
+[tool.coverage.html]
+directory = "htmlcov"

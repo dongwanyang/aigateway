@@ -142,11 +142,11 @@ def reset_debug_state(client: TestClient) -> None:
             )
         except Exception as exc:
             # Some plugins don't support per_plugin debug — log but continue
-            pytest.skip(f"per_plugin debug endpoint failed for {plugin_name}: {exc}")
+            pytest.fail(f"per_plugin debug endpoint failed for {plugin_name}: {exc}")
         try:
             disable_plugin(client, plugin_name)
         except Exception as exc:
-            pytest.skip(f"disable_plugin failed for {plugin_name}: {exc}")
+            pytest.fail(f"disable_plugin failed for {plugin_name}: {exc}")
 
 
 # ------------------------------------------------------------------

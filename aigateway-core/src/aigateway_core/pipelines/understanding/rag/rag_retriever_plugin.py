@@ -713,6 +713,10 @@ class RAGRetrieverPlugin:
         Returns:
             重排序后的节点列表。
         """
+        return await asyncio.to_thread(self._rerank_sync, query, nodes)
+
+    def _rerank_sync(self, query: str, nodes: List[Any]) -> List[Any]:
+        """在线程中加载并运行同步 cross-encoder reranker。"""
         try:
             from llama_index.core.postprocessor import SentenceTransformerRerank
 

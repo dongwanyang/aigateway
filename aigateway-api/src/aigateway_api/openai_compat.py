@@ -12,10 +12,12 @@ OpenAI 兼容接口实现
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
 import os
+import threading
 import time
 import uuid
 from typing import Any, Dict, List, Optional
@@ -26,6 +28,23 @@ from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 _st_model_cache: Dict[str, Any] = {}
+_st_model_lock = threading.Lock()
+
+
+def _encode_with_sentence_transformer(
+    model_name: str,
+    input_texts: List[str],
+) -> Any:
+    """Load/cache and run sentence-transformers outside the event loop."""
+    from sentence_transformers import SentenceTransformer
+
+    # The cache and the shared model instance both require synchronization.
+    with _st_model_lock:
+        model = _st_model_cache.get(model_name)
+        if model is None:
+            model = SentenceTransformer(model_name)
+            _st_model_cache[model_name] = model
+        return model.encode(input_texts, normalize_embeddings=True)
 
 # ------------------------------------------------------------------
 # 请求/响应模型
@@ -78,10 +97,10 @@ from aigateway_core.prefix.cache.l3_semantic import (
 )
 
 
-def _get_app_state() -> Dict[str, Any]:
+def _get_app_state(request: Request | None = None) -> Dict[str, Any]:
     """从 FastAPI get_state() 获取全局组件。"""
     from .app_state import get_state
-    s = get_state()
+    s = get_state(request)
     return {
         "cache_manager": getattr(s, "cache_manager"),
         "key_store": getattr(s, "key_store"),
@@ -458,7 +477,7 @@ async def _apply_prompt_compression(
 
 async def list_models(request: Request) -> JSONResponse:
     """列出可用模型。"""
-    state = _get_app_state()
+    state = _get_app_state(request)
     litellm_bridge = state.get("litellm_bridge")
 
     if litellm_bridge is None:
@@ -512,7 +531,7 @@ async def create_embeddings(
         )
 
     # 获取配置中的 embedding 后端
-    state = _get_app_state()
+    state = _get_app_state(request)
     config_manager = state.get("config_manager")
     embedding_backend = "sentence_transformers"
     embedding_model = body.model or "all-MiniLM-L6-v2"
@@ -527,15 +546,11 @@ async def create_embeddings(
     # sentence-transformers 本地后端
     if embedding_backend == "sentence_transformers":
         try:
-            from sentence_transformers import SentenceTransformer
-            # 模块级缓存，避免每请求加载模型
-            global _st_model_cache
-            _cache = _st_model_cache
-            st_model = _cache.get(embedding_model)
-            if st_model is None:
-                st_model = SentenceTransformer(embedding_model)
-                _cache[embedding_model] = st_model
-            embeddings = st_model.encode(input_texts, normalize_embeddings=True)
+            embeddings = await asyncio.to_thread(
+                _encode_with_sentence_transformer,
+                embedding_model,
+                input_texts,
+            )
         except ImportError:
             return JSONResponse(
                 content={"error": {"code": "unsupported", "message": "sentence-transformers not installed"}},
@@ -667,7 +682,7 @@ def _setup_router() -> Any:
         # 总分总架构：所有请求经 RequestDispatcher 分流到理解/生成管道，
         # 两条管道跑完插件链后统一从 LiteLLMBridge 出口调下游。
         from aigateway_api.dispatcher import RequestDispatcher
-        state = _get_app_state()
+        state = _get_app_state(request)
         dispatcher = RequestDispatcher(state)
         return await dispatcher.dispatch(body, request)
 

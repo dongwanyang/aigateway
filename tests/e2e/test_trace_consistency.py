@@ -74,7 +74,7 @@ def test_c2_generation_chain_full_six_plugins(user_client, trace_helpers):
     if not (plugin_names & _GEN_OPT_PLUGINS):
         stage_names = {e.get("name") for e in evs if e.get("kind") == "stage"}
         if "prompt_cache.lookup" in stage_names:
-            pytest.skip(
+            pytest.fail(
                 f"Intent classifier routed to understanding (no gen-opt plugins). "
                 f"Classifier nondeterminism. Plugins: {plugin_names}"
             )
@@ -104,7 +104,7 @@ def test_c3_three_kinds_present_when_debug_on(admin_client, user_client, trace_h
                 timeout=60,
             )
         except (httpx.ReadTimeout, httpx.TimeoutException):
-            pytest.skip("Request timed out — LLM unavailable")
+            pytest.fail("Request timed out — LLM unavailable")
         evs = trace_helpers.wait(tid)
         kinds = {e.get("kind") for e in evs}
         # uuid prompt 保证 cache miss -> stage 事件必现
@@ -183,7 +183,7 @@ def test_c6_early_return_skip_no_bridge(admin_client, unique_prefix, trace_helpe
         "rate_limit_rpm": 1, "rate_limit_tpm": 1,
     })
     if r.status_code not in (200, 201):
-        pytest.skip(f"cannot make quota key: {r.status_code}")
+        pytest.fail(f"cannot make quota key: {r.status_code}")
     data = r.json().get("data", r.json())
     key = data.get("key") or data.get("api_key")
     kid = data.get("key_id") or data.get("id")
@@ -246,7 +246,7 @@ def test_c7_short_circuit_cache_hit_no_bridge(user_client, trace_helpers):
             timeout=30,
         )
     except (httpx.ReadTimeout, httpx.TimeoutException):
-        pytest.skip("Warm request timed out — LLM unavailable")
+        pytest.fail("Warm request timed out — LLM unavailable")
     # 第二次请求用相同 prompt，应命中缓存
     user_client.post(
         "/v1/chat/completions",
@@ -260,7 +260,7 @@ def test_c7_short_circuit_cache_hit_no_bridge(user_client, trace_helpers):
     evs = trace_helpers.wait(tid)
     names = [e.get("name") for e in evs]
     if "prompt_cache.lookup" not in names:
-        pytest.skip("prompt_cache.lookup event not present; skipping short-circuit assertion")
+        pytest.fail("prompt_cache.lookup event not present; skipping short-circuit assertion")
     pc_idx = names.index("prompt_cache.lookup")
     after = names[pc_idx + 1:]
     assert not any("bridge" in str(n or "") for n in after), \

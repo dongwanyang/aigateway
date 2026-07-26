@@ -165,6 +165,7 @@ Backfill: L2 hit → L1; L3 hit → L1 only (approximate); MISS → L1+L2 + asyn
 | `prefix/media/` | Media Optimization V2. |
 | `control-panel/src/pages/` | 10 page components. |
 | `control-panel/src/api/client.ts` | Fetch calls + `parseMetrics()` (client-side Prometheus text parse). |
+| `tests/unit/` | 1346 unit tests organized by module (cache/, auth/, pii/, dispatch/, pipeline/, bridge/, admin/, integration/, cli/). |
 
 ## Development
 
@@ -198,13 +199,14 @@ docker compose down
 
 ### Testing
 ```bash
-python3 -m pytest tests/ -q                      # unit tests (e2e/ui auto-skipped)
-python3 -m pytest tests/test_cache_key_v2.py -v
-python3 -m pytest tests/ --cov=aigateway_core --cov=aigateway_api
-python3 -m pytest tests/e2e/                     # e2e: needs live gateway + ADMIN_KEY + Redis/Qdrant
-python3 -m pytest tests/ui/                      # UI e2e: needs gateway :8000 + panel :3000
+python3 -m pytest tests/unit/ -q                      # unit tests (e2e/ui auto-skipped)
+python3 -m pytest tests/unit/test_cache_key_v2.py -v
+python3 -m pytest tests/unit/ --cov=aigateway_core --cov=aigateway_api --cov-report=term-missing --cov-report=xml
+python3 -m pytest tests/e2e/                          # e2e: needs live gateway + ADMIN_KEY + Redis/Qdrant
+python3 -m pytest tests/ui/                           # UI e2e: needs gateway :8000 + panel :3000
+cd control-panel && npm test                            # frontend vitest
 ```
-82 unit test files + 8 e2e (`tests/e2e/`, incl. `test_plugin_debug_integration.py`, `test_e2e_multimodal.py`). `tests/conftest.py` gates e2e/ui: only runs when those paths are invoked explicitly (checks `AI_GATEWAY_ADMIN_KEY` + `GET /health`); `pytest tests/` auto-skips them via `pytest_collection_modifyitems` so a missing gateway never hangs the unit run. Env uses `python3` (no `python` alias).
+1346 unit tests in `tests/unit/` organized by module (cache/, auth/, pii/, dispatch/, pipeline/, bridge/, streaming/, tracing/, admin/, integration/, cli/). 8 e2e (`tests/e2e/`). `tests/conftest.py` gates e2e/ui: only runs when those paths are invoked explicitly. Env uses `python3` (no `python` alias).
 
 ### Config precedence (high → low)
 1. Real process env (docker-compose `environment:` / shell `export`)

@@ -32,7 +32,7 @@ def user_client(admin_client, unique_prefix):
         },
     )
     if resp.status_code not in (200, 201):
-        pytest.skip(f"Cannot create test user key: {resp.status_code} {resp.text}")
+        pytest.fail(f"Cannot create test user key: {resp.status_code} {resp.text}")
     data = resp.json()
     # Unwrap {data: {...}} envelope if present
     inner = data.get("data", data)

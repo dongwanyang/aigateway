@@ -46,6 +46,20 @@ from aigateway_core.shared.auth.sqlite_store import SQLiteStore
 
 logger = logging.getLogger(__name__)
 
+
+@asynccontextmanager
+async def _active_app_lifespan(app: "FastAPI"):
+    """Bind ``get_state()`` to the app instance created by Uvicorn's factory."""
+    from .app_state import activate_app, deactivate_app
+
+    activate_app(app)
+    try:
+        async with lifespan(app):
+            yield
+    finally:
+        deactivate_app(app)
+
+
 # ------------------------------------------------------------------
 # 全局异常处理器
 # ------------------------------------------------------------------
@@ -115,8 +129,11 @@ def _register_exception_handlers(app_instance: "FastAPI") -> None:
         request_id = _get_request_id(request)
         body = {"error": {"code": code, "message": msg}}
 
-        # 5xx 错误：固定回显 redacted detail（脱敏），不再受 debug_mode 控制
+        # 5xx 错误不能在 message 中回显原始异常。旧实现只脱敏 detail，
+        # 但 message 仍会泄露 API key、连接串和服务器路径，使脱敏形同虚设。
+        # 对外使用固定文案，诊断信息仅放在经过脱敏的 detail 中。
         if status >= 500:
+            body["error"]["message"] = "Internal Server Error"
             body["error"]["detail"] = f"{type(exc).__name__}: {_redact_5xx_msg(msg)}"
 
         return JSONResponse(
@@ -185,7 +202,7 @@ def _create_app() -> "FastAPI":
         title="AI Gateway API",
         description="OpenAI 兼容的多模型路由网关",
         version="1.0.0",
-        lifespan=lifespan,
+        lifespan=_active_app_lifespan,
     )
 
     # CORS 中间件必须在 app 启动前添加
@@ -532,7 +549,11 @@ async def lifespan(app: "FastAPI"):
     # 初始化 LiteLLM Bridge
     litellm_bridge = None
     try:
+        from aigateway_core.route.model_resolution.policy_engine import (
+            RoutingPolicyConfigError,
+        )
         from aigateway_core.route.bridge.litellm_bridge import LiteLLMBridge
+
         lb = LiteLLMBridge(config_manager.snapshot())
         providers_cfg = config_manager.get("providers", {})
         if providers_cfg:
@@ -543,6 +564,9 @@ async def lifespan(app: "FastAPI"):
             lb.set_auto_resolver(model_router_resolver)
         litellm_bridge = lb
         logger.info("LiteLLM Bridge 初始化完成")
+    except RoutingPolicyConfigError:  # noqa: F821
+        logger.exception("任务路由策略配置无效，拒绝以不确定路由启动")
+        raise
     except Exception as exc:
         logger.warning("LiteLLM Bridge 初始化失败（部分功能不可用）: %s", exc)
 

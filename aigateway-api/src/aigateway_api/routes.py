@@ -45,8 +45,9 @@ async def get_metrics(request: Request) -> FastAPIResponse:
 
     try:
         from .app_state import get_state
-        metrics_collector = getattr(get_state(), "metrics_collector")
-        litellm_bridge = getattr(get_state(), "litellm_bridge", None)
+        state = get_state(request)
+        metrics_collector = getattr(state, "metrics_collector")
+        litellm_bridge = getattr(state, "litellm_bridge", None)
 
         # 更新熔断器状态指标(从 litellm cooldown tracker 读,按 provider 聚合)
         if litellm_bridge and metrics_collector and hasattr(litellm_bridge, "get_cooldown_status_by_provider"):
@@ -90,7 +91,7 @@ async def get_health(request: Request) -> JSONResponse:
     返回各依赖服务的健康状态。
     """
     from .app_state import get_state
-    s = get_state()
+    s = get_state(request)
 
     redis_mgr = getattr(s, "redis_manager")
     qdrant_mgr = getattr(s, "qdrant_manager")

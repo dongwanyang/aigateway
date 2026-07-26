@@ -8,6 +8,10 @@ venv/
 # Build output
 dist/
 build/
+coverage.xml
+.coverage
+htmlcov/
+control-panel/coverage/
 
 # Environment
 .env

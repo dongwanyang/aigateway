@@ -286,7 +286,7 @@ class TestModelsPage:
         assert ok, "Could not read config"
         providers = result.get("data", {}).get("providers", {})
         if not providers:
-            pytest.skip("No providers configured")
+            pytest.fail("No providers configured")
         # Pick the first provider name
         provider_name = next(iter(providers.keys()))
         ok2, result2 = await _direct_api(
@@ -335,11 +335,11 @@ class TestPluginsPage:
         assert ok, "Could not get plugins config"
         plugins = result.get("data", {}).get("plugins", [])
         if not plugins:
-            pytest.skip("No plugins registered")
+            pytest.fail("No plugins registered")
         first = plugins[0]
         name = first.get("name", "")
         if not name:
-            pytest.skip("First plugin has no name")
+            pytest.fail("First plugin has no name")
         # Toggle off
         ok2, _ = await _direct_api("PUT", "/admin/plugins-config", body={"name": name, "enabled": False})
         assert ok2, f"Toggle off {name} failed"
@@ -372,10 +372,10 @@ class TestPluginsPage:
         assert ok
         plugins = result.get("data", {}).get("plugins", [])
         if not plugins:
-            pytest.skip("No plugins registered")
+            pytest.fail("No plugins registered")
         name = plugins[0].get("name", "")
         if not name:
-            pytest.skip("First plugin has no name")
+            pytest.fail("First plugin has no name")
         ok2, _ = await _direct_api("POST", f"/admin/plugins/{name}/debug", body={"enabled": True})
         assert ok2, f"POST /admin/plugins/{name}/debug failed"
 
@@ -732,7 +732,7 @@ class TestCachePage:
         elif isinstance(data, list):
             pass  # bare list is fine
         else:
-            pytest.skip(f"Unexpected L3 entries response shape: {type(data)}")
+            pytest.fail(f"Unexpected L3 entries response shape: {type(data)}")
 
     @pytest.mark.asyncio
     async def test_update_l3_cache_config(self):
@@ -851,7 +851,7 @@ class TestKnowledgePage:
         assert ok
         docs = result.get("data", {}).get("documents", [])
         if not docs:
-            pytest.skip("No RAG documents to delete")
+            pytest.fail("No RAG documents to delete")
         doc_id = docs[0]["doc_id"]
         ok2, result2 = await _direct_api("DELETE", f"/admin/rag/documents/{doc_id}")
         assert ok2, f"DELETE /admin/rag/documents/{doc_id} failed: {result2}"
@@ -1260,7 +1260,7 @@ class TestCachePageExtra:
         assert ok, f"GET /admin/cache/l3/entries failed: {result}"
         entries = result.get("data", {}).get("items", [])
         if not entries:
-            pytest.skip("No L3 cache entries to toggle")
+            pytest.fail("No L3 cache entries to toggle")
         point_id = entries[0].get("id") or entries[0].get("point_id") or entries[0].get("uuid")
         assert point_id, f"Cannot find ID in L3 entry: {entries[0]}"
         ok2, result2 = await _direct_api(
@@ -1279,7 +1279,7 @@ class TestCachePageExtra:
         assert ok
         entries = result.get("data", {}).get("items", [])
         if not entries:
-            pytest.skip("No L3 cache entries to delete")
+            pytest.fail("No L3 cache entries to delete")
         point_id = entries[0].get("id") or entries[0].get("point_id") or entries[0].get("uuid")
         assert point_id, f"Cannot find ID in L3 entry: {entries[0]}"
         ok2, result2 = await _direct_api(
@@ -1315,7 +1315,7 @@ class TestMetricsAndQuotasExtra:
         assert ok
         items = result.get("data", {}).get("items", [])
         if not items:
-            pytest.skip("No API keys to test quota detail")
+            pytest.fail("No API keys to test quota detail")
         key_id = items[0]["id"]
         ok2, result2 = await _direct_api("GET", f"/admin/quotas/{key_id}")
         assert ok2, f"GET /admin/quotas/{key_id} failed: {result2}"
@@ -1327,7 +1327,7 @@ class TestMetricsAndQuotasExtra:
         assert ok
         items = result.get("data", {}).get("items", [])
         if not items:
-            pytest.skip("No groups to test group detail")
+            pytest.fail("No groups to test group detail")
         group_id = items[0]["group_id"]
         ok2, result2 = await _direct_api("GET", f"/admin/groups/{group_id}")
         assert ok2, f"GET group detail for {group_id} failed: {result2}"
@@ -1339,7 +1339,7 @@ class TestMetricsAndQuotasExtra:
         assert ok
         providers = result.get("data", {}).get("providers", {})
         if not providers:
-            pytest.skip("No providers configured")
+            pytest.fail("No providers configured")
         provider_name = next(iter(providers.keys()))
         ok2, result2 = await _direct_api(
             "GET", f"/admin/providers/{provider_name}/models",

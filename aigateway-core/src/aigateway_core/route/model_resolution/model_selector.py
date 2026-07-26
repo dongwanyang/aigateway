@@ -13,9 +13,7 @@ Scoring:
     cost         = pricing[m].prompt + pricing[m].completion
     score        = success_weight * health_score + cost_weight * (1.0 / (1.0 + cost))
 
-``latency_weight`` in config is accepted but ignored — there is no real latency
-data source today; keeping it in the config schema avoids surprising downstream
-callers that set it.
+``latency_weight`` uses the bridge EWMA populated by LiteLLM success callbacks.
 
 Guarantees:
     * ``select_text_model`` NEVER raises — on timeout or any exception it logs a
@@ -47,8 +45,6 @@ class ModelSelector:
         cfg = config or {}
         self._success_rate_weight = float(cfg.get("success_rate_weight", 0.4))
         self._cost_weight = float(cfg.get("cost_weight", 0.2))
-        # Accepted for API compatibility; no real latency data source exists.
-        # Deliberately NOT used in scoring.
         self._latency_weight = float(cfg.get("latency_weight", 0.0))
         self._default_model = default_model
         self._timeout = timeout_seconds
@@ -89,28 +85,44 @@ class ModelSelector:
         status: Dict[str, Dict[str, Any]] = {}
         if cooldown is not None:
             try:
-                status = cooldown.get_all_status() or {}
+                raw_status = cooldown.get_all_status() or {}
+                for status_model, entry in raw_status.items():
+                    status[status_model] = entry
+                    status[str(status_model).split("/")[-1]] = entry
             except Exception as exc:
                 logger.warning("model_selector: get_all_status failed (%s)", exc)
                 status = {}
 
         pricing: Dict[str, Dict[str, float]] = getattr(bridge, "_model_pricing", {}) or {}
+        latency: Dict[str, float] = getattr(bridge, "_model_latency_ms", {}) or {}
 
         best: Optional[str] = None
         best_score = -1.0
         for m in text_pool:
-            entry = status.get(m)
-            # Missing entry OR state OPEN → unhealthy, skip.
-            if entry is None or entry.get("state") == "OPEN":
+            # No tracker entry means "not observed yet", not unhealthy.
+            entry = status.get(m) or {"state": "CLOSED", "failure_count": 0}
+            if entry.get("state") == "OPEN":
                 continue
             failure_count = int(entry.get("failure_count", 0) or 0)
             health_score = 1.0 / (1.0 + failure_count)
 
-            price = pricing.get(m, {}) or {}
-            cost = float(price.get("prompt", 0) or 0) + float(price.get("completion", 0) or 0)
-            cost_score = 1.0 / (1.0 + cost)
+            price = pricing.get(m)
+            if price:
+                cost = float(price.get("prompt", 0) or 0) + float(
+                    price.get("completion", 0) or 0
+                )
+                cost_score = 1.0 / (1.0 + cost)
+            else:
+                cost_score = 0.0
+            latency_score = 1.0 / (
+                1.0 + max(0.0, float(latency.get(m, 1000.0))) / 1000.0
+            )
 
-            score = self._success_rate_weight * health_score + self._cost_weight * cost_score
+            score = (
+                self._success_rate_weight * health_score
+                + self._cost_weight * cost_score
+                + self._latency_weight * latency_score
+            )
             if score > best_score:
                 best_score = score
                 best = m

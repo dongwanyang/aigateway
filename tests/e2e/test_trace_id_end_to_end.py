@@ -27,7 +27,7 @@ def test_t1_auto_generated_trace_id(user_client, trace_helpers):
     assert tid and len(tid) >= 8, f"missing X-Trace-Id header: {dict(r.headers)}"
     # If upstream returned 502, events may not exist — only verify events when request succeeded
     if r.status_code not in (200, 402, 429):
-        pytest.skip(f"Upstream returned {r.status_code} — trace events unverifiable")
+        pytest.fail(f"Upstream returned {r.status_code} — trace events unverifiable")
     evs = trace_helpers.wait(tid)
     assert evs, f"No events for auto-generated trace_id {tid}"
 
@@ -49,7 +49,7 @@ def test_t2_custom_trace_id_passthrough(user_client, trace_helpers):
     assert returned == tid, f"expected header {tid}, got {returned}"
     # Events only exist if request wasn't 502 (upstream unavailable)
     if r.status_code not in (200, 402, 429):
-        pytest.skip(f"Upstream returned {r.status_code} — trace events unverifiable")
+        pytest.fail(f"Upstream returned {r.status_code} — trace events unverifiable")
     evs = trace_helpers.wait(tid)
     assert evs, f"No events stored for custom trace_id {tid}"
 
@@ -67,7 +67,7 @@ def test_t3_events_cover_stage_and_plugin(user_client, trace_helpers):
         timeout=60,
     )
     if r.status_code == 502:
-        pytest.skip("Upstream returned 502 — trace chain unverifiable")
+        pytest.fail("Upstream returned 502 — trace chain unverifiable")
     evs = trace_helpers.wait(tid)
     kinds = {e.get("kind") for e in evs}
     # 至少要有 stage 事件(由 dispatcher 内联埋点产生)
@@ -112,7 +112,7 @@ def test_t5_redis_trace_key_and_ttl(user_client, admin_client, trace_helpers):
         key = f"aigateway:trace:{tid}"
         exists = r.exists(key)
         if not exists:
-            pytest.skip(f"Redis key {key} not found (upstream may have failed before flush)")
+            pytest.fail(f"Redis key {key} not found (upstream may have failed before flush)")
         ttl = r.ttl(key)
         # TTL 应为 7 天 = 604800 秒
         assert 604800 - 10 <= ttl <= 604800 + 10, f"TTL out of expected range: {ttl}"
@@ -165,7 +165,7 @@ def test_t7_early_return_emits_skip(admin_client, unique_prefix, trace_helpers):
         "rate_limit_rpm": 60, "rate_limit_tpm": 1,
     })
     if r.status_code not in (200, 201):
-        pytest.skip(f"cannot create zero-quota key: {r.status_code}")
+        pytest.fail(f"cannot create zero-quota key: {r.status_code}")
     data = r.json().get("data", r.json())
     key = data.get("key") or data.get("api_key")
     kid = data.get("key_id") or data.get("id")

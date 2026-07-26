@@ -98,7 +98,7 @@ def test_trace_events_roundtrip(admin_client, trace_helpers):
         admin_c.close()
     # Upstream may return 502; skip rather than pass on an unverifiable chain
     if resp.status_code == 502:
-        pytest.skip("Upstream returned 502 — trace chain unverifiable")
+        pytest.fail("Upstream returned 502 — trace chain unverifiable")
     assert resp.status_code in (200, 402, 429), \
         f"Unexpected status {resp.status_code}"
     events = trace_helpers.wait(tid, timeout=5.0)

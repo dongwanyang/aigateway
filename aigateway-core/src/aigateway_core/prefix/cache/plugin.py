@@ -6,13 +6,16 @@ module as part of the 总分总 runtime split.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import threading
 from typing import Any, Dict, List, Optional
 
 from aigateway_core.dispatch.context import PipelineContext
 
 logger = logging.getLogger(__name__)
+_semantic_embedding_lock = threading.Lock()
 
 
 class PromptCachePlugin:
@@ -166,15 +169,7 @@ class SemanticCachePlugin:
     async def _compute_embedding(self, text: str) -> Optional[List[float]]:
         """使用 sentence-transformers 计算文本嵌入向量。"""
         try:
-            from sentence_transformers import SentenceTransformer
-            if not hasattr(SemanticCachePlugin, "_model_cache"):
-                SemanticCachePlugin._model_cache: Dict[str, Any] = {}
-            model = SemanticCachePlugin._model_cache.get(self.embedding_model)
-            if model is None:
-                model = SentenceTransformer(self.embedding_model)
-                SemanticCachePlugin._model_cache[self.embedding_model] = model
-            embedding = model.encode(text, normalize_embeddings=True)
-            return embedding.tolist()
+            return await asyncio.to_thread(self._compute_embedding_sync, text)
         except ImportError:
             logger.warning(
                 "sentence-transformers 未安装，无法计算语义缓存向量"
@@ -183,3 +178,17 @@ class SemanticCachePlugin:
         except Exception as exc:
             logger.error("嵌入计算失败: %s", exc)
             return None
+
+    def _compute_embedding_sync(self, text: str) -> List[float]:
+        """在线程中加载并执行同步 sentence-transformers 模型。"""
+        from sentence_transformers import SentenceTransformer
+
+        with _semantic_embedding_lock:
+            if not hasattr(SemanticCachePlugin, "_model_cache"):
+                SemanticCachePlugin._model_cache = {}
+            model = SemanticCachePlugin._model_cache.get(self.embedding_model)
+            if model is None:
+                model = SentenceTransformer(self.embedding_model)
+                SemanticCachePlugin._model_cache[self.embedding_model] = model
+            embedding = model.encode(text, normalize_embeddings=True)
+            return embedding.tolist()

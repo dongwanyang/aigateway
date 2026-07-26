@@ -220,6 +220,7 @@ class QdrantClientManager:
         limit: int = 1,
         score_threshold: float = 0.95,
         user_id: Optional[str] = None,
+        payload_filters: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         """向量相似度搜索（L3 缓存查询）。
 
@@ -233,6 +234,7 @@ class QdrantClientManager:
             limit: 返回结果数量上限，默认 1。
             score_threshold: 最小相似度阈值，默认 0.95。
             user_id: 可选的多租户隔离过滤器。
+            payload_filters: 额外 payload 精确匹配过滤器。
 
         Returns:
             包含 points 列表的字典（含 score 和 payload），
@@ -248,16 +250,20 @@ class QdrantClientManager:
             "score_threshold": score_threshold,
         }
 
-        # 多租户隔离：通过 payload 过滤器限定 user_id
+        # 多租户隔离与调用方语义版本过滤。
+        must_filters: List[Dict[str, Any]] = []
         if user_id:
-            query_payload["filter"] = {
-                "must": [
-                    {
-                        "key": "user_id",
-                        "match": {"value": user_id},
-                    }
-                ]
-            }
+            must_filters.append({
+                "key": "user_id",
+                "match": {"value": user_id},
+            })
+        for key, value in (payload_filters or {}).items():
+            must_filters.append({
+                "key": str(key),
+                "match": {"value": value},
+            })
+        if must_filters:
+            query_payload["filter"] = {"must": must_filters}
 
         resp = await self._http.post(
             f"/collections/{collection}/points/search",

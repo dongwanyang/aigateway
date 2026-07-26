@@ -174,7 +174,7 @@ def test_e4_env_override_priority():
     )
     env_line = proc.stdout.strip()
     if not env_line:
-        pytest.skip("AI_GATEWAY_REDIS_URL not set in container env")
+        pytest.fail("AI_GATEWAY_REDIS_URL not set in container env")
     env_val = env_line.split("=", 1)[1]
     # 验证 env 值确实包含 redis
     assert "redis" in env_val.lower(), f"unexpected env value: {env_val}"
@@ -187,18 +187,18 @@ def test_e5_per_model_base_url():
     """
     r = _admin_get("/admin/providers/agnes/models")
     if r.status_code == 429:
-        pytest.skip("Rate limited on providers endpoint")
+        pytest.fail("Rate limited on providers endpoint")
     if r.status_code != 200:
         data = r.json()
         if "detail" in data and "error" in data.get("detail", {}):
-            pytest.skip(f"Agnes provider unavailable: {data['detail']['error']['message']}")
-        pytest.skip(f"Unexpected status: {r.status_code} {r.text[:200]}")
+            pytest.fail(f"Agnes provider unavailable: {data['detail']['error']['message']}")
+        pytest.fail(f"Unexpected status: {r.status_code} {r.text[:200]}")
     data = r.json()
     models = data.get("data", data)
     if isinstance(models, dict):
         models = models.get("models", models.get("data", []))
     if not isinstance(models, list):
-        pytest.skip(f"Unexpected models shape: {type(models)}")
+        pytest.fail(f"Unexpected models shape: {type(models)}")
     urls_by_name = {}
     for m in models:
         if isinstance(m, dict):
@@ -214,7 +214,7 @@ def test_e6_gen_opt_invalid_value_fallback():
     """§7 #6: PUT 非法 gen-opt 值 → 服务不崩;GET 保持前 valid 值."""
     r_before = _admin_get("/admin/global-config")
     if r_before.status_code >= 400:
-        pytest.skip(f"Rate limited on GET global-config: {r_before.status_code}")
+        pytest.fail(f"Rate limited on GET global-config: {r_before.status_code}")
     r_before_data = r_before.json()
 
     r_put = _admin_put("/admin/global-config", {
@@ -230,7 +230,7 @@ def test_e6_gen_opt_invalid_value_fallback():
     # 值应保持
     r_after = _admin_get("/admin/global-config")
     if r_after.status_code >= 400:
-        pytest.skip(f"Rate limited on GET after PUT: {r_after.status_code}")
+        pytest.fail(f"Rate limited on GET after PUT: {r_after.status_code}")
     r_after_data = r_after.json()
 
     def dig(d, *ks):

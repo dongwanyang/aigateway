@@ -31,7 +31,9 @@ def _explicit_e2e_ui(args) -> bool:
     """调用方是否显式指向 tests/e2e 或 tests/ui(而非泛指 tests/)。"""
     for a in args or []:
         s = str(a).rstrip("/")
-        if s.endswith("tests/e2e") or s.endswith("tests/ui") or "tests/e2e/" in str(a) or "tests/ui/" in str(a):
+        # e2e/ui paths trigger health-check gate
+        if s.endswith("tests/e2e") or s.endswith("tests/ui") or \
+           "tests/e2e/" in str(a) or "tests/ui/" in str(a):
             return True
     return False
 
@@ -54,8 +56,8 @@ def pytest_configure(config):
     """e2e 前置检查:环境变量 + gateway 健康。
 
     仅当调用方显式指向 tests/e2e 或 tests/ui 时才 gate(需要真实 gateway + admin key)。
-    跑 `pytest tests/` 全量时不 gate —— e2e/ui 测试项由
-    pytest_collection_modifyitems 自动 deselect,不会被收集。
+    跑 `pytest tests/` 全量时不预先探测服务；CI 应按层分别执行，
+    e2e/ui 层会在被显式选择时强制检查真实依赖。
     """
     if not _explicit_e2e_ui(config.args):
         _ensure_local_auth_db_path()
@@ -81,19 +83,38 @@ def pytest_configure(config):
 
 
 def pytest_collection_modifyitems(config, items):
-    """跑 `pytest tests/` 全量时,自动 deselect tests/e2e 与 tests/ui 下的测试项。
+    """Reject source-level skip/xfail markers instead of silently going green."""
+    forbidden = {"skip", "skipif", "xfail"}
+    violations = [
+        f"{item.nodeid}: {name}"
+        for item in items
+        for name in forbidden
+        if item.get_closest_marker(name) is not None
+    ]
+    if violations:
+        pytest.exit(
+            "禁止 skip/skipif/xfail；测试必须执行或明确失败：\n"
+            + "\n".join(violations),
+            returncode=2,
+        )
 
-    这些是 e2e/integration 测试,依赖真实 gateway + Redis + LLM API,显式指定
-    `pytest tests/e2e/` 才会(经 pytest_configure gate 后)真正运行。
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """Turn dynamic skips into failures.
+
+    A missing service or malformed response is evidence that the tested path is
+    not healthy.  Reporting it as skipped made CI green while production
+    operations were broken.
     """
-    if _explicit_e2e_ui(config.args):
-        return
-    skip_marker = pytest.mark.skip(
-        reason="e2e/integration 测试: 需真实 gateway,显式跑 `pytest tests/e2e/` 或 `tests/ui/`"
-    )
-    for item in items:
-        if "tests/e2e/" in str(item.fspath).replace("\\", "/") or "tests/ui/" in str(item.fspath).replace("\\", "/"):
-            item.add_marker(skip_marker)
+    outcome = yield
+    report = outcome.get_result()
+    if report.skipped:
+        report.outcome = "failed"
+        report.longrepr = (
+            f"{item.nodeid}: runtime skip is forbidden; "
+            "assert the precondition or fail with the real error"
+        )
 
 
 

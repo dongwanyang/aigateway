@@ -15,6 +15,7 @@
         - doc_lang:          隐式语言字段 (写 chinese 触发 Friso 中文分词)
         - pipeline_kind:     TAG  (隔离 understanding/generation)
         - model_family:      TAG
+        - pipeline_version:  TAG  (路由/管道语义版本)
         - cache_scope:       TAG  (private/group/public)
         - scope_id:          TAG  (user_id 或 group_id, 按 scope 过滤)
         - response_json:     随 Hash 存储、可 return_fields 取回，但不进 schema 索引
@@ -47,8 +48,8 @@ logger = logging.getLogger(__name__)
 # 索引常量
 # ------------------------------------------------------------------
 
-L2_INDEX_NAME = "aigateway:l2:idx"
-L2_HASH_PREFIX = "aigateway:cache:v2search:"
+L2_INDEX_NAME = "aigateway:l2:idx:v3"
+L2_HASH_PREFIX = "aigateway:cache:v3search:"
 
 # BM25 默认阈值。实测分数分布（response_json 不进 schema 后）：
 #   完全相同 prompt ~5、近重复 ~4.75、核心子串 ~3、单核心词 ~2.25、完全不相关 0。
@@ -179,6 +180,7 @@ async def ensure_index(client: Any) -> bool:
         schema = (
             TextField("normalized_prompt", weight=1.0),
             TagField("pipeline_kind", separator="|"),
+            TagField("pipeline_version", separator="|"),
             TagField("model_family", separator="|"),
             TagField("cache_scope", separator="|"),
             TagField("scope_id", separator="|"),
@@ -204,6 +206,7 @@ async def store(
     value: str,
     normalized_prompt: str,
     pipeline_kind: str,
+    pipeline_version: str,
     model_family: str,
     cache_scope: str,
     scope_id: str,
@@ -213,7 +216,7 @@ async def store(
 
     Args:
         client: ``redis.asyncio.Redis``。
-        key: cache key hash (用于生成最终 key: aigateway:cache:v2search:{key})。
+        key: cache key hash (用于生成最终 key: aigateway:cache:v3search:{key})。
         value: OpenAI 格式响应 JSON 字符串。
         normalized_prompt: JSON 序列化的 messages 数组。
         pipeline_kind / model_family / cache_scope / scope_id: 过滤维度。
@@ -235,6 +238,7 @@ async def store(
                 # doc_lang 与索引 LANGUAGE_FIELD 对应，触发 Friso 中文分词
                 "doc_lang": "chinese",
                 "pipeline_kind": _escape_tag(pipeline_kind),
+                "pipeline_version": _escape_tag(pipeline_version),
                 "model_family": _escape_tag(model_family),
                 "cache_scope": _escape_tag(cache_scope),
                 "scope_id": _escape_tag(scope_id),
@@ -256,6 +260,7 @@ async def search(
     client: Any,
     normalized_prompt: str,
     pipeline_kind: str,
+    pipeline_version: str,
     model_family: str,
     cache_scope: str,
     scope_id: str,
@@ -288,6 +293,7 @@ async def search(
     # 过滤子句 (查询侧用 _escape_tag_query 转义 - 和 .，否则 Syntax error)
     filter_clauses = [
         f"@pipeline_kind:{{{ _escape_tag_query(pipeline_kind) }}}",
+        f"@pipeline_version:{{{ _escape_tag_query(pipeline_version) }}}",
         f"@model_family:{{{ _escape_tag_query(model_family) }}}",
         f"@cache_scope:{{{ _escape_tag_query(cache_scope) }}}",
         f"@scope_id:{{{ _escape_tag_query(scope_id) }}}",

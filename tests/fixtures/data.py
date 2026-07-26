@@ -92,7 +92,8 @@ def cleanup_test_data(request, unique_prefix):
     """
     yield
     testpath = str(request.node.fspath)
-    if "/tests/e2e/" not in testpath and "/tests/ui/" not in testpath:
+    # Only e2e/ui tests need redis/qdrant cleanup; unit tests don't touch them
+    if "/tests/unit/" in testpath or "/tests/e2e/" not in testpath and "/tests/ui/" not in testpath:
         return
     _scan_and_delete_redis_keys(f"*{unique_prefix}*")
     _scan_and_delete_qdrant_points_by_prefix(unique_prefix)

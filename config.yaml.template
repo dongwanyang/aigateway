@@ -146,10 +146,14 @@ providers:
           # 字典格式支持 capabilities 标注:
           #   capabilities: 列表，元素取值 text(纯文本/多模态理解) | image(图片生成) | video(视频生成)
           #                 一个模型可同时属于多个能力，如 [text, image, video]
+          #   tasks: 文本任务能力，可选值 coding | reasoning | summary | vision | general
+          #   features: 运行时能力，可选值 vision | tool_calling | structured_output | long_context
           #   base_url:    API 基地址（可选）。若设置，覆盖 providers.<name>.base_url。
           #                留空或省略时，继承 providers.<name>.base_url。
           - name: agnes-2.0-flash
             capabilities: [text, image, video]   # 多模态理解 + 生成，继承提供商 base_url
+            tasks: [general, summary, vision]
+            features: [vision, tool_calling, structured_output, long_context]
           - name: agnes-image-2.1-flash
             capabilities: [image]                # 图片生成
           - name: agnes-video-v2.0
@@ -170,6 +174,8 @@ providers:
       - models:
           - name: deepseek-v4-flash
             capabilities: [text]      # 纯文本理解
+            tasks: [coding, reasoning, general]
+            features: [tool_calling, structured_output, long_context]
         fallback_models: []
         pricing:
           deepseek-v4-flash:
@@ -221,7 +227,7 @@ infrastructure:
 # 缓存配置
 # ==========================
 cache:
-  pipeline_version: "1"       # 管道语义变化时递增，强制失效旧响应
+  pipeline_version: "2"       # 管道语义变化时递增，强制失效旧响应
   l1:                        # L1 进程内 LRU 缓存
     max_entries: 1000        # 最大条目数（LRU 淘汰）
     max_value_bytes: 102400  # 单条最大字节数（100KB），超过不进 L1
@@ -430,8 +436,12 @@ generation_optimization:
 # 意图分类器：对每个请求分类 understanding | generation，超时回退到启发式
 intent_classifier:
   model: agnes-2.0-flash      # 分类使用的模型
-  timeout_seconds: 3          # 分类超时（秒），超时后走 fallback
+  timeout_seconds: 2          # 分类超时（秒），超时后走 fallback
   fallback: heuristic         # 回退策略：heuristic（基于模态/关键词的启发式）
+  fast_path_enabled: true     # 高置信度规则命中时跳过分类 LLM
+  fast_path_confidence: 0.8
+  cache_ttl_seconds: 300      # 仅缓存成功的 LLM 分类结果
+  cache_max_entries: 1024
 
 # 模型选择器：在候选模型中按延迟/成本/成功率加权打分选最优
 model_selector:
@@ -439,6 +449,20 @@ model_selector:
   latency_weight: 0.4         # 延迟权重
   cost_weight: 0.2            # 成本权重
   success_rate_weight: 0.4    # 成功率权重
+
+# 文本任务分类与策略。model 是客户端偏好；若不符合任务策略，会改选更合适的模型。
+task_routing:
+  enabled: true
+  version: "2"                # 策略语义变化时递增，参与缓存 key
+  min_confidence: 0.6         # 低于该置信度时保留原 model hint / 候选池顺序
+  model_selection_mode: policy # strict=尊重显式模型 | policy=策略优先 | auto=忽略 hint
+  expose_debug_metadata: false # 完整候选集仅写 trace，不默认暴露给客户端
+  model_preferences:
+    coding: [deepseek-v4-flash]
+    reasoning: [deepseek-v4-flash]
+    summary: [agnes-2.0-flash]
+    vision: [agnes-2.0-flash]
+    general: [agnes-2.0-flash]
 
 # 生成参数默认值（图片/视频生成路径）
 generation:

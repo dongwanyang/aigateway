@@ -1,38 +1,69 @@
-"""Lazy app state accessor.
+"""Access state from the FastAPI application that is actually running.
 
-Avoids circular imports between admin_routes, openai_compat, routes, etc.
-and main.py (which imports admin_routes in _mount_routes).
+``uvicorn ...:create_app --factory`` creates an application instance that is
+different from the module-level ``aigateway_api.main.app`` object.  Importing
+that global object here therefore returned state from an app whose lifespan
+had never run.
 
-Usage (inside any route/handler function):
-
-    from aigateway_api.app_state import get_state
-    s = get_state()
-    config_manager = getattr(s, "config_manager", None)
-    key_store = getattr(s, "key_store", None)
+The lifespan wrapper now registers the active application explicitly.  Route
+handlers may also pass their ``Request`` to avoid any process-global lookup.
 """
 
 from __future__ import annotations
 
 import logging
+from threading import RLock
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
+_active_apps: list[Any] = []
+_active_apps_lock = RLock()
 
-def get_state() -> object:
-    """Return ``app.state`` from the running FastAPI application.
 
-    Imports ``aigateway_api.main.app`` lazily and reads ``app.state`` fresh on
-    every call. The import itself is cached by Python's module system, so this
-    is cheap; we deliberately do NOT cache ``app.state`` because tests call
-    ``create_app()`` per-case, and a stale cache would hand back the state of
-    a torn-down app. Raises ``RuntimeError`` if the app has not been started
-    (lifespan never ran).
+def activate_app(app: Any) -> None:
+    """Register an application for the duration of its lifespan.
+
+    A list is used instead of a single assignment so nested TestClient
+    lifespans restore the previously active app when the inner client exits.
     """
-    try:
-        from aigateway_api.main import app
-    except ImportError as exc:
+    with _active_apps_lock:
+        _active_apps[:] = [
+            active_app for active_app in _active_apps if active_app is not app
+        ]
+        _active_apps.append(app)
+
+
+def deactivate_app(app: Any) -> None:
+    """Remove a previously registered application, if present."""
+    with _active_apps_lock:
+        _active_apps[:] = [
+            active_app for active_app in _active_apps if active_app is not app
+        ]
+
+
+def get_state(request: Any | None = None) -> object:
+    """Return state from the request app or the active lifespan app.
+
+    Args:
+        request: Optional FastAPI/Starlette request.  Passing it is preferred
+            in route handlers because it identifies the app unambiguously.
+
+    Raises:
+        RuntimeError: If called without a request while no application
+            lifespan is active.
+    """
+    if request is not None:
+        request_app = getattr(request, "app", None)
+        if request_app is None:
+            raise RuntimeError("Cannot access app.state: request has no app")
+        return request_app.state  # type: ignore[no-any-return]
+
+    with _active_apps_lock:
+        active_app = _active_apps[-1] if _active_apps else None
+
+    if active_app is None:
         raise RuntimeError(
-            "Cannot import app.state — the FastAPI application has not been "
-            f"started. Import error: {exc}"
-        ) from exc
-    return app.state  # type: ignore[no-any-return]
+            "Cannot access app.state: no FastAPI application lifespan is active"
+        )
+    return active_app.state  # type: ignore[no-any-return]

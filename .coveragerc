@@ -1,0 +1,24 @@
+[run]
+source =
+    aigateway_api
+    aigateway_core
+omit =
+    */tests/*
+    */__pycache__/*
+
+[report]
+show_missing = True
+precision = 2
+skip_empty = True
+exclude_lines =
+    pragma: no cover
+    if TYPE_CHECKING:
+    if __name__ == .__main__.:
+    raise NotImplementedError
+    @abstractmethod
+
+[xml]
+output = coverage.xml
+
+[html]
+directory = htmlcov

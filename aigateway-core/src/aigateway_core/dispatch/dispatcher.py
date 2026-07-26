@@ -347,8 +347,38 @@ class RequestDispatcher:
 
         # ===== 分流(只看模态和显式意图,不看 body.model)=====
         # auto 请求最终选哪个模型由 bridge 决定,分流器不越权。
-        pipeline_kind, intent_hint = await classify_request(
+        classify_start = time.time()
+        classification = await classify_request(
             body, self.config_manager, intent_classifier=self.intent_classifier
+        )
+        classify_ms = round((time.time() - classify_start) * 1000, 2)
+        pipeline_kind, intent_hint = classification
+        request.state.task_profile = classification.task_profile
+        request.state.intent_hint = intent_hint
+        request.state.classification_source = classification.source
+        task_payload = (
+            classification.task_profile.as_dict()
+            if classification.task_profile is not None
+            else {}
+        )
+        task_payload.update({
+            "pipeline_kind": pipeline_kind,
+            "source": classification.source,
+        })
+        plugin_trace.append({
+            "plugin_name": "task_classifier",
+            "duration_ms": classify_ms,
+            "status": "success",
+            **task_payload,
+        })
+        _emit_stage(
+            request.state.trace_id,
+            "classify",
+            "intent_classifier.classify",
+            classify_ms,
+            "ok",
+            payload=task_payload,
+            dimension="dispatch",
         )
         logger.info(
             "dispatch: pipeline_kind=%s, model=%s, stream=%s",
@@ -425,6 +455,17 @@ class RequestDispatcher:
             pipeline_version = str(
                 self.config_manager.get("cache.pipeline_version", "1") or "1"
             )
+            routing_version = str(
+                self.config_manager.get("task_routing.version", "1") or "1"
+            )
+            profile = getattr(request.state, "task_profile", None)
+            if profile is not None:
+                modalities = ",".join(profile.modalities)
+                pipeline_version = (
+                    f"{pipeline_version}:routing-{routing_version}:"
+                    f"{profile.operation}:{profile.domain}:{modalities}"
+                )
+        request.state.routing_cache_version = pipeline_version
         cache_key = cache_manager.generate_cache_key(
             normalized_prompt=normalized_messages,
             model=body.model,
@@ -447,10 +488,12 @@ class RequestDispatcher:
             "l2_search": {
                 "normalized_prompt": normalized_messages,
                 "pipeline_kind": "understanding",
+                "pipeline_version": pipeline_version,
                 "model_family": _cache_model_family(body.model),
                 "cache_scope": cache_scope,
                 "scope_id": l2_scope_id,
             },
+            "pipeline_version": pipeline_version,
         }
         if cache_manager._qdrant_client is not None:
             from aigateway_core.prefix.cache.l3_semantic import _compute_l3_vector
@@ -837,7 +880,8 @@ class RequestDispatcher:
         )
 
         try:
-            hint = intent_hint
+            hint = intent_hint or getattr(request.state, "intent_hint", None)
+            task_profile = getattr(request.state, "task_profile", None)
             result = await litellm_bridge.completion(
                 messages=body.messages,
                 model=body.model,
@@ -852,6 +896,8 @@ class RequestDispatcher:
                 stop=body.stop,
                 intent=pipeline_kind,
                 model_hint=hint,
+                apply_task_routing=True,
+                task_profile=task_profile,
                 extra_headers=extra_headers,
                 request_context=getattr(request.state, "request_context", None),
             )
@@ -877,7 +923,12 @@ class RequestDispatcher:
                              "duration_ms": _llm_ok_ms,
                              "status": "success"})
         _emit_stage(request.state.trace_id, "bridge", "litellm_bridge.completion", _llm_ok_ms, "ok",
-                    payload={"model": _resolve_logged_model(body.model, result)}, dimension="bridge")
+                    payload={
+                        "model": _resolve_logged_model(body.model, result),
+                        "model_router": (result.get("_meta") or {}).get(
+                            "model_router"
+                        ),
+                    }, dimension="bridge")
 
         # bridge 返回错误
         if "error" in result and "data" not in result:
@@ -886,7 +937,11 @@ class RequestDispatcher:
                 tracker.__exit__(None, None, None)
             error_info = result.get("error", {})
             error_code = error_info.get("code", "internal_error") if isinstance(error_info, dict) else "internal_error"
-            status_code = 404 if error_code == "model_not_found" else 502
+            status_code = {
+                "model_not_found": 404,
+                "model_incompatible": 400,
+                "no_model_for_policy": 503,
+            }.get(error_code, 502)
             request.state.plugin_trace = plugin_trace
             await _record_request_log(request=request, method="POST", endpoint="/v1/chat/completions",
                                       status_code=status_code,
@@ -987,6 +1042,9 @@ class RequestDispatcher:
                         meta={
                             "normalized_prompt": normalized_messages,
                             "pipeline_kind": "understanding",
+                            "pipeline_version": getattr(
+                                request.state, "routing_cache_version", "1"
+                            ),
                             "model_family": _cache_model_family(body.model),
                             "cache_scope": cache_scope,
                             "scope_id": l2_scope_id,
@@ -1000,6 +1058,7 @@ class RequestDispatcher:
                     _l3_backfill_task = asyncio.create_task(_safe_l3_backfill(
                         cache_manager, cache_key, value_str,
                         normalized_messages, logged_model, user_id or "", tt,
+                        getattr(request.state, "routing_cache_version", "1"),
                     ))
                     _l3_backfill_task.add_done_callback(
                         lambda t: logger.warning("L3 异步回填异常: %s", t.exception())
@@ -1026,6 +1085,18 @@ class RequestDispatcher:
             "prompt_compress": compress_meta,
         })
         meta = {k: v for k, v in meta.items() if v}
+        expose_router_meta = False
+        if self.config_manager is not None:
+            expose_value = self.config_manager.get(
+                "task_routing.expose_debug_metadata", False
+            )
+            expose_router_meta = (
+                expose_value is True
+                or isinstance(expose_value, str)
+                and expose_value.lower() == "true"
+            )
+        if not expose_router_meta:
+            meta.pop("model_router", None)
         return JSONResponse(
             content={"data": result.get("data", {}), "message": "success", "_meta": meta},
             status_code=200,
@@ -1057,7 +1128,8 @@ class RequestDispatcher:
         key_store = self.key_store
 
         llm_start = time.time()
-        hint = intent_hint
+        hint = intent_hint or getattr(request.state, "intent_hint", None)
+        task_profile = getattr(request.state, "task_profile", None)
 
         # Inject trace context for downstream LLM calls
         from aigateway_core.shared.tracing import TracingManager
@@ -1082,6 +1154,8 @@ class RequestDispatcher:
             stop=body.stop,
             intent=pipeline_kind,
             model_hint=hint,
+            apply_task_routing=True,
+            task_profile=task_profile,
             extra_headers=extra_headers,
             request_context=getattr(request.state, "request_context", None),
         )
@@ -1298,6 +1372,9 @@ class RequestDispatcher:
                         meta={
                             "normalized_prompt": normalized_messages,
                             "pipeline_kind": "understanding",
+                            "pipeline_version": getattr(
+                                request.state, "routing_cache_version", "1"
+                            ),
                             "model_family": _cache_model_family(model),
                             "cache_scope": cache_scope,
                             "scope_id": l2_scope_id,
@@ -1311,6 +1388,7 @@ class RequestDispatcher:
                     _l3_backfill_task = asyncio.create_task(_safe_l3_backfill(
                         cache_manager, cache_key, value_str,
                         normalized_messages, logged_model, user_id or "", tt,
+                        getattr(request.state, "routing_cache_version", "1"),
                     ))
                     _l3_backfill_task.add_done_callback(
                         lambda t: logger.warning("L3 异步回填异常: %s", t.exception())

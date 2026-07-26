@@ -21,7 +21,9 @@ The two do not conflict — different signatures, different call sites.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import threading
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -32,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 # 模块级模型缓存（避免每次请求加载 ~600MB 模型）
 _l3_model_cache: Dict[str, Any] = {}
+_l3_model_lock = threading.Lock()
 
 # L3 向量计算设备：cpu | cuda | auto（默认 auto——有 CUDA 用 CUDA，否则 CPU）。
 # late-bind：由 main.py 启动时按 config embedding.device 调用 set_l3_device() 注入，
@@ -68,59 +71,73 @@ async def _compute_l3_vector(text: str, *, load_if_missing: bool = True) -> Opti
     Returns:
         1024 维归一化向量列表，失败返回 None。
     """
+    if not load_if_missing and "tokenizer" not in _l3_model_cache:
+        return None
+    return await asyncio.to_thread(
+        _compute_l3_vector_sync,
+        text,
+        load_if_missing,
+    )
+
+
+def _compute_l3_vector_sync(
+    text: str,
+    load_if_missing: bool = True,
+) -> Optional[list]:
+    """在线程中加载并执行同步 transformers 模型。"""
     try:
         import torch
         from transformers import AutoModel, AutoTokenizer
 
         model_name = "Qwen/Qwen3-Embedding-0.6B"
 
-        # 从模块级缓存获取或加载模型
-        if "tokenizer" not in _l3_model_cache:
-            if not load_if_missing:
-                return None
-            logger.info("Loading L3 embedding model: %s", model_name)
-            _l3_model_cache["tokenizer"] = AutoTokenizer.from_pretrained(
-                model_name, trust_remote_code=True
+        # 模型对象跨请求共享；串行化加载与推理，避免重复冷加载和并发访问。
+        with _l3_model_lock:
+            if "tokenizer" not in _l3_model_cache:
+                if not load_if_missing:
+                    return None
+                logger.info("Loading L3 embedding model: %s", model_name)
+                _l3_model_cache["tokenizer"] = AutoTokenizer.from_pretrained(
+                    model_name, trust_remote_code=True
+                )
+                device = _l3_device
+                if device == "cuda" and not torch.cuda.is_available():
+                    logger.warning("L3 device=cuda 但 CUDA 不可用，回落 cpu")
+                    device = "cpu"
+                if device == "auto":
+                    device = "cuda" if torch.cuda.is_available() else "cpu"
+                _l3_model_cache["device"] = device
+                _l3_model_cache["model"] = AutoModel.from_pretrained(
+                    model_name, trust_remote_code=True
+                ).to(device).eval()
+                logger.info("L3 embedding model loaded on device=%s", device)
+
+            tokenizer = _l3_model_cache["tokenizer"]
+            model = _l3_model_cache["model"]
+            device = _l3_model_cache["device"]
+            inputs = tokenizer(
+                text,
+                return_tensors="pt",
+                truncation=True,
+                max_length=512,
+                padding=True,
+            ).to(device)
+
+            with torch.no_grad():
+                outputs = model(**inputs)
+
+            attention_mask = inputs["attention_mask"]
+            token_embeddings = outputs.last_hidden_state
+            input_mask_expanded = (
+                attention_mask.unsqueeze(-1)
+                .expand(token_embeddings.size())
+                .float()
             )
-            # 解析最终 device：auto = 有 CUDA 用 CUDA，否则 CPU
-            device = _l3_device
-            if device == "cuda" and not torch.cuda.is_available():
-                logger.warning("L3 device=cuda 但 CUDA 不可用，回落 cpu")
-                device = "cpu"
-            if device == "auto":
-                device = "cuda" if torch.cuda.is_available() else "cpu"
-            _l3_model_cache["device"] = device
-            _l3_model_cache["model"] = AutoModel.from_pretrained(
-                model_name, trust_remote_code=True
-            ).to(device).eval()
-            logger.info("L3 embedding model loaded on device=%s", device)
-
-        tokenizer = _l3_model_cache["tokenizer"]
-        model = _l3_model_cache["model"]
-        device = _l3_model_cache["device"]
-
-        # Tokenize（截断过长文本）→ 送入对应 device
-        inputs = tokenizer(
-            text, return_tensors="pt", truncation=True, max_length=512, padding=True
-        ).to(device)
-
-        # 推理
-        with torch.no_grad():
-            outputs = model(**inputs)
-
-        # 使用 last_hidden_state 的 mean pooling 作为 sentence embedding
-        attention_mask = inputs["attention_mask"]
-        token_embeddings = outputs.last_hidden_state  # (1, seq_len, 1024)
-        input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
-        embedding = torch.sum(token_embeddings * input_mask_expanded, 1) / torch.clamp(
-            input_mask_expanded.sum(1), min=1e-9
-        )
-
-        # L2 归一化
-        embedding = torch.nn.functional.normalize(embedding, p=2, dim=1)
-
-        # .cpu() 保证 tolist 不跨 device
-        return embedding[0].cpu().tolist()
+            embedding = torch.sum(
+                token_embeddings * input_mask_expanded, 1
+            ) / torch.clamp(input_mask_expanded.sum(1), min=1e-9)
+            embedding = torch.nn.functional.normalize(embedding, p=2, dim=1)
+            return embedding[0].cpu().tolist()
 
     except ImportError as exc:
         logger.warning("L3 vector: transformers/torch not available: %s", exc)
@@ -138,6 +155,7 @@ async def _safe_l3_backfill(
     model: str,
     user_id: str,
     token_count: int,
+    pipeline_version: str = "1",
 ) -> None:
     """异步回填 L3 语义缓存（fire-and-forget）。
 
@@ -162,6 +180,7 @@ async def _safe_l3_backfill(
             user_id=user_id,
             token_count=token_count,
             vector=vector,
+            pipeline_version=pipeline_version,
         )
         logger.debug("L3 backfill success: key=%s", cache_key[:16])
     except Exception as exc:

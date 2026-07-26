@@ -87,6 +87,8 @@ async def _compute_embeddings_via_litellm(texts: List[str]) -> Optional[List[Lis
     返回 1024 维向量列表，失败返回 None。
     """
     try:
+        from .app_state import get_state
+
         s = get_state()
         config_manager = getattr(s, "config_manager", None)
 
@@ -2697,6 +2699,7 @@ async def prometheus_query(
     Prometheus instance that scrapes the gateway.
     """
     import httpx
+    import os
     prom_url = os.environ.get("AI_GATEWAY_PROMETHEUS_URL", "http://prometheus:9090")
     api_path = "/api/v1/query"
     params: Dict[str, str] = {"query": query}
@@ -2725,6 +2728,7 @@ async def prometheus_query_range(
 ):
     """Proxy to Prometheus /api/v1/query_range endpoint."""
     import httpx
+    import os
     prom_url = os.environ.get("AI_GATEWAY_PROMETHEUS_URL", "http://prometheus:9090")
     params: Dict[str, str] = {"query": query, "start": start, "end": end, "step": step}
     try:
