@@ -16,8 +16,8 @@ sys.path.insert(0, str(ROOT / "aigateway-api/src"))
 sys.path.insert(0, str(ROOT / "aigateway-core/src"))
 
 from aigateway_api.admin_routes import _rag_document_identity
-from aigateway_api.auth_routes import router as auth_router, _hash_key
-from aigateway_api.auth_middleware import authenticate_admin
+from aigateway_api.auth_routes import router as auth_router
+from aigateway_api.auth_middleware import authenticate_admin, _hash_key
 from aigateway_core.prefix.cache.cache_manager import CacheManager
 from aigateway_core.route.streaming.sse import SSEGenerator
 from aigateway_core.shared.auth.sqlite_store import SQLiteStore
@@ -170,29 +170,12 @@ async def test_bootstrap_credentials_can_be_disabled(tmp_path: Path, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_credentials_support_legacy_config_key(tmp_path: Path, monkeypatch):
-    monkeypatch.delenv("ADMIN_API_KEY", raising=False)
+async def test_bootstrap_credentials_require_initial_admin_password(tmp_path: Path, monkeypatch):
     monkeypatch.delenv("AI_GATEWAY_INITIAL_ADMIN_PASSWORD", raising=False)
+    monkeypatch.delenv("ADMIN_API_KEY", raising=False)
     monkeypatch.setenv("AI_GATEWAY_PREFILL_INITIAL_CREDENTIALS", "true")
-    legacy_key = "gw-legacy-config-admin-key-123456"
-    key_store = AsyncMock()
-    key_store.db_path = str(tmp_path / "auth.db")
-    key_store.validate.return_value = {
-        "key_prefix": "gw-legac",
-        "scopes": ["admin"],
-    }
-    key_store.check_is_default.return_value = True
-
     app = FastAPI()
-    app.state.key_store = key_store
-    app.state.config_manager = MagicMock()
-    app.state.config_manager.get.return_value = {
-        "api_keys": [{
-            "key": legacy_key,
-            "user_id": "admin",
-            "scopes": ["admin", "chat"],
-        }]
-    }
+    app.state.key_store = SQLiteStore(str(tmp_path / "auth.db"))
     app.include_router(auth_router, prefix="/auth")
 
     async with AsyncClient(
@@ -200,24 +183,13 @@ async def test_bootstrap_credentials_support_legacy_config_key(tmp_path: Path, m
         base_url="http://testserver",
     ) as client:
         response = await client.get("/auth/bootstrap")
-    assert response.json()["data"]["initial_password"] == legacy_key
-    key_store.check_is_default.assert_awaited_once_with(_hash_key(legacy_key))
+    assert response.json()["data"] == {"available": False}
 
 
 @pytest.mark.asyncio
-async def test_account_login_rejects_non_admin_key_as_password(tmp_path: Path, monkeypatch):
-    """A valid non-admin API key submitted as a password must not bootstrap login."""
-    monkeypatch.setenv("AI_GATEWAY_ADMIN_USERNAME", "admin")
-    monkeypatch.delenv("AI_GATEWAY_INITIAL_ADMIN_PASSWORD", raising=False)
-    key_store = AsyncMock()
-    key_store.db_path = str(tmp_path / "auth.db")
-    key_store.validate.return_value = {
-        "key_prefix": "gw-chat-",
-        "scopes": ["chat"],
-    }
-
+async def test_api_key_payload_is_not_console_login(tmp_path: Path):
     app = FastAPI()
-    app.state.key_store = key_store
+    app.state.key_store = SQLiteStore(str(tmp_path / "auth.db"))
     app.include_router(auth_router, prefix="/auth")
 
     async with AsyncClient(
@@ -226,10 +198,9 @@ async def test_account_login_rejects_non_admin_key_as_password(tmp_path: Path, m
     ) as client:
         response = await client.post(
             "/auth/session",
-            json={"username": "admin", "password": "gw-chat-only-key"},
+            json={"api_key": "gw-chat-only-key"},
         )
-    assert response.status_code == 401
-    assert response.json()["detail"]["error"]["message"] == "Invalid username or password"
+    assert response.status_code == 422
 
 
 @pytest.mark.asyncio
@@ -249,24 +220,6 @@ async def test_account_login_with_non_ascii_username_returns_401_not_500(tmp_pat
             json={"username": "管理员", "password": "installer-admin-password-123456"},
         )
     assert response.status_code == 401
-
-
-@pytest.mark.asyncio
-async def test_api_key_console_login_disabled_by_default(tmp_path: Path):
-    app = FastAPI()
-    app.state.key_store = SQLiteStore(str(tmp_path / "auth.db"))
-    app.include_router(auth_router, prefix="/auth")
-
-    async with AsyncClient(
-        transport=ASGITransport(app=app),
-        base_url="http://testserver",
-    ) as client:
-        response = await client.post(
-            "/auth/session",
-            json={"api_key": "gw-chat-only-key"},
-        )
-    assert response.status_code == 400
-    assert response.json()["detail"]["error"]["code"] == "api_key_login_disabled"
 
 
 @pytest.mark.asyncio
