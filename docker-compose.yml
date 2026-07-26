@@ -41,8 +41,11 @@ services:
 
   redis:
     image: redis/redis-stack:7.2.0-v18
-    expose:
-      - "6379"
+    ports:
+      # Bind to loopback only — these are dev/introspection ports, not for
+      # remote access. Neither Redis nor Qdrant is configured with auth here.
+      - "127.0.0.1:6379:6379"
+      - "127.0.0.1:8001:8001"
     volumes:
       - redis-data:/data
     command: redis-stack-server --appendonly yes --maxmemory 512mb --maxmemory-policy volatile-lru --save 60 1
@@ -57,9 +60,10 @@ services:
 
   qdrant:
     image: qdrant/qdrant:v1.13.4
-    expose:
-      - "6333"
-      - "6334"
+    ports:
+      # Loopback only — see redis note above.
+      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:6334:6334"
     volumes:
       - qdrant-data:/qdrant/storage
     restart: unless-stopped

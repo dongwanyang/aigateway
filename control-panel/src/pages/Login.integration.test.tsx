@@ -13,11 +13,13 @@ const auth = vi.hoisted(() => ({
   state: { isAuthenticated: false },
 }))
 const resetPassword = vi.hoisted(() => vi.fn())
+const getBootstrapCredentials = vi.hoisted(() => vi.fn())
 
 vi.mock('@/contexts/AuthContext', () => ({ useAuth: () => auth }))
 vi.mock('@/api/client', async importOriginal => ({
   ...await importOriginal<typeof import('@/api/client')>(),
   resetPassword,
+  getBootstrapCredentials,
 }))
 
 function renderLogin() {
@@ -37,6 +39,7 @@ describe('Login authentication and forced key reset', () => {
     auth.logout.mockReset()
     auth.completeForceReset.mockReset()
     resetPassword.mockReset()
+    getBootstrapCredentials.mockReset().mockResolvedValue({ available: false })
     auth.isLoading = false
     auth.forceReset = false
     Object.defineProperty(navigator, 'clipboard', {
@@ -50,6 +53,7 @@ describe('Login authentication and forced key reset', () => {
     const user = userEvent.setup()
     renderLogin()
 
+    await user.click(screen.getByRole('tab', { name: 'API Key' }))
     await user.type(screen.getByPlaceholderText('输入您的 API Key'), 'gw-live-key')
     await user.click(screen.getByRole('button', { name: '登录' }))
 
@@ -62,11 +66,30 @@ describe('Login authentication and forced key reset', () => {
     const user = userEvent.setup()
     renderLogin()
 
+    await user.click(screen.getByRole('tab', { name: 'API Key' }))
     await user.type(screen.getByPlaceholderText('输入您的 API Key'), 'bad-key')
     await user.click(screen.getByRole('button', { name: '登录' }))
 
     expect(await screen.findByText('API Key 无效')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '登录' })).toBeEnabled()
+  })
+
+  it('prefills generated bootstrap credentials and supports account login', async () => {
+    getBootstrapCredentials.mockResolvedValue({
+      available: true,
+      username: 'admin',
+      initial_password: 'gw-generated-bootstrap-key',
+    })
+    auth.login.mockResolvedValue({ forceReset: true })
+    const user = userEvent.setup()
+    renderLogin()
+
+    expect(await screen.findByDisplayValue('gw-generated-bootstrap-key')).toBeInTheDocument()
+    expect(screen.getByDisplayValue('admin')).toBeInTheDocument()
+    expect(screen.getByText(/已自动填入安装时生成的初始凭据/)).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '登录' }))
+    expect(auth.login).toHaveBeenCalledWith('gw-generated-bootstrap-key', 'admin')
   })
 
   it('validates both forced-reset fields before calling the API', async () => {

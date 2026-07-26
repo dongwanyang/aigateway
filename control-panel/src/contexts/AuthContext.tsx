@@ -21,7 +21,7 @@ export interface AuthContextValue {
   keyPrefix: string | null
   forceReset: boolean
   isLoading: boolean
-  login: (key: string) => Promise<{ forceReset: boolean }>
+  login: (key: string, username?: string) => Promise<{ forceReset: boolean }>
   logout: () => Promise<void>
   completeForceReset: () => void
 }
@@ -56,8 +56,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [clear, sessionQuery.data, sessionQuery.isError, setAuthenticated])
 
-  const login = async (key: string) => {
-    const result = await saveApiKey(key)
+  const login = async (key: string, username?: string) => {
+    const result = username ? await saveApiKey(key, username) : await saveApiKey(key)
     const requiresReset = Boolean(result.force_reset)
     setAuthenticated(result.key_prefix, requiresReset)
     queryClient.setQueryData(queryKeys.auth.session, {

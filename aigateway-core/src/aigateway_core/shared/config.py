@@ -233,6 +233,7 @@ class ConfigManager:
             "cache", "media_optimization", "circuit_breaker", "rate_limiter",
             "streaming", "generation_optimization", "code_rag",
             "plugin_runtime", "retry_budget",
+            "intent_classifier", "model_selector", "task_routing", "generation",
         }
 
         # 环境变量覆盖产生的扁平键（AI_GATEWAY_* 去前缀后的小写形式）
@@ -262,9 +263,17 @@ class ConfigManager:
             for provider_name, provider_cfg in providers.items():
                 if isinstance(provider_cfg, dict):
                     api_key = provider_cfg.get("api_key", "")
-                    if isinstance(api_key, str) and api_key.startswith("sk-") and len(api_key) > 10:
-                        # 检查不是 ${ENV_VAR} 语法
-                        if not api_key.startswith("${"):
+                    if (
+                        isinstance(api_key, str)
+                        and api_key.startswith("sk-")
+                        and len(api_key) > 10
+                    ):
+                        # 环境变量引用在验证前已解析；值与任一环境变量
+                        # 相同仍视为安全引用，不误报成 YAML 明文。
+                        env_backed = api_key in {
+                            value for value in os.environ.values() if value
+                        }
+                        if not api_key.startswith("${") and not env_backed:
                             logger.warning(
                                 "providers.%s.api_key 疑似明文密钥，建议使用 ${ENV_VAR} 语法引用环境变量",
                                 provider_name,
@@ -796,10 +805,17 @@ class ConfigManager:
             "cache", "media_optimization", "circuit_breaker", "rate_limiter",
             "streaming", "generation_optimization", "code_rag",
             "plugin_runtime", "retry_budget",
+            "intent_classifier", "model_selector", "task_routing", "generation",
         }
 
         # 检查未识别的顶层字段
-        unknown_fields = set(config.keys()) - allowed_top_level
+        env_prefix = "AI_GATEWAY_"
+        env_generated_keys = {
+            key[len(env_prefix):].lower()
+            for key in os.environ
+            if key.startswith(env_prefix)
+        }
+        unknown_fields = set(config.keys()) - allowed_top_level - env_generated_keys
         if unknown_fields:
             issues.append({"level": "WARNING", "message": f"未识别的顶层字段: {list(unknown_fields)}"})
 
@@ -822,7 +838,10 @@ class ConfigManager:
                 if isinstance(provider_cfg, dict):
                     api_key = provider_cfg.get("api_key", "")
                     if isinstance(api_key, str) and api_key.startswith("sk-") and len(api_key) > 10:
-                        if not api_key.startswith("${"):
+                        env_backed = api_key in {
+                            value for value in os.environ.values() if value
+                        }
+                        if not api_key.startswith("${") and not env_backed:
                             issues.append({
                                 "level": "WARNING",
                                 "message": f"providers.{provider_name}.api_key 疑似明文密钥",

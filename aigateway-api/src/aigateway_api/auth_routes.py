@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import secrets
+import tempfile
 from datetime import datetime, timezone
 from typing import Any, Dict
 
@@ -24,7 +25,9 @@ def _is_https(request: Request) -> bool:
 
 
 class CreateSessionRequest(BaseModel):
-    api_key: str = Field(..., min_length=1)
+    api_key: str | None = Field(default=None, min_length=1)
+    username: str | None = Field(default=None, min_length=1)
+    password: str | None = Field(default=None, min_length=1)
 
 
 def _now_iso() -> str:
@@ -35,10 +38,96 @@ def _now_unix() -> int:
     return int(datetime.now(timezone.utc).timestamp())
 
 
+def _initial_admin_key(request: Request) -> str:
+    """Find the installer key in env, with legacy config.yaml compatibility."""
+    env_key = os.environ.get("ADMIN_API_KEY", "").strip()
+    if env_key:
+        return env_key
+
+    config_manager = getattr(request.app.state, "config_manager", None)
+    if config_manager is None:
+        return ""
+    try:
+        auth_config = config_manager.get("auth", {}) or {}
+        for entry in auth_config.get("api_keys", []) or []:
+            if not isinstance(entry, dict):
+                continue
+            scopes = entry.get("scopes", [])
+            if (
+                entry.get("user_id") == "admin"
+                and "admin" in scopes
+                and isinstance(entry.get("key"), str)
+            ):
+                return entry["key"].strip()
+    except Exception:
+        return ""
+    return ""
+
+
+def _scrub_admin_key_from_env() -> None:
+    """Remove the ``ADMIN_API_KEY=`` line from the on-disk ``.env``.
+
+    Called after a successful force-reset. The installer-seeded key in ``.env``
+    is a *first-boot seed* only — once the operator has rotated it, leaving the
+    old key on disk means a future DB wipe / re-install would reseed the
+    *revoked* key back to ``is_default=1, active``, silently resurrecting a
+    credential the operator believed dead. Deleting the line (rather than
+    writing the new key back) keeps runtime secrets out of the plaintext
+    config and cuts the resurrection path: ``${ADMIN_API_KEY:-}`` resolves to
+    empty, and ``seed_from_config`` skips empty keys.
+
+    Atomic (tempfile + ``os.replace``) so a concurrent ``load_dotenv`` reader
+    never sees a half-written file. Best-effort: missing file or permission
+    errors are swallowed (the reset itself already succeeded in SQLite).
+    """
+    env_path = os.path.join(os.getcwd(), ".env")
+    if not os.path.isfile(env_path):
+        return
+    try:
+        with open(env_path, "r", encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return
+
+    kept = [ln for ln in lines if not ln.strip().startswith("ADMIN_API_KEY=")]
+    if len(kept) == len(lines):
+        return  # Nothing to remove (env var may have come from the real env).
+
+    try:
+        target_dir = os.path.dirname(env_path) or "."
+        fd, tmp_path = tempfile.mkstemp(dir=target_dir, prefix=".env.tmp.")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as out:
+                out.writelines(kept)
+            os.replace(tmp_path, env_path)
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+    except OSError:
+        return
+
+
 @router.post("/session")
 async def create_session(
     request: Request, response: Response, body: CreateSessionRequest
 ) -> Dict[str, Any]:
+    account_login = False
+    if body.api_key:
+        login_key = body.api_key
+    elif body.username is not None and body.password is not None:
+        account_login = True
+        login_key = body.password
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": {
+                    "code": "validation_error",
+                    "message": "Provide an API key or username and password",
+                }
+            },
+        )
+
     key_store = getattr(request.app.state, "key_store", None)
     if key_store is None:
         raise HTTPException(
@@ -46,19 +135,48 @@ async def create_session(
             detail={"error": {"code": "unavailable", "message": "Authentication service unavailable"}},
         )
     try:
-        key_data = await key_store.validate(body.api_key)
+        key_data = await key_store.validate(login_key)
     except Exception:
         key_data = None
+    if account_login and key_data is not None:
+        # Constant-time username check (bytes to tolerate non-ASCII input;
+        # secrets.compare_digest raises TypeError on non-ASCII str). Done after
+        # validate() so the wrong-username and wrong-password paths both pay the
+        # key-store lookup cost and don't leak username validity via timing.
+        expected_username = os.environ.get("AI_GATEWAY_ADMIN_USERNAME", "admin")
+        username_match = False
+        try:
+            username_match = secrets.compare_digest(
+                body.username.encode("utf-8"),
+                expected_username.encode("utf-8"),
+            )
+        except Exception:
+            username_match = False
+        if not username_match:
+            key_data = None
+        else:
+            scopes = key_data.get("scopes", [])
+            if "admin" not in scopes:
+                key_data = None
     if key_data is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={"error": {"code": "unauthorized", "message": "Invalid API key"}},
+            detail={
+                "error": {
+                    "code": "unauthorized",
+                    "message": (
+                        "Invalid username or password"
+                        if account_login
+                        else "Invalid API key"
+                    ),
+                }
+            },
         )
 
     max_age = int(os.environ.get("AI_GATEWAY_SESSION_TTL_SECONDS", "28800"))
     response.set_cookie(
         key=SESSION_COOKIE_NAME,
-        value=body.api_key,
+        value=login_key,
         max_age=max_age,
         httponly=True,
         secure=_is_https(request),
@@ -67,7 +185,7 @@ async def create_session(
     )
 
     # Check if this is the default admin key (needs force-reset on first login)
-    key_hash = _hash_key(body.api_key)
+    key_hash = _hash_key(login_key)
     is_default = False
     if hasattr(key_store, "check_is_default"):
         is_default = await key_store.check_is_default(key_hash)
@@ -75,9 +193,61 @@ async def create_session(
     return {
         "data": {
             "authenticated": True,
-            "key_prefix": key_data.get("key_prefix", body.api_key[:8]),
+            "key_prefix": key_data.get("key_prefix", login_key[:8]),
             "scopes": key_data.get("scopes", []),
             "force_reset": is_default,
+        },
+        "message": "success",
+    }
+
+
+@router.get("/bootstrap")
+async def get_bootstrap_credentials(request: Request, response: Response) -> Dict[str, Any]:
+    """Return one-time installer credentials while the generated key is still default.
+
+    Off by default; installers opt in with
+    AI_GATEWAY_PREFILL_INITIAL_CREDENTIALS=true for freshly-installed local
+    instances. The endpoint stops exposing credentials automatically as soon as
+    the default key is rotated/revoked.
+    """
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+
+    # Default off in all environments — credential prefill is a convenience for
+    # a freshly-installed local instance only. Installers opt in by setting
+    # AI_GATEWAY_PREFILL_INITIAL_CREDENTIALS=true in the .env they generate; any
+    # other deployment (especially internet-facing) stays safe by default.
+    enabled = (
+        os.environ.get(
+            "AI_GATEWAY_PREFILL_INITIAL_CREDENTIALS", "false"
+        ).strip().lower()
+        not in {"0", "false", "no", "off"}
+    )
+    initial_key = _initial_admin_key(request)
+    key_store = getattr(request.app.state, "key_store", None)
+    if not enabled or not initial_key or key_store is None:
+        return {"data": {"available": False}, "message": "success"}
+
+    # Read-only check only: avoid key_store.validate(), which writes
+    # last_used_at on every call and would let bootstrap polling pollute the
+    # admin key's audit trail / first-login timestamp.
+    try:
+        is_default = (
+            await key_store.check_is_default(_hash_key(initial_key))
+            if hasattr(key_store, "check_is_default")
+            else False
+        )
+    except Exception:
+        is_default = False
+
+    if not is_default:
+        return {"data": {"available": False}, "message": "success"}
+
+    return {
+        "data": {
+            "available": True,
+            "username": os.environ.get("AI_GATEWAY_ADMIN_USERNAME", "admin"),
+            "initial_password": initial_key,
         },
         "message": "success",
     }
@@ -262,6 +432,11 @@ async def reset_password(
                 detail={"error": {"code": "conflict", "message": "API key already exists"}},
             ) from exc
         raise
+
+    # The installer-seeded ADMIN_API_KEY in .env is now stale (points at the
+    # revoked key). Scrub it so a future DB wipe can't resurrect the old
+    # credential. See _scrub_admin_key_from_env for the threat model.
+    _scrub_admin_key_from_env()
 
     # Set new session cookie
     max_age = int(os.environ.get("AI_GATEWAY_SESSION_TTL_SECONDS", "28800"))

@@ -3,6 +3,7 @@
 import { spawnSync } from 'node:child_process'
 import {
   accessSync,
+  appendFileSync,
   constants,
   existsSync,
   mkdirSync,
@@ -10,6 +11,7 @@ import {
   readdirSync,
   statSync,
 } from 'node:fs'
+import { randomBytes } from 'node:crypto'
 import { homedir } from 'node:os'
 import { delimiter, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -202,26 +204,15 @@ ${sourceMode
 
   // ---- Generate default admin API key (first-time only) ----
   const envPath = join(installDirectory, '.env')
-  let adminKeyGenerated = false
   try {
     const envContent = existsSync(envPath) ? readFileSync(envPath, 'utf8') : ''
     if (!envContent.includes('ADMIN_API_KEY=')) {
-      const ADMIN_KEY = `gw-${require('crypto').randomBytes(24).toString('hex')}`
-      require('fs').appendFileSync(envPath, `\nADMIN_API_KEY=${ADMIN_KEY}\n`)
-
-      // Update config.yaml placeholder — fail loudly if file is missing
-      const configPath = join(installDirectory, 'config.yaml')
-      if (existsSync(configPath)) {
-        let configContent = readFileSync(configPath, 'utf8')
-        configContent = configContent.replace(
-          /key:\s*\$\{ADMIN_API_KEY:-[^}]*\}/,
-          `key: ${ADMIN_KEY}`
-        )
-        writeFileSync(configPath, configContent)
-      } else {
-        console.error(`ERROR: config.yaml not found at ${configPath} — cannot embed admin key`)
-        process.exit(1)
-      }
+      const ADMIN_KEY = `gw-${randomBytes(24).toString('hex')}`
+      appendFileSync(envPath, `\nADMIN_API_KEY=${ADMIN_KEY}\n`)
+      // Opt in to one-time bootstrap credential prefill on the login page for
+      // this freshly-installed local instance. Operators can remove/disable it
+      // for shared or internet-facing deployments.
+      appendFileSync(envPath, `AI_GATEWAY_PREFILL_INITIAL_CREDENTIALS=true\n`)
 
       console.log(`\n==========================================`)
       console.log(`  默认管理员凭据（请妥善保存！）`)
@@ -230,7 +221,6 @@ ${sourceMode
       console.log(`==========================================`)
       console.log('')
       process.stderr.write(`\x1b[1;33m[!] 这是默认管理员密钥，首次登录后请务必重置！\x1b[0m\n\n`)
-      adminKeyGenerated = true
     }
   } catch {
     // Non-fatal: continue with installer even if key generation fails

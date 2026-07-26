@@ -142,7 +142,7 @@ Backfill: L2 hit → L1; L3 hit → L1 only (approximate); MISS → L1+L2 + asyn
 |---|---|
 | `config.yaml` | Runtime params, add provider, toggle plugins (hot-reloadable). |
 | `config.yaml.template` | Schema reference — check before adding a field. |
-| `docker-compose.yml` | 6 services (gateway, control-panel, redis, qdrant, prometheus, grafana). |
+| `docker-compose.yml` | 4 services (gateway `:8000`, control-panel `:3000`, redis `:6379/8001`, qdrant `:6333/6334`). Redis + Qdrant ports published to host (host redis-server must be stopped to free `:6379`). |
 | `aigateway-api/Dockerfile` | Multi-target images: runtime / RAG / vision / full / GPU. |
 | `aigateway-api/pyproject.toml` | API dependencies and public dev/rag/vision/gpu extras. |
 | `aigateway-core/pyproject.toml` | Core dependencies used by the API extras. |

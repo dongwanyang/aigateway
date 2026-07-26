@@ -6,27 +6,64 @@
  */
 import { useEffect, useState, useRef } from 'react'
 import { useNavigate } from 'react-router'
-import { Shield, RefreshCw, AlertTriangle, Copy, CheckCircle } from 'lucide-react'
+import {
+  Shield,
+  RefreshCw,
+  AlertTriangle,
+  Copy,
+  CheckCircle,
+  Eye,
+  EyeOff,
+  KeyRound,
+  User,
+} from 'lucide-react'
 import Card from '@/components/Card'
 import { useAuth } from '@/contexts/AuthContext'
-import { resetPassword } from '@/api/client'
+import { getBootstrapCredentials, resetPassword } from '@/api/client'
 
 export default function Login() {
   const { login, isLoading, forceReset, logout, completeForceReset } = useAuth()
+  const [loginMode, setLoginMode] = useState<'account' | 'api-key'>('account')
+  const [username, setUsername] = useState('admin')
+  const [password, setPassword] = useState('')
   const [apiKey, setApiKey] = useState('')
+  const [showSecret, setShowSecret] = useState(false)
+  const [bootstrapFilled, setBootstrapFilled] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const navigate = useNavigate()
   const inputRef = useRef<HTMLInputElement>(null)
+  const credentialsTouched = useRef(false)
 
   useEffect(() => { inputRef.current?.focus() }, [])
+  useEffect(() => {
+    if (isLoading || forceReset) return
+    let cancelled = false
+    getBootstrapCredentials()
+      .then(credentials => {
+        if (
+          cancelled
+          || credentialsTouched.current
+          || !credentials.available
+          || !credentials.initial_password
+        ) return
+        setUsername(credentials.username ?? 'admin')
+        setPassword(credentials.initial_password)
+        setApiKey(credentials.initial_password)
+        setBootstrapFilled(true)
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [forceReset, isLoading])
 
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault()
     setSubmitting(true)
     setError(null)
     try {
-      const result = await login(apiKey)
+      const result = loginMode === 'account'
+        ? await login(password, username)
+        : await login(apiKey)
       if (!result.forceReset) navigate('/', { replace: true })
     } catch (error) {
       setError(error instanceof Error ? error.message : '登录失败，请检查 API Key')
@@ -204,31 +241,153 @@ export default function Login() {
           <Shield size={48} style={{ color: 'var(--color-primary)' }} />
           <h1 className="text-xl font-bold mt-4">AI Gateway Control Panel</h1>
           <p className="text-sm mt-1" style={{ color: 'var(--color-text-tertiary)' }}>
-            使用 API Key 登录
+            登录以管理您的 AI Gateway
           </p>
         </div>
+        <div
+          className="grid grid-cols-2 gap-1 mb-5 p-1"
+          style={{ background: 'var(--color-bg-base)', borderRadius: '8px' }}
+          role="tablist"
+          aria-label="登录方式"
+        >
+          <button
+            type="button"
+            role="tab"
+            aria-selected={loginMode === 'account'}
+            className="btn justify-center"
+            style={{
+              background: loginMode === 'account' ? 'var(--color-bg-overlay)' : 'transparent',
+              color: loginMode === 'account' ? 'var(--color-text-primary)' : 'var(--color-text-tertiary)',
+              minHeight: '36px',
+            }}
+            onClick={() => { setLoginMode('account'); setError(null) }}
+          >
+            <User size={15} /> 管理员账号
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={loginMode === 'api-key'}
+            className="btn justify-center"
+            style={{
+              background: loginMode === 'api-key' ? 'var(--color-bg-overlay)' : 'transparent',
+              color: loginMode === 'api-key' ? 'var(--color-text-primary)' : 'var(--color-text-tertiary)',
+              minHeight: '36px',
+            }}
+            onClick={() => { setLoginMode('api-key'); setError(null) }}
+          >
+            <KeyRound size={15} /> API Key
+          </button>
+        </div>
         <form onSubmit={handleLogin} className="space-y-4">
-          <div>
-            <label className="block text-xs mb-1 font-medium" style={{ color: 'var(--color-text-tertiary)' }}>
-              API Key
-            </label>
-            <input
-              ref={inputRef}
-              className="input w-full"
-              type="password"
-              placeholder="输入您的 API Key"
-              value={apiKey}
-              onChange={e => { setApiKey(e.target.value); setError(null) }}
-              disabled={submitting}
-            />
-          </div>
+          {loginMode === 'account' ? (
+            <>
+              <div>
+                <label className="block text-xs mb-1 font-medium" style={{ color: 'var(--color-text-tertiary)' }}>
+                  用户名
+                </label>
+                <input
+                  ref={inputRef}
+                  className="input w-full"
+                  type="text"
+                  autoComplete="username"
+                  placeholder="管理员用户名"
+                  value={username}
+                  onChange={e => {
+                    credentialsTouched.current = true
+                    setUsername(e.target.value)
+                    setError(null)
+                  }}
+                  disabled={submitting}
+                />
+              </div>
+              <div>
+                <label className="block text-xs mb-1 font-medium" style={{ color: 'var(--color-text-tertiary)' }}>
+                  密码
+                </label>
+                <div className="relative">
+                  <input
+                    className="input w-full"
+                    style={{ paddingRight: '42px' }}
+                    type={showSecret ? 'text' : 'password'}
+                    autoComplete="current-password"
+                    placeholder="输入管理员密码"
+                    value={password}
+                    onChange={e => {
+                      credentialsTouched.current = true
+                      setPassword(e.target.value)
+                      setError(null)
+                      setBootstrapFilled(false)
+                    }}
+                    disabled={submitting}
+                  />
+                  <button
+                    type="button"
+                    aria-label={showSecret ? '隐藏密码' : '显示密码'}
+                    className="absolute right-3 top-1/2 -translate-y-1/2"
+                    style={{ color: 'var(--color-text-tertiary)' }}
+                    onClick={() => setShowSecret(value => !value)}
+                  >
+                    {showSecret ? <EyeOff size={17} /> : <Eye size={17} />}
+                  </button>
+                </div>
+              </div>
+            </>
+          ) : (
+            <div>
+              <label className="block text-xs mb-1 font-medium" style={{ color: 'var(--color-text-tertiary)' }}>
+                API Key
+              </label>
+              <div className="relative">
+                <input
+                  ref={inputRef}
+                  className="input w-full"
+                  style={{ paddingRight: '42px' }}
+                  type={showSecret ? 'text' : 'password'}
+                  autoComplete="off"
+                  placeholder="输入您的 API Key"
+                  value={apiKey}
+                  onChange={e => {
+                    credentialsTouched.current = true
+                    setApiKey(e.target.value)
+                    setError(null)
+                    setBootstrapFilled(false)
+                  }}
+                  disabled={submitting}
+                />
+                <button
+                  type="button"
+                  aria-label={showSecret ? '隐藏 API Key' : '显示 API Key'}
+                  className="absolute right-3 top-1/2 -translate-y-1/2"
+                  style={{ color: 'var(--color-text-tertiary)' }}
+                  onClick={() => setShowSecret(value => !value)}
+                >
+                  {showSecret ? <EyeOff size={17} /> : <Eye size={17} />}
+                </button>
+              </div>
+            </div>
+          )}
+          {bootstrapFilled && (
+            <div
+              className="text-xs flex items-start gap-2"
+              style={{ color: 'var(--color-success)' }}
+            >
+              <CheckCircle size={14} className="shrink-0 mt-px" />
+              已自动填入安装时生成的初始凭据，首次登录后需要重置。
+            </div>
+          )}
           {error && (
             <div className="text-sm" style={{ color: 'var(--color-danger)' }}>{error}</div>
           )}
           <button
             type="submit"
             className="btn btn-primary w-full justify-center"
-            disabled={submitting || !apiKey.trim()}
+            disabled={
+              submitting
+              || (loginMode === 'account'
+                ? !username.trim() || !password.trim()
+                : !apiKey.trim())
+            }
           >
             {submitting ? '登录中...' : '登录'}
           </button>

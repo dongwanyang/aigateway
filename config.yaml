@@ -18,6 +18,7 @@ retry_budget:
 intent_classifier:
   model: agnes-2.0-flash
   timeout_seconds: 2
+  fallback: heuristic
   fast_path_enabled: true
   fast_path_confidence: 0.8
   cache_ttl_seconds: 300
@@ -43,23 +44,24 @@ generation:
   image:
     default_size: 2K
     response_format: url
+    quality: auto
   video:
     poll_endpoint: /v1/videos/{id}
 auth:
   api_keys:
-  - key: gw-rRIop4dpcyJJNUTJbHmHpr9Bj3M11s5o
-    user_id: admin
-    scopes:
-    - admin
-    - chat
-    - embedding
-    expires_at: null
-    group: admin-team
-    quotas:
-      daily_tokens: 1000000
-      monthly_cost: 50.0
-      rate_limit_rpm: 60
-      rate_limit_tpm: 100000
+    - key: ${ADMIN_API_KEY:-}
+      user_id: admin
+      scopes:
+        - admin
+        - chat
+        - embedding
+      expires_at: null
+      group: admin-team
+      quotas:
+        daily_tokens: 1000000
+        monthly_cost: 50.0
+        rate_limit_rpm: 60
+        rate_limit_tpm: 100000
   distributed_mode: false
   defaults:
     daily_tokens: 1000000
@@ -68,11 +70,11 @@ auth:
     rate_limit_tpm: 100000
   budget_alert_threshold: 0.8
   groups:
-  - name: admin-team
-    daily_tokens: 1000000
-    monthly_cost: 50.0
-    rate_limit_rpm: 60
-    rate_limit_tpm: 100000
+    - name: admin-team
+      daily_tokens: 1000000
+      monthly_cost: 50.0
+      rate_limit_rpm: 60
+      rate_limit_tpm: 100000
 plugins:
 - name: pii_detector
   enabled: true
@@ -223,6 +225,7 @@ embedding:
   model: Qwen/Qwen3-Embedding-0.6B
   vector_dim: 1024
   openai_model: text-embedding-3-small
+  device: auto
 observability:
   prometheus_enabled: true
   opentelemetry_enabled: true
@@ -324,10 +327,26 @@ code_rag:
   graph_db_dir: /data/code_graphs
 hot_reload: true
 debug:
+  frontend: false
   entry: false
+  cache: false
+  bridge: false
   plugins_enabled: false
   plugins:
     enabled: false
+    per_plugin:
+      pii_detector: false
+      prompt_cache: false
+      semantic_cache: false
+      rag_retriever: false
+      conv_compressor: false
+      media_optimizer: false
+      ai_director: false
+      intent_evaluator: false
+      token_compressor: false
+      draft_generator: false
+      gen_model_router: false
+      cost_tracker: false
 media_optimization:
   enabled: true
   download_timeouts:
@@ -433,4 +452,4 @@ generation_optimization:
       connect_timeout: 10
       execution_timeout: 300
     enabled: true
-debug_mode: true
+debug_mode: false

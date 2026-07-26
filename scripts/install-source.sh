@@ -123,14 +123,10 @@ fi
 if ! grep -q '^ADMIN_API_KEY=' "$ROOT_DIR/.env" 2>/dev/null; then
   ADMIN_KEY="gw-$(openssl rand -hex 24)"
   echo "ADMIN_API_KEY=${ADMIN_KEY}" >> "$ROOT_DIR/.env"
-
-  # Replace placeholder in config.yaml — fail loudly if config doesn't exist
-  if [[ -f "$ROOT_DIR/config.yaml" ]]; then
-    sed -i -E "s|key:[[:space:]]*\$\{ADMIN_API_KEY:-[^}]*\}|key: ${ADMIN_KEY}|g" "$ROOT_DIR/config.yaml"
-  else
-    error "config.yaml not found at $ROOT_DIR/config.yaml — cannot embed admin key"
-    exit 1
-  fi
+  # Opt in to one-time bootstrap credential prefill on the login page for this
+  # freshly-installed local instance. Operators can remove/disable it for
+  # shared or internet-facing deployments.
+  echo "AI_GATEWAY_PREFILL_INITIAL_CREDENTIALS=true" >> "$ROOT_DIR/.env"
 
   echo ""
   echo "=========================================="

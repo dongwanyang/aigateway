@@ -44,19 +44,22 @@ async function ensureAuthHeaders(): Promise<Record<string, string>> {
   return { 'Content-Type': 'application/json' }
 }
 
-/** Exchange an API key for an HttpOnly browser session. Returns { key_prefix, force_reset }. */
-export async function saveApiKey(key: string): Promise<{ key_prefix: string; force_reset?: boolean }> {
+/** Exchange an API key (optionally presented as an admin password) for an HttpOnly session. */
+export async function saveApiKey(
+  key: string,
+  username?: string,
+): Promise<{ key_prefix: string; force_reset?: boolean }> {
   const res = await fetch(`${API_BASE}/auth/session`, {
     method: 'POST',
     credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ api_key: key }),
+    body: JSON.stringify(username ? { username, password: key } : { api_key: key }),
   })
   if (!res.ok) {
     let message = 'Invalid API key'
     try {
       const body = await res.json()
-      message = body.error?.message ?? message
+      message = body.error?.message ?? body.detail?.error?.message ?? message
     } catch {
       // Non-JSON error response (e.g., HTML nginx page)
     }
@@ -71,6 +74,23 @@ export async function saveApiKey(key: string): Promise<{ key_prefix: string; for
     key_prefix: data.data?.key_prefix ?? key.substring(0, 8),
     force_reset: data.data?.force_reset,
   }
+}
+
+export interface BootstrapCredentials {
+  available: boolean
+  username?: string
+  initial_password?: string
+}
+
+/** Fetch installer-generated credentials only while the initial key is active. */
+export async function getBootstrapCredentials(): Promise<BootstrapCredentials> {
+  const res = await fetch(`${API_BASE}/auth/bootstrap`, {
+    credentials: 'include',
+    cache: 'no-store',
+  })
+  if (!res.ok) return { available: false }
+  const body = await res.json()
+  return body.data ?? { available: false }
 }
 
 /** Clear the HttpOnly browser session and its non-secret UI marker. */

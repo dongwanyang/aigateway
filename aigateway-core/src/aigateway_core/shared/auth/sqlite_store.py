@@ -852,9 +852,18 @@ class SQLiteStore:
         return imported
 
     async def check_is_default(self, key_hash: str) -> bool:
-        """Return True if the given key is the default admin key from config.yaml."""
+        """Return True if the given key is the active default admin key.
+
+        A revoked/suspended default key (e.g. after a force-reset rotated it)
+        must NOT count as "still default" — otherwise the bootstrap prefill
+        endpoint would keep offering a dead credential. Requires both
+        ``is_default=1`` and ``status='active'``.
+        """
         def _lookup():
-            row = self.conn.fetchone("SELECT is_default FROM api_keys WHERE key_hash=?", (key_hash,))
+            row = self.conn.fetchone(
+                "SELECT is_default FROM api_keys WHERE key_hash=? AND status='active'",
+                (key_hash,),
+            )
             return bool(row and row["is_default"])
         return await self._db(_lookup)
 

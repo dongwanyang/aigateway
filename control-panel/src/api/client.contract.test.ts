@@ -98,6 +98,38 @@ describe('browser authentication and streaming contracts', () => {
       status: 401,
     })
   })
+
+  it('supports administrator account login and no-store bootstrap credentials', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(jsonResponse({
+        data: { key_prefix: 'gw-admin', force_reset: false },
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        data: {
+          available: true,
+          username: 'admin',
+          initial_password: 'gw-initial',
+        },
+      }))
+
+    await api.saveApiKey('gw-password', 'admin')
+    await expect(api.getBootstrapCredentials()).resolves.toMatchObject({
+      available: true,
+      username: 'admin',
+    })
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      expect.stringMatching(/\/auth\/session$/),
+      expect.objectContaining({
+        body: JSON.stringify({ username: 'admin', password: 'gw-password' }),
+      }),
+    )
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      expect.stringMatching(/\/auth\/bootstrap$/),
+      expect.objectContaining({ cache: 'no-store' }),
+    )
+  })
 })
 
 describe('draft and media workflow contracts', () => {
