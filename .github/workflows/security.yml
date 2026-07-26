@@ -26,9 +26,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Audit API project
+        # aigateway-api depends on the local aigateway-core workspace package,
+        # which isn't on PyPI — no-deps audits only the declared dependency
+        # versions without trying to resolve the local package.
         uses: pypa/gh-action-pip-audit@v1.1.0
         with:
           inputs: aigateway-api/
+          no-deps: true
       - name: Audit core project
         uses: pypa/gh-action-pip-audit@v1.1.0
         with:
