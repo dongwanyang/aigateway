@@ -7,11 +7,11 @@ import { useAuthStore } from '@/stores/authStore'
 
 const api = vi.hoisted(() => ({
   getBrowserSession: vi.fn(),
-  getSavedApiKey: vi.fn(),
-  saveApiKey: vi.fn(),
-  clearApiKey: vi.fn(),
+  getSavedSessionMarker: vi.fn(),
+  loginWithPassword: vi.fn(),
+  clearBrowserSession: vi.fn(),
 }))
-vi.mock('@/api/client', () => api)
+vi.mock('@/api/authSession', () => api)
 
 function Consumer() {
   const auth = useAuth()
@@ -19,7 +19,7 @@ function Consumer() {
     <div>
       <span>{auth.isAuthenticated ? `authenticated:${auth.keyPrefix}` : 'anonymous'}</span>
       <span>{auth.forceReset ? 'reset-required' : 'normal'}</span>
-      <button onClick={() => void auth.login('gw-login-key')}>login</button>
+      <button onClick={() => void auth.login('admin', 'admin-password')}>login</button>
       <button onClick={() => void auth.logout()}>logout</button>
       <button onClick={auth.completeForceReset}>complete reset</button>
     </div>
@@ -39,40 +39,40 @@ describe('AuthProvider browser-session contract', () => {
     localStorage.clear()
     useAuthStore.getState().clear()
     api.getBrowserSession.mockReset()
-    api.getSavedApiKey.mockReset().mockReturnValue(null)
-    api.saveApiKey.mockReset()
-    api.clearApiKey.mockReset().mockResolvedValue(undefined)
+    api.getSavedSessionMarker.mockReset().mockReturnValue(null)
+    api.loginWithPassword.mockReset()
+    api.clearBrowserSession.mockReset().mockResolvedValue(undefined)
   })
 
   it('hydrates an authenticated forced-reset session from the backend', async () => {
     api.getBrowserSession.mockResolvedValue({
       authenticated: true,
-      key_prefix: 'gw-server',
+      key_prefix: 'admin',
       force_reset: true,
     })
     renderProvider()
-    expect(await screen.findByText('authenticated:gw-server')).toBeInTheDocument()
+    expect(await screen.findByText('authenticated:admin')).toBeInTheDocument()
     expect(screen.getByText('reset-required')).toBeInTheDocument()
     expect(localStorage.getItem('aigateway_session_active')).toBe('1')
   })
 
-  it('logs in, completes reset and clears both store and query state on logout', async () => {
+  it('logs in with username and password, completes reset, and clears state on logout', async () => {
     api.getBrowserSession.mockResolvedValue({ authenticated: false })
-    api.saveApiKey.mockResolvedValue({ key_prefix: 'gw-new', force_reset: true })
+    api.loginWithPassword.mockResolvedValue({ key_prefix: 'admin', force_reset: true })
     const user = userEvent.setup()
     const { client } = renderProvider()
     await screen.findByText('anonymous')
 
     await user.click(screen.getByRole('button', { name: 'login' }))
-    expect(await screen.findByText('authenticated:gw-new')).toBeInTheDocument()
-    expect(api.saveApiKey).toHaveBeenCalledWith('gw-login-key')
+    expect(await screen.findByText('authenticated:admin')).toBeInTheDocument()
+    expect(api.loginWithPassword).toHaveBeenCalledWith('admin', 'admin-password')
     await user.click(screen.getByRole('button', { name: 'complete reset' }))
     expect(screen.getByText('normal')).toBeInTheDocument()
     expect(client.getQueryData(['auth', 'session'])).toMatchObject({ force_reset: false })
 
     await user.click(screen.getByRole('button', { name: 'logout' }))
     await waitFor(() => expect(screen.getByText('anonymous')).toBeInTheDocument())
-    expect(api.clearApiKey).toHaveBeenCalled()
+    expect(api.clearBrowserSession).toHaveBeenCalled()
     expect(client.getQueryData(['auth', 'session'])).toEqual({ authenticated: false })
   })
 
