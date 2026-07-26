@@ -5,6 +5,7 @@ services:
     build:
       context: .
       dockerfile: aigateway-api/Dockerfile
+      target: ${GATEWAY_IMAGE_TARGET:-gateway-runtime}
     ports:
       - "8000:8000"
     env_file:

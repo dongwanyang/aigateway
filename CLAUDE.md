@@ -143,8 +143,11 @@ Backfill: L2 hit → L1; L3 hit → L1 only (approximate); MISS → L1+L2 + asyn
 | `config.yaml` | Runtime params, add provider, toggle plugins (hot-reloadable). |
 | `config.yaml.template` | Schema reference — check before adding a field. |
 | `docker-compose.yml` | 6 services (gateway, control-panel, redis, qdrant, prometheus, grafana). |
-| `aigateway-api/Dockerfile` | Layered install (apt → torch → requirements.txt → Qwen3 model → src). |
-| `aigateway-api/requirements.txt` | All Python deps. Bump here, not in Dockerfile. |
+| `aigateway-api/Dockerfile` | Multi-target images: runtime / RAG / vision / full / GPU. |
+| `aigateway-api/pyproject.toml` | API dependencies and public dev/rag/vision/gpu extras. |
+| `aigateway-core/pyproject.toml` | Core dependencies used by the API extras. |
+| `scripts/quickstart.sh` | Idempotent guided installer; writes `.aigateway-install.env`. |
+| `npm-installer/` | Dependency-free npm wrapper; clones/locates the repo and invokes quickstart. |
 | `Dockerfile.frontend` | Node 20 build → Nginx serve. |
 | `.env.example` / `.env.docker` | Runtime env template / BuildKit switch. `.env` itself gitignored. |
 | `docs/DB_SCHEMA.md` | Redis keys, Qdrant collections, PipelineContext. |
@@ -220,7 +223,7 @@ python3 -m pytest tests/ui/                      # UI e2e: needs gateway :8000 +
 2. **sys.path shim** — `main.py` prepends `aigateway-core/src`; Dockerfile places packages differently.
 3. **Prometheus lazy init** — metrics created on first `_ensure_initialized()` call. Duration histogram buckets: `[0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0]`. New: `gateway_cost_by_group{group_id}` counter tracks per-group cost.
 4. **Frontend parses Prom text** client-side via `parseMetrics()`. No structured metrics endpoint.
-5. **Deps live in `requirements.txt`** — not the Dockerfile. Editable installs work because packages are plain `src/` dirs. torch installed separately as a pre-layer.
+5. **Deps live in `pyproject.toml`** — Dockerfile only selects `.[rag]`, `.[vision]`, or `.[gpu]`; never duplicate Python package names there.
 6. **Layered plugin registration** — `_register_builtin_plugins()` (classic) and `register_generation_optimization_plugins()` (gen-opt) both feed the same `PluginRegistry`.
 7. **Embedding model cached** — `_l3_model_cache` module-level in `openai_compat.py` avoids reloading ~600MB Qwen3.
 8. **Hot-reload loop** — admin PUT → file write → `atomic_swap` → `_notify_reload` → `main._on_config_reload` rebuilds both PipelineEngines.
@@ -229,6 +232,7 @@ python3 -m pytest tests/ui/                      # UI e2e: needs gateway :8000 +
 11. **Single-worker** — `workers: 1` in Dockerfile CMD; the config field is deprecated.
 12. **Streaming parity** — SSE path also decrements quota, backfills cache, uses real cost.
 13. **Bridge logged model resolution** — `_resolve_logged_model` and `_resolve_stream_logged_model` in `dispatcher.py` extract the actual resolved model name from bridge results (not the client's `auto` placeholder) for logging, cost ledger, and cache backfill. Priority: `_meta.routed_to.model` > response body `data.model` > original `body_model`.
+14. **Runtime capability negotiation** — `/admin/capabilities` reports installed/configured/available for RAG, Code RAG, vision, upscaling, and GPU. Control Panel uses it to explain unavailable features and show the matching `scripts/quickstart.sh --add ...` command.
 
 ## Known States & Gotchas
 

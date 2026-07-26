@@ -25,14 +25,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Audit API requirements
+      - name: Audit API project
         uses: pypa/gh-action-pip-audit@v1.1.0
         with:
-          inputs: aigateway-api/requirements.txt
-          # BasicSR is only imported for local RealESRGAN upscaling. The gateway
-          # never invokes its SLURM launcher, which is the vulnerable path, and
-          # upstream currently provides no fixed release.
-          ignore-vulns: PYSEC-2026-1215
+          inputs: aigateway-api/
       - name: Audit core project
         uses: pypa/gh-action-pip-audit@v1.1.0
         with:
@@ -45,11 +41,19 @@ jobs:
         with:
           node-version: "20"
           cache: npm
-          cache-dependency-path: control-panel/package-lock.json
+          cache-dependency-path: |
+            control-panel/package-lock.json
+            npm-installer/package-lock.json
       - name: Verify frontend lockfile and audit dependencies
         working-directory: control-panel
         run: |
           npm ci --ignore-scripts
+          npm audit --audit-level=high
+      - name: Test and audit npm installer
+        working-directory: npm-installer
+        run: |
+          npm ci --ignore-scripts
+          npm test
           npm audit --audit-level=high
 
   filesystem-scan:

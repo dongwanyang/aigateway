@@ -7,8 +7,9 @@ on:
       - '.github/workflows/benchmark.yml'
       - 'benchmarks/**'
       - 'aigateway-core/src/**'
+      - 'aigateway-core/pyproject.toml'
       - 'aigateway-api/src/**'
-      - 'aigateway-api/requirements.txt'
+      - 'aigateway-api/pyproject.toml'
       - 'docker-compose.yml'
   workflow_dispatch:
     inputs:
@@ -62,9 +63,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -r aigateway-api/requirements.txt
           pip install -e aigateway-core
-          pip install -e aigateway-api
+          pip install -e "aigateway-api[rag]"
           pip install -e aigateway-cli
 
       - name: Start gateway

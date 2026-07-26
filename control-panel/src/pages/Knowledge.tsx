@@ -4,10 +4,32 @@ import Card from '@/components/Card'
 import { listRagDocuments, importRagDocument, deleteRagDocument } from '@/api/client'
 import type { RagDocument } from '@/api/client'
 import KnowledgeCodeTab from './KnowledgeCodeTab'
+import CapabilityUnavailable from '@/components/CapabilityUnavailable'
+import { useRuntimeCapabilities } from '@/hooks/useRuntimeCapabilities'
 
 type KnowledgeTab = 'text' | 'code'
 
 export default function Knowledge() {
+  const { data, loading } = useRuntimeCapabilities()
+  const rag = data?.capabilities.rag
+
+  if (loading) {
+    return <div style={{ color: 'var(--color-text-tertiary)' }}>正在检查知识库能力...</div>
+  }
+  if (rag && !rag.available) {
+    return (
+      <CapabilityUnavailable
+        title="知识库能力当前不可用"
+        description="基础 Gateway 仍可正常代理文本、图片和视频模型；文档导入、语义检索和 Code RAG 需要 RAG 镜像及可用的 Qdrant。"
+        capability={rag}
+      />
+    )
+  }
+
+  return <KnowledgeContent />
+}
+
+function KnowledgeContent() {
   const [knowledgeTab, setKnowledgeTab] = useState<KnowledgeTab>('text')
   const [documents, setDocuments] = useState<RagDocument[]>([])
   const [loading, setLoading] = useState(true)

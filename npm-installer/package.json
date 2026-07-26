@@ -1,0 +1,34 @@
+{
+  "name": "aigateway-installer",
+  "version": "0.1.1",
+  "description": "Interactive Docker installer for AI Gateway",
+  "type": "module",
+  "bin": {
+    "aigateway-install": "bin/aigateway-install.js"
+  },
+  "files": [
+    "bin",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dongwanyang/aigateway.git"
+  },
+  "keywords": [
+    "ai-gateway",
+    "docker",
+    "installer",
+    "llm",
+    "rag"
+  ],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
+}

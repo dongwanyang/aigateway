@@ -23,15 +23,36 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-llmlingua = ["llmlingua>=0.2.0"]
-clip = ["transformers>=4.30.0", "torch>=2.0.0", "Pillow>=9.0"]
-comfyui = ["websockets>=11.0", "httpx>=0.24.0"]
-llamaindex = ["llama-index>=0.10.0", "llama-index-vector-stores-qdrant>=0.2.0"]
-langchain = ["langchain>=0.1.0", "langchain-openai>=0.0.5"]
-paddleocr = ["paddleocr>=2.7.0", "paddlepaddle>=2.5.0"]
-unstructured = ["unstructured[all-docs]>=0.12.0"]
+rag = [
+    "llmlingua>=0.2.0",
+    "transformers>=4.51.0",
+    "sentence-transformers>=3.0.0",
+    "llama-index>=0.10.0",
+    "llama-index-vector-stores-qdrant>=0.2.0",
+    "llama-index-embeddings-huggingface>=0.2.0",
+    "qdrant-client>=1.9.0",
+    "langchain-community>=0.3.0",
+    "langchain-text-splitters>=0.3.0",
+    "langchain-classic>=1.0.0",
+    "langchain-openai>=0.3.0",
+    "gitpython>=3.1.0",
+]
+vision = [
+    "Pillow>=10.0.0",
+    "numpy>=1.26.0",
+    "pytesseract>=0.3.10",
+    "opencv-python-headless>=4.9.0",
+    "faster-whisper>=1.0.0",
+    "pymupdf>=1.24.0",
+    "python-docx>=1.1.0",
+    "beautifulsoup4>=4.12.0",
+    "transformers>=4.51.0",
+    "realesrgan>=0.3.0",
+    "basicsr>=1.4.2",
+]
+gpu = ["torch>=2.0.0"]
 all-integrations = [
-    "aigateway-core[llmlingua,clip,comfyui,llamaindex,langchain,paddleocr,unstructured]",
+    "aigateway-core[rag,vision,gpu]",
 ]
 
 [tool.hatch.build.targets.wheel]

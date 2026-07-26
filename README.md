@@ -79,25 +79,45 @@
 # 1. 克隆项目
 git clone <repo-url>
 
-# 2. 创建 .env 并填入你的 LLM 提供商 API Key
-cp .env.example .env
-nano .env   # 至少填一个:AGNES_API_KEY 或 DEEPSEEK_API_KEY
+# 2. 运行安装向导：逐步选择 Runtime / RAG / Vision / Full、GPU 和监控
+bash scripts/quickstart.sh --build
 
-# 3. 一键启动 6 个服务（首次构建约 10-15 分钟,后续改代码重建秒级）
-docker compose up -d --build
-#   或用快速启动脚本(自动引导建 .env + 健康检查):
-#   bash scripts/quickstart.sh --build
+# 无交互安装示例
+bash scripts/quickstart.sh --non-interactive --profile full --accelerator cuda --monitoring --build
 
-# 4. 访问
+# 安装后可重复运行，增加能力不会删除已有数据卷
+bash scripts/quickstart.sh --add rag --build
+bash scripts/quickstart.sh --add vision --build
+bash scripts/quickstart.sh --show-plan
+
+# 3. 在自动创建的 .env 中填入至少一个提供商 API Key
+nano .env
+
+# 4. 访问（监控地址仅在向导中启用监控后存在）
 # API Gateway:   http://localhost:8000
 # 控制面板:      http://localhost:3000
-# Prometheus:    http://localhost:9090
-# Grafana:       http://localhost:3001（需设置 GRAFANA_ADMIN_PASSWORD）
 ```
 
 > 💡 **不填 API Key 也能启动**：`config.yaml` 中所有密钥用 `${VAR:-}` 引用，未设时优雅降级为空。Gateway 能正常启动（插件 fail-open），但调用 LLM 会鉴权失败 —— 填好 `.env` 后 `docker compose restart gateway` 即可。
 >
+> 控制台会读取 `/admin/capabilities`。当前镜像未包含知识库或本地视觉能力时，页面会显示原因和对应的升级命令，不会等到操作失败后才报错。
+>
 > 📋 完整安装/配置/排查指引见 [INSTALL.md](INSTALL.md)。
+
+### npm 安装
+
+不需要先手动克隆仓库。npm 安装器会下载 AI Gateway，然后启动同一个能力选择向导：
+
+```bash
+npm install -g aigateway-installer
+aigateway-install
+
+# 或者一次性运行
+npx aigateway-installer
+```
+
+npm 包不在 `postinstall` 阶段执行系统命令；只有运行 `aigateway-install`
+后才会下载仓库、展示选项并启动 Docker。
 
 ### 方式二：本地开发
 
@@ -123,13 +143,14 @@ python --version    # 应输出 Python 3.12.x
 # 2. 安装核心库（顺序重要：core 先装）
 # ------------------------------------------------------------------
 cd aigateway-core && pip install -e . && cd ..
-cd aigateway-api  && pip install -e . && cd ..
+cd aigateway-api  && pip install -e ".[dev]" && cd ..
 cd aigateway-cli  && pip install -e . && cd ..
 
 # ------------------------------------------------------------------
-# 3. 安装可选集成（按需选择；all-integrations 会拖 ~5GB 依赖，含 torch/CUDA/paddle）
+# 3. 安装可选能力（从仓库根目录执行）
 # ------------------------------------------------------------------
-# 3. 按需安装可选集成（见下方「开源集成清单」表；一次装全：pip install -e "aigateway-core[all-integrations]"）
+pip install -e "aigateway-api[rag]"          # RAG / Code RAG / 本地 Embedding
+pip install -e "aigateway-api[vision,gpu]"   # OCR / 视频 / 超分辨率
 
 # ------------------------------------------------------------------
 # 4. 编辑 config.yaml，填入 API Key（providers 节）
@@ -291,17 +312,16 @@ generation_optimization:
 
 所有集成均为**可选依赖**，未安装时自动降级为 passthrough 模式（fail-open）：
 
-| 集成 | 包名 | 安装命令 | 用途 |
-|------|------|---------|------|
-| LLMLingua-2 | `llmlingua` | `pip install -e ".[llmlingua]"` | Prompt Token 压缩 |
-| CLIP | `transformers` + `torch` | `pip install -e ".[clip]"` | 视觉特征提取 |
-| ComfyUI | `websockets` + `httpx` | `pip install -e ".[comfyui]"` | 图片/视频生成 |
-| LlamaIndex | `llama-index` | `pip install -e ".[llamaindex]"` | RAG 向量检索 |
-| LangChain | `langchain` | `pip install -e ".[langchain]"` | 对话历史摘要 |
-| PaddleOCR | `paddleocr` | `pip install -e ".[paddleocr]"` | 中文 OCR |
-| Unstructured | `unstructured` | `pip install -e ".[unstructured]"` | 文档解析 |
+| 能力集 | 安装命令 | 用途 |
+|--------|---------|------|
+| `dev` | `pip install -e "aigateway-api[dev]"` | pytest、ruff、mypy |
+| `rag` | `pip install -e "aigateway-api[rag]"` | LLMLingua、LlamaIndex、LangChain、Code RAG、本地 Embedding |
+| `vision` | `pip install -e "aigateway-api[vision]"` | OCR、音视频解析、RealESRGAN |
+| `gpu` | `pip install -e "aigateway-api[gpu]"` | PyTorch GPU/本地推理基础 |
+| `all` | `pip install -e "aigateway-api[all]"` | 全部运行时能力（镜像与磁盘占用很大） |
 
-全部安装：`pip install -e ".[all-integrations]"`
+Python 包及版本只在 `aigateway-core/pyproject.toml` 和
+`aigateway-api/pyproject.toml` 中声明；Dockerfile 仅选择上述能力集。
 
 ---
 

@@ -178,6 +178,20 @@ def _compute_hash_embeddings(texts: List[str]) -> List[List[float]]:
 router = APIRouter()
 
 
+@router.get("/capabilities")
+async def get_runtime_capabilities(
+    request: Request,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+):
+    """Report optional image features without importing them during startup."""
+    from .capabilities import detect_runtime_capabilities
+
+    return {
+        "data": detect_runtime_capabilities(request.app.state),
+        "message": "success",
+    }
+
+
 # 生成管道插件 → generation_optimization 段内对应的配置键路径（末位为 "enabled"）。
 # 这 6 个插件不在 config.yaml 的 plugins 列表里，而是由 generation_optimization 段控制：
 #   注册时 enabled = generation_optimization.enabled and <sub>.enabled

@@ -1,6 +1,7 @@
 import { LayoutDashboard, Puzzle, DollarSign, Shield, Database, FileText, Sun, Moon, BookOpen, Settings, Bot, MessageSquare } from 'lucide-react'
 import { Link, useLocation } from 'react-router-dom'
 import { useTheme } from '@/hooks/useTheme'
+import CapabilityBanner from '@/components/CapabilityBanner'
 
 const navItems = [
   { path: '/', label: '概览', icon: LayoutDashboard },
@@ -70,6 +71,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
         style={{ marginTop: '56px', marginLeft: 'var(--sidebar-width)', padding: '24px' }}
       >
         <div style={{ maxWidth: '1440px' }}>
+          <CapabilityBanner />
           {children}
         </div>
       </main>

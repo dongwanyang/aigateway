@@ -43,21 +43,69 @@ nano .env   # 或用你喜欢的编辑器
 
 ### 3. 启动
 
-**快速启动脚本(推荐首次使用)**:
+**交互安装向导（推荐首次使用）**:
 
 ```bash
 bash scripts/quickstart.sh --build
 ```
 
-脚本会自动:引导创建 `.env` → 启用 BuildKit → 构建并启动 → 健康检查 → 打印访问地址。
+向导会逐步选择镜像能力、GPU 和监控，生成 `.aigateway-install.env`，创建
+`.env`，启动 Compose 并执行健康检查。它可以重复运行，不会自动删除数据卷。
 
-**或手动启动**:
+可用 profile：
+
+| Profile | 内容 | 适用场景 |
+|---------|------|----------|
+| `runtime` | 基础网关、控制台、Redis | 纯代理、远程模型 |
+| `rag` | Runtime + 知识库、Code RAG、本地 Embedding | 文档和代码检索 |
+| `vision` | Runtime + OCR、音视频处理、RealESRGAN | 本地媒体处理 |
+| `full` | RAG + Vision | 完整单机体验、评估、离线部署 |
+
+自动化和后续升级：
 
 ```bash
-docker compose up -d --build
+bash scripts/quickstart.sh --non-interactive --profile runtime --build
+bash scripts/quickstart.sh --non-interactive --profile full --accelerator cuda --monitoring --build
+bash scripts/quickstart.sh --add rag --build
+bash scripts/quickstart.sh --remove vision --build
+bash scripts/quickstart.sh --show-plan
+bash scripts/quickstart.sh --down
 ```
 
-首次构建约 10-15 分钟(下载 torch + Qwen3-Embedding 模型约 1.2GB)。后续改源码重建,**依赖层缓存命中,秒级完成**。
+`--remove` 只更换运行镜像，不删除 Redis、Qdrant 或 CodeGraph 数据卷。
+
+### 通过 npm 安装
+
+npm 安装器适用于 macOS、Linux 和 Windows WSL2，需要 Node.js 18+、Git、
+Bash、Docker 与 Docker Compose v2。
+
+```bash
+npm install -g aigateway-installer
+aigateway-install
+```
+
+或者直接运行：
+
+```bash
+npx aigateway-installer
+```
+
+如果当前目录不是 AI Gateway 仓库，安装器默认下载到 `~/.aigateway/runtime`，随后
+展示与 `quickstart.sh` 完全相同的能力选择界面。自动化参数会原样透传：
+
+```bash
+aigateway-install \
+  --non-interactive \
+  --profile full \
+  --accelerator cuda \
+  --monitoring \
+  --build
+
+aigateway-install --add rag --build
+aigateway-install --show-plan
+```
+
+可用 `--dir`、`--repo` 和 `--ref` 指定安装目录、源码仓库与发布版本。
 
 ### 4. 验证
 
@@ -71,8 +119,8 @@ curl http://localhost:8000/health   # 应返回 {"data":{"status":"healthy",...}
 |------|------|
 | API Gateway | http://localhost:8000 |
 | 控制面板 | http://localhost:3000 |
-| Prometheus | http://localhost:9090 |
-| Grafana | http://localhost:3001（密码由 `GRAFANA_ADMIN_PASSWORD` 注入） |
+| Prometheus | http://localhost:9090（启用 monitoring 时） |
+| Grafana | http://localhost:3001（启用 monitoring 时） |
 
 生产环境必须使用 TLS 覆盖配置（80 端口仅返回 308 跳转）：
 
@@ -100,11 +148,12 @@ source .venv/bin/activate
 
 # 3. 安装(顺序:core → api → cli)
 cd aigateway-core && pip install -e . && cd ..
-cd aigateway-api  && pip install -e . && cd ..
+cd aigateway-api  && pip install -e ".[dev]" && cd ..
 cd aigateway-cli  && pip install -e . && cd ..
 
-# 4. 安装可选集成(按需)
-pip install -e "aigateway-core[all-integrations]"   # 全部,约 5GB
+# 4. 安装可选能力(按需,从仓库根目录执行)
+pip install -e "aigateway-api[rag]"
+pip install -e "aigateway-api[vision,gpu]"
 
 # 5. 配置 .env
 cp .env.example .env && nano .env

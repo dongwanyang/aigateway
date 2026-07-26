@@ -415,7 +415,7 @@ class RAGRetrieverPlugin:
     async def _list_code_collections(self) -> List[str]:
         """从 Qdrant 拉集合列表并挑 rag_code_* 前缀."""
         try:
-            import httpx  # 已在 requirements.txt 里
+            import httpx  # aigateway-core 的基础依赖
         except Exception:
             return []
 

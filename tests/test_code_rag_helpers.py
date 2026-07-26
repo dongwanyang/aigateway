@@ -6,6 +6,7 @@ fail loudly instead of silently drifting.
 import os
 import tempfile
 import io
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -91,10 +92,42 @@ def test_docker_compose_has_code_graphs_volume() -> None:
     )
 
 
-def test_requirements_declare_code_rag_deps() -> None:
-    text = (REPO_ROOT / "aigateway-api" / "requirements.txt").read_text(encoding="utf-8")
+def test_pyproject_declares_code_rag_deps() -> None:
+    text = (REPO_ROOT / "aigateway-core" / "pyproject.toml").read_text(encoding="utf-8")
     for pkg in ("langchain-community", "langchain-text-splitters", "gitpython", "codegraph"):
-        assert pkg in text, f"missing dep '{pkg}' in aigateway-api/requirements.txt"
+        if pkg == "codegraph":
+            dockerfile = (REPO_ROOT / "aigateway-api" / "Dockerfile").read_text(encoding="utf-8")
+            assert "@colbymchenry/codegraph" in dockerfile
+        else:
+            assert pkg in text, f"missing dependency '{pkg}' in aigateway-core/pyproject.toml"
+
+
+def test_dependency_groups_and_docker_targets_stay_split() -> None:
+    with (REPO_ROOT / "aigateway-api" / "pyproject.toml").open("rb") as handle:
+        api_project = tomllib.load(handle)["project"]
+    with (REPO_ROOT / "aigateway-core" / "pyproject.toml").open("rb") as handle:
+        core_project = tomllib.load(handle)["project"]
+
+    assert set(api_project["optional-dependencies"]) >= {"dev", "rag", "vision", "gpu"}
+    assert set(core_project["optional-dependencies"]) >= {"rag", "vision", "gpu"}
+    assert not (REPO_ROOT / "aigateway-api" / "requirements.txt").exists()
+
+    dockerfile = (REPO_ROOT / "aigateway-api" / "Dockerfile").read_text(encoding="utf-8")
+    for target in (
+        "gateway-runtime",
+        "gateway-rag",
+        "gateway-vision",
+        "gateway-full",
+        "gateway-gpu",
+    ):
+        assert f"AS {target}" in dockerfile
+    assert "requirements.txt" not in dockerfile
+    assert "pip install --no-cache-dir torch" not in dockerfile
+
+    quickstart_script = (REPO_ROOT / "scripts" / "quickstart.sh").read_text(encoding="utf-8")
+    assert "--profile runtime|rag|vision|full" in quickstart_script
+    assert ".aigateway-install.env" in quickstart_script
+    assert "--add rag|vision|gpu" in quickstart_script
 
 
 # ---------------------------------------------------------------------------

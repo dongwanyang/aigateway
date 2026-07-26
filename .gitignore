@@ -11,6 +11,7 @@ build/
 
 # Environment
 .env
+.aigateway-install.env
 .env.local
 .env.production
 

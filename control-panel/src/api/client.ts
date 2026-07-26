@@ -1277,6 +1277,30 @@ export async function triggerL3Cleanup(): Promise<ApiResponse<{ deleted_count: n
 }
 
 // ------------------------------------------------------------------
+// Admin: Installed runtime capabilities
+// ------------------------------------------------------------------
+
+export interface RuntimeCapability {
+  installed: boolean
+  configured: boolean
+  available: boolean
+  install_command: string | null
+  reason: string | null
+}
+
+export interface RuntimeCapabilities {
+  profile: string
+  capabilities: Record<
+    'core' | 'rag' | 'code_rag' | 'vision' | 'upscaling' | 'gpu',
+    RuntimeCapability
+  >
+}
+
+export async function getRuntimeCapabilities(): Promise<ApiResponse<RuntimeCapabilities>> {
+  return fetchJson<RuntimeCapabilities>('/admin/capabilities')
+}
+
+// ------------------------------------------------------------------
 // Admin: Provider Connectivity Test & Model List
 // ------------------------------------------------------------------
 

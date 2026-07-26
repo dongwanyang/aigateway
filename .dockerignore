@@ -79,5 +79,6 @@ tests/
 # 保留(白名单,确保不被误排):
 # - aigateway-core/src/aigateway_core/**
 # - aigateway-api/src/aigateway_api/**
-# - aigateway-api/requirements.txt
+# - aigateway-core/pyproject.toml
+# - aigateway-api/pyproject.toml
 # - .env.example(供参考,可入镜像)
