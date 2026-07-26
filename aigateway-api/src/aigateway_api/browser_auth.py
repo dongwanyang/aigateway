@@ -103,17 +103,27 @@ class BrowserAuthStore:
             row = conn.execute("SELECT 1 FROM admin_users LIMIT 1").fetchone()
         return row is not None
 
-    def provision_admin(self, username: str, temporary_password: str) -> Dict[str, Any]:
+    def provision_admin(self, username: str, temporary_password: str) -> Optional[Dict[str, Any]]:
+        """Create the initial admin account exactly once.
+
+        First-login requests can race when two browser tabs submit the installer
+        password at the same time. SQLite enforces uniqueness on both user_id and
+        username; treat an IntegrityError as "another request won" instead of
+        overwriting or returning that competing account as a successful login.
+        """
         now = _now_unix()
-        with self._connect() as conn:
-            conn.execute(
-                """INSERT INTO admin_users
-                   (user_id, username, password_hash, status,
-                    requires_password_change, password_changed_at, created_at, updated_at)
-                   VALUES ('admin', ?, ?, 'active', 1, ?, ?, ?)""",
-                (username, _password_hash(temporary_password), now, now, now),
-            )
-        return self.get_user(username) or {}
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    """INSERT INTO admin_users
+                       (user_id, username, password_hash, status,
+                        requires_password_change, password_changed_at, created_at, updated_at)
+                       VALUES ('admin', ?, ?, 'active', 1, ?, ?, ?)""",
+                    (username, _password_hash(temporary_password), now, now, now),
+                )
+        except sqlite3.IntegrityError:
+            return None
+        return self.get_user(username)
 
     def verify_credentials(self, username: str, password: str) -> Optional[Dict[str, Any]]:
         user = self.get_user(username)
