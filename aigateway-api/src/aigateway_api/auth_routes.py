@@ -7,7 +7,7 @@ import tempfile
 from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from .auth_middleware import SESSION_COOKIE_NAME
 from .browser_auth import get_browser_auth_store
@@ -103,18 +103,16 @@ def _scrub_initial_password_from_env() -> None:
 
 
 class CreateSessionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     username: str = Field(..., min_length=1)
     password: str = Field(..., min_length=1)
 
-    class Config:
-        extra = "forbid"
-
 
 class ResetPasswordRequest(BaseModel):
-    new_password: str = Field(..., min_length=12)
+    model_config = ConfigDict(extra="forbid")
 
-    class Config:
-        extra = "forbid"
+    new_password: str = Field(..., min_length=12)
 
 
 def _matches_initial_password(candidate: str) -> bool:
