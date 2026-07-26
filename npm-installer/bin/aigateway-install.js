@@ -22,18 +22,25 @@ function printHelp() {
 AI Gateway npm 安装器
 
 用法:
-  aigateway-install
-  aigateway-install --profile full --accelerator cuda --build
-  npx aigateway-installer --add rag --build
+  aigateway-install [--source]
+  aigateway-install --source --profile full
+  aigateway-install --docker --profile full --accelerator cuda --build
 
 npm 安装器选项:
+  --source           源码安装（默认）
+  --docker           使用 Docker Compose 部署
   --dir <path>       安装或使用指定目录（默认 ~/.aigateway/runtime）
   --repo <url>       Git 仓库地址
   --ref <ref>        Git 分支或标签（默认 main）
   --installer-help   显示本帮助
   --version          显示 npm 安装器版本
 
-其他参数会原样传给 scripts/quickstart.sh，例如:
+源码安装参数会传给 scripts/install-source.sh，例如:
+  --profile runtime|rag|vision|full
+  --python <path>
+  --no-frontend
+
+Docker 部署参数会传给 scripts/quickstart.sh，例如:
   --profile runtime|rag|vision|full
   --add rag|vision|gpu
   --remove rag|vision|gpu
@@ -83,7 +90,9 @@ function parseArguments(argv) {
   let installDirectory = null
   let repository = process.env.AIGATEWAY_INSTALL_REPOSITORY || DEFAULT_REPOSITORY
   let ref = process.env.AIGATEWAY_INSTALL_REF || DEFAULT_REF
-  const quickstartArgs = []
+  let mode = 'source'
+  let explicitMode = null
+  const installerArgs = []
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]
@@ -94,12 +103,19 @@ function parseArguments(argv) {
       if (arg === '--repo') repository = value
       if (arg === '--ref') ref = value
       index += 1
+    } else if (arg === '--source' || arg === '--docker') {
+      const requestedMode = arg.slice(2)
+      if (explicitMode && explicitMode !== requestedMode) {
+        fail('--source 与 --docker 不能同时使用')
+      }
+      mode = requestedMode
+      explicitMode = requestedMode
     } else {
-      quickstartArgs.push(arg)
+      installerArgs.push(arg)
     }
   }
 
-  return { installDirectory, repository, ref, quickstartArgs }
+  return { installDirectory, repository, ref, mode, installerArgs }
 }
 
 function packageVersion() {
@@ -160,22 +176,32 @@ export function main(argv = process.argv.slice(2)) {
     return 0
   }
   if (process.platform === 'win32' && !process.env.WSL_DISTRO_NAME) {
-    fail('Windows 请在 WSL2 中运行，当前安装器需要 Bash 和 Docker Compose')
+    fail('Windows 请在 WSL2 中运行，当前安装器需要 Bash')
   }
   if (!commandExists('bash')) fail('未找到 Bash')
 
   const parsed = parseArguments(argv)
   const installDirectory = resolveInstallDirectory(parsed.installDirectory)
   ensureCheckout(installDirectory, parsed.repository, parsed.ref)
+  const sourceMode = parsed.mode === 'source'
+  const installerScript = sourceMode
+    ? join(installDirectory, 'scripts', 'install-source.sh')
+    : join(installDirectory, 'scripts', 'quickstart.sh')
+  if (!existsSync(installerScript)) {
+    fail(`当前仓库缺少 ${installerScript}；请检查 --ref 指定的版本`)
+  }
 
   process.stdout.write(`
 AI Gateway 安装目录：${installDirectory}
-接下来请选择要安装的能力。安装器可重复运行，不会自动删除数据卷。
+安装方式：${sourceMode ? '源码安装' : 'Docker Compose 部署'}
+${sourceMode
+    ? '将创建项目虚拟环境并以 editable 模式安装源码。'
+    : '接下来请选择要部署的能力。安装器可重复运行，不会自动删除数据卷。'}
 
 `)
   const result = run(
     'bash',
-    [join(installDirectory, 'scripts', 'quickstart.sh'), ...parsed.quickstartArgs],
+    [installerScript, ...parsed.installerArgs],
     { cwd: installDirectory },
   )
   return result.status ?? 1

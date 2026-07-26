@@ -1,7 +1,7 @@
 {
   "name": "aigateway-installer",
   "version": "0.1.2",
-  "description": "Interactive Docker installer for AI Gateway",
+  "description": "Source and Docker installer for AI Gateway",
   "type": "module",
   "bin": {
     "aigateway-install": "bin/aigateway-install.js"
@@ -22,6 +22,7 @@
   },
   "keywords": [
     "ai-gateway",
+    "source",
     "docker",
     "installer",
     "llm",

@@ -106,18 +106,20 @@ nano .env
 
 ### npm 安装
 
-不需要先手动克隆仓库。npm 安装器会下载 AI Gateway，然后启动同一个能力选择向导：
+不需要先手动克隆仓库。npm 安装器会下载 AI Gateway，默认进行源码安装：
 
 ```bash
 npm install -g aigateway-installer
-aigateway-install
+aigateway-install                         # 等同于 --source
+aigateway-install --source --profile full
 
 # 或者一次性运行
 npx aigateway-installer
 ```
 
 npm 包不在 `postinstall` 阶段执行系统命令；只有运行 `aigateway-install`
-后才会下载仓库、展示选项并启动 Docker。
+后才会下载仓库并安装。若要使用 Docker Compose 部署，请显式传入
+`aigateway-install --docker`；原有 profile、GPU、监控和构建参数均可继续使用。
 
 ### 方式二：本地开发
 
