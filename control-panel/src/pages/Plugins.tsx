@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Puzzle, Key, Save, X, RefreshCw, Bug, Globe, Eye, Database, Network } from 'lucide-react'
+import { Puzzle, RefreshCw, Bug, Globe, Eye, Database, Network } from 'lucide-react'
 import Card from '@/components/Card'
 import {
   getPluginsConfig,
@@ -14,7 +14,7 @@ import type { PluginConfigItem, DebugConfig } from '@/api/client'
 import { useAuth } from '@/contexts/AuthContext'
 
 export default function Plugins() {
-  const { isAuthenticated, login } = useAuth()
+  const { isAuthenticated } = useAuth()
   const [plugins, setPlugins] = useState<PluginConfigItem[]>([])
   const [loading, setLoading] = useState(true)
   const [globalConfig, setGlobalConfig] = useState({ hot_reload: false })
@@ -23,31 +23,10 @@ export default function Plugins() {
   const [debugLoading, setDebugLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  // --- API Key 管理 ---
-  const [apiKeyInput, setApiKeyInput] = useState('')
-  const [showKeyInput, setShowKeyInput] = useState(false)
-  const savedKey = isAuthenticated ? '1' : null
-
-  const handleSaveKey = async () => {
-    if (apiKeyInput.trim()) {
-      try {
-        await login(apiKeyInput.trim())
-        setApiKeyInput('')
-        setShowKeyInput(false)
-        setError(null)
-        await loadData()
-      } catch {
-        setError('API Key 无效，请重新输入')
-      }
-    }
-  }
-
-  // --- 数据加载（带鉴权重试） ---
   async function loadData() {
     setLoading(true)
     setGlobalLoading(true)
     setError(null)
-
     try {
       const [pluginsRes, globalRes] = await Promise.all([
         getPluginsConfig(),
@@ -55,12 +34,8 @@ export default function Plugins() {
       ])
       setPlugins(pluginsRes.data.plugins)
       setGlobalConfig({ hot_reload: globalRes.data.hot_reload })
-    } catch {
-      if (savedKey) {
-        setError('API Key 无效或服务不可用，请重新输入')
-      } else {
-        setError('未配置 API Key，请先输入管理员密钥')
-      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '插件配置加载失败')
     } finally {
       setLoading(false)
       setGlobalLoading(false)
@@ -70,8 +45,7 @@ export default function Plugins() {
   async function loadDebug() {
     setDebugLoading(true)
     try {
-      const cfg = await getDebugConfig()
-      setDebugCfg(cfg)
+      setDebugCfg(await getDebugConfig())
     } catch {
       // non-fatal: debug config is optional
     } finally {
@@ -80,52 +54,50 @@ export default function Plugins() {
   }
 
   useEffect(() => {
-    loadData()
-    loadDebug()
-  }, [])
+    if (!isAuthenticated) return
+    void loadData()
+    void loadDebug()
+  }, [isAuthenticated])
 
   const toggle = async (name: string, currentEnabled: boolean) => {
-    const newEnabled = !currentEnabled
-    setPlugins(prev => prev.map(p => p.name === name ? { ...p, enabled: newEnabled } : p))
+    const next = !currentEnabled
+    setPlugins(prev => prev.map(p => p.name === name ? { ...p, enabled: next } : p))
     try {
-      await togglePlugin(name, newEnabled)
+      await togglePlugin(name, next)
     } catch {
       setPlugins(prev => prev.map(p => p.name === name ? { ...p, enabled: currentEnabled } : p))
     }
   }
 
   const toggleDebug = async (name: string, currentDebug: boolean | null) => {
-    if (currentDebug === null) return  // prompt_compress 等不支持单独 debug
-    const newDebug = !currentDebug
-    setPlugins(prev => prev.map(p => p.name === name ? { ...p, debug: newDebug } : p))
+    if (currentDebug === null) return
+    const next = !currentDebug
+    setPlugins(prev => prev.map(p => p.name === name ? { ...p, debug: next } : p))
     try {
-      await setPluginDebug(name, newDebug)
+      await setPluginDebug(name, next)
     } catch {
       setPlugins(prev => prev.map(p => p.name === name ? { ...p, debug: currentDebug } : p))
     }
   }
 
-  const toggleGlobal = async (key: 'hot_reload', currentValue: boolean) => {
-    const newValue = !currentValue
-    setGlobalConfig(prev => ({ ...prev, [key]: newValue }))
+  const toggleGlobal = async () => {
+    const next = !globalConfig.hot_reload
+    setGlobalConfig({ hot_reload: next })
     try {
-      // Only send the toggled field — backend preserves debug_mode when omitted
-      // (update_global_config falls back to the current value). Sending
-      // debug_mode: false here would silently disable debug mode on every toggle.
-      await updateGlobalConfig({
-        hot_reload: newValue,
-      })
+      await updateGlobalConfig({ hot_reload: next })
     } catch {
-      setGlobalConfig(prev => ({ ...prev, [key]: currentValue }))
+      setGlobalConfig({ hot_reload: !next })
     }
   }
 
-  async function toggleDebugDimension(dim: keyof Pick<DebugConfig, 'frontend' | 'entry' | 'cache' | 'bridge' | 'plugins_enabled'>) {
+  async function toggleDebugDimension(
+    dim: keyof Pick<DebugConfig, 'frontend' | 'entry' | 'cache' | 'bridge' | 'plugins_enabled'>,
+  ) {
     if (!debugCfg) return
-    const newVal = !debugCfg[dim]
-    setDebugCfg(prev => prev ? { ...prev, [dim]: newVal } : prev)
+    const next = !debugCfg[dim]
+    setDebugCfg(prev => prev ? { ...prev, [dim]: next } : prev)
     try {
-      await updateDebugSection({ [dim]: newVal })
+      await updateDebugSection({ [dim]: next })
       await loadDebug()
     } catch {
       await loadDebug()
@@ -151,125 +123,8 @@ export default function Plugins() {
     return descriptions[name] ?? '默认配置'
   }
 
-  // 如果还没有保存的 API Key，显示输入界面
-  if (!savedKey && !showKeyInput) {
-    return (
-      <div className="space-y-6">
-        <div className="flex items-center justify-between">
-          <h2 className="text-2xl font-bold">插件管理</h2>
-        </div>
-
-        <Card>
-          <div className="max-w-md mx-auto text-center py-8">
-            <Key size={48} className="mx-auto mb-4 opacity-40" style={{ color: 'var(--color-primary)' }} />
-            <h3 className="text-lg font-semibold mb-2">需要 API Key</h3>
-            <p className="text-sm mb-6" style={{ color: 'var(--color-text-tertiary)' }}>
-              请输入管理员 API Key 以查看和管理插件配置。
-              <br />
-              密钥只用于创建 HttpOnly 会话，不会保存到浏览器存储。
-            </p>
-            <button
-              onClick={() => setShowKeyInput(true)}
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '8px',
-                padding: '10px 24px',
-                borderRadius: '8px',
-                border: 'none',
-                cursor: 'pointer',
-                fontWeight: 600,
-                fontSize: '14px',
-                backgroundColor: 'var(--color-primary)',
-                color: 'white',
-              }}
-            >
-              <Key size={16} />
-              输入 API Key
-            </button>
-          </div>
-        </Card>
-      </div>
-    )
-  }
-
-  // 正在输入 API Key
-  if (showKeyInput) {
-    return (
-      <div className="space-y-6">
-        <div className="flex items-center justify-between">
-          <h2 className="text-2xl font-bold">插件管理</h2>
-        </div>
-
-        <Card>
-          <div className="max-w-md mx-auto py-6">
-            <div className="flex items-center gap-3 mb-4">
-              <Key size={24} style={{ color: 'var(--color-primary)' }} />
-              <h3 className="text-lg font-semibold">配置 API Key</h3>
-            </div>
-            <div className="flex gap-2">
-              <input
-                type="password"
-                value={apiKeyInput}
-                onChange={e => setApiKeyInput(e.target.value)}
-                placeholder="gw-xxxxxxxx..."
-                onKeyDown={e => { if (e.key === 'Enter') void handleSaveKey() }}
-                style={{
-                  flex: 1,
-                  padding: '10px 14px',
-                  borderRadius: '8px',
-                  border: '1px solid var(--color-border)',
-                  backgroundColor: 'var(--color-bg-base)',
-                  color: 'var(--color-text-primary)',
-                  fontSize: '14px',
-                  outline: 'none',
-                }}
-                autoFocus
-              />
-              <button
-                onClick={() => void handleSaveKey()}
-                disabled={!apiKeyInput.trim()}
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: '6px',
-                  padding: '10px 18px',
-                  borderRadius: '8px',
-                  border: 'none',
-                  cursor: apiKeyInput.trim() ? 'pointer' : 'not-allowed',
-                  fontWeight: 600,
-                  fontSize: '14px',
-                  backgroundColor: apiKeyInput.trim() ? 'var(--color-primary)' : 'var(--color-bg-overlay)',
-                  color: apiKeyInput.trim() ? 'white' : 'var(--color-text-tertiary)',
-                }}
-              >
-                <Save size={16} />
-                保存
-              </button>
-              <button
-                onClick={() => { setShowKeyInput(false); setApiKeyInput('') }}
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  padding: '10px 14px',
-                  borderRadius: '8px',
-                  border: '1px solid var(--color-border)',
-                  cursor: 'pointer',
-                  backgroundColor: 'var(--color-bg-overlay)',
-                  color: 'var(--color-text-secondary)',
-                }}
-              >
-                <X size={16} />
-              </button>
-            </div>
-            <p className="text-xs mt-3" style={{ color: 'var(--color-text-tertiary)' }}>
-              管理员 Key 请以 config.yaml auth.api_keys 中配置的 gw-* 密钥为准。
-            </p>
-          </div>
-        </Card>
-      </div>
-    )
+  if (!isAuthenticated) {
+    return <div style={{ color: 'var(--color-text-tertiary)' }}>请先登录控制台。</div>
   }
 
   return (
@@ -281,36 +136,11 @@ export default function Plugins() {
             {plugins.filter(p => p.enabled).length}/{plugins.length} 已启用
           </span>
           <button
-            onClick={() => { setShowKeyInput(true); setApiKeyInput('') }}
+            onClick={() => void loadData()}
             style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: '6px',
-              padding: '6px 12px',
-              borderRadius: '6px',
-              border: '1px solid var(--color-border)',
-              cursor: 'pointer',
-              fontSize: '12px',
-              backgroundColor: 'var(--color-bg-overlay)',
-              color: 'var(--color-text-secondary)',
-            }}
-            title="更换 API Key"
-          >
-            <Key size={14} />
-            更换 Key
-          </button>
-          <button
-            onClick={loadData}
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              padding: '6px 10px',
-              borderRadius: '6px',
-              border: '1px solid var(--color-border)',
-              cursor: 'pointer',
-              fontSize: '12px',
-              backgroundColor: 'var(--color-bg-overlay)',
+              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+              padding: '6px 10px', borderRadius: '6px', border: '1px solid var(--color-border)',
+              cursor: 'pointer', fontSize: '12px', backgroundColor: 'var(--color-bg-overlay)',
               color: 'var(--color-text-secondary)',
             }}
             title="刷新数据"
@@ -320,13 +150,12 @@ export default function Plugins() {
         </div>
       </div>
 
-      {/* 错误提示 */}
       {error && (
         <Card style={{ borderLeft: '4px solid var(--color-danger)', backgroundColor: 'var(--color-error-bg)' }}>
           <div className="flex items-center justify-between">
             <span className="text-sm" style={{ color: 'var(--color-danger)' }}>{error}</span>
             <button
-              onClick={() => { setError(null); loadData() }}
+              onClick={() => { setError(null); void loadData() }}
               style={{ color: 'var(--color-danger)', background: 'none', border: 'none', cursor: 'pointer', fontSize: '12px' }}
             >
               重试
@@ -340,11 +169,7 @@ export default function Plugins() {
           {[1, 2, 3].map(i => <div key={i} className="h-16 skeleton rounded" />)}
         </div>
       ) : plugins.length === 0 ? (
-        <Card>
-          <div className="text-center py-8" style={{ color: 'var(--color-text-tertiary)' }}>
-            {error ? '点击重试加载插件配置' : '未检测到插件配置'}
-          </div>
-        </Card>
+        <Card><div className="text-center py-8" style={{ color: 'var(--color-text-tertiary)' }}>未检测到插件配置</div></Card>
       ) : (
         (['understanding', 'generation'] as const).map(kind => {
           const kindPlugins = plugins.filter(p => (p.pipeline_kind || 'understanding') === kind)
@@ -353,18 +178,14 @@ export default function Plugins() {
             <div key={kind} className="mb-8">
               <h3 className="text-lg font-semibold mb-4" style={{ color: 'var(--color-text-primary)' }}>
                 {kind === 'understanding' ? '理解管道' : '生成管道'}
-                <span className="ml-2 text-sm font-normal" style={{ color: 'var(--color-text-tertiary)' }}>
-                  ({kindPlugins.length} 插件)
-                </span>
+                <span className="ml-2 text-sm font-normal" style={{ color: 'var(--color-text-tertiary)' }}>({kindPlugins.length} 插件)</span>
               </h3>
               {['缓存', '安全', '性能', '路由', '其他'].map(catLabel => {
                 const catPlugins = kindPlugins.filter(p => getCategory(p.name) === catLabel)
                 if (catPlugins.length === 0) return null
                 return (
                   <div key={catLabel} className="mb-4">
-                    <div className="text-sm font-medium mb-2" style={{ color: 'var(--color-text-secondary)' }}>
-                      {catLabel}
-                    </div>
+                    <div className="text-sm font-medium mb-2" style={{ color: 'var(--color-text-secondary)' }}>{catLabel}</div>
                     <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
                       {catPlugins.map(plugin => (
                         <Card key={plugin.name} className="flex items-center justify-between">
@@ -373,47 +194,23 @@ export default function Plugins() {
                               <Puzzle size={20} style={{ color: plugin.enabled ? 'white' : 'var(--color-text-tertiary)' }} />
                             </div>
                             <div>
-                              <div className="font-medium flex items-center gap-2">
-                                {plugin.name}
-                                {plugin.pipeline_kind && (
-                                  <span
-                                    className="text-xs px-2 py-0.5 rounded"
-                                    style={{
-                                      backgroundColor: plugin.pipeline_kind === 'generation'
-                                        ? 'var(--color-warning, #f59e0b)'
-                                        : 'var(--color-bg-overlay)',
-                                      color: plugin.pipeline_kind === 'generation' ? 'white' : 'var(--color-text-tertiary)',
-                                    }}
-                                    title={plugin.pipeline_kind === 'generation' ? '生成管道' : '理解管道'}
-                                  >
-                                    {plugin.pipeline_kind === 'generation' ? '生成' : '理解'}
-                                  </span>
-                                )}
-                              </div>
-                              <div className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>
-                                {getPluginDescription(plugin.name)}
-                              </div>
+                              <div className="font-medium">{plugin.name}</div>
+                              <div className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>{getPluginDescription(plugin.name)}</div>
                             </div>
                           </div>
                           <div className="flex items-center gap-2">
                             {plugin.debug !== null && plugin.debug !== undefined && (
                               <button
-                                onClick={() => toggleDebug(plugin.name, plugin.debug ?? false)}
+                                onClick={() => void toggleDebug(plugin.name, plugin.debug ?? false)}
                                 title="Debug 日志"
                                 className="p-2 rounded-lg cursor-pointer"
-                                style={{
-                                  backgroundColor: plugin.debug ? 'var(--color-warning, #f59e0b)' : 'var(--color-bg-overlay)',
-                                }}
+                                style={{ backgroundColor: plugin.debug ? 'var(--color-warning, #f59e0b)' : 'var(--color-bg-overlay)' }}
                               >
                                 <Bug size={16} style={{ color: plugin.debug ? 'white' : 'var(--color-text-tertiary)' }} />
                               </button>
                             )}
                             <label className="toggle cursor-pointer">
-                              <input
-                                type="checkbox"
-                                checked={plugin.enabled}
-                                onChange={() => toggle(plugin.name, plugin.enabled)}
-                              />
+                              <input type="checkbox" checked={plugin.enabled} onChange={() => void toggle(plugin.name, plugin.enabled)} />
                               <span className="toggle-slider" />
                             </label>
                           </div>
@@ -430,9 +227,7 @@ export default function Plugins() {
 
       <Card title="全局配置">
         {debugLoading ? (
-          <div className="space-y-3">
-            {[1, 2, 3, 4, 5].map(i => <div key={i} className="h-4 skeleton rounded" />)}
-          </div>
+          <div className="space-y-3">{[1, 2, 3, 4, 5].map(i => <div key={i} className="h-4 skeleton rounded" />)}</div>
         ) : (
           <div className="space-y-4">
             <div className="flex items-center justify-between">
@@ -441,19 +236,12 @@ export default function Plugins() {
                 <div className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>修改 config.yaml 后自动生效</div>
               </div>
               <label className="toggle cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={globalConfig.hot_reload}
-                  onChange={() => toggleGlobal('hot_reload', globalConfig.hot_reload)}
-                  disabled={globalLoading}
-                />
+                <input type="checkbox" checked={globalConfig.hot_reload} onChange={() => void toggleGlobal()} disabled={globalLoading} />
                 <span className="toggle-slider" />
               </label>
             </div>
             <hr style={{ borderColor: 'var(--color-border)' }} />
-            <div className="text-sm font-medium mb-1" style={{ color: 'var(--color-text-secondary)' }}>
-              分维度调试开关
-            </div>
+            <div className="text-sm font-medium mb-1" style={{ color: 'var(--color-text-secondary)' }}>分维度调试开关</div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               {([
                 { key: 'frontend' as const, label: '前端', desc: 'ASGI 中间件层请求日志', icon: Globe },
@@ -462,24 +250,13 @@ export default function Plugins() {
                 { key: 'bridge' as const, label: 'Bridge', desc: 'LiteLLM 模型调用出口', icon: Network },
                 { key: 'plugins_enabled' as const, label: '插件总开关', desc: '所有插件 debug 日志', icon: Bug },
               ]).map(({ key, label, desc, icon: Icon }) => (
-                <div
-                  key={key}
-                  className="flex items-center justify-between p-3 rounded-lg"
-                  style={{ backgroundColor: 'var(--color-bg-overlay)' }}
-                >
+                <div key={key} className="flex items-center justify-between p-3 rounded-lg" style={{ backgroundColor: 'var(--color-bg-overlay)' }}>
                   <div className="flex items-center gap-3">
                     <Icon size={18} style={{ color: debugCfg?.[key] ? 'var(--color-primary)' : 'var(--color-text-tertiary)' }} />
-                    <div>
-                      <div className="text-sm font-medium">{label}</div>
-                      <div className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>{desc}</div>
-                    </div>
+                    <div><div className="text-sm font-medium">{label}</div><div className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>{desc}</div></div>
                   </div>
                   <label className="toggle cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={!!debugCfg?.[key]}
-                      onChange={() => toggleDebugDimension(key)}
-                    />
+                    <input type="checkbox" checked={!!debugCfg?.[key]} onChange={() => void toggleDebugDimension(key)} />
                     <span className="toggle-slider" />
                   </label>
                 </div>
