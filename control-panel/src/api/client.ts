@@ -10,23 +10,6 @@ import type {
   ApiError,
   ChatCompletionRequest,
   ChatCompletionData,
-  ModelListData,
-  EmbeddingRequest,
-  EmbeddingListData,
-  ApiKeyListData,
-  CreateApiKeyRequest,
-  CreateApiKeyData,
-  RevokedKeyData,
-  DetailedQuotaData,
-  HealthData,
-  MetricSample,
-  Group,
-  GroupListData,
-  CreateGroupRequest,
-  UpdateGroupRequest,
-  AssignGroupRequest,
-  CacheScope,
-  VideoStatusResponse,
 } from '@/types'
 
 // ------------------------------------------------------------------
