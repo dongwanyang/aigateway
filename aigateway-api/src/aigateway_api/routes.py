@@ -84,8 +84,6 @@ async def post_console_chat_completions(
     """
     from aigateway_api.dispatcher import RequestDispatcher
 
-    request.state.console_browser_user_id = _auth.get("user_id")
-    request.state.console_browser_username = _auth.get("username")
     await _bind_console_chat_api_key(request)
 
     state = _get_app_state(request)
@@ -100,8 +98,6 @@ async def get_console_video_status(
     _auth: Dict[str, Any] = Depends(authenticate_admin),
 ) -> JSONResponse:
     """Poll video status from the control panel without exposing an API key."""
-    request.state.console_browser_user_id = _auth.get("user_id")
-    request.state.console_browser_username = _auth.get("username")
     await _bind_console_chat_api_key(request)
 
     state = _get_app_state(request)
