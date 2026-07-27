@@ -237,6 +237,11 @@ trap 'rm -f "$tmp_state"' EXIT
 mv "$tmp_state" "$INSTALL_STATE"
 trap - EXIT
 
+# BuildKit is required for Dockerfile cache mounts and heredoc COPY. Respect an
+# explicit operator setting, but default local installs to the fast builder.
+export DOCKER_BUILDKIT="${DOCKER_BUILDKIT:-1}"
+export COMPOSE_DOCKER_CLI_BUILD="${COMPOSE_DOCKER_CLI_BUILD:-1}"
+
 compose=(docker compose --env-file "$INSTALL_STATE" -f docker-compose.yml)
 if [[ "$accelerator" == "cuda" ]]; then
   compose+=(-f docker-compose.gpu.yml)
