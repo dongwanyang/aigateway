@@ -5,6 +5,10 @@ import Card from '@/components/Card'
 import { useAuth } from '@/contexts/AuthContext'
 import { getBootstrapCredentials, resetPassword } from '@/api/authSession'
 
+function looksLikeGatewayApiKey(value: string): boolean {
+  return value.trim().startsWith('gw-')
+}
+
 export default function Login() {
   const { login, isLoading, forceReset, logout, completeForceReset } = useAuth()
   const [username, setUsername] = useState('admin')
@@ -40,10 +44,13 @@ export default function Login() {
     setSubmitting(true)
     setError(null)
     try {
+      if (looksLikeGatewayApiKey(password)) {
+        throw new Error('API Key 不能用于控制台登录。请使用初始管理员密码，或首次登录后设置的管理员密码。')
+      }
       const result = await login(username, password)
       if (!result.forceReset) navigate('/', { replace: true })
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : '登录失败，请检查用户名和密码')
+      setError(reason instanceof Error ? reason.message : '登录失败，请检查用户名和管理员密码')
     } finally {
       setSubmitting(false)
     }
@@ -66,7 +73,7 @@ export default function Login() {
       completeForceReset()
       navigate('/', { replace: true })
     } catch (reason) {
-      setResetError(reason instanceof Error ? reason.message : '密码设置失败')
+      setResetError(reason instanceof Error ? reason.message : '管理员密码设置失败')
     } finally {
       setResetSubmitting(false)
     }
@@ -88,7 +95,7 @@ export default function Login() {
             <AlertTriangle size={48} style={{ color: 'var(--color-warning)', margin: '0 auto' }} />
             <h1 className="text-xl font-bold mt-4">设置独立管理员密码</h1>
             <p className="text-sm mt-1" style={{ color: 'var(--color-text-tertiary)' }}>
-              初始密码仅用于首次进入控制台。设置后，控制台登录与 API Key 完全分离。
+              初始密码仅用于首次进入控制台。设置后，控制台登录密码与 API Key 完全分离。
             </p>
           </div>
           <form onSubmit={handleReset} className="space-y-4">
@@ -105,7 +112,7 @@ export default function Login() {
               />
             </div>
             <div>
-              <label className="block text-xs mb-1 font-medium" style={{ color: 'var(--color-text-tertiary)' }}>确认密码</label>
+              <label className="block text-xs mb-1 font-medium" style={{ color: 'var(--color-text-tertiary)' }}>确认管理员密码</label>
               <input
                 className="input w-full"
                 type="password"
@@ -139,7 +146,7 @@ export default function Login() {
         <div className="text-center mb-6">
           <Shield size={48} style={{ color: 'var(--color-primary)', margin: '0 auto' }} />
           <h1 className="text-xl font-bold mt-4">AI Gateway Control Panel</h1>
-          <p className="text-sm mt-1" style={{ color: 'var(--color-text-tertiary)' }}>使用管理员账号登录</p>
+          <p className="text-sm mt-1" style={{ color: 'var(--color-text-tertiary)' }}>使用管理员账号和管理员密码登录</p>
         </div>
         <form onSubmit={handleLogin} className="space-y-4">
           <div>
@@ -159,7 +166,7 @@ export default function Login() {
             </div>
           </div>
           <div>
-            <label className="block text-xs mb-1 font-medium" style={{ color: 'var(--color-text-tertiary)' }}>密码</label>
+            <label className="block text-xs mb-1 font-medium" style={{ color: 'var(--color-text-tertiary)' }}>管理员密码</label>
             <div className="relative">
               <input
                 className="input w-full"
@@ -172,7 +179,7 @@ export default function Login() {
               />
               <button
                 type="button"
-                aria-label={showSecret ? '隐藏密码' : '显示密码'}
+                aria-label={showSecret ? '隐藏管理员密码' : '显示管理员密码'}
                 className="absolute right-3 top-1/2 -translate-y-1/2"
                 style={{ color: 'var(--color-text-tertiary)' }}
                 onClick={() => setShowSecret(value => !value)}
@@ -180,6 +187,9 @@ export default function Login() {
                 {showSecret ? <EyeOff size={17} /> : <Eye size={17} />}
               </button>
             </div>
+            <p className="text-xs mt-1" style={{ color: 'var(--color-text-tertiary)' }}>
+              API Key 仅用于 OpenAI 兼容的 /v1/* 程序化调用，不能用于控制台登录。
+            </p>
           </div>
           {error && <div className="text-sm" style={{ color: 'var(--color-danger)' }}>{error}</div>}
           <button type="submit" className="btn btn-primary w-full justify-center" disabled={submitting || !username.trim() || !password}>
