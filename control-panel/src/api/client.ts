@@ -1,203 +1,64 @@
 /**
  * API 客户端 — 与 API_CONTRACT.md 对齐
- *
  * 控制台认证逻辑集中在 authSession.ts；本文件只保留已登录后的普通资源 API。
  */
-
-import type {
-  ApiResponse,
-  ApiError,
-  ChatCompletionRequest,
-  ChatCompletionData,
-  ModelListData,
-  EmbeddingRequest,
-  EmbeddingListData,
-  ApiKeyListData,
-  CreateApiKeyRequest,
-  CreateApiKeyData,
-  RevokedKeyData,
-  DetailedQuotaData,
-  HealthData,
-  MetricSample,
-  Group,
-  GroupListData,
-  CreateGroupRequest,
-  UpdateGroupRequest,
-  AssignGroupRequest,
-  CacheScope,
-  VideoStatusResponse,
-} from '@/types'
+import type { ApiResponse, ApiError, ChatCompletionRequest, ChatCompletionData, ModelListData, EmbeddingRequest, EmbeddingListData, ApiKeyListData, CreateApiKeyRequest, CreateApiKeyData, RevokedKeyData, DetailedQuotaData, HealthData, MetricSample, Group, GroupListData, CreateGroupRequest, UpdateGroupRequest, CacheScope, VideoStatusResponse } from '@/types'
 export { requestChatCompletion, type ChatResponse } from './consoleChat'
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? ''
-
-async function ensureAuthHeaders(): Promise<Record<string, string>> {
-  return { 'Content-Type': 'application/json' }
-}
-
+async function ensureAuthHeaders(): Promise<Record<string, string>> { return { 'Content-Type': 'application/json' } }
 async function fetchJson<T>(path: string, options: RequestInit = {}): Promise<{ data: T; message: string }> {
   const headers = await ensureAuthHeaders()
-  const res = await fetch(`${API_BASE}${path}`, {
-    ...options,
-    credentials: 'include',
-    headers: { ...headers, ...(options.headers ?? {}) },
-  })
-  if (!res.ok) {
-    let code = 'unknown_error'
-    let message = `HTTP ${res.status}`
-    try {
-      const body = (await res.json()) as ApiError
-      code = body.error?.code ?? code
-      message = body.error?.message ?? message
-    } catch {
-      message = `Server error: ${res.status} ${res.statusText}`
-    }
-    const error = new Error(message)
-    ;(error as any).code = code
-    ;(error as any).status = res.status
-    throw error
-  }
+  const res = await fetch(`${API_BASE}${path}`, { ...options, credentials: 'include', headers: { ...headers, ...(options.headers ?? {}) } })
+  if (!res.ok) { let code = 'unknown_error'; let message = `HTTP ${res.status}`; try { const body = (await res.json()) as ApiError; code = body.error?.code ?? code; message = body.error?.message ?? message } catch { message = `Server error: ${res.status} ${res.statusText}` }; const error = new Error(message); ;(error as any).code = code; ;(error as any).status = res.status; throw error }
   return res.json()
 }
-
 async function rawJson<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = await ensureAuthHeaders()
-  const res = await fetch(`${API_BASE}${path}`, {
-    ...options,
-    credentials: 'include',
-    headers: { ...headers, ...(options.headers ?? {}) },
-  })
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}))
-    const msg = body?.error?.message ?? body?.detail?.error?.message ?? body?.detail ?? `HTTP ${res.status}`
-    throw new Error(String(msg))
-  }
+  const res = await fetch(`${API_BASE}${path}`, { ...options, credentials: 'include', headers: { ...headers, ...(options.headers ?? {}) } })
+  if (!res.ok) { const body = await res.json().catch(() => ({})); const msg = body?.error?.message ?? body?.detail?.error?.message ?? body?.detail ?? `HTTP ${res.status}`; throw new Error(String(msg)) }
   return res.json()
 }
+async function errorText(res: Response, fallback: string): Promise<string> { try { const body = await res.json(); return body?.error?.code || body?.error?.message || body?.detail?.error?.message || body?.detail || `${fallback}: HTTP ${res.status}` } catch { return `${fallback}: HTTP ${res.status}` } }
 
-export async function createChatCompletion(body: ChatCompletionRequest): Promise<ApiResponse<ChatCompletionData>> {
-  return fetchJson<ChatCompletionData>('/admin/console/chat/completions', {
-    method: 'POST',
-    body: JSON.stringify(body),
-  })
-}
-
-export async function getDraftPreview(draftId: string): Promise<{ previewDataUrl?: string; previewCount?: number; status?: 'generating' }> {
-  const headers = await ensureAuthHeaders()
-  const res = await fetch(`${API_BASE}/admin/draft/${encodeURIComponent(draftId)}/preview`, { credentials: 'include', headers })
-  if (res.status === 202) { await res.json().catch(() => ({})); return { status: 'generating' } }
-  if (!res.ok) throw new Error(await errorText(res, 'preview 加载失败'))
-  const json = (await res.json()) as { preview_data_url?: string; preview_count?: number }
-  if (!json.preview_data_url) throw new Error('preview 响应缺少 preview_data_url')
-  return { previewDataUrl: json.preview_data_url, previewCount: json.preview_count ?? 1 }
-}
-
-export async function getDraftResult(draftId: string): Promise<{ resultDataUrl: string }> {
-  const json = await rawJson<{ result_data_url?: string }>(`/admin/draft/${encodeURIComponent(draftId)}/result`)
-  if (!json.result_data_url) throw new Error('result 响应缺少 result_data_url')
-  return { resultDataUrl: json.result_data_url }
-}
-
-export async function deleteSessionDrafts(sessionId: string): Promise<{ session_id: string; deleted_count: number }> {
-  return rawJson(`/admin/drafts/session/${encodeURIComponent(sessionId)}`, { method: 'DELETE' })
-}
-
-export type ConfirmDraftResult =
-  | { videoId: string; status: string; mediaType: 'video' }
-  | { upscaledUrl: string; targetResolution: [number, number]; algorithm: string; mediaType: 'image' }
-
-export async function confirmDraft(draftId: string): Promise<ConfirmDraftResult> {
-  const json = await rawJson<{ media_type?: string; video_id?: string; status?: string; upscaled_url?: string; target_resolution?: [number, number]; algorithm?: string }>(`/admin/draft/${encodeURIComponent(draftId)}/confirm`, { method: 'POST' })
-  if (json.media_type === 'video' && json.video_id) return { videoId: json.video_id, status: json.status ?? 'generating', mediaType: 'video' }
-  if (!json.upscaled_url) throw new Error('confirm 响应缺少 upscaled_url')
-  return { upscaledUrl: json.upscaled_url, targetResolution: json.target_resolution ?? [0, 0], algorithm: json.algorithm ?? 'upscale', mediaType: 'image' }
-}
-
-export async function rejectDraft(draftId: string): Promise<{ newDraftId: string; previewUrl: string; attemptNumber: number; maxAttempts: number }> {
-  const json = await rawJson<{ new_draft_id?: string; preview_url?: string; attempt_number?: number; max_attempts?: number }>(`/admin/draft/${encodeURIComponent(draftId)}/reject`, { method: 'POST' })
-  if (!json.new_draft_id || !json.preview_url) throw new Error('reject 响应缺少 new_draft_id / preview_url')
-  return { newDraftId: json.new_draft_id, previewUrl: json.preview_url, attemptNumber: json.attempt_number ?? 1, maxAttempts: json.max_attempts ?? 5 }
-}
-
-export async function getDraftStatus(draftId: string): Promise<{ status: string; expiresAt: number; attemptNumber: number; maxAttempts: number }> {
-  const json = await rawJson<{ status?: string; expires_at?: number; attempt_number?: number; max_attempts?: number }>(`/admin/draft/${encodeURIComponent(draftId)}`)
-  return { status: json.status ?? 'unknown', expiresAt: json.expires_at ?? 0, attemptNumber: json.attempt_number ?? 1, maxAttempts: json.max_attempts ?? 5 }
-}
-
-export async function getVideoStatus(videoId: string): Promise<VideoStatusResponse> {
-  return rawJson<VideoStatusResponse>(`/admin/console/videos/${encodeURIComponent(videoId)}`)
-}
+export async function createChatCompletion(body: ChatCompletionRequest): Promise<ApiResponse<ChatCompletionData>> { return fetchJson<ChatCompletionData>('/admin/console/chat/completions', { method: 'POST', body: JSON.stringify(body) }) }
+export async function getDraftPreview(draftId: string): Promise<{ previewDataUrl?: string; previewCount?: number; status?: 'generating' }> { const headers = await ensureAuthHeaders(); const res = await fetch(`${API_BASE}/admin/draft/${encodeURIComponent(draftId)}/preview`, { credentials: 'include', headers }); if (res.status === 202) { await res.json().catch(() => ({})); return { status: 'generating' } }; if (!res.ok) throw new Error(await errorText(res, 'preview 加载失败')); const json = await res.json() as { preview_data_url?: string; preview_count?: number }; if (!json.preview_data_url) throw new Error('preview 响应缺少 preview_data_url'); return { previewDataUrl: json.preview_data_url, previewCount: json.preview_count ?? 1 } }
+export async function getDraftResult(draftId: string): Promise<{ resultDataUrl: string }> { const json = await rawJson<{ result_data_url?: string }>(`/admin/draft/${encodeURIComponent(draftId)}/result`); if (!json.result_data_url) throw new Error('result 响应缺少 result_data_url'); return { resultDataUrl: json.result_data_url } }
+export async function deleteSessionDrafts(sessionId: string): Promise<{ session_id: string; deleted_count: number }> { return rawJson(`/admin/drafts/session/${encodeURIComponent(sessionId)}`, { method: 'DELETE' }) }
+export type ConfirmDraftResult = { videoId: string; status: string; mediaType: 'video' } | { upscaledUrl: string; targetResolution: [number, number]; algorithm: string; mediaType: 'image' }
+export async function confirmDraft(draftId: string): Promise<ConfirmDraftResult> { const json = await rawJson<{ media_type?: string; video_id?: string; status?: string; upscaled_url?: string; target_resolution?: [number, number]; algorithm?: string }>(`/admin/draft/${encodeURIComponent(draftId)}/confirm`, { method: 'POST' }); if (json.media_type === 'video' && json.video_id) return { videoId: json.video_id, status: json.status ?? 'generating', mediaType: 'video' }; if (!json.upscaled_url) throw new Error('confirm 响应缺少 upscaled_url'); return { upscaledUrl: json.upscaled_url, targetResolution: json.target_resolution ?? [0, 0], algorithm: json.algorithm ?? 'upscale', mediaType: 'image' } }
+export async function rejectDraft(draftId: string): Promise<{ newDraftId: string; previewUrl: string; attemptNumber: number; maxAttempts: number }> { const json = await rawJson<{ new_draft_id?: string; preview_url?: string; attempt_number?: number; max_attempts?: number }>(`/admin/draft/${encodeURIComponent(draftId)}/reject`, { method: 'POST' }); if (!json.new_draft_id || !json.preview_url) throw new Error('reject 响应缺少 new_draft_id / preview_url'); return { newDraftId: json.new_draft_id, previewUrl: json.preview_url, attemptNumber: json.attempt_number ?? 1, maxAttempts: json.max_attempts ?? 5 } }
+export async function getDraftStatus(draftId: string): Promise<{ status: string; expiresAt: number; attemptNumber: number; maxAttempts: number }> { const json = await rawJson<{ status?: string; expires_at?: number; attempt_number?: number; max_attempts?: number }>(`/admin/draft/${encodeURIComponent(draftId)}`); return { status: json.status ?? 'unknown', expiresAt: json.expires_at ?? 0, attemptNumber: json.attempt_number ?? 1, maxAttempts: json.max_attempts ?? 5 } }
+export async function getVideoStatus(videoId: string): Promise<VideoStatusResponse> { return rawJson<VideoStatusResponse>(`/admin/console/videos/${encodeURIComponent(videoId)}`) }
 
 export async function listModels(): Promise<ApiResponse<ModelListData>> { return fetchJson<ModelListData>('/v1/models') }
 export async function createEmbeddings(body: EmbeddingRequest): Promise<ApiResponse<EmbeddingListData>> { return fetchJson<EmbeddingListData>('/v1/embeddings', { method: 'POST', body: JSON.stringify(body) }) }
-
 export async function listApiKeys(page = 1, pageSize = 20): Promise<ApiResponse<ApiKeyListData>> { return fetchJson<ApiKeyListData>(`/admin/api-keys?page=${page}&page_size=${pageSize}`) }
 export async function createApiKey(body: CreateApiKeyRequest): Promise<ApiResponse<CreateApiKeyData>> { return fetchJson<CreateApiKeyData>('/admin/api-keys', { method: 'POST', body: JSON.stringify(body) }) }
 export async function deleteApiKey(keyId: string): Promise<ApiResponse<RevokedKeyData>> { return fetchJson<RevokedKeyData>(`/admin/api-keys/${encodeURIComponent(keyId)}`, { method: 'DELETE' }) }
 export async function rotateApiKey(keyId: string): Promise<{ data: { key: string; warning: string } }> { return fetchJson<{ key: string; warning: string }>(`/admin/api-keys/${encodeURIComponent(keyId)}/rotate`, { method: 'POST', body: JSON.stringify({}) }) }
-
 export interface UpdateQuotaRequest { daily_tokens?: number; monthly_cost?: number; rate_limit_rpm?: number; rate_limit_tpm?: number }
 export interface UpdateQuotaData { id: string; user_id: string; quotas: { daily_tokens_limit: number; monthly_cost_limit: number; rate_limit_rpm: number; rate_limit_tpm: number } }
 export async function updateApiKeyQuota(keyId: string, body: UpdateQuotaRequest): Promise<ApiResponse<UpdateQuotaData>> { return fetchJson<UpdateQuotaData>(`/admin/api-keys/${encodeURIComponent(keyId)}`, { method: 'PUT', body: JSON.stringify(body) }) }
 export async function getQuota(keyId: string): Promise<ApiResponse<DetailedQuotaData>> { return fetchJson<DetailedQuotaData>(`/admin/quotas/${encodeURIComponent(keyId)}`) }
-
 export async function listGroups(): Promise<ApiResponse<GroupListData>> { return fetchJson<GroupListData>('/admin/groups') }
 export async function createGroup(body: CreateGroupRequest): Promise<ApiResponse<Group>> { return fetchJson<Group>('/admin/groups', { method: 'POST', body: JSON.stringify(body) }) }
 export async function updateGroup(groupId: string, body: UpdateGroupRequest): Promise<ApiResponse<Group>> { return fetchJson<Group>(`/admin/groups/${encodeURIComponent(groupId)}`, { method: 'PUT', body: JSON.stringify(body) }) }
 export async function deleteGroup(groupId: string): Promise<ApiResponse<{ deleted: boolean }>> { return fetchJson<{ deleted: boolean }>(`/admin/groups/${encodeURIComponent(groupId)}`, { method: 'DELETE' }) }
-export async function assignKeyGroup(keyId: string, groupId: string, cacheScope?: CacheScope): Promise<ApiResponse<{ assigned: boolean }>> {
-  const body: AssignGroupRequest = { key_id: keyId, group_id: groupId, cache_scope: cacheScope }
-  return fetchJson<{ assigned: boolean }>('/admin/groups/assign-key', { method: 'POST', body: JSON.stringify(body) })
-}
+export async function assignKeyGroup(keyId: string, groupId: string, cacheScope?: CacheScope): Promise<ApiResponse<unknown>> { return fetchJson<unknown>(`/admin/api-keys/${encodeURIComponent(keyId)}/group`, { method: 'PUT', body: JSON.stringify({ group_id: groupId, cache_scope: cacheScope }) }) }
 
 export async function getHealth(): Promise<ApiResponse<HealthData>> { const res = await fetch(`${API_BASE}/health`, { credentials: 'include' }); if (!res.ok) throw new Error(`Health check failed: ${res.status}`); return res.json() }
 export async function getMetricsText(): Promise<string> { const res = await fetch(`${API_BASE}/metrics`, { credentials: 'include' }); if (!res.ok) throw new Error(`Failed to fetch metrics: ${res.status}`); return res.text() }
-
-export function parseMetrics(text: string): MetricSample[] {
-  const samples: MetricSample[] = []
-  for (const line of text.split('\n')) {
-    if (!line.startsWith('gateway_') || line.startsWith('#')) continue
-    const match = line.match(/^(.+?)\{(.+?)\} (.+)$/)
-    if (match) {
-      const [, name, labelsStr, value] = match
-      const labels: Record<string, string> = {}
-      for (const pair of labelsStr.split(',')) {
-        const [k, v] = pair.split('=').map(s => s.replace(/"/g, ''))
-        if (k && v !== undefined) labels[k] = v
-      }
-      samples.push({ name, labels, value: parseFloat(value) })
-    } else {
-      const simpleMatch = line.match(/^(.+?) (.+)$/)
-      if (simpleMatch) { const [, name, value] = simpleMatch; samples.push({ name, labels: {}, value: parseFloat(value) }) }
-    }
-  }
-  return samples
-}
-
+export function parseMetrics(text: string): MetricSample[] { const samples: MetricSample[] = []; for (const line of text.split('\n')) { if (!line.startsWith('gateway_') || line.startsWith('#')) continue; const match = line.match(/^(.+?)\{(.+?)\} (.+)$/); if (match) { const [, name, labelsStr, value] = match; const labels: Record<string, string> = {}; for (const pair of labelsStr.split(',')) { const [k, v] = pair.split('=').map(s => s.replace(/"/g, '')); if (k && v !== undefined) labels[k] = v } samples.push({ name, labels, value: parseFloat(value) }) } else { const simpleMatch = line.match(/^(.+?) (.+)$/); if (simpleMatch) { const [, name, value] = simpleMatch; samples.push({ name, labels: {}, value: parseFloat(value) }) } } } return samples }
 export interface MetricsQueryResponse { status: string; data: { resultType: string; result: Array<{ metric?: Record<string, string>; values?: Array<{ timestamp: string; value: string }> }> } }
-export async function metricsQuery(params: { query: string; start: string; end: string; step: string }): Promise<MetricsQueryResponse> {
-  const qs = new URLSearchParams(params)
-  const res = await fetch(`${API_BASE}/admin/metrics/query_range?${qs}`, { credentials: 'include' })
-  if (!res.ok) throw new Error(`Failed to query metrics: ${res.status}`)
-  return res.json()
-}
-
+export async function metricsQuery(params: { query: string; start?: string; end?: string; step?: string }): Promise<MetricsQueryResponse> { const qs = new URLSearchParams({ query: params.query, step: params.step || '3600' }); if (params.start) qs.set('start', params.start); if (params.end) qs.set('end', params.end); const res = await fetch(`${API_BASE}/admin/metrics/query_range?${qs}`, { credentials: 'include' }); if (!res.ok) throw new Error(`Failed to query metrics: ${res.status}`); return res.json() }
 export interface MetricsJsonData { prometheus: Record<string, { labels: Record<string, string>; value: number }>; keys: { total_keys: number; total_daily_tokens_used: number; total_monthly_cost_used: number; total_requests: number }; circuit_breakers: Record<string, unknown>; uptime_seconds: number }
 export async function getMetricsJson(): Promise<ApiResponse<MetricsJsonData>> { return fetchJson<MetricsJsonData>('/admin/metrics-json') }
-
 export interface LedgerRow { id: number; trace_id: string; ts: string; ts_unix: number; user_id: string; group_id: string; model: string; provider: string; pipeline_kind: string; tokens_in: number; tokens_out: number; tokens_total: number; cost_usd: number; cached: number; stream: number; status: string }
 interface AggregateRow { k: string; requests: number; tokens_in: number; tokens_out: number; tokens_total: number; cost_usd: number; cache_hits: number }
 interface AggregateDayRow { k: string; requests: number; tokens_total: number; cost_usd: number }
 export interface CostSummary { total: Record<string, number>; by_model: AggregateRow[]; by_user: AggregateRow[]; by_group: AggregateRow[]; by_day: AggregateDayRow[] }
-
-export async function getCostLedger(params?: { limit?: number; offset?: number; start?: number | null; end?: number | null; user_id?: string | null; group_id?: string | null; model?: string | null }): Promise<LedgerRow[]> {
-  const qs = new URLSearchParams()
-  if (params?.limit) qs.set('limit', String(params.limit)); if (params?.offset) qs.set('offset', String(params.offset))
-  if (params?.start !== undefined && params.start !== null) qs.set('start', String(params.start)); if (params?.end !== undefined && params.end !== null) qs.set('end', String(params.end))
-  if (params?.user_id) qs.set('user_id', params.user_id); if (params?.group_id) qs.set('group_id', params.group_id); if (params?.model) qs.set('model', params.model)
-  const body = await rawJson<{ rows?: LedgerRow[] }>(`/admin/costs/ledger${qs.toString() ? '?' + qs : ''}`)
-  return body.rows ?? []
-}
+export async function getCostLedger(params?: { limit?: number; offset?: number; start?: number | null; end?: number | null; user_id?: string | null; group_id?: string | null; model?: string | null }): Promise<LedgerRow[]> { const qs = new URLSearchParams(); if (params?.limit) qs.set('limit', String(params.limit)); if (params?.offset) qs.set('offset', String(params.offset)); if (params?.start !== undefined && params.start !== null) qs.set('start', String(params.start)); if (params?.end !== undefined && params.end !== null) qs.set('end', String(params.end)); if (params?.user_id) qs.set('user_id', params.user_id); if (params?.group_id) qs.set('group_id', params.group_id); if (params?.model) qs.set('model', params.model); const body = await rawJson<{ rows?: LedgerRow[] }>(`/admin/costs/ledger${qs.toString() ? '?' + qs : ''}`); return body.rows ?? [] }
 export async function getCostSummary(days?: number): Promise<CostSummary> { return rawJson<CostSummary>(`/admin/costs/summary${days ? `?days=${days}` : ''}`) }
 
 export interface PluginConfigItem { name: string; enabled: boolean; depends_on: string[]; config: Record<string, unknown>; pipeline_kind?: 'understanding' | 'generation'; priority?: number; debug?: boolean | null }
@@ -229,7 +90,6 @@ export async function getTraceDetail(traceId: string): Promise<ApiResponse<Trace
 export interface RuntimeCapability { available: boolean; reason?: string; commands?: string[]; details?: Record<string, unknown> }
 export interface RuntimeCapabilitiesData { capabilities: Record<string, RuntimeCapability> }
 export async function getRuntimeCapabilities(): Promise<ApiResponse<RuntimeCapabilitiesData>> { return fetchJson<RuntimeCapabilitiesData>('/admin/capabilities') }
-
 export interface RagDocument { doc_id: string; filename: string; file_type: string; chunk_count: number; chunk_strategy: string; chunk_size: number; chunk_overlap: number; total_tokens: number; created_at: number; url: string }
 export async function listRagDocuments(): Promise<ApiResponse<{ documents: RagDocument[] }>> { return fetchJson<{ documents: RagDocument[] }>('/admin/rag/documents') }
 export async function importRagDocument(params: { url?: string; content?: string; filename?: string; chunk_strategy?: string; chunk_size?: number; chunk_overlap?: number }): Promise<ApiResponse<{ doc_id: string; filename: string; chunk_count: number; total_tokens: number; elapsed_ms: number }>> { return fetchJson('/admin/rag/documents', { method: 'POST', body: JSON.stringify(params) }) }
@@ -267,5 +127,3 @@ export async function listL3Entries(params: { page?: number; pageSize?: number; 
 export async function updateL3EntryMode(pointId: string, mode: 'auto' | 'manual', ttlHours?: number): Promise<ApiResponse<L3CacheEntry>> { return fetchJson<L3CacheEntry>(`/admin/cache/l3/entries/${encodeURIComponent(pointId)}/mode`, { method: 'PUT', body: JSON.stringify({ mode, ttl_hours: ttlHours }) }) }
 export async function deleteL3Entry(pointId: string): Promise<ApiResponse<{ deleted: boolean }>> { return fetchJson<{ deleted: boolean }>(`/admin/cache/l3/entries/${encodeURIComponent(pointId)}`, { method: 'DELETE' }) }
 export async function triggerL3Cleanup(): Promise<ApiResponse<{ deleted: number }>> { return fetchJson<{ deleted: number }>('/admin/cache/l3/cleanup', { method: 'POST' }) }
-
-async function errorText(res: Response, fallback: string): Promise<string> { try { const body = await res.json(); return body?.error?.code || body?.error?.message || body?.detail?.error?.message || body?.detail || `${fallback}: HTTP ${res.status}` } catch { return `${fallback}: HTTP ${res.status}` } }
