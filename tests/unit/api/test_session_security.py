@@ -28,7 +28,7 @@ async def test_browser_cookie_is_not_accepted_by_api_key_dependency(tmp_path):
     with pytest.raises(HTTPException) as exc:
         await authenticate(request)
     assert exc.value.status_code == 401
-    assert exc.value.detail["error"]["message"] == "API key required"
+    assert exc.value.detail["error"]["message"] == "Invalid or missing API key"
 
 
 @pytest.mark.asyncio
