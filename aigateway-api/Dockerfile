@@ -26,8 +26,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 COPY aigateway-core/pyproject.toml /app/aigateway-core/pyproject.toml
 COPY aigateway-api/pyproject.toml /app/aigateway-api/pyproject.toml
 
-RUN cat > /usr/local/bin/aigateway-docker-requirements <<'PY' \
-    && chmod +x /usr/local/bin/aigateway-docker-requirements
+COPY <<'PY' /usr/local/bin/aigateway-docker-requirements
 #!/usr/bin/env python3
 from __future__ import annotations
 
@@ -99,6 +98,7 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 PY
+RUN chmod +x /usr/local/bin/aigateway-docker-requirements
 
 EXPOSE 8000
 
