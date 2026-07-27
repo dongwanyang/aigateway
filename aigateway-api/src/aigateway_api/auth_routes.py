@@ -1,6 +1,7 @@
 """Browser account and session endpoints for the control panel."""
 from __future__ import annotations
 
+import asyncio
 import os
 import secrets
 import tempfile
@@ -26,9 +27,23 @@ def _truthy(value: str | None) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _trusted_proxy_ips() -> set[str]:
+    raw = os.environ.get("AI_GATEWAY_TRUSTED_PROXY_IPS", "")
+    return {item.strip() for item in raw.split(",") if item.strip()}
+
+
+def _request_from_trusted_proxy(request: Request) -> bool:
+    if _truthy(os.environ.get("AI_GATEWAY_TRUST_PROXY_HEADERS")):
+        return True
+    client_host = request.client.host if request.client else ""
+    return bool(client_host and client_host in _trusted_proxy_ips())
+
+
 def _is_https(request: Request) -> bool:
     forwarded = request.headers.get("x-forwarded-proto", "")
-    return request.url.scheme == "https" or forwarded.split(",", 1)[0].strip() == "https"
+    if forwarded and _request_from_trusted_proxy(request):
+        return forwarded.split(",", 1)[0].strip() == "https"
+    return request.url.scheme == "https"
 
 
 def _session_ttl() -> int:
@@ -40,10 +55,13 @@ def _absolute_session_ttl() -> int:
 
 
 def _set_session_cookie(request: Request, response: Response, token: str) -> None:
+    # Browser lifetime is capped by the absolute TTL; idle timeout is enforced by
+    # the server-side session row and does not require re-issuing Set-Cookie on
+    # every request.
     response.set_cookie(
         key=SESSION_COOKIE_NAME,
         value=token,
-        max_age=_session_ttl(),
+        max_age=_absolute_session_ttl(),
         httponly=True,
         secure=_is_https(request),
         samesite="strict",
@@ -51,9 +69,19 @@ def _set_session_cookie(request: Request, response: Response, token: str) -> Non
     )
 
 
+def _clear_session_cookie(request: Request, response: Response) -> None:
+    response.delete_cookie(
+        SESSION_COOKIE_NAME,
+        path="/",
+        secure=_is_https(request),
+        httponly=True,
+        samesite="strict",
+    )
+
+
 def _client_ip(request: Request) -> str:
     forwarded = request.headers.get("x-forwarded-for", "")
-    if forwarded:
+    if forwarded and _request_from_trusted_proxy(request):
         return forwarded.split(",", 1)[0].strip()
     return request.client.host if request.client else ""
 
@@ -140,9 +168,9 @@ async def create_session(
         )
 
     store = get_browser_auth_store(request)
-    user = store.verify_credentials(username, password)
+    user = await asyncio.to_thread(store.verify_credentials, username, password)
 
-    if user is None and not store.has_users():
+    if user is None and not await asyncio.to_thread(store.has_users):
         expected_username = os.environ.get("AI_GATEWAY_ADMIN_USERNAME", "admin")
         try:
             username_ok = secrets.compare_digest(
@@ -151,7 +179,17 @@ async def create_session(
         except Exception:
             username_ok = False
         if username_ok and _matches_initial_password(password):
-            user = store.provision_admin(username, password)
+            user = await asyncio.to_thread(store.provision_admin, username, password)
+            if user is None:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "error": {
+                            "code": "admin_already_initialized",
+                            "message": "Administrator account was already initialized.",
+                        }
+                    },
+                )
 
     if user is None:
         raise HTTPException(
@@ -159,7 +197,8 @@ async def create_session(
             detail={"error": {"code": "unauthorized", "message": "Invalid username or password"}},
         )
 
-    token = store.create_session(
+    token = await asyncio.to_thread(
+        store.create_session,
         str(user["user_id"]),
         ttl_seconds=_session_ttl(),
         absolute_ttl_seconds=_absolute_session_ttl(),
@@ -185,7 +224,7 @@ async def get_bootstrap_credentials(request: Request, response: Response) -> Dic
     response.headers["Cache-Control"] = "no-store, max-age=0"
     response.headers["Pragma"] = "no-cache"
     store = get_browser_auth_store(request)
-    if not _truthy(os.environ.get("AI_GATEWAY_PREFILL_INITIAL_CREDENTIALS")) or store.has_users():
+    if not _truthy(os.environ.get("AI_GATEWAY_PREFILL_INITIAL_CREDENTIALS")) or await asyncio.to_thread(store.has_users):
         return {"data": {"available": False}, "message": "success"}
 
     initial_password = _initial_admin_password()
@@ -207,7 +246,7 @@ async def get_session(request: Request) -> Dict[str, Any]:
     if not raw_token:
         return {"data": {"authenticated": False}}
     store = get_browser_auth_store(request)
-    session = store.validate_session(raw_token, idle_ttl_seconds=_session_ttl())
+    session = await asyncio.to_thread(store.validate_session, raw_token, idle_ttl_seconds=_session_ttl())
     if session is None:
         return {"data": {"authenticated": False}}
     return {
@@ -225,8 +264,8 @@ async def get_session(request: Request) -> Dict[str, Any]:
 async def delete_session(request: Request, response: Response) -> Dict[str, Any]:
     raw_token = request.cookies.get(SESSION_COOKIE_NAME)
     if raw_token:
-        get_browser_auth_store(request).revoke_session(raw_token)
-    response.delete_cookie(SESSION_COOKIE_NAME, path="/", samesite="strict")
+        await asyncio.to_thread(get_browser_auth_store(request).revoke_session, raw_token)
+    _clear_session_cookie(request, response)
     return {"data": {"authenticated": False}, "message": "success"}
 
 
@@ -247,13 +286,14 @@ async def reset_password(
     if not raw_token:
         raise HTTPException(status_code=401, detail={"error": {"code": "unauthorized", "message": "Authentication required"}})
     store = get_browser_auth_store(request)
-    session = store.validate_session(raw_token, idle_ttl_seconds=_session_ttl())
+    session = await asyncio.to_thread(store.validate_session, raw_token, idle_ttl_seconds=_session_ttl())
     if session is None:
         raise HTTPException(status_code=401, detail={"error": {"code": "unauthorized", "message": "Invalid session"}})
 
-    store.change_password(str(session["user_id"]), new_password)
+    await asyncio.to_thread(store.change_password, str(session["user_id"]), new_password)
     _scrub_initial_password_from_env()
-    new_token = store.create_session(
+    new_token = await asyncio.to_thread(
+        store.create_session,
         str(session["user_id"]),
         ttl_seconds=_session_ttl(),
         absolute_ttl_seconds=_absolute_session_ttl(),
