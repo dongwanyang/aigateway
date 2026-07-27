@@ -89,6 +89,17 @@ describe('Login authentication and forced password reset', () => {
     expect(screen.getByRole('button', { name: '登录' })).toBeEnabled()
   })
 
+  it('rejects gateway API keys before calling the console login API', async () => {
+    const user = userEvent.setup()
+    const { container } = renderLogin()
+
+    await user.type(currentPasswordInput(container), 'gw-1234567890abcdef')
+    await user.click(screen.getByRole('button', { name: '登录' }))
+
+    expect(await screen.findByText('API Key 不能用于控制台登录。请使用初始管理员密码，或首次登录后设置的管理员密码。')).toBeInTheDocument()
+    expect(auth.login).not.toHaveBeenCalled()
+  })
+
   it('prefills generated bootstrap credentials and supports account login', async () => {
     getBootstrapCredentials.mockResolvedValue({
       available: true,
