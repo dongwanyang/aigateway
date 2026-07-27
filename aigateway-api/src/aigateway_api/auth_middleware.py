@@ -183,8 +183,10 @@ async def authenticate_admin(request: Request) -> Dict[str, Any]:
 
 async def require_api_key(request: Request) -> None:
     """Compatibility dependency: authenticate API-key headers only."""
-    await authenticate_api_key(
-        request,
-        api_key=request.headers.get("x-api-key"),
-        authorization=request.headers.get("authorization"),
+    key_value = _extract_api_key(
+        request.headers.get("authorization"),
+        request.headers.get("x-api-key"),
     )
+    if not key_value:
+        raise _api_key_required()
+    await _authenticate_api_key(request, key_value)
