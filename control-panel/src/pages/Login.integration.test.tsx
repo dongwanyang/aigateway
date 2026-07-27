@@ -16,8 +16,7 @@ const resetPassword = vi.hoisted(() => vi.fn())
 const getBootstrapCredentials = vi.hoisted(() => vi.fn())
 
 vi.mock('@/contexts/AuthContext', () => ({ useAuth: () => auth }))
-vi.mock('@/api/client', async importOriginal => ({
-  ...await importOriginal<typeof import('@/api/client')>(),
+vi.mock('@/api/authSession', () => ({
   resetPassword,
   getBootstrapCredentials,
 }))
@@ -33,7 +32,27 @@ function renderLogin() {
   )
 }
 
-describe('Login authentication and forced key reset', () => {
+function currentPasswordInput(container: HTMLElement): HTMLInputElement {
+  const input = container.querySelector('input[autocomplete="current-password"]')
+  if (!(input instanceof HTMLInputElement)) throw new Error('current password input not found')
+  return input
+}
+
+function usernameInput(container: HTMLElement): HTMLInputElement {
+  const input = container.querySelector('input[autocomplete="username"]')
+  if (!(input instanceof HTMLInputElement)) throw new Error('username input not found')
+  return input
+}
+
+function resetPasswordInputs(container: HTMLElement): HTMLInputElement[] {
+  const inputs = Array.from(container.querySelectorAll('input[autocomplete="new-password"]'))
+  if (inputs.length !== 2 || !inputs.every(input => input instanceof HTMLInputElement)) {
+    throw new Error('reset password inputs not found')
+  }
+  return inputs as HTMLInputElement[]
+}
+
+describe('Login authentication and forced password reset', () => {
   beforeEach(() => {
     auth.login.mockReset()
     auth.logout.mockReset()
@@ -42,35 +61,31 @@ describe('Login authentication and forced key reset', () => {
     getBootstrapCredentials.mockReset().mockResolvedValue({ available: false })
     auth.isLoading = false
     auth.forceReset = false
-    Object.defineProperty(navigator, 'clipboard', {
-      configurable: true,
-      value: { writeText: vi.fn().mockResolvedValue(undefined) },
-    })
   })
 
-  it('submits the entered key and navigates only after a normal login', async () => {
+  it('submits username and password and navigates after a normal login', async () => {
     auth.login.mockResolvedValue({ forceReset: false })
     const user = userEvent.setup()
-    renderLogin()
+    const { container } = renderLogin()
 
-    await user.click(screen.getByRole('tab', { name: 'API Key' }))
-    await user.type(screen.getByPlaceholderText('输入您的 API Key'), 'gw-live-key')
+    await user.clear(usernameInput(container))
+    await user.type(usernameInput(container), 'admin')
+    await user.type(currentPasswordInput(container), 'admin-password')
     await user.click(screen.getByRole('button', { name: '登录' }))
 
-    await waitFor(() => expect(auth.login).toHaveBeenCalledWith('gw-live-key'))
+    await waitFor(() => expect(auth.login).toHaveBeenCalledWith('admin', 'admin-password'))
     expect(await screen.findByText('控制台首页')).toBeInTheDocument()
   })
 
   it('shows the backend login error and keeps the user on the form', async () => {
-    auth.login.mockRejectedValue(new Error('API Key 无效'))
+    auth.login.mockRejectedValue(new Error('用户名或密码无效'))
     const user = userEvent.setup()
-    renderLogin()
+    const { container } = renderLogin()
 
-    await user.click(screen.getByRole('tab', { name: 'API Key' }))
-    await user.type(screen.getByPlaceholderText('输入您的 API Key'), 'bad-key')
+    await user.type(currentPasswordInput(container), 'bad-password')
     await user.click(screen.getByRole('button', { name: '登录' }))
 
-    expect(await screen.findByText('API Key 无效')).toBeInTheDocument()
+    expect(await screen.findByText('用户名或密码无效')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '登录' })).toBeEnabled()
   })
 
@@ -78,62 +93,52 @@ describe('Login authentication and forced key reset', () => {
     getBootstrapCredentials.mockResolvedValue({
       available: true,
       username: 'admin',
-      initial_password: 'gw-generated-bootstrap-key',
+      initial_password: 'temporary-admin-password',
     })
     auth.login.mockResolvedValue({ forceReset: true })
     const user = userEvent.setup()
     renderLogin()
 
-    expect(await screen.findByDisplayValue('gw-generated-bootstrap-key')).toBeInTheDocument()
+    expect(await screen.findByDisplayValue('temporary-admin-password')).toBeInTheDocument()
     expect(screen.getByDisplayValue('admin')).toBeInTheDocument()
-    expect(screen.getByText(/已自动填入安装时生成的初始凭据/)).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: '登录' }))
-    expect(auth.login).toHaveBeenCalledWith('gw-generated-bootstrap-key', 'admin')
+    expect(auth.login).toHaveBeenCalledWith('admin', 'temporary-admin-password')
   })
 
   it('validates both forced-reset fields before calling the API', async () => {
     auth.forceReset = true
     const user = userEvent.setup()
-    renderLogin()
-    const key = screen.getByPlaceholderText('输入新的 API Key')
-    const confirmation = screen.getByPlaceholderText('再次输入新 API Key')
+    const { container } = renderLogin()
+    const [password, confirmation] = resetPasswordInputs(container)
 
-    await user.type(key, 'abcdefghijklmnopqrst')
-    await user.type(confirmation, 'different-key-value-123')
-    await user.click(screen.getByRole('button', { name: '重置密钥' }))
-    expect(screen.getByText('两次输入的密钥不一致')).toBeInTheDocument()
+    await user.type(password, 'abcdefghijkl')
+    await user.type(confirmation, 'different-password')
+    await user.click(screen.getByRole('button', { name: '设置管理员密码' }))
+    expect(screen.getByText('两次输入的密码不一致')).toBeInTheDocument()
 
-    await user.clear(key)
+    await user.clear(password)
     await user.clear(confirmation)
-    await user.type(key, 'short')
+    await user.type(password, 'short')
     await user.type(confirmation, 'short')
-    await user.click(screen.getByRole('button', { name: '重置密钥' }))
-    expect(screen.getByText('新密钥长度不能少于 20 个字符')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '设置管理员密码' }))
+    expect(screen.getByText('管理员密码至少需要 12 个字符')).toBeInTheDocument()
     expect(resetPassword).not.toHaveBeenCalled()
   })
 
-  it('resets, exposes the one-time key, copies it and enters the console', async () => {
+  it('sets the new administrator password and enters the console', async () => {
     auth.forceReset = true
-    resetPassword.mockResolvedValue({ data: { new_api_key: 'gw-new-abcdefghijklmnop' } })
+    resetPassword.mockResolvedValue({ data: { password_changed: true } })
     const user = userEvent.setup()
-    const writeText = vi.fn().mockResolvedValue(undefined)
-    Object.defineProperty(navigator, 'clipboard', {
-      configurable: true,
-      value: { writeText },
-    })
-    renderLogin()
+    const { container } = renderLogin()
+    const [password, confirmation] = resetPasswordInputs(container)
 
-    await user.type(screen.getByPlaceholderText('输入新的 API Key'), 'abcdefghijklmnopqrst')
-    await user.type(screen.getByPlaceholderText('再次输入新 API Key'), 'abcdefghijklmnopqrst')
-    await user.click(screen.getByRole('button', { name: '重置密钥' }))
+    await user.type(password, 'abcdefghijkl')
+    await user.type(confirmation, 'abcdefghijkl')
+    await user.click(screen.getByRole('button', { name: '设置管理员密码' }))
 
-    expect(await screen.findByText('gw-new-abcdefghijklmnop')).toBeInTheDocument()
-    expect(resetPassword).toHaveBeenCalledWith('abcdefghijklmnopqrst')
+    await waitFor(() => expect(resetPassword).toHaveBeenCalledWith('abcdefghijkl'))
     expect(auth.completeForceReset).toHaveBeenCalled()
-    await user.click(screen.getByTitle('复制到剪贴板'))
-    expect(writeText).toHaveBeenCalledWith('gw-new-abcdefghijklmnop')
-    await user.click(screen.getByRole('button', { name: '进入控制台' }))
     expect(await screen.findByText('控制台首页')).toBeInTheDocument()
   })
 
@@ -141,8 +146,8 @@ describe('Login authentication and forced key reset', () => {
     auth.forceReset = true
     const user = userEvent.setup()
     renderLogin()
+
     await user.click(screen.getByRole('button', { name: '取消并退出' }))
     expect(auth.logout).toHaveBeenCalled()
-    expect(screen.getByText('检测到默认管理员密钥')).toBeInTheDocument()
   })
 })
