@@ -247,7 +247,7 @@ export default function Models() {
   const [quickAddBaseUrl, setQuickAddBaseUrl] = useState('')
   const [quickAddName, setQuickAddName] = useState('')
   const [fullConfig, setFullConfig] = useState<Record<string, unknown>>({})
-  const [testResults, setTestResults] = useState<Record<string, { success: boolean; latency_ms: number; error?: string; loading: boolean }>>({})
+  const [testResults, setTestResults] = useState<Record<string, { success: boolean; latency_ms: number; error?: string | null; loading: boolean }>>({})
   const [fetchedModels, setFetchedModels] = useState<Record<string, { models: string[]; loading: boolean; error?: string }>>({})
 
   // --- 新增/编辑模型弹窗 ---
