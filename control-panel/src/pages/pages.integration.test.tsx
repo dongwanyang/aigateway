@@ -118,7 +118,7 @@ const fullConfig = {
 function responseFor(input: RequestInfo | URL, init?: RequestInit): Response {
   const url = String(input)
   const method = init?.method ?? 'GET'
-  if (url.endsWith('/v1/chat/completions')) {
+  if (url.endsWith('/admin/console/chat/completions')) {
     return new Response([
       'data: {"choices":[{"delta":{"content":"Hello "}}],"_meta":{"routed_to":{"intent":"understanding","model":"gpt-4o"}}}',
       '',
@@ -155,24 +155,29 @@ function responseFor(input: RequestInfo | URL, init?: RequestInit): Response {
       'gateway_request_duration_seconds_bucket{model="gpt",le="0.5"} 10',
     ].join('\n'))
   }
+  if (url.includes('/admin/debug/config')) {
+    return Response.json({
+      data: {
+        frontend: true,
+        entry: true,
+        cache: false,
+        bridge: false,
+        plugins_enabled: true,
+        per_plugin: { prompt_cache: true },
+      },
+      message: 'success',
+    })
+  }
+  if (url.includes('/admin/debug/plugins/')) {
+    const plugin = decodeURIComponent(url.split('/admin/debug/plugins/')[1]?.split('?')[0] ?? '')
+    return Response.json({ data: { name: plugin, enabled: false }, message: 'success' })
+  }
   if (url.includes('/admin/config')) {
     if (method === 'PUT') return Response.json({ data: { updated: true }, message: 'success' })
-    if (url.endsWith('/admin/config/debug')) {
-      return Response.json({
-        data: {
-          frontend: true,
-          entry: true,
-          cache: false,
-          bridge: false,
-          plugins_enabled: true,
-          per_plugin: { prompt_cache: true },
-        },
-        message: 'success',
-      })
-    }
     return Response.json({ data: fullConfig, message: 'success' })
   }
   if (url.includes('/admin/plugins-config')) {
+    if (method === 'PUT') return Response.json({ data: { name: 'pii_detector', enabled: false }, message: 'success' })
     return Response.json({
       data: {
         plugins: [
@@ -247,7 +252,7 @@ function responseFor(input: RequestInfo | URL, init?: RequestInit): Response {
         resultType: 'matrix',
         result: [{
           metric: { model: 'gpt-4o' },
-          values: [['1', '0.1'], ['2', '0.2']],
+          values: [{ timestamp: '1', value: '0.1' }, { timestamp: '2', value: '0.2' }],
         }],
       },
     })
@@ -677,8 +682,8 @@ describe('control panel pages against production API response shapes', () => {
     ))
     await user.click(screen.getAllByTitle('Debug 日志')[0])
     await waitFor(() => expect(fetch).toHaveBeenCalledWith(
-      expect.stringMatching(/\/admin\/plugins\/prompt_cache\/debug$/),
-      expect.objectContaining({ method: 'POST' }),
+      expect.stringMatching(/\/admin\/debug\/plugins\/prompt_cache$/),
+      expect.objectContaining({ method: 'PUT', body: expect.stringContaining('"enabled":false') }),
     ))
     const hotReload = screen.getByText('热重载').parentElement?.parentElement?.querySelector('input') as HTMLInputElement
     await user.click(hotReload)
@@ -743,7 +748,7 @@ describe('control panel pages against production API response shapes', () => {
     expect(await screen.findByText('Hello world')).toBeInTheDocument()
     expect(screen.getAllByText('Explain routing').length).toBeGreaterThan(0)
     expect(fetch).toHaveBeenCalledWith(
-      expect.stringMatching(/\/v1\/chat\/completions$/),
+      expect.stringMatching(/\/admin\/console\/chat\/completions$/),
       expect.objectContaining({
         method: 'POST',
         body: expect.stringContaining('"content":"Explain routing"'),
