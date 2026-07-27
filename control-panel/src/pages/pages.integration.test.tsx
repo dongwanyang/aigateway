@@ -115,6 +115,21 @@ const fullConfig = {
   },
 }
 
+const initialCodeRepository = {
+  document_id: 'repo-1',
+  source_type: 'git',
+  source_label: 'https://example.test/repo.git',
+  file_count: 1,
+  language_summary: ['python'],
+  function_count: 2,
+  class_count: 1,
+  chunk_count: 3,
+  embedding_model: 'embed',
+  import_time: '2026-01-01',
+}
+
+let codeRepositories = [{ ...initialCodeRepository }]
+
 function responseFor(input: RequestInfo | URL, init?: RequestInit): Response {
   const url = String(input)
   const method = init?.method ?? 'GET'
@@ -383,19 +398,12 @@ function responseFor(input: RequestInfo | URL, init?: RequestInit): Response {
     return Response.json({ document_id: 'repo-1', synced_files: 2, refreshed_symbols: 4, deleted_files: 1 })
   }
   if (url.includes('/admin/rag/code/repositories')) {
-    if (method === 'DELETE') return new Response(null, { status: 204 })
-    return Response.json([{
-      document_id: 'repo-1',
-      source_type: 'git',
-      source_label: 'https://example.test/repo.git',
-      file_count: 1,
-      language_summary: ['python'],
-      function_count: 2,
-      class_count: 1,
-      chunk_count: 3,
-      embedding_model: 'embed',
-      import_time: '2026-01-01',
-    }])
+    if (method === 'DELETE') {
+      const documentId = decodeURIComponent(url.split('/admin/rag/code/repositories/')[1]?.split('?')[0] ?? '')
+      codeRepositories = codeRepositories.filter(repo => repo.document_id !== documentId)
+      return new Response(null, { status: 204 })
+    }
+    return Response.json(codeRepositories)
   }
   if (url.includes('/admin/capabilities')) {
     const available = {
@@ -440,6 +448,7 @@ function renderPage(component: React.ReactElement) {
 }
 
 beforeEach(() => {
+  codeRepositories = [{ ...initialCodeRepository }]
   useChatStore.setState({
     sessions: [],
     activeId: null,
@@ -720,7 +729,7 @@ describe('control panel pages against production API response shapes', () => {
       expect.stringMatching(/\/admin\/rag\/code\/repositories\/repo-1$/),
       expect.objectContaining({ method: 'DELETE' }),
     ))
-    expect(screen.queryByText('https://example.test/repo.git')).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.queryByText('https://example.test/repo.git')).not.toBeInTheDocument())
   })
 
   it('validates and saves edited JSON configuration', async () => {
