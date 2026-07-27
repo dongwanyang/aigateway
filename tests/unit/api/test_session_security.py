@@ -9,6 +9,7 @@ from httpx import ASGITransport, AsyncClient
 from aigateway_api.auth_middleware import SESSION_COOKIE_NAME, authenticate, authenticate_admin
 from aigateway_api.auth_routes import router as auth_router
 from aigateway_api.browser_auth import BrowserAuthStore
+from aigateway_api.routes import router as routes_router
 from aigateway_core.shared.auth.sqlite_store import SQLiteStore
 
 
@@ -110,3 +111,53 @@ async def test_forwarded_for_is_ignored_without_trusted_proxy(tmp_path, monkeypa
     with BrowserAuthStore(str(db_path))._connect() as conn:
         row = conn.execute("SELECT ip_address FROM browser_sessions LIMIT 1").fetchone()
     assert row["ip_address"] != "203.0.113.10"
+
+
+@pytest.mark.asyncio
+async def test_console_chat_blocks_force_reset_browser_session(tmp_path):
+    store = BrowserAuthStore(str(tmp_path / "auth.db"))
+    user = store.provision_admin("admin", "temporary-admin-password")
+    token = store.create_session(
+        user["user_id"], ttl_seconds=3600, absolute_ttl_seconds=7200
+    )
+
+    app = FastAPI()
+    app.state.browser_auth_store = store
+    app.include_router(routes_router)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as client:
+        response = await client.post(
+            "/admin/console/chat/completions",
+            cookies={SESSION_COOKIE_NAME: token},
+            json={"model": "auto", "messages": [{"role": "user", "content": "hello"}]},
+        )
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["error"]["code"] == "password_change_required"
+
+
+@pytest.mark.asyncio
+async def test_console_chat_requires_server_side_api_key(tmp_path, monkeypatch):
+    monkeypatch.delenv("AI_GATEWAY_CONSOLE_CHAT_API_KEY", raising=False)
+    monkeypatch.delenv("ADMIN_API_KEY", raising=False)
+
+    store = BrowserAuthStore(str(tmp_path / "auth.db"))
+    user = store.provision_admin("admin", "temporary-admin-password")
+    store.change_password(user["user_id"], "changed-admin-password")
+    token = store.create_session(
+        user["user_id"], ttl_seconds=3600, absolute_ttl_seconds=7200
+    )
+
+    app = FastAPI()
+    app.state.browser_auth_store = store
+    app.include_router(routes_router)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as client:
+        response = await client.post(
+            "/admin/console/chat/completions",
+            cookies={SESSION_COOKIE_NAME: token},
+            json={"model": "auto", "messages": [{"role": "user", "content": "hello"}]},
+        )
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["error"]["code"] == "console_chat_api_key_required"
