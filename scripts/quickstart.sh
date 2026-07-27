@@ -294,40 +294,109 @@ set_env_value() {
   mv "$tmp_env" "$ROOT_DIR/.env"
 }
 
+resolve_auth_db_path() {
+  local configured
+  configured="$(env_value AI_GATEWAY_AUTH_DB_PATH)"
+  if [[ -z "$configured" ]]; then
+    printf '%s\n' "$ROOT_DIR/data/auth.db"
+  elif [[ "$configured" == /* ]]; then
+    printf '%s\n' "$configured"
+  else
+    printf '%s\n' "$ROOT_DIR/$configured"
+  fi
+}
+
+browser_admin_exists() {
+  local db_path="$1"
+  [[ -f "$db_path" ]] || return 1
+
+  local python_bin=""
+  if command -v python3 >/dev/null 2>&1; then
+    python_bin="$(command -v python3)"
+  elif command -v python >/dev/null 2>&1; then
+    python_bin="$(command -v python)"
+  else
+    # Conservative fallback: if a persisted auth DB exists but cannot be
+    # inspected, do not mint or print a potentially unusable bootstrap password.
+    return 0
+  fi
+
+  "$python_bin" - "$db_path" <<'PY'
+import sqlite3
+import sys
+
+db_path = sys.argv[1]
+try:
+    with sqlite3.connect(db_path) as conn:
+        has_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='admin_users'"
+        ).fetchone()
+        if not has_table:
+            raise SystemExit(1)
+        has_user = conn.execute("SELECT 1 FROM admin_users LIMIT 1").fetchone()
+        raise SystemExit(0 if has_user else 1)
+except sqlite3.Error:
+    # Avoid printing misleading first-run credentials when the DB is present but
+    # unreadable or mid-migration.
+    raise SystemExit(0)
+PY
+}
+
 admin_key="$(env_value ADMIN_API_KEY)"
 initial_password="$(env_value AI_GATEWAY_INITIAL_ADMIN_PASSWORD)"
 admin_username="$(env_value AI_GATEWAY_ADMIN_USERNAME)"
 admin_username="${admin_username:-admin}"
-generated_credentials="false"
+auth_db_path="$(resolve_auth_db_path)"
+admin_initialized="false"
+generated_api_key="false"
+generated_initial_password="false"
+
+if browser_admin_exists "$auth_db_path"; then
+  admin_initialized="true"
+fi
 
 if [[ -z "$admin_key" ]]; then
   admin_key="gw-$(openssl rand -hex 24)"
   set_env_value "ADMIN_API_KEY" "$admin_key"
-  generated_credentials="true"
+  generated_api_key="true"
 fi
 
-if [[ -z "$initial_password" ]]; then
-  initial_password="adm-$(openssl rand -hex 18)"
-  set_env_value "AI_GATEWAY_INITIAL_ADMIN_PASSWORD" "$initial_password"
-  generated_credentials="true"
+if [[ "$admin_initialized" == "true" ]]; then
+  set_env_value "AI_GATEWAY_PREFILL_INITIAL_CREDENTIALS" "false"
+  if [[ -n "$initial_password" ]]; then
+    warn "检测到已初始化的控制台管理员，跳过一次性初始密码预填。"
+  fi
+else
+  if [[ -z "$initial_password" ]]; then
+    initial_password="adm-$(openssl rand -hex 18)"
+    set_env_value "AI_GATEWAY_INITIAL_ADMIN_PASSWORD" "$initial_password"
+    generated_initial_password="true"
+  fi
+  # Local first-run UX: expose installer-generated bootstrap credentials to the
+  # login page only before the browser admin user is provisioned. The backend
+  # removes AI_GATEWAY_INITIAL_ADMIN_PASSWORD from .env after password reset.
+  set_env_value "AI_GATEWAY_PREFILL_INITIAL_CREDENTIALS" "true"
 fi
 
-# Local first-run UX: expose installer-generated bootstrap credentials to the
-# login page only before the browser admin user is provisioned. The backend
-# removes AI_GATEWAY_INITIAL_ADMIN_PASSWORD from .env after password reset.
-set_env_value "AI_GATEWAY_PREFILL_INITIAL_CREDENTIALS" "true"
-
-if [[ "$generated_credentials" == "true" ]]; then
+if [[ "$generated_api_key" == "true" || "$generated_initial_password" == "true" ]]; then
   echo ""
   echo "=========================================="
-  echo "  默认控制台凭据（请妥善保存！）"
+  echo "  默认凭据（请妥善保存！）"
   echo "=========================================="
-  echo "  用户名     : ${admin_username}"
-  echo "  初始密码   : ${initial_password}"
-  echo "  API Key    : ${admin_key}"
+  if [[ "$generated_initial_password" == "true" ]]; then
+    echo "  用户名     : ${admin_username}"
+    echo "  初始密码   : ${initial_password}"
+  fi
+  if [[ "$generated_api_key" == "true" ]]; then
+    echo "  API Key    : ${admin_key}"
+  fi
   echo "=========================================="
   echo ""
-  warn "首次登录后会强制设置独立管理员密码；API Key 仅用于 /v1/* 程序化调用。"
+  if [[ "$generated_initial_password" == "true" ]]; then
+    warn "首次登录后会强制设置独立管理员密码；API Key 仅用于 /v1/* 程序化调用。"
+  else
+    warn "API Key 仅用于 /v1/* 程序化调用，不是控制台登录密码。"
+  fi
 fi
 
 up_args=(up -d)
