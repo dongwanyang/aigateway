@@ -86,6 +86,30 @@ async def test_session_cookie_uses_absolute_ttl_and_logout_matches_secure_flag(t
 
 
 @pytest.mark.asyncio
+async def test_initial_admin_password_rejects_gateway_api_key(tmp_path, monkeypatch):
+    gateway_api_key = "gw-1234567890abcdef"
+    monkeypatch.setenv("ADMIN_API_KEY", gateway_api_key)
+    monkeypatch.setenv("AI_GATEWAY_INITIAL_ADMIN_PASSWORD", gateway_api_key)
+    monkeypatch.setenv("AI_GATEWAY_PREFILL_INITIAL_CREDENTIALS", "true")
+    monkeypatch.setenv("AI_GATEWAY_ADMIN_USERNAME", "admin")
+
+    app = FastAPI()
+    app.state.key_store = SQLiteStore(str(tmp_path / "auth.db"))
+    app.include_router(auth_router, prefix="/auth")
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as client:
+        bootstrap = await client.get("/auth/bootstrap")
+        assert bootstrap.status_code == 200
+        assert bootstrap.json()["data"] == {"available": False}
+
+        login = await client.post(
+            "/auth/session",
+            json={"username": "admin", "password": gateway_api_key},
+        )
+        assert login.status_code == 401
+
+
+@pytest.mark.asyncio
 async def test_forwarded_for_is_ignored_without_trusted_proxy(tmp_path, monkeypatch):
     monkeypatch.setenv("AI_GATEWAY_INITIAL_ADMIN_PASSWORD", "temporary-admin-password")
     monkeypatch.setenv("AI_GATEWAY_ADMIN_USERNAME", "admin")
