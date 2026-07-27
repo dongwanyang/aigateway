@@ -119,23 +119,68 @@ if [[ ! -f "$ROOT_DIR/.env" && -f "$ROOT_DIR/.env.example" ]]; then
   warn "已创建 .env；请在其中配置至少一个模型提供商 API Key"
 fi
 
-# ---- Generate default admin API key (first-time only) ----
-if ! grep -q '^ADMIN_API_KEY=' "$ROOT_DIR/.env" 2>/dev/null; then
-  ADMIN_KEY="gw-$(openssl rand -hex 24)"
-  echo "ADMIN_API_KEY=${ADMIN_KEY}" >> "$ROOT_DIR/.env"
-  # Opt in to one-time bootstrap credential prefill on the login page for this
-  # freshly-installed local instance. Operators can remove/disable it for
-  # shared or internet-facing deployments.
-  echo "AI_GATEWAY_PREFILL_INITIAL_CREDENTIALS=true" >> "$ROOT_DIR/.env"
+env_value() {
+  local key="$1"
+  awk -v key="$key" '
+    index($0, key "=") == 1 {
+      sub("^[^=]*=", "")
+      value=$0
+    }
+    END { print value }
+  ' "$ROOT_DIR/.env" 2>/dev/null
+}
 
+set_env_value() {
+  local key="$1"
+  local value="$2"
+  local tmp_env
+  tmp_env="$(mktemp "$ROOT_DIR/.env.tmp.XXXXXX")"
+  if grep -q "^${key}=" "$ROOT_DIR/.env" 2>/dev/null; then
+    awk -v key="$key" -v value="$value" '
+      index($0, key "=") == 1 { print key "=" value; next }
+      { print }
+    ' "$ROOT_DIR/.env" > "$tmp_env"
+  else
+    cat "$ROOT_DIR/.env" > "$tmp_env"
+    printf '%s=%s\n' "$key" "$value" >> "$tmp_env"
+  fi
+  mv "$tmp_env" "$ROOT_DIR/.env"
+}
+
+admin_key="$(env_value ADMIN_API_KEY)"
+initial_password="$(env_value AI_GATEWAY_INITIAL_ADMIN_PASSWORD)"
+admin_username="$(env_value AI_GATEWAY_ADMIN_USERNAME)"
+admin_username="${admin_username:-admin}"
+generated_credentials="false"
+
+if [[ -z "$admin_key" ]]; then
+  admin_key="gw-$(openssl rand -hex 24)"
+  set_env_value "ADMIN_API_KEY" "$admin_key"
+  generated_credentials="true"
+fi
+
+if [[ -z "$initial_password" ]]; then
+  initial_password="adm-$(openssl rand -hex 18)"
+  set_env_value "AI_GATEWAY_INITIAL_ADMIN_PASSWORD" "$initial_password"
+  generated_credentials="true"
+fi
+
+# Local first-run UX: expose installer-generated bootstrap credentials to the
+# login page only before the browser admin user is provisioned. The backend
+# removes AI_GATEWAY_INITIAL_ADMIN_PASSWORD from .env after password reset.
+set_env_value "AI_GATEWAY_PREFILL_INITIAL_CREDENTIALS" "true"
+
+if [[ "$generated_credentials" == "true" ]]; then
   echo ""
   echo "=========================================="
-  echo "  默认管理员凭据（请妥善保存！）"
+  echo "  默认控制台凭据（请妥善保存！）"
   echo "=========================================="
-  echo "  API Key : ${ADMIN_KEY}"
+  echo "  用户名     : ${admin_username}"
+  echo "  初始密码   : ${initial_password}"
+  echo "  API Key    : ${admin_key}"
   echo "=========================================="
   echo ""
-  warn "这是默认管理员密钥，首次登录后请务必重置！"
+  warn "首次登录后会强制设置独立管理员密码；API Key 仅用于 /v1/* 程序化调用。"
 fi
 
 echo
