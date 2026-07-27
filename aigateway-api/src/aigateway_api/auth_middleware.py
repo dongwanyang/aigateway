@@ -56,7 +56,7 @@ def require_scope(key_data: Dict[str, Any], scope: str) -> None:
 def _api_key_required(headers: Optional[Dict[str, str]] = None) -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail={"error": {"code": "unauthorized", "message": "Invalid or missing API key"}},
+        detail={"error": {"code": "unauthorized", "message": "API key required"}},
         headers=headers,
     )
 
@@ -179,14 +179,3 @@ async def authenticate_admin(request: Request) -> Dict[str, Any]:
     require_scope(principal, "admin")
     _reject_force_reset(principal)
     return principal
-
-
-async def require_api_key(request: Request) -> None:
-    """Compatibility dependency: authenticate API-key headers only."""
-    key_value = _extract_api_key(
-        request.headers.get("authorization"),
-        request.headers.get("x-api-key"),
-    )
-    if not key_value:
-        raise _api_key_required()
-    await _authenticate_api_key(request, key_value)
