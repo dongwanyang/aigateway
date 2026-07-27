@@ -74,7 +74,8 @@ export async function updateFullConfig(config: Record<string, unknown>): Promise
 export async function setPluginDebug(name: string, enabled: boolean): Promise<ApiResponse<{ name: string; enabled: boolean }>> { return fetchJson<{ name: string; enabled: boolean }>(`/admin/debug/plugins/${encodeURIComponent(name)}`, { method: 'PUT', body: JSON.stringify({ enabled }) }) }
 export async function getDebugConfig(): Promise<DebugConfig> { return (await fetchJson<DebugConfig>('/admin/debug/config')).data }
 export async function updateDebugSection(config: Partial<DebugConfig>): Promise<ApiResponse<DebugConfig>> { return fetchJson<DebugConfig>('/admin/debug/config', { method: 'PUT', body: JSON.stringify(config) }) }
-export async function testProviderConnectivity(provider: string, config?: Record<string, unknown>): Promise<ApiResponse<Record<string, unknown>>> { return fetchJson<Record<string, unknown>>(`/admin/providers/${encodeURIComponent(provider)}/test`, { method: 'POST', body: JSON.stringify(config ?? {}) }) }
+export interface ProviderConnectivityResult { success: boolean; latency_ms: number; error?: string | null }
+export async function testProviderConnectivity(provider: string, config?: Record<string, unknown>): Promise<ApiResponse<ProviderConnectivityResult>> { return fetchJson<ProviderConnectivityResult>(`/admin/providers/${encodeURIComponent(provider)}/test`, { method: 'POST', body: JSON.stringify(config ?? {}) }) }
 export async function fetchProviderModels(provider: string, config?: Record<string, unknown>): Promise<ApiResponse<{ models: string[] }>> { return fetchJson<{ models: string[] }>(`/admin/providers/${encodeURIComponent(provider)}/models`, { method: 'POST', body: JSON.stringify(config ?? {}) }) }
 
 export interface PluginTraceStep { plugin_name: string; duration_ms: number; status: 'success' | 'skipped' | 'failed' }
@@ -87,8 +88,8 @@ export async function deleteAllLogs(): Promise<ApiResponse<{ deleted: boolean }>
 export async function batchDeleteLogs(requestIds: string[]): Promise<ApiResponse<{ deleted: number; requested: number }>> { return fetchJson<{ deleted: number; requested: number }>('/admin/logs/batch-delete', { method: 'POST', body: JSON.stringify({ request_ids: requestIds }) }) }
 export async function getTraceDetail(traceId: string): Promise<ApiResponse<TraceDetail>> { return fetchJson<TraceDetail>(`/admin/trace/${encodeURIComponent(traceId)}`) }
 
-export interface RuntimeCapability { available: boolean; reason?: string; commands?: string[]; details?: Record<string, unknown> }
-export interface RuntimeCapabilitiesData { capabilities: Record<string, RuntimeCapability> }
+export interface RuntimeCapability { installed: boolean; configured: boolean; available: boolean; reason?: string | null; install_command: string | null; commands?: string[]; details?: Record<string, unknown> }
+export interface RuntimeCapabilitiesData { profile: string; capabilities: Record<string, RuntimeCapability> }
 export async function getRuntimeCapabilities(): Promise<ApiResponse<RuntimeCapabilitiesData>> { return fetchJson<RuntimeCapabilitiesData>('/admin/capabilities') }
 export interface RagDocument { doc_id: string; filename: string; file_type: string; chunk_count: number; chunk_strategy: string; chunk_size: number; chunk_overlap: number; total_tokens: number; created_at: number; url: string }
 export async function listRagDocuments(): Promise<ApiResponse<{ documents: RagDocument[] }>> { return fetchJson<{ documents: RagDocument[] }>('/admin/rag/documents') }
@@ -126,4 +127,4 @@ export async function updateL3CacheConfig(config: Partial<L3CacheConfig>): Promi
 export async function listL3Entries(params: { page?: number; pageSize?: number; mode?: string; userId?: string; sortBy?: string }): Promise<ApiResponse<L3EntriesData>> { const qs = new URLSearchParams(); if (params.page) qs.set('page', String(params.page)); if (params.pageSize) qs.set('page_size', String(params.pageSize)); if (params.mode) qs.set('mode', params.mode); if (params.userId) qs.set('user_id', params.userId); if (params.sortBy) qs.set('sort_by', params.sortBy); return fetchJson<L3EntriesData>(`/admin/cache/l3/entries?${qs}`) }
 export async function updateL3EntryMode(pointId: string, mode: 'auto' | 'manual', ttlHours?: number): Promise<ApiResponse<L3CacheEntry>> { return fetchJson<L3CacheEntry>(`/admin/cache/l3/entries/${encodeURIComponent(pointId)}/mode`, { method: 'PUT', body: JSON.stringify({ mode, ttl_hours: ttlHours }) }) }
 export async function deleteL3Entry(pointId: string): Promise<ApiResponse<{ deleted: boolean }>> { return fetchJson<{ deleted: boolean }>(`/admin/cache/l3/entries/${encodeURIComponent(pointId)}`, { method: 'DELETE' }) }
-export async function triggerL3Cleanup(): Promise<ApiResponse<{ deleted: number }>> { return fetchJson<{ deleted: number }>('/admin/cache/l3/cleanup', { method: 'POST' }) }
+export async function triggerL3Cleanup(): Promise<ApiResponse<{ deleted_count: number }>> { return fetchJson<{ deleted_count: number }>('/admin/cache/l3/cleanup', { method: 'POST' }) }
