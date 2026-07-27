@@ -17,6 +17,8 @@ async function rawJson<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = await ensureAuthHeaders()
   const res = await fetch(`${API_BASE}${path}`, { ...options, credentials: 'include', headers: { ...headers, ...(options.headers ?? {}) } })
   if (!res.ok) { const body = await res.json().catch(() => ({})); const msg = body?.error?.message ?? body?.detail?.error?.message ?? body?.detail ?? `HTTP ${res.status}`; throw new Error(String(msg)) }
+  // 204 No Content (空响应体) — 跳过 res.json()，否则抛 SyntaxError 把成功误判为失败。
+  if (res.status === 204) return undefined as T
   return res.json()
 }
 async function errorText(res: Response, fallback: string): Promise<string> { try { const body = await res.json(); return body?.error?.code || body?.error?.message || body?.detail?.error?.message || body?.detail || `${fallback}: HTTP ${res.status}` } catch { return `${fallback}: HTTP ${res.status}` } }
