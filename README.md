@@ -191,15 +191,19 @@ cd control-panel && npm install && npm run dev
 
 ### 验证
 
+先通过控制台创建 QA 专用 API Key，或从测试环境变量 / CI Secret 注入，不要把真实客户端 key 写入仓库文件。
+
 ```bash
+export QA_API_KEY="<created-by-admin-api-keys>"
+
 # 列出模型
 curl http://localhost:8000/v1/models \
-  -H "Authorization: Bearer gw-rRIop4dpcyJJNUTJbHmHpr9Bj3M11s5o"
+  -H "Authorization: Bearer ${QA_API_KEY:?missing QA_API_KEY}"
 
 # 发送聊天请求
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer gw-rRIop4dpcyJJNUTJbHmHpr9Bj3M11s5o" \
+  -H "Authorization: Bearer ${QA_API_KEY:?missing QA_API_KEY}" \
   -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"你好"}]}'
 
 # CLI 交互
