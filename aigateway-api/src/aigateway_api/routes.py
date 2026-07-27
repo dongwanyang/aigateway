@@ -6,7 +6,7 @@ Routes — 基础设施路由
 - GET /metrics — Prometheus 指标端点
 - GET /health — 健康检查端点
 
-这些接口不需要鉴权（公开端点）。控制台专用聊天端点虽然定义在本模块，
+这些接口不需要鉴权（公开端点）。控制台专用聊天/视频端点虽然定义在本模块，
 但使用 authenticate_admin 显式保护，并在调度前绑定服务端 API Key，
 确保成本账本和配额仍按 API Key 维度执行。
 """
@@ -91,6 +91,35 @@ async def post_console_chat_completions(
     state = _get_app_state(request)
     dispatcher = RequestDispatcher(state)
     return await dispatcher.dispatch(body, request)
+
+
+@router.get("/admin/console/videos/{video_id}")
+async def get_console_video_status(
+    video_id: str,
+    request: Request,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+) -> JSONResponse:
+    """Poll video status from the control panel without exposing an API key."""
+    request.state.console_browser_user_id = _auth.get("user_id")
+    request.state.console_browser_username = _auth.get("username")
+    await _bind_console_chat_api_key(request)
+
+    state = _get_app_state(request)
+    bridge = state.get("litellm_bridge")
+    if bridge is None:
+        return JSONResponse(
+            content={"error": {"code": "bridge_unavailable", "message": "LiteLLM bridge not initialized"}},
+            status_code=503,
+        )
+    try:
+        result: Dict[str, Any] = await bridge.retrieve_video(video_id)
+        return JSONResponse(content=result)
+    except Exception:
+        logger.exception("Console video retrieval failed: %s", video_id)
+        return JSONResponse(
+            content={"error": {"code": "video_retrieve_failed", "message": "Video retrieval failed"}},
+            status_code=502,
+        )
 
 
 # ------------------------------------------------------------------
