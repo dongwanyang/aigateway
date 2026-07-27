@@ -53,6 +53,14 @@ def require_scope(key_data: Dict[str, Any], scope: str) -> None:
         )
 
 
+def _api_key_required(headers: Optional[Dict[str, str]] = None) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail={"error": {"code": "unauthorized", "message": "Invalid or missing API key"}},
+        headers=headers,
+    )
+
+
 def _password_change_required() -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
@@ -75,8 +83,8 @@ async def _authenticate_api_key(request: Request, key_value: str) -> Dict[str, A
     if key_store is None:
         logger.error("KeyStore is not initialized")
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={"error": {"code": "unavailable", "message": "Authentication service unavailable"}},
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": {"code": "internal_error", "message": "Authentication service unavailable"}},
         )
     try:
         key_data = await key_store.validate(key_value)
@@ -95,10 +103,7 @@ async def _authenticate_api_key(request: Request, key_value: str) -> Dict[str, A
             detail={"error": {"code": code, "message": text}},
         ) from exc
     if key_data is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={"error": {"code": "unauthorized", "message": "Invalid or missing API key"}},
-        )
+        raise _api_key_required()
     request.state.auth_type = "api_key"
     request.state.api_key_data = key_data
     request.state.api_key_value = key_value
@@ -141,11 +146,7 @@ async def authenticate_api_key(
     """Authenticate machine/API endpoints with API-key headers only."""
     key_value = _extract_api_key(authorization, api_key)
     if not key_value:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={"error": {"code": "unauthorized", "message": "API key required"}},
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        raise _api_key_required(headers={"WWW-Authenticate": "Bearer"})
     return await _authenticate_api_key(request, key_value)
 
 
@@ -173,10 +174,7 @@ async def authenticate_admin(request: Request) -> Dict[str, Any]:
     else:
         token = _get_session_cookie(request)
         if not token:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail={"error": {"code": "unauthorized", "message": "Authentication required"}},
-            )
+            raise _api_key_required(headers={"WWW-Authenticate": "Bearer"})
         principal = await _authenticate_browser_session(request, token)
     require_scope(principal, "admin")
     _reject_force_reset(principal)
