@@ -7,27 +7,61 @@ Routes — 基础设施路由
 - GET /health — 健康检查端点
 
 这些接口不需要鉴权（公开端点）。控制台专用聊天端点虽然定义在本模块，
-但使用 authenticate_admin 显式保护。
+但使用 authenticate_admin 显式保护，并在调度前绑定服务端 API Key，
+确保成本账本和配额仍按 API Key 维度执行。
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse, Response as FastAPIResponse
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
-from .auth_middleware import authenticate_admin
+from .auth_middleware import authenticate_admin, authenticate_api_key, require_scope
 from .openai_compat import ChatCompletionRequest, _get_app_state
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _console_chat_api_key() -> str:
+    """Return the server-side API key used to account for control-panel chat."""
+    return (
+        os.environ.get("AI_GATEWAY_CONSOLE_CHAT_API_KEY", "").strip()
+        or os.environ.get("ADMIN_API_KEY", "").strip()
+    )
+
+
+async def _bind_console_chat_api_key(request: Request) -> Dict[str, Any]:
+    """Bind a real API-key principal before entering RequestDispatcher.
+
+    /v1/* remains API-key-only. The browser session proves the operator is logged
+    in to the control panel; this helper then attaches a server-side API key so
+    quota checks, request accounting, and cost ledger updates still use the same
+    key_hash path as machine clients.
+    """
+    key_value = _console_chat_api_key()
+    if not key_value:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "error": {
+                    "code": "console_chat_api_key_required",
+                    "message": "Set AI_GATEWAY_CONSOLE_CHAT_API_KEY or ADMIN_API_KEY to enable control-panel chat.",
+                }
+            },
+        )
+    principal = await authenticate_api_key(request, api_key=key_value)
+    require_scope(principal, "chat")
+    return principal
 
 
 # ------------------------------------------------------------------
@@ -40,14 +74,19 @@ async def post_console_chat_completions(
     body: ChatCompletionRequest,
     request: Request,
     _auth: Dict[str, Any] = Depends(authenticate_admin),
-) -> JSONResponse:
+) -> Any:
     """Control-panel chat endpoint authenticated by browser session.
 
     /v1/* remains API-key-only for machine clients. The control panel uses this
     admin-scoped endpoint so username/password browser sessions do not bypass the
-    API-key boundary while still preserving the existing chat UX.
+    API-key boundary while still preserving the existing chat UX. Before dispatch
+    it binds a server-side API key so quota/cost enforcement remains active.
     """
     from aigateway_api.dispatcher import RequestDispatcher
+
+    request.state.console_browser_user_id = _auth.get("user_id")
+    request.state.console_browser_username = _auth.get("username")
+    await _bind_console_chat_api_key(request)
 
     state = _get_app_state(request)
     dispatcher = RequestDispatcher(state)
@@ -72,9 +111,9 @@ async def get_metrics(request: Request) -> FastAPIResponse:
 
     try:
         from .app_state import get_state
-        state = get_state(request)
-        metrics_collector = getattr(state, "metrics_collector")
-        litellm_bridge = getattr(state, "litellm_bridge", None)
+        state_obj = get_state(request)
+        metrics_collector = getattr(state_obj, "metrics_collector")
+        litellm_bridge = getattr(state_obj, "litellm_bridge", None)
 
         # 更新熔断器状态指标(从 litellm cooldown tracker 读,按 provider 聚合)
         if litellm_bridge and metrics_collector and hasattr(litellm_bridge, "get_cooldown_status_by_provider"):
