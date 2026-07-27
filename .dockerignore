@@ -2,7 +2,7 @@
 # .dockerignore — 缩小构建上下文,加速镜像构建
 # ============================================================
 # gateway 构建上下文为仓库根(.),前端为 ./control-panel
-# 排除所有不参与镜像构建的路径,避免 .venv(5GB+)等进入上下文
+# 排除所有不参与镜像构建的路径,避免 .venv、运行时数据、模型缓存等进入上下文
 # ============================================================
 
 # Python 虚拟环境与缓存(最大头:.venv 可达 5GB)
@@ -16,6 +16,8 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+htmlcov/
 
 # Node 依赖与构建产物(Dockerfile 内自行 npm install)
 **/node_modules/
@@ -34,6 +36,7 @@ __pycache__/
 .env.local
 .env.production
 .env.*.local
+.aigateway-install.env
 
 # IDE / 编辑器
 .vscode/
@@ -51,11 +54,23 @@ Dockerfile.frontend
 aigateway-api/Dockerfile
 **/Dockerfile*
 
-# 运行时数据卷
+# 运行时数据、数据库、模型缓存与日志(均通过 volumes 或运行时生成)
+data/
 redis-data/
 qdrant-data/
 grafana-data/
 prometheus-data/
+logs/
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.log
+.cache/
+.cache-*/
+models/
+weights/
 
 # 文档与脚本(不进镜像)
 docs/
