@@ -86,11 +86,30 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else ""
 
 
+def _looks_like_gateway_api_key(value: str) -> bool:
+    return value.strip().startswith("gw-")
+
+
+def _matches_admin_api_key(value: str) -> bool:
+    admin_api_key = os.environ.get("ADMIN_API_KEY", "").strip()
+    if not admin_api_key:
+        return False
+    try:
+        return secrets.compare_digest(value.encode("utf-8"), admin_api_key.encode("utf-8"))
+    except Exception:
+        return False
+
+
+def _valid_initial_admin_password(value: str) -> bool:
+    """Reject machine API keys accidentally configured as console passwords."""
+    return bool(value and not _looks_like_gateway_api_key(value) and not _matches_admin_api_key(value))
+
+
 def _initial_admin_password() -> str:
     """Return the installer-generated temporary console password, if present."""
     for name in _INITIAL_PASSWORD_ENV_NAMES:
         value = os.environ.get(name, "").strip()
-        if value:
+        if _valid_initial_admin_password(value):
             return value
     return ""
 
