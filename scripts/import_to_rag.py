@@ -9,7 +9,7 @@ chunk count minimal.
 
 Usage:
     python scripts/import_to_rag.py --dry-run
-    python scripts/import_to_rag.py
+    AI_GATEWAY_ADMIN_KEY=<admin-or-qa-key> python scripts/import_to_rag.py
     python scripts/import_to_rag.py --include core --include api
 """
 
@@ -33,9 +33,11 @@ import httpx
 # ---------------------------------------------------------------------------
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-API_BASE = "http://localhost:8000"
-ADMIN_KEY = "gw-rRIop4dpcyJJNUTJbHmHpr9Bj3M11s5o"
-HEADERS = {"Authorization": f"Bearer {ADMIN_KEY}", "Content-Type": "application/json"}
+API_BASE = os.getenv("AI_GATEWAY_API_BASE", "http://localhost:8000")
+ADMIN_KEY = os.getenv("AI_GATEWAY_ADMIN_KEY") or os.getenv("QA_API_KEY")
+HEADERS = {"Content-Type": "application/json"}
+if ADMIN_KEY:
+    HEADERS["Authorization"] = f"Bearer {ADMIN_KEY}"
 
 # (rel_dir, chunk_strategy, chunk_size, chunk_overlap)
 # chunk_size=4096 keeps ~1-6 chunks per file (~6-40s per POST), safe for 600s timeout
@@ -169,6 +171,10 @@ def main():
             lc = sum(1 for _ in open(ap, encoding="utf-8", errors="replace"))
             log.info("  %s  (%d lines, %s)", rp, lc, strat)
         return
+
+    if not ADMIN_KEY:
+        log.error("Missing AI_GATEWAY_ADMIN_KEY or QA_API_KEY; refusing to import without an explicit test/admin credential.")
+        sys.exit(1)
 
     ok = err = 0
     n = len(all_files)
