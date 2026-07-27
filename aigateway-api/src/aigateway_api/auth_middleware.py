@@ -1,6 +1,7 @@
 """Authentication dependencies for API keys and browser sessions."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 from typing import Any, Dict, Optional
@@ -27,6 +28,7 @@ def _extract_api_key(
 
 
 def _hash_key(key_value: str) -> str:
+    """Return the canonical API-key hash used by SQLiteStore and legacy tests."""
     return hashlib.sha256(key_value.encode("utf-8")).hexdigest()
 
 
@@ -49,6 +51,23 @@ def require_scope(key_data: Dict[str, Any], scope: str) -> None:
                 }
             },
         )
+
+
+def _password_change_required() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={
+            "error": {
+                "code": "password_change_required",
+                "message": "Administrator password change is required before using this endpoint.",
+            }
+        },
+    )
+
+
+def _reject_force_reset(principal: Dict[str, Any]) -> None:
+    if principal.get("auth_type") == "browser_session" and principal.get("requires_password_change"):
+        raise _password_change_required()
 
 
 async def _authenticate_api_key(request: Request, key_value: str) -> Dict[str, Any]:
@@ -83,14 +102,16 @@ async def _authenticate_api_key(request: Request, key_value: str) -> Dict[str, A
     request.state.auth_type = "api_key"
     request.state.api_key_data = key_data
     request.state.api_key_value = key_value
+    request.state.api_key_hash = _hash_key(key_value)
     return key_data
 
 
-def _authenticate_browser_session(request: Request, token: str) -> Dict[str, Any]:
+async def _authenticate_browser_session(request: Request, token: str) -> Dict[str, Any]:
     import os
 
     ttl = int(os.environ.get("AI_GATEWAY_SESSION_TTL_SECONDS", "28800"))
-    session = get_browser_auth_store(request).validate_session(token, idle_ttl_seconds=ttl)
+    store = get_browser_auth_store(request)
+    session = await asyncio.to_thread(store.validate_session, token, idle_ttl_seconds=ttl)
     if session is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -112,31 +133,37 @@ def _authenticate_browser_session(request: Request, token: str) -> Dict[str, Any
     return principal
 
 
+async def authenticate_api_key(
+    request: Request,
+    api_key: Optional[str] = Header(None, alias="x-api-key"),
+    authorization: Optional[str] = Header(None),
+) -> Dict[str, Any]:
+    """Authenticate machine/API endpoints with API-key headers only."""
+    key_value = _extract_api_key(authorization, api_key)
+    if not key_value:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"error": {"code": "unauthorized", "message": "API key required"}},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return await _authenticate_api_key(request, key_value)
+
+
 async def authenticate(
     request: Request,
     api_key: Optional[str] = Header(None, alias="x-api-key"),
     authorization: Optional[str] = Header(None),
 ) -> Dict[str, Any]:
-    """Authenticate an API-key header or an opaque browser session.
-
-    Header credentials are always interpreted as API keys. Cookies are always
-    interpreted as browser sessions; raw API keys are never accepted from the
-    session cookie.
-    """
-    key_value = _extract_api_key(authorization, api_key)
-    if key_value:
-        return await _authenticate_api_key(request, key_value)
-    session_token = _get_session_cookie(request)
-    if session_token:
-        return _authenticate_browser_session(request, session_token)
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail={"error": {"code": "unauthorized", "message": "Authentication required"}},
-        headers={"WWW-Authenticate": "Bearer"},
-    )
+    """Compatibility dependency for /v1 endpoints: API-key headers only."""
+    return await authenticate_api_key(request, api_key=api_key, authorization=authorization)
 
 
 async def authenticate_admin(request: Request) -> Dict[str, Any]:
+    """Authenticate administrator routes with admin API keys or browser sessions.
+
+    Browser sessions that still require an administrator password change may only
+    call auth/session endpoints directly; admin routes fail closed server-side.
+    """
     key_value = _extract_api_key(
         request.headers.get("authorization"),
         request.headers.get("x-api-key"),
@@ -150,14 +177,15 @@ async def authenticate_admin(request: Request) -> Dict[str, Any]:
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail={"error": {"code": "unauthorized", "message": "Authentication required"}},
             )
-        principal = _authenticate_browser_session(request, token)
+        principal = await _authenticate_browser_session(request, token)
     require_scope(principal, "admin")
+    _reject_force_reset(principal)
     return principal
 
 
 async def require_api_key(request: Request) -> None:
-    """Compatibility middleware: authenticate either supported credential type."""
-    await authenticate(
+    """Compatibility dependency: authenticate API-key headers only."""
+    await authenticate_api_key(
         request,
         api_key=request.headers.get("x-api-key"),
         authorization=request.headers.get("authorization"),
