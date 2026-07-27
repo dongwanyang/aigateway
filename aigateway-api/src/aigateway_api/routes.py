@@ -6,7 +6,8 @@ Routes — 基础设施路由
 - GET /metrics — Prometheus 指标端点
 - GET /health — 健康检查端点
 
-这些接口不需要鉴权（公开端点）。
+这些接口不需要鉴权（公开端点）。控制台专用聊天端点虽然定义在本模块，
+但使用 authenticate_admin 显式保护。
 """
 
 from __future__ import annotations
@@ -17,9 +18,12 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response as FastAPIResponse
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+
+from .auth_middleware import authenticate_admin
+from .openai_compat import ChatCompletionRequest, _get_app_state
 
 logger = logging.getLogger(__name__)
 
@@ -27,9 +31,32 @@ router = APIRouter()
 
 
 # ------------------------------------------------------------------
-# GET /metrics
+# POST /admin/console/chat/completions
 # ------------------------------------------------------------------
 
+
+@router.post("/admin/console/chat/completions")
+async def post_console_chat_completions(
+    body: ChatCompletionRequest,
+    request: Request,
+    _auth: Dict[str, Any] = Depends(authenticate_admin),
+) -> JSONResponse:
+    """Control-panel chat endpoint authenticated by browser session.
+
+    /v1/* remains API-key-only for machine clients. The control panel uses this
+    admin-scoped endpoint so username/password browser sessions do not bypass the
+    API-key boundary while still preserving the existing chat UX.
+    """
+    from aigateway_api.dispatcher import RequestDispatcher
+
+    state = _get_app_state(request)
+    dispatcher = RequestDispatcher(state)
+    return await dispatcher.dispatch(body, request)
+
+
+# ------------------------------------------------------------------
+# GET /metrics
+# ------------------------------------------------------------------
 
 
 @router.get("/metrics")
