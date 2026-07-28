@@ -160,20 +160,21 @@ const PRESET_PROVIDERS: PresetProvider[] = [
 
 // --- 类型定义 ---
 
-// 支持的 modality 分类
-const MODALITY_OPTIONS = ['llm', 'mllm', 'generative'] as const
-type Modality = typeof MODALITY_OPTIONS[number]
+// 支持的模型能力分类
+const CAPABILITY_OPTIONS = ['text', 'image', 'video'] as const
+type Capability = typeof CAPABILITY_OPTIONS[number]
 
-const MODALITY_LABEL: Record<Modality, string> = {
-  llm: '纯文本 (llm)',
-  mllm: '多模态理解 (mllm)',
-  generative: '生成 (generative)',
+const CAPABILITY_LABEL: Record<Capability, string> = {
+  text: '文本 (text)',
+  image: '图像 (image)',
+  video: '视频 (video)',
 }
 
 interface ModelEntry {
   name: string
-  modality: string[]
+  capabilities: string[]
   base_url?: string            // 可选：per-model base_url 覆盖，留空继承提供商级别
+  [key: string]: unknown
 }
 
 interface PricingConfig {
@@ -185,6 +186,7 @@ interface ModelGroup {
   models: ModelEntry[]
   fallback_models: string[]
   pricing: Record<string, PricingConfig>
+  [key: string]: unknown
 }
 
 interface ProviderConfig {
@@ -194,6 +196,7 @@ interface ProviderConfig {
   num_retries: number
   retry_after: number
   timeout: number
+  [key: string]: unknown
 }
 
 interface EmbeddingConfig {
@@ -201,26 +204,43 @@ interface EmbeddingConfig {
   model: string
   vector_dim: number
   openai_model: string
+  [key: string]: unknown
 }
 
 // 归一化任意 config 中的 model_entry -> ModelEntry
 function normalizeModelEntry(raw: any): ModelEntry | null {
   if (!raw) return null
   if (typeof raw === 'string') {
-    return { name: raw, modality: [] }
+    return { name: raw, capabilities: [] }
   }
   if (typeof raw === 'object') {
     const name = String(raw.name ?? '').trim()
     if (!name) return null
-    let modality: string[] = []
-    if (Array.isArray(raw.modality)) {
-      modality = raw.modality.map((x: any) => String(x)).filter(Boolean)
+    let capabilities: string[] = []
+    if (Array.isArray(raw.capabilities)) {
+      capabilities = raw.capabilities.map((x: any) => String(x)).filter(Boolean)
+    } else if (typeof raw.capabilities === 'string' && raw.capabilities) {
+      capabilities = [raw.capabilities]
+    } else if (Array.isArray(raw.modality)) {
+      capabilities = raw.modality.flatMap((value: any) => {
+        const modality = String(value)
+        if (modality === 'llm') return ['text']
+        if (modality === 'mllm') return ['text', 'image']
+        if (modality === 'generative') return ['image', 'video']
+        return modality ? [modality] : []
+      })
     } else if (typeof raw.modality === 'string' && raw.modality) {
-      // 旧字符串写法：加载时容错为单元素列表，保存时以列表形式回写
-      modality = [raw.modality]
+      // 兼容旧配置；保存时统一迁移到 capabilities。
+      if (raw.modality === 'llm') capabilities = ['text']
+      else if (raw.modality === 'mllm') capabilities = ['text', 'image']
+      else if (raw.modality === 'generative') capabilities = ['image', 'video']
+      else capabilities = [raw.modality]
     }
+    capabilities = [...new Set(capabilities)]
     const baseUrlRaw = typeof raw.base_url === 'string' ? raw.base_url.trim() : ''
-    return { name, modality, base_url: baseUrlRaw || undefined }
+    const normalized = { ...raw, name, capabilities, base_url: baseUrlRaw || undefined }
+    delete normalized.modality
+    return normalized
   }
   return null
 }
@@ -258,7 +278,7 @@ export default function Models() {
     modelIdx: number
     mode: 'add' | 'edit'
     name: string
-    modality: string[]
+    capabilities: string[]
     promptPrice: string
     completionPrice: string
     baseUrl: string
@@ -293,9 +313,10 @@ export default function Models() {
             const pricing = typeof g?.pricing === 'object' && g?.pricing !== null
               ? { ...g.pricing }
               : {}
-            return { models, fallback_models: fallbackModels, pricing }
+            return { ...g, models, fallback_models: fallbackModels, pricing }
           })
           parsed[name] = {
+            ...cfg,
             api_key: cfg.api_key ?? '',
             base_url: cfg.base_url ?? '',
             model_grouper: groups,
@@ -311,6 +332,7 @@ export default function Models() {
       // 解析 embedding
       const rawEmbed = (data.embedding ?? {}) as any
       setEmbedding({
+        ...rawEmbed,
         backend: rawEmbed.backend ?? 'sentence_transformers',
         model: rawEmbed.model ?? '',
         vector_dim: rawEmbed.vector_dim ?? 1024,
@@ -371,7 +393,7 @@ export default function Models() {
       model_grouper: [{
         models: selectedPreset.defaultModels.map(name => ({
           name,
-          modality: ['llm'],   // 默认给 llm，用户可在编辑弹窗中调整
+          capabilities: ['text'],
         })),
         fallback_models: [],
         pricing: {},
@@ -431,8 +453,9 @@ export default function Models() {
       const prevEntry = models[modelIdx]
       if (!prevEntry) return prev
       const nextEntry: ModelEntry = {
+        ...prevEntry,
         name: patch.name !== undefined ? patch.name : prevEntry.name,
-        modality: patch.modality !== undefined ? patch.modality : prevEntry.modality,
+        capabilities: patch.capabilities !== undefined ? patch.capabilities : prevEntry.capabilities,
         base_url: patch.base_url !== undefined ? patch.base_url : prevEntry.base_url,
       }
       // 如果 name 发生变化，同步迁移 pricing key
@@ -455,14 +478,14 @@ export default function Models() {
   function addModelToGroup(
     providerName: string,
     groupIdx: number,
-    entry: ModelEntry = { name: '', modality: [] },
+    entry: ModelEntry = { name: '', capabilities: [] },
   ) {
     setProviders(prev => {
       const p = { ...prev[providerName] }
       const groups = [...p.model_grouper]
       const group = { ...groups[groupIdx] }
       // 过滤掉值为 undefined 的可选字段，保持 config 干净
-      const cleanEntry: ModelEntry = { name: entry.name, modality: entry.modality }
+      const cleanEntry: ModelEntry = { ...entry, name: entry.name, capabilities: entry.capabilities }
       if (entry.base_url) cleanEntry.base_url = entry.base_url
       group.models = [...group.models, cleanEntry]
       groups[groupIdx] = group
@@ -497,7 +520,7 @@ export default function Models() {
       modelIdx: -1,
       mode: 'add',
       name: initialName,
-      modality: initialName ? ['llm'] : [],
+      capabilities: initialName ? ['text'] : [],
       promptPrice: '',
       completionPrice: '',
       baseUrl: '',
@@ -515,7 +538,7 @@ export default function Models() {
       modelIdx,
       mode: 'edit',
       name: entry.name,
-      modality: [...entry.modality],
+      capabilities: [...entry.capabilities],
       promptPrice: pricing ? formatPrice(pricing.prompt) : '',
       completionPrice: pricing ? formatPrice(pricing.completion) : '',
       baseUrl: entry.base_url ?? '',
@@ -526,13 +549,15 @@ export default function Models() {
     setModelDialog(null)
   }
 
-  function toggleDialogModality(m: string) {
+  function toggleDialogCapability(capability: string) {
     setModelDialog(prev => {
       if (!prev) return prev
-      const has = prev.modality.includes(m)
+      const has = prev.capabilities.includes(capability)
       return {
         ...prev,
-        modality: has ? prev.modality.filter(x => x !== m) : [...prev.modality, m],
+        capabilities: has
+          ? prev.capabilities.filter(x => x !== capability)
+          : [...prev.capabilities, capability],
       }
     })
   }
@@ -544,8 +569,8 @@ export default function Models() {
       setError('请填写模型名称')
       return
     }
-    if (modelDialog.modality.length === 0) {
-      setError('请至少选择一个 modality')
+    if (modelDialog.capabilities.length === 0) {
+      setError('请至少选择一个模型能力')
       return
     }
 
@@ -575,13 +600,13 @@ export default function Models() {
     if (mode === 'add') {
       addModelToGroup(providerName, groupIdx, {
         name: trimmedName,
-        modality: [...modelDialog.modality],
+        capabilities: [...modelDialog.capabilities],
         base_url: modelDialog.baseUrl.trim() || undefined,
       })
     } else {
       updateModelInGroup(providerName, groupIdx, modelIdx, {
         name: trimmedName,
-        modality: [...modelDialog.modality],
+        capabilities: [...modelDialog.capabilities],
         base_url: modelDialog.baseUrl.trim() || undefined,
       })
     }
@@ -1167,11 +1192,11 @@ export default function Models() {
                                     {model.name || <span style={{ color: 'var(--color-text-quaternary)' }}>（未命名模型）</span>}
                                   </div>
                                   <div className="flex flex-wrap items-center gap-1 mt-1">
-                                    {model.modality.length === 0 ? (
-                                      <span className="text-xs" style={{ color: 'var(--color-text-quaternary)' }}>无 modality</span>
-                                    ) : model.modality.map(m => (
+                                    {model.capabilities.length === 0 ? (
+                                      <span className="text-xs" style={{ color: 'var(--color-text-quaternary)' }}>未配置能力</span>
+                                    ) : model.capabilities.map(capability => (
                                       <span
-                                        key={m}
+                                        key={capability}
                                         className="text-xs px-1.5 py-0.5 rounded"
                                         style={{
                                           backgroundColor: 'rgba(59, 130, 246, 0.1)',
@@ -1179,7 +1204,7 @@ export default function Models() {
                                           border: '1px solid rgba(59, 130, 246, 0.3)',
                                         }}
                                       >
-                                        {m}
+                                        {capability}
                                       </span>
                                     ))}
                                     {model.base_url ? (
@@ -1363,17 +1388,17 @@ export default function Models() {
 
             <div>
               <label className="block text-xs mb-1 font-medium" style={{ color: 'var(--color-text-tertiary)' }}>
-                Modality <span style={{ color: 'var(--color-danger)' }}>*</span>
+                模型能力 <span style={{ color: 'var(--color-danger)' }}>*</span>
                 <span className="ml-2" style={{ color: 'var(--color-text-quaternary)' }}>
                   可多选，代表该模型支持的能力
                 </span>
               </label>
               <div className="flex flex-col gap-1 rounded p-2" style={{ border: '1px solid var(--color-border)', backgroundColor: 'var(--color-bg-overlay)' }}>
-                {MODALITY_OPTIONS.map(m => {
-                  const checked = modelDialog.modality.includes(m)
+                {CAPABILITY_OPTIONS.map(capability => {
+                  const checked = modelDialog.capabilities.includes(capability)
                   return (
                     <label
-                      key={m}
+                      key={capability}
                       className="flex items-center gap-2 cursor-pointer text-sm px-2 py-1 rounded"
                       style={{
                         backgroundColor: checked ? 'rgba(59, 130, 246, 0.08)' : 'transparent',
@@ -1382,9 +1407,9 @@ export default function Models() {
                       <input
                         type="checkbox"
                         checked={checked}
-                        onChange={() => toggleDialogModality(m)}
+                        onChange={() => toggleDialogCapability(capability)}
                       />
-                      <span>{MODALITY_LABEL[m]}</span>
+                      <span>{CAPABILITY_LABEL[capability]}</span>
                     </label>
                   )
                 })}

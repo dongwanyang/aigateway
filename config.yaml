@@ -30,16 +30,23 @@ model_selector:
   success_rate_weight: 0.4
 task_routing:
   enabled: true
-  version: "2"
+  version: '2'
   min_confidence: 0.6
   model_selection_mode: policy
   expose_debug_metadata: false
   model_preferences:
-    coding: [kimi-k2.7-code, deepseek-v4-pro, deepseek-v4-flash]
-    reasoning: [deepseek-v4-pro, glm-5.2]
-    summary: [agnes-2.0-flash, deepseek-v4-flash]
-    vision: [agnes-2.0-flash]
-    general: [agnes-2.0-flash]
+    coding:
+    - kimi-k2.7-code
+    - deepseek-v4-pro
+    reasoning:
+    - deepseek-v4-pro
+    - glm-5.2
+    summary:
+    - agnes-2.0-flash
+    vision:
+    - agnes-2.0-flash
+    general:
+    - agnes-2.0-flash
 generation:
   image:
     default_size: 2K
@@ -49,19 +56,19 @@ generation:
     poll_endpoint: /v1/videos/{id}
 auth:
   api_keys:
-    - key: ${ADMIN_API_KEY:-}
-      user_id: admin
-      scopes:
-        - admin
-        - chat
-        - embedding
-      expires_at: null
-      group: admin-team
-      quotas:
-        daily_tokens: 1000000
-        monthly_cost: 50.0
-        rate_limit_rpm: 60
-        rate_limit_tpm: 100000
+  - key: ${ADMIN_API_KEY:-}
+    user_id: admin
+    scopes:
+    - admin
+    - chat
+    - embedding
+    expires_at: null
+    group: admin-team
+    quotas:
+      daily_tokens: 1000000
+      monthly_cost: 50.0
+      rate_limit_rpm: 60
+      rate_limit_tpm: 100000
   distributed_mode: false
   defaults:
     daily_tokens: 1000000
@@ -70,11 +77,11 @@ auth:
     rate_limit_tpm: 100000
   budget_alert_threshold: 0.8
   groups:
-    - name: admin-team
-      daily_tokens: 1000000
-      monthly_cost: 50.0
-      rate_limit_rpm: 60
-      rate_limit_tpm: 100000
+  - name: admin-team
+    daily_tokens: 1000000
+    monthly_cost: 50.0
+    rate_limit_rpm: 60
+    rate_limit_tpm: 100000
 plugins:
 - name: pii_detector
   enabled: true
@@ -146,8 +153,15 @@ providers:
         - text
         - image
         - video
-        tasks: [general, summary, vision]
-        features: [vision, tool_calling, structured_output, long_context]
+        tasks:
+        - general
+        - summary
+        - vision
+        features:
+        - vision
+        - tool_calling
+        - structured_output
+        - long_context
       - name: agnes-image-2.1-flash
         capabilities:
         - image
@@ -168,24 +182,6 @@ providers:
     num_retries: 3
     retry_after: 1000
     timeout: 3600
-  deepseek:
-    api_key: ${DEEPSEEK_API_KEY:-}
-    base_url: https://api.deepseek.com/v1
-    model_grouper:
-    - models:
-      - name: deepseek-v4-flash
-        capabilities:
-        - text
-        tasks: [general, summary, coding]
-        features: [tool_calling, structured_output, long_context]
-      fallback_models: []
-      pricing:
-        deepseek-v4-flash:
-          prompt: 0.02
-          completion: 1
-    num_retries: 3
-    retry_after: 1000
-    timeout: 120
   glm5.2:
     api_key: ${GLM52_API_KEY:-}
     base_url: https://buddy.relaypool.cam/codebuddy/v1
@@ -194,18 +190,32 @@ providers:
       - name: glm-5.2
         capabilities:
         - text
-        tasks: [general, reasoning]
-        features: [tool_calling, structured_output, long_context]
+        tasks:
+        - general
+        - reasoning
+        features:
+        - tool_calling
+        - structured_output
+        - long_context
       - name: deepseek-v4-pro
         capabilities:
         - text
-        tasks: [reasoning, coding]
-        features: [tool_calling, structured_output, long_context]
+        tasks:
+        - reasoning
+        - coding
+        features:
+        - tool_calling
+        - structured_output
+        - long_context
       - name: kimi-k2.7-code
         capabilities:
         - text
-        tasks: [coding]
-        features: [tool_calling, structured_output, long_context]
+        tasks:
+        - coding
+        features:
+        - tool_calling
+        - structured_output
+        - long_context
       fallback_models: []
       pricing:
         glm-5.2:
@@ -249,7 +259,7 @@ infrastructure:
     hnsw_m: 16
     hnsw_ef_construct: 128
 cache:
-  pipeline_version: "2"
+  pipeline_version: '2'
   l1:
     max_entries: 1000
     max_value_bytes: 102400
@@ -331,22 +341,11 @@ debug:
   entry: false
   cache: false
   bridge: false
-  plugins_enabled: false
   plugins:
     enabled: false
     per_plugin:
-      pii_detector: false
       prompt_cache: false
-      semantic_cache: false
-      rag_retriever: false
-      conv_compressor: false
-      media_optimizer: false
-      ai_director: false
-      intent_evaluator: false
-      token_compressor: false
-      draft_generator: false
-      gen_model_router: false
-      cost_tracker: false
+  plugins_enabled: false
 media_optimization:
   enabled: true
   download_timeouts:

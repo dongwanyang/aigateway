@@ -93,14 +93,21 @@ const fullConfig = {
     openai: {
       api_key: 'sk-masked***',
       base_url: 'https://api.openai.com/v1',
+      provider_extension: { region: 'test' },
       model_grouper: [{
         models: [
-          { name: 'gpt-4o', modality: ['llm'] },
-          'gpt-4o-mini',
+          {
+            name: 'gpt-4o',
+            capabilities: ['text', 'image'],
+            tasks: ['general', 'vision'],
+            features: ['tool_calling'],
+          },
+          { name: 'gpt-4o-mini', modality: ['llm'] },
           { name: '', modality: [] },
         ],
         fallback_models: ['gpt-4o-mini'],
         pricing: { 'gpt-4o': { prompt: 0.01, completion: 0.03 } },
+        group_extension: true,
       }],
       num_retries: 3,
       retry_after: 1000,
@@ -112,6 +119,7 @@ const fullConfig = {
     model: 'Qwen/embed',
     vector_dim: 1024,
     openai_model: 'text-embedding-3-small',
+    device: 'auto',
   },
 }
 
@@ -170,7 +178,7 @@ function responseFor(input: RequestInfo | URL, init?: RequestInit): Response {
       'gateway_request_duration_seconds_bucket{model="gpt",le="0.5"} 10',
     ].join('\n'))
   }
-  if (url.includes('/admin/debug/config')) {
+  if (url.includes('/admin/config/debug')) {
     return Response.json({
       data: {
         frontend: true,
@@ -183,9 +191,9 @@ function responseFor(input: RequestInfo | URL, init?: RequestInit): Response {
       message: 'success',
     })
   }
-  if (url.includes('/admin/debug/plugins/')) {
-    const plugin = decodeURIComponent(url.split('/admin/debug/plugins/')[1]?.split('?')[0] ?? '')
-    return Response.json({ data: { name: plugin, enabled: false }, message: 'success' })
+  if (/\/admin\/plugins\/[^/]+\/debug$/.test(url)) {
+    const plugin = decodeURIComponent(url.split('/admin/plugins/')[1]?.split('/debug')[0] ?? '')
+    return Response.json({ data: { plugin, debug: false }, message: 'success' })
   }
   if (url.includes('/admin/config')) {
     if (method === 'PUT') return Response.json({ data: { updated: true }, message: 'success' })
@@ -500,6 +508,28 @@ describe('control panel pages against production API response shapes', () => {
       expect.stringMatching(/\/admin\/config$/),
       expect.objectContaining({ method: 'PUT' }),
     )
+    const saveCall = vi.mocked(fetch).mock.calls.find(([input, init]) => (
+      String(input).endsWith('/admin/config') && init?.method === 'PUT'
+    ))
+    expect(saveCall).toBeDefined()
+    const savedConfig = JSON.parse(String(saveCall?.[1]?.body))
+    const savedProvider = savedConfig.providers.openai
+    const savedModel = savedProvider.model_grouper[0].models[0]
+    expect(savedModel).toMatchObject({
+      name: 'gpt-4o',
+      capabilities: ['text', 'image'],
+      tasks: ['general', 'vision'],
+      features: ['tool_calling'],
+    })
+    expect(savedModel).not.toHaveProperty('modality')
+    expect(savedProvider.model_grouper[0].models[1]).toMatchObject({
+      name: 'gpt-4o-mini',
+      capabilities: ['text'],
+    })
+    expect(savedProvider.model_grouper[0].models[1]).not.toHaveProperty('modality')
+    expect(savedProvider.provider_extension).toEqual({ region: 'test' })
+    expect(savedProvider.model_grouper[0].group_extension).toBe(true)
+    expect(savedConfig.embedding.device).toBe('auto')
   })
 
   it('tests provider connectivity, fetches remote models and completes quick-add', async () => {
@@ -520,7 +550,7 @@ describe('control panel pages against production API response shapes', () => {
     expect(await screen.findByText(/已添加提供商 "anthropic"/)).toBeInTheDocument()
   })
 
-  it('edits a model through the modality and pricing dialog', async () => {
+  it('edits a model through the capabilities and pricing dialog', async () => {
     const user = userEvent.setup()
     renderPage(<Models />)
     await screen.findByText('gpt-4o')
@@ -529,12 +559,12 @@ describe('control panel pages against production API response shapes', () => {
     const name = screen.getByPlaceholderText('如: gpt-4o')
     await user.clear(name)
     await user.type(name, 'gpt-4.1')
-    await user.click(screen.getByText('多模态理解 (mllm)'))
+    await user.click(screen.getByText('视频 (video)'))
     await user.clear(screen.getByPlaceholderText('0.000005'))
     await user.type(screen.getByPlaceholderText('0.000005'), '0.02')
     await user.click(screen.getByRole('button', { name: '保存' }))
     expect(await screen.findByText('gpt-4.1')).toBeInTheDocument()
-    expect(screen.getByText('mllm')).toBeInTheDocument()
+    expect(screen.getByText('video')).toBeInTheDocument()
   })
 
   it('switches quota tabs, searches keys and opens creation forms', async () => {
@@ -691,8 +721,29 @@ describe('control panel pages against production API response shapes', () => {
     ))
     await user.click(screen.getAllByTitle('Debug 日志')[0])
     await waitFor(() => expect(fetch).toHaveBeenCalledWith(
-      expect.stringMatching(/\/admin\/debug\/plugins\/prompt_cache$/),
-      expect.objectContaining({ method: 'PUT', body: expect.stringContaining('"enabled":false') }),
+      expect.stringMatching(/\/admin\/plugins\/prompt_cache\/debug$/),
+      expect.objectContaining({ method: 'POST', body: expect.stringContaining('"enabled":false') }),
+    ))
+    const frontendDebug = screen.getByText('前端').parentElement?.parentElement?.parentElement?.querySelector('input')
+    expect(frontendDebug).toBeInstanceOf(HTMLInputElement)
+    await user.click(frontendDebug as HTMLInputElement)
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith(
+      expect.stringMatching(/\/admin\/global-config$/),
+      expect.objectContaining({
+        method: 'PUT',
+        body: JSON.stringify({
+          debug: {
+            frontend: false,
+            entry: true,
+            cache: false,
+            bridge: false,
+            plugins: {
+              enabled: true,
+              per_plugin: { prompt_cache: true },
+            },
+          },
+        }),
+      }),
     ))
     const hotReload = screen.getByText('热重载').parentElement?.parentElement?.querySelector('input') as HTMLInputElement
     await user.click(hotReload)

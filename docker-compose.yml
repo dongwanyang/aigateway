@@ -70,6 +70,22 @@ services:
     networks:
       - gateway-net
 
+  prometheus:
+    image: prom/prometheus:v3.3.0
+    ports:
+      # Loopback only — dev/introspection, not for remote access.
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.listen-address=0.0.0.0:9090
+    restart: unless-stopped
+    networks:
+      - gateway-net
+
 networks:
   gateway-net:
     driver: bridge
@@ -78,3 +94,4 @@ volumes:
   redis-data:
   qdrant-data:
   code_graphs_data:
+  prometheus-data:

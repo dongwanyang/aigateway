@@ -42,6 +42,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     retry: false,
     staleTime: 30_000,
   })
+  const sessionStatePending = sessionQuery.data !== undefined && (
+    Boolean(sessionQuery.data.authenticated) !== isAuthenticated
+    || (
+      sessionQuery.data.authenticated
+      && Boolean(sessionQuery.data.force_reset) !== forceReset
+    )
+  )
 
   useEffect(() => {
     if (sessionQuery.data?.authenticated) {
@@ -96,7 +103,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       isAuthenticated,
       keyPrefix,
       forceReset,
-      isLoading: sessionQuery.isLoading,
+      // React effects synchronize the query result into Zustand after render.
+      // Keep route guards in their loading state during that reconciliation
+      // window so a valid browser session is not redirected to /login.
+      isLoading: sessionQuery.isLoading || sessionStatePending,
       login,
       logout,
       completeForceReset,

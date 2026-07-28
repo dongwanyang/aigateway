@@ -8,6 +8,7 @@ const auth = vi.hoisted(() => ({
   login: vi.fn(),
   logout: vi.fn(),
   completeForceReset: vi.fn(),
+  isAuthenticated: false,
   isLoading: false,
   forceReset: false,
   state: { isAuthenticated: false },
@@ -61,6 +62,14 @@ describe('Login authentication and forced password reset', () => {
     getBootstrapCredentials.mockReset().mockResolvedValue({ available: false })
     auth.isLoading = false
     auth.forceReset = false
+    auth.isAuthenticated = false
+  })
+
+  it('leaves the login page when an existing browser session is restored', async () => {
+    auth.isAuthenticated = true
+    renderLogin()
+
+    expect(await screen.findByText('控制台首页')).toBeInTheDocument()
   })
 
   it('submits username and password and navigates after a normal login', async () => {

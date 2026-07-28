@@ -73,9 +73,28 @@ export async function getGlobalConfig(): Promise<ApiResponse<GlobalConfigData>> 
 export async function updateGlobalConfig(config: { hot_reload: boolean; debug_mode?: boolean }): Promise<ApiResponse<GlobalConfigData>> { return fetchJson<GlobalConfigData>('/admin/global-config', { method: 'PUT', body: JSON.stringify(config) }) }
 export async function getFullConfig(): Promise<ApiResponse<Record<string, unknown>>> { return fetchJson<Record<string, unknown>>('/admin/config') }
 export async function updateFullConfig(config: Record<string, unknown>): Promise<ApiResponse<{ updated: boolean }>> { return fetchJson<{ updated: boolean }>('/admin/config', { method: 'PUT', body: JSON.stringify(config) }) }
-export async function setPluginDebug(name: string, enabled: boolean): Promise<ApiResponse<{ name: string; enabled: boolean }>> { return fetchJson<{ name: string; enabled: boolean }>(`/admin/debug/plugins/${encodeURIComponent(name)}`, { method: 'PUT', body: JSON.stringify({ enabled }) }) }
-export async function getDebugConfig(): Promise<DebugConfig> { return (await fetchJson<DebugConfig>('/admin/debug/config')).data }
-export async function updateDebugSection(config: Partial<DebugConfig>): Promise<ApiResponse<DebugConfig>> { return fetchJson<DebugConfig>('/admin/debug/config', { method: 'PUT', body: JSON.stringify(config) }) }
+export async function setPluginDebug(name: string, enabled: boolean): Promise<ApiResponse<{ plugin: string; debug: boolean }>> { return fetchJson<{ plugin: string; debug: boolean }>(`/admin/plugins/${encodeURIComponent(name)}/debug`, { method: 'POST', body: JSON.stringify({ enabled }) }) }
+export async function getDebugConfig(): Promise<DebugConfig> { return (await fetchJson<DebugConfig>('/admin/config/debug')).data }
+export async function updateDebugSection(config: Partial<DebugConfig>): Promise<ApiResponse<GlobalConfigData>> {
+  const current = await getDebugConfig()
+  const merged = { ...current, ...config }
+  const plugins = {
+    enabled: Boolean(merged.plugins_enabled),
+    per_plugin: (
+      typeof merged.per_plugin === 'object' && merged.per_plugin !== null
+        ? merged.per_plugin
+        : {}
+    ),
+  }
+  const debug = {
+    frontend: Boolean(merged.frontend),
+    entry: Boolean(merged.entry),
+    cache: Boolean(merged.cache),
+    bridge: Boolean(merged.bridge),
+    plugins,
+  }
+  return fetchJson<GlobalConfigData>('/admin/global-config', { method: 'PUT', body: JSON.stringify({ debug }) })
+}
 export interface ProviderConnectivityResult { success: boolean; latency_ms: number; error?: string | null }
 export async function testProviderConnectivity(provider: string, config?: Record<string, unknown>): Promise<ApiResponse<ProviderConnectivityResult>> { return fetchJson<ProviderConnectivityResult>(`/admin/providers/${encodeURIComponent(provider)}/test`, { method: 'POST', body: JSON.stringify(config ?? {}) }) }
 export async function fetchProviderModels(provider: string, config?: Record<string, unknown>): Promise<ApiResponse<{ models: string[] }>> { return fetchJson<{ models: string[] }>(`/admin/providers/${encodeURIComponent(provider)}/models`, { method: 'POST', body: JSON.stringify(config ?? {}) }) }

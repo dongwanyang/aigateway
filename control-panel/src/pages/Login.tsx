@@ -10,7 +10,7 @@ function looksLikeGatewayApiKey(value: string): boolean {
 }
 
 export default function Login() {
-  const { login, isLoading, forceReset, logout, completeForceReset } = useAuth()
+  const { login, isAuthenticated, isLoading, forceReset, logout, completeForceReset } = useAuth()
   const [username, setUsername] = useState('admin')
   const [password, setPassword] = useState('')
   const [showSecret, setShowSecret] = useState(false)
@@ -27,7 +27,13 @@ export default function Login() {
   useEffect(() => { inputRef.current?.focus() }, [])
 
   useEffect(() => {
-    if (isLoading || forceReset) return
+    if (!isLoading && isAuthenticated && !forceReset) {
+      navigate('/', { replace: true })
+    }
+  }, [forceReset, isAuthenticated, isLoading, navigate])
+
+  useEffect(() => {
+    if (isLoading || isAuthenticated || forceReset) return
     let cancelled = false
     getBootstrapCredentials()
       .then(credentials => {
@@ -37,7 +43,7 @@ export default function Login() {
       })
       .catch(() => {})
     return () => { cancelled = true }
-  }, [forceReset, isLoading])
+  }, [forceReset, isAuthenticated, isLoading])
 
   async function handleLogin(event: React.FormEvent) {
     event.preventDefault()
