@@ -191,7 +191,7 @@ cd control-panel && npm install && npm run dev
 
 ### 验证
 
-先通过控制台创建 QA 专用 API Key，或从测试环境变量 / CI Secret 注入，不要把真实客户端 key 写入仓库文件。
+先通过控制台创建 QA 专用 API Key，或从测试环境变量 / CI Secret 注入，不要把真实客户端 key 写入仓库文件。完整测试选择见 [docs/TESTING.md](docs/TESTING.md)，认证与 API Key QA 流程见 [docs/QA_AUTH_TESTING.md](docs/QA_AUTH_TESTING.md)。
 
 ```bash
 export QA_API_KEY="<created-by-admin-api-keys>"
@@ -393,8 +393,15 @@ Python 包及版本只在 `aigateway-core/pyproject.toml` 和
 
 ### 运行测试
 
+完整测试选择、认证 QA 和交付格式见：
+
+- [docs/TESTING.md](docs/TESTING.md)
+- [docs/QA_AUTH_TESTING.md](docs/QA_AUTH_TESTING.md)
+
+常用命令：
+
 ```bash
-python -m pytest tests/ -v          # 全部 82+ 测试文件
+python -m pytest tests/ -v          # 全部测试
 python -m pytest tests/ -x -q       # 快速模式（首个失败停止）
 ```
 
