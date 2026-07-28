@@ -1,6 +1,8 @@
 # QA 认证测试指南
 
-本项目的认证模型已经分成两条链路：
+本文件是认证、控制台 Session、API Key、QA 凭据和相关测试流程的专项权威文档。通用测试选择和交付格式见 [`docs/TESTING.md`](TESTING.md)。
+
+本项目的认证模型分成两条链路：
 
 - 控制台 / 管理接口：用户名密码登录，浏览器或测试客户端使用 HttpOnly Session Cookie。
 - OpenAI 兼容程序化接口：使用 `Authorization: Bearer <gateway-api-key>`。
@@ -11,7 +13,7 @@
 
 | 场景 | 正确认证方式 | 典型接口 |
 | --- | --- | --- |
-| 控制台登录 | 用户名 + 密码 | `POST /auth/session` |
+| 控制台登录 | 用户名 + 管理员密码 | `POST /auth/session` |
 | 控制台状态 | Session Cookie | `GET /auth/session` |
 | 控制台退出 | Session Cookie | `DELETE /auth/session` |
 | 控制台配置、插件、配额、日志、RAG 管理 | Session Cookie | `/admin/*` |
@@ -24,6 +26,8 @@
 - 只带浏览器 Cookie 调 `/v1/*` 不应被当作客户端 API Key 放行。
 - 带有效 Bearer API Key 调 `/v1/*` 应放行。
 - Bearer API Key 不应替代控制台登录。
+- 前端不得恢复 `localStorage.aigateway_api_key` 登录模式。
+- 前端不得暴露 `ADMIN_API_KEY` 或 `AI_GATEWAY_CONSOLE_CHAT_API_KEY`。
 
 ## 2. `config.yaml` 中不再放什么
 
@@ -104,6 +108,23 @@ curl -sS "$BASE_URL/v1/chat/completions" \
   }'
 ```
 
+### 3.4 负向边界检查
+
+```bash
+# Cookie 不能当作 /v1/* API Key 使用
+curl -sS -o /tmp/aigateway-cookie-only.json -w '%{http_code}\n' \
+  -b /tmp/aigateway-qa-cookies.txt \
+  "$BASE_URL/v1/models"
+
+# API Key 不能当作控制台登录密码使用
+curl -sS -o /tmp/aigateway-api-key-login.json -w '%{http_code}\n' \
+  -H "Content-Type: application/json" \
+  -X POST "$BASE_URL/auth/session" \
+  -d "{\"username\":\"$QA_ADMIN_USERNAME\",\"password\":\"$QA_API_KEY\"}"
+```
+
+两者都不应返回 2xx。
+
 ## 4. pytest 推荐 fixture
 
 ```python
@@ -168,6 +189,15 @@ def test_v1_models_accepts_gateway_api_key(qa_api_key: str) -> None:
 def test_v1_rejects_cookie_only(admin_session: requests.Session) -> None:
     response = admin_session.get(f"{BASE_URL}/v1/models", timeout=10)
     assert response.status_code in {401, 403}
+
+
+def test_auth_session_rejects_gateway_api_key(qa_api_key: str) -> None:
+    response = requests.post(
+        f"{BASE_URL}/auth/session",
+        json={"username": "admin", "password": qa_api_key},
+        timeout=10,
+    )
+    assert response.status_code in {401, 403}
 ```
 
 ## 5. 前端 / Vitest / Playwright 规则
@@ -184,6 +214,7 @@ fetch(path, { credentials: 'include' })
 - `/admin/*` mock Session Cookie 已登录后的行为。
 - `/admin/console/chat/completions` 是控制台聊天端点。
 - `/v1/*` 的程序化调用测试应单独 mock Bearer API Key，不要混进控制台登录测试。
+- 登录页输入 `gw-*` 时应提示 API Key 不能用于控制台登录。
 
 ## 6. Postman / Apifox 规则
 
@@ -205,10 +236,16 @@ QA_API_KEY=<created-by-admin-api-keys>
 
 ## 7. 给其他模型或代理的操作准则
 
-处理认证、测试或 QA 相关任务时，先遵守本文件：
+处理认证、测试或 QA 相关任务时，先遵守本文件，再按 [`docs/TESTING.md`](TESTING.md) 选择测试命令和交付格式。
 
 - 不要恢复旧的前端 API Key 登录模式。
 - 不要在 `config.yaml`、`config.yaml.template`、README 示例中硬编码真实 `gw-*` key。
 - 不要把 `/admin/*` 改回 Bearer API Key 鉴权。
 - 不要把 `/v1/*` 改成仅 Cookie 鉴权。
 - 写测试时必须覆盖 Cookie 与 Bearer 的边界，而不是只测成功路径。
+
+## 8. 文档维护规则
+
+当认证模型、QA 脚本、测试 fixture、Postman/Apifox 集合或 CI Secret 名称变化时，必须同步更新本文件。
+
+示例中的密钥只能使用占位符，不能提交真实 `gw-*` key、provider key、Cookie 或 session token。
