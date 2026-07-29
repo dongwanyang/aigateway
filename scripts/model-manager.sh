@@ -3,10 +3,41 @@ set -euo pipefail
 
 action="${1:-}"
 model="${2:-}"
-[[ "$action" == "install" ]] || {
-  echo "usage: $0 install sdxl-base|qwen3-embedding-0.6b|wan2.2-ti2v-5b" >&2
-  exit 1
+
+# 已批准模型规格表：name|label|license|size|target|sha256
+# install / verify / list 共用这一份，避免三处各写一份路径与校验和。
+emit_specs() {
+  local comfy_models="${AIGATEWAY_COMFY_DATA_DIR:-$(cd "$(dirname "$0")/.." && pwd)/comfyui}/models"
+  local model_dir="${AIGATEWAY_MODEL_DIR:-$(cd "$(dirname "$0")/.." && pwd)/models}"
+  cat <<EOF
+sdxl-base|Stability AI SDXL Base 1.0|CreativeML Open RAIL++-M|约 6.94GB|$comfy_models/checkpoints/sd_xl_base_1.0.safetensors|31e35c80fc4829d14f90153f4c74cd59c90b779f6afe05a74cd6120b893f7e5b
+wan2.2-ti2v-5b-diffusion|Wan2.2 TI2V 5B diffusion (fp16)|Apache-2.0|约 9.4GB|$comfy_models/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors|456f901338bd9eadbded3828b819109a9b68e8a525ca5cf8d0049a69fcfeca1e
+wan2.2-ti2v-5b-encoder|Wan2.2 TI2V 5B text encoder (umt5_xxl fp8)|Apache-2.0|约 6.3GB|$comfy_models/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors|c3355d30191f1f066b26d93fba017ae9809dce6c627dda5f6a66eaa651204f68
+wan2.2-ti2v-5b-vae|Wan2.2 TI2V 5B VAE|Apache-2.0|约 1.4GB|$comfy_models/vae/wan2.2_vae.safetensors|e40321bd36b9709991dae2530eb4ac303dd168276980d3e9bc4b6e2b75fed156
+qwen3-embedding-0.6b|Qwen3-Embedding-0.6B|Apache-2.0|约 1.21GB|$model_dir/qwen3-embedding-0.6b/model.safetensors|0437e45c94563b09e13cb7a64478fc406947a93cb34a7e05870fc8dcd48e23fd
+EOF
 }
+
+usage() {
+  cat >&2 <<EOF
+usage: $0 <command> [model]
+
+commands:
+  install <model>   下载并校验模型（已存在且校验通过则跳过）
+  verify  [model]   只校验已存在模型，不下载（不指定则校验全部）
+  list              列出已批准模型、是否已安装、校验状态
+
+approved models:
+  sdxl-base                 SDXL Base 1.0（图片草稿/精修）
+  wan2.2-ti2v-5b            Wan2.2 TI2V 5B（视频，含 diffusion+encoder+vae 三个文件）
+  qwen3-embedding-0.6b      Qwen3 Embedding（知识库 RAG）
+EOF
+}
+
+case "$action" in
+  install|verify|list) ;;
+  *) usage; exit 1 ;;
+esac
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 model_root="${AIGATEWAY_MODEL_DIR:-$repo_root/models}"
@@ -147,6 +178,83 @@ install_wan_video() {
     echo "已安装: $target"
   done
 }
+
+# 校验单个已存在文件。返回 0=通过，1=校验和不符，2=缺失（不下载）。
+check_one() {
+  local target="$1" sha256="$2"
+  if [[ ! -f "$target" ]]; then
+    echo "missing"
+    return 2
+  fi
+  if printf '%s  %s\n' "$sha256" "$target" | sha256sum -c - >/dev/null 2>&1; then
+    echo "ok"
+    return 0
+  fi
+  echo "mismatch"
+  return 1
+}
+
+# verify/list 共用：打印每条 spec 的状态。返回码 = 缺失或校验失败的条数。
+report_specs() {
+  local missing=0 bad=0
+  printf '%-28s %-8s %-10s %s\n' "MODEL" "STATUS" "SIZE" "PATH"
+  local spec name label license size target sha256 status
+  while IFS='|' read -r name label license size target sha256; do
+    [[ -z "$name" ]] && continue
+    status="$(check_one "$target" "$sha256")"
+    case "$status" in
+      ok) ;;
+      missing) missing=$((missing + 1)) ;;
+      mismatch) bad=$((bad + 1)) ;;
+    esac
+    printf '%-28s %-8s %-10s %s\n' "$name" "$status" "$size" "$target"
+  done < <(emit_specs)
+  echo
+  if (( bad > 0 )); then
+    echo "⚠️  $bad 个文件校验和不符（可能下载损坏或被篡改），请重新 install" >&2
+  fi
+  if (( missing > 0 )); then
+    echo "ℹ️  $missing 个模型未安装（运行 $0 install <model> 下载）" >&2
+  fi
+  if (( bad + missing == 0 )); then
+    echo "✓ 全部已批准模型已安装且校验通过"
+    return 0
+  fi
+  return 1
+}
+
+case "$action" in
+  list)
+    report_specs
+    exit $?
+    ;;
+  verify)
+    # 指定 model 时只校验该模型的文件（wan2.2-ti2v-5b 展开为 3 个文件）
+    if [[ -z "$model" ]]; then
+      report_specs
+      exit $?
+    fi
+    # 复用 install 的别名 → 过滤相关 spec 行
+    printf '%s\n' "$model" | grep -qE '^(sdxl-base|wan2.2-ti2v-5b|qwen3-embedding-0.6b)$' \
+      || { echo "unknown approved model: $model" >&2; exit 1; }
+    missing=0; bad=0
+    while IFS='|' read -r name label license size target sha256; do
+      [[ -z "$name" ]] && continue
+      case "$model" in
+        sdxl-base) [[ "$name" == "sdxl-base" ]] || continue ;;
+        qwen3-embedding-0.6b) [[ "$name" == "qwen3-embedding-0.6b" ]] || continue ;;
+        wan2.2-ti2v-5b) [[ "$name" == wan2.2-ti2v-5b-* ]] || continue ;;
+      esac
+      status="$(check_one "$target" "$sha256")"
+      printf '%-28s %-8s %-10s %s\n' "$name" "$status" "$size" "$target"
+      case "$status" in
+        missing) missing=$((missing + 1)) ;;
+        mismatch) bad=$((bad + 1)) ;;
+      esac
+    done < <(emit_specs)
+    (( bad + missing == 0 )) && exit 0 || exit 1
+    ;;
+esac
 
 case "$model" in
   sdxl-base) install_sdxl ;;
