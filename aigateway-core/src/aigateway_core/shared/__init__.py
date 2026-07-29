@@ -82,6 +82,10 @@ async def _configured_upsert_collection(
     selected_distance = distance or get_runtime_value(
         "infrastructure.qdrant.distance"
     )
+    normalized_distance = str(selected_distance).strip().lower().capitalize()
+    if normalized_distance not in {"Cosine", "Dot", "Euclid", "Manhattan"}:
+        raise RuntimeError("runtime_config_invalid:infrastructure.qdrant.distance")
+
     payload = {
         "vectors": {
             "size": (
@@ -89,7 +93,7 @@ async def _configured_upsert_collection(
                 if size is not None
                 else int(configured_number("embedding.vector_dim", int))
             ),
-            "distance": str(selected_distance).upper(),
+            "distance": normalized_distance,
         },
         "hnsw_config": {
             "m": int(configured_number("infrastructure.qdrant.hnsw_m", int)),
