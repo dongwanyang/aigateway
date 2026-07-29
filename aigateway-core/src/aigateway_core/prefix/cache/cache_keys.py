@@ -1,39 +1,47 @@
 """Cache-key v2 helpers.
 
-Moved from ``aigateway_core.caching`` as part of the 总分总 runtime split
-(Task 3). These are lightweight, dependency-free functions used by
-``CacheManager.generate_cache_key`` and the dispatcher to build normalized
-cache keys.
+Cache-key parameter buckets are runtime policy. Token edges are loaded from
+``cache.key_buckets.max_tokens`` so cache semantics can be versioned and tuned
+without changing source code.
 """
 from __future__ import annotations
 
 import re
 import unicodedata
 
-# ------------------------------------------------------------------
-# Cache key v2 constants
-# ------------------------------------------------------------------
-# Parameter bucketing: coarse-grained merge so minor SDK default
-# differences fall into the same bucket.
-_TEMPERATURE_BUCKETS: list[tuple] = [
-    (0.05, "exact_zero"),   # <= 0.05 treated as deterministic, own bucket
-    (0.3,  "det"),          # 0.05 ~ 0.3 low determinism
-    (0.9,  "bal"),          # 0.3 ~ 0.9 balanced
-    (float("inf"), "cre"),  # > 0.9 creative
-]
-_MAX_TOKENS_BUCKETS: list[int] = [256, 512, 1024, 2048, 4096, 8192, 16384]
+from aigateway_core.shared.runtime_values import get_runtime_value
 
-# model_family: strip trailing date snapshot, e.g. gpt-4o-2024-08-06 → gpt-4o,
-# claude-3-5-sonnet-20241022 → claude-3-5-sonnet.
-# Matches:
-#   -YYYYMMDD           e.g. 20241022
-#   -YYYY-MM-DD         e.g. 2024-08-06
-#   -latest             e.g. gpt-4-latest (some vendors)
+# Temperature labels are semantic categories, not deployment capacities. They
+# remain code-level algorithm definitions; max-token edges are configurable.
+_TEMPERATURE_BUCKETS: list[tuple] = [
+    (0.05, "exact_zero"),
+    (0.3, "det"),
+    (0.9, "bal"),
+    (float("inf"), "cre"),
+]
+_MAX_TOKENS_BUCKETS: list[int] = []
+
 _MODEL_SNAPSHOT_RE = re.compile(r"-(?:\d{8}|\d{4}-\d{2}-\d{2}|latest)$")
 
 
+def _configured_max_token_buckets() -> list[int]:
+    raw = get_runtime_value("cache.key_buckets.max_tokens")
+    if not isinstance(raw, list) or not raw:
+        raise RuntimeError("runtime_config_invalid:cache.key_buckets.max_tokens")
+    try:
+        values = [int(item) for item in raw]
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "runtime_config_invalid:cache.key_buckets.max_tokens"
+        ) from exc
+    if any(item <= 0 for item in values) or values != sorted(set(values)):
+        raise RuntimeError("runtime_config_invalid:cache.key_buckets.max_tokens")
+    _MAX_TOKENS_BUCKETS[:] = values
+    return _MAX_TOKENS_BUCKETS
+
+
 def _bucket_temperature(t: float | None) -> str:
-    """Map temperature to a coarse bucket. None treated as 1.0 (OpenAI default)."""
+    """Map temperature to a coarse bucket. None treated as 1.0."""
     if t is None:
         t = 1.0
     for upper, name in _TEMPERATURE_BUCKETS:
@@ -43,30 +51,20 @@ def _bucket_temperature(t: float | None) -> str:
 
 
 def _bucket_max_tokens(mt: int | None) -> str:
-    """Map max_tokens to nearest bucket. None / 0 → any."""
+    """Map max_tokens to the configured nearest bucket. None / 0 → any."""
     if not mt or mt <= 0:
         return "any"
-    # Round up; beyond max edge → max edge
-    for edge in _MAX_TOKENS_BUCKETS:
+    buckets = _configured_max_token_buckets()
+    for edge in buckets:
         if mt <= edge:
             return f"le_{edge}"
-    return f"gt_{_MAX_TOKENS_BUCKETS[-1]}"
+    return f"gt_{buckets[-1]}"
 
 
 def _model_family(model: str) -> str:
-    """Extract family from model_id, stripping trailing date snapshot.
-
-    - gpt-4o                       → gpt-4o
-    - gpt-4o-2024-08-06            → gpt-4o
-    - gpt-4o-mini-2024-07-18       → gpt-4o-mini
-    - claude-3-5-sonnet-20241022   → claude-3-5-sonnet
-    - claude-sonnet-4-5-20250929   → claude-sonnet-4-5
-    - auto                         → auto (special value, unchanged)
-    - openai/gpt-4o                → openai/gpt-4o (provider prefix preserved)
-    """
+    """Extract family from model_id, stripping trailing date snapshots."""
     if not model:
         return ""
-    # Preserve provider/ prefix, only process the model part
     if "/" in model:
         prefix, tail = model.rsplit("/", 1)
         return f"{prefix}/{_MODEL_SNAPSHOT_RE.sub('', tail)}"
@@ -74,20 +72,11 @@ def _model_family(model: str) -> str:
 
 
 def _normalize_prompt(text: str) -> str:
-    """Normalize prompt text: NFKC + collapse whitespace + strip.
-
-    - NFKC: unify full/half-width, combining characters (e.g. "ａ" → "a")
-    - Multiple consecutive whitespace (incl. tabs/newlines) collapsed to one space
-    - Leading/trailing whitespace removed
-
-    Purpose: let semantically-equivalent prompts with minor formatting
-    differences produce the same hash.
-    """
+    """Normalize prompt text with NFKC, whitespace collapse and strip."""
     if not text:
         return ""
     normalized = unicodedata.normalize("NFKC", text)
-    normalized = re.sub(r"\s+", " ", normalized).strip()
-    return normalized
+    return re.sub(r"\s+", " ", normalized).strip()
 
 
 __all__ = [
