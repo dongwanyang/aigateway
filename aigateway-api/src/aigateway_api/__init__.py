@@ -18,20 +18,30 @@ def _preload_cors_origins() -> None:
 
     ``main._create_app`` must register CORS middleware before lifespan creates a
     ``ConfigManager``. Reading only this small YAML value here keeps the source of
-    truth in ``config.yaml`` and avoids falling through to localhost constants in
-    normal deployments. An explicit environment value still has highest priority.
+    truth in ``config.yaml``. Process environment and ``.env`` values retain
+    higher priority than YAML.
     """
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(override=False)
+    except ImportError:
+        pass
+
     if os.environ.get("AI_GATEWAY_CORS_ORIGINS", "").strip():
+        return
+
+    try:
+        import yaml
+    except ImportError:
         return
 
     config_path = Path(
         os.environ.get("AI_GATEWAY_CONFIG_PATH", "./config.yaml")
     ).expanduser()
     try:
-        import yaml
-
         raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-    except (ImportError, OSError, yaml.YAMLError):
+    except (OSError, yaml.YAMLError):
         return
 
     server = raw.get("server", {}) if isinstance(raw, dict) else {}
