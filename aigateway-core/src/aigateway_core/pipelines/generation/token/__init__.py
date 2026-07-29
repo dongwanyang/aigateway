@@ -3,6 +3,8 @@
 Re-exports the strategy modules and the token-compressor plugin that live in
 this package.
 """
+from aigateway_core.shared.runtime_values import redis_key_prefix
+
 from . import (
     feature_cache as _s_fcache,
 )
@@ -18,6 +20,13 @@ from . import (
 from . import token_compressor_plugin as _p_token
 from . import (
     video_preview as _s_video,
+)
+
+# PromptTemplateManager keeps these names as class attributes for compatibility.
+# Resolve them from config before the class is re-exported or instantiated.
+_s_tmpl.PromptTemplateManager.KEY_PREFIX = redis_key_prefix("prompt_template")
+_s_tmpl.PromptTemplateManager.INDEX_PREFIX = redis_key_prefix(
+    "prompt_template_index"
 )
 
 _sources = (_s_token, _s_fcache, _s_confirm, _s_tmpl, _s_video, _p_token)
