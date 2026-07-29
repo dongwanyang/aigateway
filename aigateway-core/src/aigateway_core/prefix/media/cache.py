@@ -12,6 +12,11 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
+from aigateway_core.shared.runtime_values import (
+    media_cache_ttl_seconds,
+    redis_key_prefix,
+)
+
 from .types import MediaContent, MediaType
 
 if TYPE_CHECKING:
@@ -23,23 +28,27 @@ logger = logging.getLogger(__name__)
 class MediaCacheManager:
     """媒体缓存管理器 — 缓存 MOL 处理结果，避免重复处理。
 
-    缓存策略:
-    - Key: media_hash(url + mime_type + pipeline_config_hash)
-    - Value: 处理后的 MediaContent 序列化（JSON）
-    - TTL: 可配置，默认 7 天
-
-    Redis Key 格式:
-    - aigateway:media:image:{hash}
-    - aigateway:media:video:{hash}
-    - aigateway:media:audio:{hash}
-    - aigateway:media:document:{hash}
+    Redis key 前缀来自 ``infrastructure.redis.key_prefixes.media``；未显式配置
+    时由配置文件中的服务 namespace 派生。TTL 来自
+    ``media_optimization.media_cache_ttl``。
     """
 
-    KEY_PREFIX = "aigateway:media"
-    DEFAULT_TTL = 604800  # 7 days
-
-    def __init__(self, redis_client: RedisClientManager) -> None:
+    def __init__(
+        self,
+        redis_client: RedisClientManager,
+        *,
+        key_prefix: str | None = None,
+        default_ttl: int | None = None,
+    ) -> None:
         self._redis = redis_client
+        self._key_prefix = (key_prefix or redis_key_prefix("media")).rstrip(":")
+        self._default_ttl = (
+            int(default_ttl)
+            if default_ttl is not None
+            else media_cache_ttl_seconds()
+        )
+        if self._default_ttl <= 0:
+            raise ValueError("default_ttl must be positive")
 
     async def get(
         self, media_type: MediaType, content_hash: str
@@ -48,7 +57,7 @@ class MediaCacheManager:
         if self._redis is None or self._redis.redis is None:
             return None
 
-        key = f"{self.KEY_PREFIX}:{media_type.value}:{content_hash}"
+        key = f"{self._key_prefix}:{media_type.value}:{content_hash}"
         try:
             raw = await self._redis.redis.get(key)
             if raw is None:
@@ -69,10 +78,13 @@ class MediaCacheManager:
         if self._redis is None or self._redis.redis is None:
             return
 
-        key = f"{self.KEY_PREFIX}:{media_type.value}:{content_hash}"
+        key = f"{self._key_prefix}:{media_type.value}:{content_hash}"
         try:
             serialized = self._serialize(content)
-            await self._redis.redis.set(key, serialized, ex=ttl or self.DEFAULT_TTL)
+            effective_ttl = self._default_ttl if ttl is None else int(ttl)
+            if effective_ttl <= 0:
+                raise ValueError("ttl must be positive")
+            await self._redis.redis.set(key, serialized, ex=effective_ttl)
         except Exception as exc:
             logger.warning("媒体缓存写入失败: %s", exc)
 
