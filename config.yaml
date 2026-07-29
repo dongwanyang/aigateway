@@ -285,6 +285,7 @@ observability:
 infrastructure:
   redis:
     url: ${AI_GATEWAY_REDIS_URL:-redis://localhost:6379/0}
+    namespace: ai-gateway
     connect_timeout: 5
     socket_timeout: 10
     health_check_interval: 30
@@ -483,6 +484,8 @@ generation_optimization:
       batch_size: 1
     enabled: true
   draft_workflow:
+    store_dir: /app/data/drafts
+    retention_period_hours: 24
     comfyui:
       server_url: http://comfyui:8188
       public_url: http://localhost:8188
