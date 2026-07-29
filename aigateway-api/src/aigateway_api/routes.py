@@ -16,6 +16,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import tempfile
 import time
 from datetime import UTC, datetime
 from typing import Any
@@ -129,6 +131,225 @@ async def get_console_video_status(
             content={"error": {"code": "video_retrieve_failed", "message": "Video retrieval failed"}},
             status_code=502,
         )
+
+
+# ------------------------------------------------------------------
+# Admin config schema/table endpoints
+# ------------------------------------------------------------------
+
+
+def _config_path_from_state(request: Request) -> str:
+    from .app_state import get_state
+
+    state = get_state(request)
+    config_manager = getattr(state, "config_manager", None)
+    config_path = getattr(config_manager, "config_path", None)
+    if not config_path:
+        config_path = os.environ.get("AI_GATEWAY_CONFIG_PATH", "./config.yaml")
+    if not os.path.isfile(config_path):
+        raise HTTPException(
+            status_code=500,
+            detail={"error": {"code": "internal_error", "message": "Config file not found"}},
+        )
+    return config_path
+
+
+def _read_yaml_config(path: str) -> dict[str, Any]:
+    import yaml
+
+    with open(path, "r", encoding="utf-8") as file:
+        return yaml.safe_load(file) or {}
+
+
+def _write_yaml_config(path: str, data: dict[str, Any]) -> None:
+    import errno
+    import fcntl
+    import yaml
+
+    lock_path = path + ".lock"
+    with open(lock_path, "w", encoding="utf-8") as lock_file:
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"error": {"code": "config_update_busy", "message": "Another configuration update is in progress"}},
+            ) from exc
+
+        config_dir = os.path.dirname(os.path.abspath(path)) or "."
+        if os.path.ismount(path):
+            with open(path, "w", encoding="utf-8") as file:
+                yaml.dump(data, file, default_flow_style=False, allow_unicode=True, sort_keys=False)
+                file.flush()
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+            return
+
+        fd, tmp_path = tempfile.mkstemp(prefix=".config.yaml.", suffix=".tmp", dir=config_dir)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as file:
+                yaml.dump(data, file, default_flow_style=False, allow_unicode=True, sort_keys=False)
+            try:
+                os.replace(tmp_path, path)
+            except OSError as exc:
+                if exc.errno not in (errno.EBUSY, errno.EXDEV, errno.ENOTSUP, errno.EPERM):
+                    raise
+                with open(path, "w", encoding="utf-8") as file:
+                    yaml.dump(data, file, default_flow_style=False, allow_unicode=True, sort_keys=False)
+                    file.flush()
+        finally:
+            try:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+            except OSError:
+                pass
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+
+def _template_candidates(config_path: str) -> list[str]:
+    here = os.path.abspath(os.path.dirname(__file__))
+    return [
+        os.environ.get("AI_GATEWAY_CONFIG_TEMPLATE_PATH", ""),
+        os.path.join(os.getcwd(), "config.yaml.template"),
+        os.path.join(os.path.dirname(os.path.abspath(config_path)), "config.yaml.template"),
+        os.path.abspath(os.path.join(here, "..", "..", "..", "config.yaml.template")),
+        os.path.abspath(os.path.join(here, "..", "..", "..", "..", "config.yaml.template")),
+    ]
+
+
+def _clean_inline_comment(comment: str) -> str:
+    comment = comment.strip()
+    comment = re.sub(r"^=+\s*", "", comment)
+    comment = re.sub(r"\s*=+$", "", comment)
+    return comment.strip()
+
+
+def _parse_template_schema(config_path: str) -> list[dict[str, Any]]:
+    """Extract table descriptions from config.yaml.template comments.
+
+    The template remains the source of truth for parameter descriptions. The
+    frontend receives only generated metadata, so descriptions do not drift into
+    React code.
+    """
+    template_path = next((p for p in _template_candidates(config_path) if p and os.path.isfile(p)), "")
+    if not template_path:
+        return []
+
+    stack: list[tuple[int, str]] = []
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    key_re = re.compile(r"^(?P<indent>\s*)(?P<list>-\s+)?(?P<key>[A-Za-z0-9_\-]+)\s*:\s*(?P<rest>.*)$")
+    with open(template_path, "r", encoding="utf-8") as file:
+        for raw_line in file:
+            if not raw_line.strip() or raw_line.lstrip().startswith("#"):
+                continue
+            match = key_re.match(raw_line)
+            if not match:
+                continue
+            indent = len(match.group("indent"))
+            is_list_item = bool(match.group("list"))
+            key = match.group("key")
+            rest = match.group("rest")
+
+            while stack and stack[-1][0] >= indent:
+                stack.pop()
+            parent_parts = [part for _, part in stack]
+            if is_list_item:
+                if parent_parts:
+                    parent_parts[-1] = parent_parts[-1] + "[]"
+                else:
+                    parent_parts.append("[]")
+            path = ".".join([*parent_parts, key]).strip(".")
+            if not path:
+                continue
+
+            comment = ""
+            if "#" in rest:
+                comment = _clean_inline_comment(rest.split("#", 1)[1])
+            if comment and path not in seen:
+                items.append({
+                    "path": path,
+                    "module": path.split(".", 1)[0].replace("[]", ""),
+                    "description": comment,
+                })
+                seen.add(path)
+
+            # Treat mapping keys with no scalar value as a parent path.
+            value_part = rest.split("#", 1)[0].strip()
+            if value_part == "":
+                if is_list_item and parent_parts:
+                    stack.append((indent, parent_parts[-1]))
+                else:
+                    stack.append((indent, key))
+
+    return items
+
+
+def _preserve_masked_provider_keys(new_config: dict[str, Any], current_config: dict[str, Any]) -> None:
+    providers = new_config.get("providers")
+    current_providers = current_config.get("providers", {})
+    if not isinstance(providers, dict) or not isinstance(current_providers, dict):
+        return
+    for provider_name, provider_cfg in providers.items():
+        if not isinstance(provider_cfg, dict):
+            continue
+        key_value = provider_cfg.get("api_key")
+        if isinstance(key_value, str) and key_value.endswith("***"):
+            original = current_providers.get(provider_name, {})
+            if isinstance(original, dict):
+                provider_cfg["api_key"] = original.get("api_key", key_value)
+
+
+@router.get("/admin/config/schema")
+async def get_config_schema(
+    request: Request,
+    _auth: dict[str, Any] = Depends(authenticate_admin),
+):
+    """Return parameter descriptions for the control-panel table editor."""
+    config_path = _config_path_from_state(request)
+    return {
+        "data": {"items": _parse_template_schema(config_path)},
+        "message": "success",
+    }
+
+
+@router.put("/admin/config/table")
+async def update_table_config(
+    request: Request,
+    _auth: dict[str, Any] = Depends(authenticate_admin),
+):
+    """Write the full table-edited config.yaml.
+
+    This endpoint is intentionally separate from PUT /admin/config, whose legacy
+    whitelist predates the table editor. It accepts every top-level section that
+    already exists in config.yaml, preserving masked provider API keys.
+    """
+    from .app_state import get_state
+
+    try:
+        new_config = await request.json()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"code": "validation_error", "message": "Invalid JSON body"}},
+        ) from exc
+    if not isinstance(new_config, dict):
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"code": "validation_error", "message": "Config body must be an object"}},
+        )
+
+    config_path = _config_path_from_state(request)
+    current_config = _read_yaml_config(config_path)
+    _preserve_masked_provider_keys(new_config, current_config)
+    _write_yaml_config(config_path, new_config)
+
+    state = get_state(request)
+    config_manager = getattr(state, "config_manager", None)
+    if config_manager is not None:
+        config_manager.load()
+
+    return {"data": {"updated": True}, "message": "success"}
 
 
 # ------------------------------------------------------------------
