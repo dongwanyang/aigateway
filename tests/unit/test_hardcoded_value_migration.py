@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 
-import pytest
 import yaml
 
 
@@ -73,8 +74,7 @@ def test_l2_operations_refresh_prefixes_lazily(tmp_path, monkeypatch):
 
     from aigateway_core.prefix.cache import l2_search
 
-    assert pytest.run(asyncio=False) if False else True
-    result = __import__("asyncio").run(l2_search.ensure_index(None))
+    result = asyncio.run(l2_search.ensure_index(None))
     assert result is False
     assert l2_search.L2_INDEX_NAME == "tenant-a:l2:idx:v9"
     assert l2_search.L2_HASH_PREFIX == "tenant-a:cache:v9search:"
@@ -110,11 +110,10 @@ def test_bridge_uses_shared_config_backed_estimator(tmp_path, monkeypatch):
     assert bridge._estimate_cost("gpt-4o", 100) == 0.0
 
 
-@pytest.mark.asyncio
-async def test_comfyui_missing_config_does_not_assume_localhost():
+def test_comfyui_missing_config_does_not_assume_localhost():
     from aigateway_api.local_generation import builtin_presets, probe_comfyui
 
-    status = await probe_comfyui({})
+    status = asyncio.run(probe_comfyui({}))
     assert status["available"] is False
     assert status["public_url"] == ""
     assert status["manager_url"] == ""
@@ -138,11 +137,10 @@ def test_cors_preload_reads_yaml_without_overriding_explicit_env(tmp_path, monke
 
     aigateway_api._preload_cors_origins()
     assert (
-        monkeypatch.context
-        and __import__("os").environ["AI_GATEWAY_CORS_ORIGINS"]
+        os.environ["AI_GATEWAY_CORS_ORIGINS"]
         == "https://panel.example,https://ops.example"
     )
 
     monkeypatch.setenv("AI_GATEWAY_CORS_ORIGINS", "https://explicit.example")
     aigateway_api._preload_cors_origins()
-    assert __import__("os").environ["AI_GATEWAY_CORS_ORIGINS"] == "https://explicit.example"
+    assert os.environ["AI_GATEWAY_CORS_ORIGINS"] == "https://explicit.example"
