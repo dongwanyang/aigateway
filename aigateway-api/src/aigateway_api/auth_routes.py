@@ -10,11 +10,12 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 
+from aigateway_core.shared.runtime_values import configured_number, configured_text
+
 from .auth_middleware import SESSION_COOKIE_NAME
 from .browser_auth import get_browser_auth_store
 
 router = APIRouter()
-
 
 _INITIAL_PASSWORD_ENV_NAMES = (
     "AI_GATEWAY_INITIAL_ADMIN_PASSWORD",
@@ -46,18 +47,39 @@ def _is_https(request: Request) -> bool:
     return request.url.scheme == "https"
 
 
+def _positive_env_or_config(env_name: str, config_path: str) -> int:
+    raw = os.environ.get(env_name, "").strip()
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError as exc:
+            raise RuntimeError(f"invalid {env_name}") from exc
+        if value <= 0:
+            raise RuntimeError(f"invalid {env_name}")
+        return value
+    return int(configured_number(config_path, int))
+
+
+def _admin_username() -> str:
+    explicit = os.environ.get("AI_GATEWAY_ADMIN_USERNAME", "").strip()
+    return explicit or configured_text("auth.admin_username")
+
+
 def _session_ttl() -> int:
-    return int(os.environ.get("AI_GATEWAY_SESSION_TTL_SECONDS", "28800"))
+    return _positive_env_or_config(
+        "AI_GATEWAY_SESSION_TTL_SECONDS",
+        "auth.session.idle_ttl_seconds",
+    )
 
 
 def _absolute_session_ttl() -> int:
-    return int(os.environ.get("AI_GATEWAY_SESSION_ABSOLUTE_TTL_SECONDS", "86400"))
+    return _positive_env_or_config(
+        "AI_GATEWAY_SESSION_ABSOLUTE_TTL_SECONDS",
+        "auth.session.absolute_ttl_seconds",
+    )
 
 
 def _set_session_cookie(request: Request, response: Response, token: str) -> None:
-    # Browser lifetime is capped by the absolute TTL; idle timeout is enforced by
-    # the server-side session row and does not require re-issuing Set-Cookie on
-    # every request.
     response.set_cookie(
         key=SESSION_COOKIE_NAME,
         value=token,
@@ -115,12 +137,7 @@ def _initial_admin_password() -> str:
 
 
 def _scrub_initial_password_from_env() -> None:
-    """Best-effort removal of one-time console passwords from .env.
-
-    After the operator sets the real admin password, a future DB wipe should not
-    silently resurrect the installer temporary password from plaintext config.
-    API keys are separate machine credentials and are intentionally not touched.
-    """
+    """Best-effort removal of one-time console passwords from .env."""
     env_path = os.path.join(os.getcwd(), ".env")
     if not os.path.isfile(env_path):
         return
@@ -190,7 +207,7 @@ async def create_session(
     user = await asyncio.to_thread(store.verify_credentials, username, password)
 
     if user is None and not await asyncio.to_thread(store.has_users):
-        expected_username = os.environ.get("AI_GATEWAY_ADMIN_USERNAME", "admin")
+        expected_username = _admin_username()
         try:
             username_ok = secrets.compare_digest(
                 username.encode("utf-8"), expected_username.encode("utf-8")
@@ -252,7 +269,7 @@ async def get_bootstrap_credentials(request: Request, response: Response) -> dic
     return {
         "data": {
             "available": True,
-            "username": os.environ.get("AI_GATEWAY_ADMIN_USERNAME", "admin"),
+            "username": _admin_username(),
             "initial_password": initial_password,
         },
         "message": "success",
@@ -271,7 +288,7 @@ async def get_session(request: Request) -> dict[str, Any]:
     return {
         "data": {
             "authenticated": True,
-            "key_prefix": session.get("username", "admin"),
+            "key_prefix": session.get("username") or _admin_username(),
             "scopes": ["admin", "chat", "embedding"],
             "force_reset": bool(session.get("requires_password_change")),
         },
