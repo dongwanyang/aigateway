@@ -64,6 +64,22 @@ def get_runtime_value(path: str, *, required: bool = True) -> Any:
     return value
 
 
+def configured_path(path: str) -> str:
+    """Resolve a configured filesystem path relative to config.yaml.
+
+    Absolute paths are preserved. Relative paths are anchored to the directory
+    containing the active configuration file rather than the process working
+    directory, making container, systemd and test launches deterministic.
+    """
+    raw = get_runtime_value(path)
+    if not isinstance(raw, str) or not raw.strip():
+        raise RuntimeError(f"runtime_config_invalid:{path}")
+    value = Path(raw.strip()).expanduser()
+    if not value.is_absolute():
+        value = _config_path().resolve().parent / value
+    return str(value.resolve())
+
+
 def _namespace() -> str:
     explicit = get_runtime_value("infrastructure.redis.namespace", required=False)
     source = explicit or get_runtime_value("observability.otel_service_name")
@@ -74,12 +90,7 @@ def _namespace() -> str:
 
 
 def redis_key_prefix(component: str) -> str:
-    """Return an explicit component prefix or derive one from the YAML namespace.
-
-    Explicit overrides live under ``infrastructure.redis.key_prefixes``. A
-    component value may include or omit a trailing colon; callers receive a
-    normalized value without the trailing separator.
-    """
+    """Return an explicit component prefix or derive one from the YAML namespace."""
     overrides = get_runtime_value("infrastructure.redis.key_prefixes", required=False)
     if isinstance(overrides, dict):
         configured = overrides.get(component)
