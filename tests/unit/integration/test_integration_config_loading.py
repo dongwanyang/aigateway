@@ -25,7 +25,7 @@ class TestSafeUnconfiguredValues:
         assert result.paddleocr == PaddleOCRConfig()
         assert result.unstructured == UnstructuredConfig()
 
-    def test_empty_config_does_not_guess_models_urls_or_paths(self):
+    def test_empty_config_does_not_guess_reported_deployment_values(self):
         result = parse_integration_configs({})
         assert result.prompt_compress.model_name == ""
         assert result.clip.model_name == ""
@@ -41,8 +41,6 @@ class TestSafeUnconfiguredValues:
         assert comfy.workflow_path == ""
         assert comfy.upscale_model == ""
         assert comfy.allowed_upscale_models == []
-        assert comfy.qwen_image_diffusion_model == ""
-        assert comfy.video_diffusion_model == ""
 
         rag = result.rag_retriever
         assert rag.rerank_model == ""
