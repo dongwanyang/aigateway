@@ -20,6 +20,18 @@ def _png(width: int, height: int) -> bytes:
     return stream.getvalue()
 
 
+def _comfy_config(**overrides) -> ComfyUIConfig:
+    values = {
+        "checkpoint_name": "sdxl.safetensors",
+        "allowed_checkpoints": ["sdxl.safetensors"],
+        "upscale_enabled": True,
+        "upscale_model": "RealESRGAN_x4plus.pth",
+        "allowed_upscale_models": ["RealESRGAN_x4plus.pth"],
+    }
+    values.update(overrides)
+    return ComfyUIConfig(**values)
+
+
 @pytest.mark.parametrize(
     ("source", "expected"),
     [
@@ -31,7 +43,7 @@ def _png(width: int, height: int) -> bytes:
 def test_faithful_4k_preserves_aspect_ratio(tmp_path, source, expected):
     strategy = DraftGeneratorStrategy(
         DraftWorkflowConfig(store_dir=str(tmp_path)),
-        comfyui_config=ComfyUIConfig(max_upscale_long_edge=4096),
+        comfyui_config=_comfy_config(max_upscale_long_edge=4096),
     )
     assert strategy._faithful_upscale_resolution(_png(*source)) == expected
 
@@ -39,7 +51,7 @@ def test_faithful_4k_preserves_aspect_ratio(tmp_path, source, expected):
 def test_faithful_4k_never_downscales_an_oversized_source(tmp_path):
     strategy = DraftGeneratorStrategy(
         DraftWorkflowConfig(store_dir=str(tmp_path)),
-        comfyui_config=ComfyUIConfig(max_upscale_long_edge=4096),
+        comfyui_config=_comfy_config(max_upscale_long_edge=4096),
     )
     assert strategy._faithful_upscale_resolution(_png(5000, 2500)) == (5000, 2500)
 
@@ -51,7 +63,7 @@ async def test_video_faithful_4k_does_not_require_image_upscale_model(
 ):
     strategy = DraftGeneratorStrategy(
         DraftWorkflowConfig(store_dir=str(tmp_path / "drafts")),
-        comfyui_config=ComfyUIConfig(models_path=str(tmp_path / "models")),
+        comfyui_config=_comfy_config(models_path=str(tmp_path / "models")),
     )
     strategy._check_comfyui = AsyncMock()
     strategy._validate_checkpoint = MagicMock(return_value="sdxl.safetensors")
@@ -77,7 +89,7 @@ async def test_video_faithful_4k_does_not_require_image_upscale_model(
 def test_faithful_workflow_uses_only_upscale_core_nodes(tmp_path):
     strategy = DraftGeneratorStrategy(
         DraftWorkflowConfig(store_dir=str(tmp_path)),
-        comfyui_config=ComfyUIConfig(),
+        comfyui_config=_comfy_config(),
     )
     workflow = strategy._build_faithful_upscale_workflow("input.png", (4096, 2048))
     class_types = {node["class_type"] for node in workflow.values()}
@@ -97,7 +109,7 @@ def test_faithful_workflow_uses_only_upscale_core_nodes(tmp_path):
 def test_upscale_model_must_be_allowlisted_basename(tmp_path, model):
     strategy = DraftGeneratorStrategy(
         DraftWorkflowConfig(store_dir=str(tmp_path)),
-        comfyui_config=ComfyUIConfig(upscale_model=model),
+        comfyui_config=_comfy_config(upscale_model=model),
     )
     with pytest.raises(DraftWorkflowError):
         strategy._build_faithful_upscale_workflow("input.png", (4096, 4096))
@@ -114,7 +126,7 @@ def test_chinese_prompt_prefers_installed_qwen_image(tmp_path):
         (models / folder / name).write_bytes(b"model")
     strategy = DraftGeneratorStrategy(
         DraftWorkflowConfig(store_dir=str(tmp_path / "drafts")),
-        comfyui_config=ComfyUIConfig(models_path=str(models)),
+        comfyui_config=_comfy_config(models_path=str(models)),
     )
     request = GenerationRequest(
         prompt="a red sign",
@@ -132,7 +144,7 @@ def test_chinese_prompt_prefers_installed_qwen_image(tmp_path):
 def test_chinese_prompt_uses_sdxl_when_qwen_is_missing(tmp_path):
     strategy = DraftGeneratorStrategy(
         DraftWorkflowConfig(store_dir=str(tmp_path / "drafts")),
-        comfyui_config=ComfyUIConfig(models_path=str(tmp_path / "models")),
+        comfyui_config=_comfy_config(models_path=str(tmp_path / "models")),
     )
     request = GenerationRequest(
         prompt="faithful English translation",
