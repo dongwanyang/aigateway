@@ -233,7 +233,7 @@ def test_qdrant_manager_uses_configured_connection_and_index_values(tmp_path, mo
 
     assert asyncio.run(manager.upsert_collection("documents")) is True
     _, payload, _ = manager._http.put_calls[-1]
-    assert payload["vectors"] == {"size": 768, "distance": "DOT"}
+    assert payload["vectors"] == {"size": 768, "distance": "Dot"}
     assert payload["hnsw_config"] == {"m": 32, "ef_construct": 256}
 
 
