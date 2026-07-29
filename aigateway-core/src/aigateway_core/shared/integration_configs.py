@@ -2,9 +2,9 @@
 集成配置 — 开源工具集成配置数据模型
 ====================================
 
-这些 dataclass 只提供类型、安全开关和通用算法约束。模型名称、网络地址、
-文件系统路径、工作流版本及模型文件名必须由 config.yaml 或环境变量提供，
-避免库代码对具体部署作出隐式假设。
+模型名称、网络地址、文件系统路径和报告点名的工作流资源由 config.yaml
+或环境变量提供。通用算法参数与尚未迁移的生成模型保持现有兼容默认值，
+后续按报告顺序继续外置。
 """
 
 from __future__ import annotations
@@ -37,17 +37,17 @@ class CLIPConfig:
 class ComfyUIConfig:
     """ComfyUI API 连接与工作流配置。
 
-    URL、路径、工作流版本和模型文件均是部署配置，缺失时保留为空，调用方
-    应禁用对应能力或报告 ``config_missing``，不得回退到 localhost 或固定模型。
+    URL、挂载路径、workflow/checkpoint 和 upscale model 必须由配置提供；
+    缺失时调用方应报告配置错误或关闭对应能力。
     """
 
     server_url: str = ""
     public_url: str = ""
-    manager_enabled: bool = False
+    manager_enabled: bool = True
     connect_timeout: int = 10
     execution_timeout: int = 1200
     ws_reconnect_attempts: int = 3
-    required: bool = False
+    required: bool = True
     workflow_version: str = ""
     checkpoint_name: str = ""
     allowed_checkpoints: list[str] = field(default_factory=list)
@@ -59,27 +59,39 @@ class ComfyUIConfig:
     models_path: str = ""
     output_path: str = ""
     workflow_path: str = ""
-    upscale_enabled: bool = False
+    upscale_enabled: bool = True
     upscale_model: str = ""
     allowed_upscale_models: list[str] = field(default_factory=list)
     max_upscale_long_edge: int = 4096
-    qwen_image_enabled: bool = False
-    qwen_image_diffusion_model: str = ""
-    qwen_image_text_encoder: str = ""
-    qwen_image_vae: str = ""
+    qwen_image_enabled: bool = True
+    qwen_image_diffusion_model: str = "qwen_image_fp8_e4m3fn.safetensors"
+    qwen_image_text_encoder: str = "qwen_2.5_vl_7b_fp8_scaled.safetensors"
+    qwen_image_vae: str = "qwen_image_vae.safetensors"
     qwen_image_draft_steps: int = 12
     qwen_image_max_draft_edge: int = 768
-    allowed_qwen_image_diffusion_models: list[str] = field(default_factory=list)
-    allowed_qwen_image_text_encoders: list[str] = field(default_factory=list)
-    allowed_qwen_image_vaes: list[str] = field(default_factory=list)
-    video_enabled: bool = False
-    video_workflow_version: str = ""
-    video_diffusion_model: str = ""
-    video_text_encoder: str = ""
-    video_vae: str = ""
-    allowed_video_diffusion_models: list[str] = field(default_factory=list)
-    allowed_video_text_encoders: list[str] = field(default_factory=list)
-    allowed_video_vaes: list[str] = field(default_factory=list)
+    allowed_qwen_image_diffusion_models: list[str] = field(
+        default_factory=lambda: ["qwen_image_fp8_e4m3fn.safetensors"]
+    )
+    allowed_qwen_image_text_encoders: list[str] = field(
+        default_factory=lambda: ["qwen_2.5_vl_7b_fp8_scaled.safetensors"]
+    )
+    allowed_qwen_image_vaes: list[str] = field(
+        default_factory=lambda: ["qwen_image_vae.safetensors"]
+    )
+    video_enabled: bool = True
+    video_workflow_version: str = "wan2.2-ti2v-5b-v1"
+    video_diffusion_model: str = "wan2.2_ti2v_5B_fp16.safetensors"
+    video_text_encoder: str = "umt5_xxl_fp8_e4m3fn_scaled.safetensors"
+    video_vae: str = "wan2.2_vae.safetensors"
+    allowed_video_diffusion_models: list[str] = field(
+        default_factory=lambda: ["wan2.2_ti2v_5B_fp16.safetensors"]
+    )
+    allowed_video_text_encoders: list[str] = field(
+        default_factory=lambda: ["umt5_xxl_fp8_e4m3fn_scaled.safetensors"]
+    )
+    allowed_video_vaes: list[str] = field(
+        default_factory=lambda: ["wan2.2_vae.safetensors"]
+    )
     video_width: int = 512
     video_height: int = 288
     video_frames: int = 17
@@ -92,11 +104,7 @@ class ComfyUIConfig:
 
 @dataclass
 class RAGRetrieverConfig:
-    """LlamaIndex RAG 检索配置。
-
-    模型、集合名称、远程地址和 CodeGraph 路径由 YAML 提供。数值字段保留
-    通用算法默认值，便于可选插件在未完整配置时安全降级。
-    """
+    """LlamaIndex RAG 检索配置。"""
 
     enabled: bool = True
     top_k: int = 5
