@@ -7,7 +7,9 @@ Authoritative implementations:
 """
 from __future__ import annotations
 
-# Eagerly import only lightweight cache helpers and the L2 namespace adapter.
+from functools import wraps
+from typing import Any
+
 from aigateway_core.prefix.cache.cache_keys import (
     _MAX_TOKENS_BUCKETS,
     _MODEL_SNAPSHOT_RE,
@@ -19,13 +21,29 @@ from aigateway_core.prefix.cache.cache_keys import (
 )
 from aigateway_core.shared.runtime_values import redis_key_prefix
 
-# ``l2_search`` historically exposed module constants used throughout its
-# implementation. Set those constants from config before callers import/use the
-# submodule, preserving its public API while removing deployment-specific names.
+# ``l2_search`` historically uses module constants internally. Wrap its three
+# public Redis operations so those constants are refreshed from config immediately
+# before use, without making package import depend on the current working directory.
 from aigateway_core.prefix.cache import l2_search as _l2_search
 
-_l2_search.L2_INDEX_NAME = redis_key_prefix("l2_index")
-_l2_search.L2_HASH_PREFIX = redis_key_prefix("l2_hash") + ":"
+
+def _configure_l2_namespace() -> None:
+    _l2_search.L2_INDEX_NAME = redis_key_prefix("l2_index")
+    _l2_search.L2_HASH_PREFIX = redis_key_prefix("l2_hash") + ":"
+
+
+def _wrap_l2_operation(operation):
+    @wraps(operation)
+    async def wrapped(*args: Any, **kwargs: Any):
+        _configure_l2_namespace()
+        return await operation(*args, **kwargs)
+
+    return wrapped
+
+
+_l2_search.ensure_index = _wrap_l2_operation(_l2_search.ensure_index)
+_l2_search.store = _wrap_l2_operation(_l2_search.store)
+_l2_search.search = _wrap_l2_operation(_l2_search.search)
 
 __all__ = [
     "_MAX_TOKENS_BUCKETS",
@@ -36,5 +54,3 @@ __all__ = [
     "_model_family",
     "_normalize_prompt",
 ]
-
-del _l2_search
