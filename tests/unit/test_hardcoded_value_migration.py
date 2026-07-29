@@ -19,7 +19,17 @@ def _write_config(tmp_path, data: dict) -> str:
 
 def _base_config() -> dict:
     return {
-        "auth": {"database_path": "data/auth.db"},
+        "auth": {
+            "database_path": "data/auth.db",
+            "database_timeout_seconds": 3,
+            "admin_username": "console-admin",
+            "admin_user_id": "operator-1",
+            "session": {
+                "idle_ttl_seconds": 1200,
+                "absolute_ttl_seconds": 7200,
+            },
+            "password": {"pbkdf2_iterations": 1000},
+        },
         "observability": {"otel_service_name": "test-gateway"},
         "infrastructure": {
             "redis": {
@@ -42,6 +52,9 @@ def _base_config() -> dict:
             "key_buckets": {"max_tokens": [100, 200, 400]},
         },
         "media_optimization": {"media_cache_ttl": 123},
+        "generation_optimization": {
+            "preset_store_dir": "data/generation-presets",
+        },
         "providers": {
             "demo": {
                 "model_grouper": [
@@ -88,6 +101,41 @@ def test_configured_relative_path_is_anchored_to_yaml(tmp_path, monkeypatch):
     assert Path(store.db_path) == expected.resolve()
     assert expected.is_file()
     store.conn.close()
+
+
+def test_browser_auth_policy_is_loaded_from_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("AI_GATEWAY_CONFIG_PATH", _write_config(tmp_path, _base_config()))
+    for name in (
+        "AI_GATEWAY_ADMIN_USERNAME",
+        "AI_GATEWAY_ADMIN_USER_ID",
+        "AI_GATEWAY_SESSION_TTL_SECONDS",
+        "AI_GATEWAY_SESSION_ABSOLUTE_TTL_SECONDS",
+        "AI_GATEWAY_PASSWORD_PBKDF2_ITERATIONS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    from aigateway_api import auth_routes
+    from aigateway_api.browser_auth import BrowserAuthStore
+
+    assert auth_routes._admin_username() == "console-admin"
+    assert auth_routes._session_ttl() == 1200
+    assert auth_routes._absolute_session_ttl() == 7200
+
+    store = BrowserAuthStore(str(tmp_path / "browser.db"))
+    user = store.provision_admin("console-admin", "temporary-password")
+    assert user is not None
+    assert user["user_id"] == "operator-1"
+    assert str(user["password_hash"]).startswith("pbkdf2_sha256$1000$")
+    assert store._timeout_seconds == 3.0
+
+
+def test_generation_preset_directory_is_loaded_from_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("AI_GATEWAY_CONFIG_PATH", _write_config(tmp_path, _base_config()))
+    monkeypatch.delenv("AI_GATEWAY_GENERATION_PRESETS_DIR", raising=False)
+
+    from aigateway_api.local_generation import preset_store_dir
+
+    assert preset_store_dir() == (tmp_path / "data" / "generation-presets").resolve()
 
 
 def test_media_cache_manager_uses_configured_prefix_and_ttl(tmp_path, monkeypatch):
