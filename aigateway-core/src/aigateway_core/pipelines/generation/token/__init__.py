@@ -3,6 +3,8 @@
 Re-exports the strategy modules and the token-compressor plugin that live in
 this package.
 """
+from functools import wraps
+
 from aigateway_core.shared.runtime_values import redis_key_prefix
 
 from . import (
@@ -22,12 +24,20 @@ from . import (
     video_preview as _s_video,
 )
 
-# PromptTemplateManager keeps these names as class attributes for compatibility.
-# Resolve them from config before the class is re-exported or instantiated.
-_s_tmpl.PromptTemplateManager.KEY_PREFIX = redis_key_prefix("prompt_template")
-_s_tmpl.PromptTemplateManager.INDEX_PREFIX = redis_key_prefix(
-    "prompt_template_index"
-)
+# PromptTemplateManager retains its existing implementation and public API. Resolve
+# instance prefixes from config only when a manager is created, avoiding import-time
+# dependence on config.yaml.
+_original_template_init = _s_tmpl.PromptTemplateManager.__init__
+
+
+@wraps(_original_template_init)
+def _configured_template_init(self, *args, **kwargs):
+    self.KEY_PREFIX = redis_key_prefix("prompt_template")
+    self.INDEX_PREFIX = redis_key_prefix("prompt_template_index")
+    _original_template_init(self, *args, **kwargs)
+
+
+_s_tmpl.PromptTemplateManager.__init__ = _configured_template_init
 
 _sources = (_s_token, _s_fcache, _s_confirm, _s_tmpl, _s_video, _p_token)
 _names: list[str] = []
