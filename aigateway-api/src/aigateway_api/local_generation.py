@@ -13,6 +13,8 @@ from typing import Any
 
 import httpx
 
+from aigateway_core.shared.runtime_values import configured_path
+
 _SAFE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 _CORE_IMAGE_NODES = [
     "CheckpointLoaderSimple",
@@ -167,12 +169,8 @@ def builtin_presets(comfy: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def preset_store_dir() -> Path:
-    return Path(
-        os.environ.get(
-            "AI_GATEWAY_GENERATION_PRESETS_DIR",
-            "/app/data/generation-presets",
-        )
-    )
+    explicit = os.environ.get("AI_GATEWAY_GENERATION_PRESETS_DIR", "").strip()
+    return Path(explicit or configured_path("generation_optimization.preset_store_dir"))
 
 
 def load_custom_presets() -> list[dict[str, Any]]:
