@@ -43,6 +43,14 @@ retry_budget:
 # ==========================
 auth:
   database_path: /app/data/auth.db # API Key、配额、分组和成本账本 SQLite 文件路径
+  database_timeout_seconds: 30 # SQLite 获取文件锁的等待超时（秒）
+  admin_username: admin      # 首次初始化控制台管理员时使用的登录名
+  admin_user_id: admin       # 管理员在 SQLite 和审计记录中的稳定用户 ID
+  session:
+    idle_ttl_seconds: 28800  # 浏览器 Session 空闲超时（秒）
+    absolute_ttl_seconds: 86400 # 浏览器 Session 最长存活时间（秒）
+  password:
+    pbkdf2_iterations: 600000 # 管理员密码 PBKDF2-SHA256 迭代次数
   api_keys:                  # API Key 列表（首次启动时导入 SQLite）
     - key: ${ADMIN_API_KEY:-}
       user_id: admin         # 关联的用户 ID
@@ -360,6 +368,7 @@ media_optimization:
 # 生成优化层配置
 # ==========================
 generation_optimization:
+  preset_store_dir: /app/data/generation-presets # 自定义 ComfyUI 预设 JSON 存储目录
   ai_director: {}
   model_router: {}
   feature_cache: {}
