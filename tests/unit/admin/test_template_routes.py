@@ -15,7 +15,7 @@ Tests for Template Routes — 提示词模板 API 端点测试
 
 import os
 import sys
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
@@ -26,12 +26,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-api"
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 
 from aigateway_core.pipelines.generation._common.config import PromptTemplateConfig
-from aigateway_core.pipelines.generation._common.exceptions import TemplateValidationError
-from aigateway_core.pipelines.generation._common.models import PromptTemplate
+from aigateway_core.pipelines.generation._common.exceptions import (
+    TemplateValidationError,
+)
 from aigateway_core.pipelines.generation.token.prompt_template_manager import (
     PromptTemplateManager,
 )
-
 
 # ==================================================================
 # Fixtures
@@ -633,8 +633,8 @@ class TestServiceUnavailable:
     async def test_503_when_no_manager(self):
         """All endpoints return 503 if prompt_template_manager is None."""
         from aigateway_api.template_routes import router
-        from fastapi.responses import JSONResponse
         from fastapi import HTTPException as _HTTPException
+        from fastapi.responses import JSONResponse
 
         test_app = FastAPI()
         test_app.include_router(router)

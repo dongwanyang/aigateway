@@ -65,13 +65,10 @@
 
 ### 前置要求
 
-- **Python 3.12**（必须；paddlepaddle / llama-index-vector-stores-qdrant 目前无 3.13/3.14 wheel）
-- Node.js 20+（本地跑前端时需要）
-- Docker（用于快速起 Redis / Qdrant，或方式一的整套编排）
-- Redis 7+
-- Qdrant 1.7+（语义缓存 + RAG 使用；不启也可以跑，语义缓存会 fail-open）
-
-> ⚠️ **不要用 Python 3.13/3.14**：paddleocr 依赖的 `paddlepaddle` 目前最新版（3.3.1）在 PyPI 上没有 cp313/cp314 wheel，`pip install` 会直接报 `No matching distribution found`。项目 Docker 镜像用的是 `python:3.12-slim`，本地开发请对齐。
+- Docker Engine/Desktop 与 Docker Compose v2
+- Linux 或 Windows WSL2 的 Knowledge/Studio/Full：NVIDIA 驱动及
+  NVIDIA Container Toolkit
+- Apple Silicon：Docker Desktop、Python 3 与 Xcode Command Line Tools
 
 ### 方式一：Docker Compose（推荐）
 
@@ -79,16 +76,14 @@
 # 1. 克隆项目
 git clone <repo-url>
 
-# 2. 运行安装向导：逐步选择 Runtime / RAG / Vision / Full、GPU 和监控
-bash scripts/quickstart.sh --build
+# 2. 默认从 GHCR 安装 Lite
+bash scripts/quickstart.sh --edition lite
 
-# 无交互安装示例
-bash scripts/quickstart.sh --non-interactive --profile full --accelerator cuda --monitoring --build
+# Full：从 GHCR 安装，启用监控并安装批准模型
+bash scripts/quickstart.sh --edition full --monitoring --install-models
 
-# 安装后可重复运行，增加能力不会删除已有数据卷
-bash scripts/quickstart.sh --add rag --build
-bash scripts/quickstart.sh --add vision --build
-bash scripts/quickstart.sh --show-plan
+# 从当前 checkout 构建完全相同的 targets
+bash scripts/quickstart.sh --edition full --distribution source --build
 
 # 3. 在自动创建的 .env 中填入至少一个提供商 API Key
 nano .env
@@ -100,26 +95,35 @@ nano .env
 
 > 💡 **不填 API Key 也能启动**：`config.yaml` 中所有密钥用 `${VAR:-}` 引用，未设时优雅降级为空。Gateway 能正常启动（插件 fail-open），但调用 LLM 会鉴权失败 —— 填好 `.env` 后 `docker compose restart gateway` 即可。
 >
-> 控制台会读取 `/admin/capabilities`。当前镜像未包含知识库或本地视觉能力时，页面会显示原因和对应的升级命令，不会等到操作失败后才报错。
+四档套餐是 Lite（Gateway/控制台/Redis）、Knowledge（加 Qdrant 与 GPU
+Embedding）、Studio（加独立 ComfyUI）和 Full。Linux/Windows 使用独立
+NVIDIA ComfyUI 容器；Apple Silicon 的核心栈仍在 Docker 中，ComfyUI 与
+Embedding 以用户级 MPS 服务运行，Gateway 通过 `host.docker.internal`
+访问。
+
+源码模式会从对应版本的 GHCR 镜像导入 BuildKit inline cache。Python
+依赖、PyTorch/CUDA 和系统包位于源码层之前，因此日常代码修改只会重新
+复制并安装本地 Gateway 包；Gateway 与 ComfyUI 也会复用同一 CUDA/PyTorch
+层。为保持这种增量构建速度，不要在每次开发构建后运行
+`docker builder prune`，只在磁盘水位需要回收时清理构建缓存。
 >
 > 📋 完整安装/配置/排查指引见 [INSTALL.md](INSTALL.md)。
 
 ### npm 安装
 
-不需要先手动克隆仓库。npm 安装器会下载 AI Gateway，默认进行源码安装：
+不需要先手动克隆仓库。npm 安装器默认拉取 GHCR 镜像：
 
 ```bash
 npm install -g aigateway-installer
-aigateway-install                         # 等同于 --source
-aigateway-install --source --profile full
+aigateway-install --edition lite
+aigateway-install --edition full --distribution source --build
 
 # 或者一次性运行
 npx aigateway-installer
 ```
 
-npm 包不在 `postinstall` 阶段执行系统命令；只有运行 `aigateway-install`
-后才会下载仓库并安装。若要使用 Docker Compose 部署，请显式传入
-`aigateway-install --docker`；原有 profile、GPU、监控和构建参数均可继续使用。
+npm 包不在 `postinstall` 阶段执行系统命令。旧 `--profile`、`--accelerator`、
+`--add/--remove`、`--source/--docker` 接口已移除。
 
 ### 方式二：本地开发
 
@@ -162,8 +166,8 @@ pip install -e "aigateway-api[vision,gpu]"   # OCR / 视频 / 超分辨率
 # ------------------------------------------------------------------
 # 5. 启动基础设施（Redis 必须；Qdrant 是语义缓存/RAG 才需要）
 # ------------------------------------------------------------------
-docker run -d --name redis  -p 6379:6379           redis:7-alpine
-docker run -d --name qdrant -p 6333:6333 -p 6334:6334 qdrant/qdrant:latest
+docker run -d --name redis -p 6379:6379 redis/redis-stack:7.2.0-v18
+docker run -d --name qdrant -p 6333:6333 -p 6334:6334 qdrant/qdrant:v1.13.4
 
 # ------------------------------------------------------------------
 # 6. 启动 API 服务（从项目根目录启动，确保 config.yaml 可被找到）
@@ -230,7 +234,7 @@ aigateway/
 ├── control-panel/src/                   # React 控制面板（10 个页面）
 ├── tests/                               # 82+ 测试文件
 ├── config.yaml                          # 唯一配置文件
-└── docker-compose.yml                   # 6 服务编排
+└── docker-compose.yml                   # 核心服务与可选 profiles
 ```
 
 ---
@@ -293,8 +297,59 @@ generation_optimization:
       device: cpu
   draft_workflow:
     comfyui:
-      server_url: "http://localhost:8188"
+      server_url: "http://comfyui:8188"
       execution_timeout: 300
+      required: true
+      workflow_version: "image-v1"
+      checkpoint_name: "sd_xl_base_1.0.safetensors"
+      allowed_checkpoints: ["sd_xl_base_1.0.safetensors"]
+      max_concurrency: 1
+      min_free_gb: 30
+      model_budget_gb: 30
+      output_budget_gb: 10
+      workflow_path: "/comfyui/workflows"
+```
+
+### ComfyUI 渐进式图片与视频生成
+
+ComfyUI 是图片草稿与最终精修的必需后端。服务不可用、checkpoint
+不在白名单或磁盘低于水位时，生成请求会明确失败，不会静默改走外部图片
+或视频 API。
+
+```bash
+# 1. 宿主机与容器必须都能看到 GPU
+nvidia-smi
+docker run --rm --gpus all nvidia/cuda:13.0.1-base-ubuntu24.04 nvidia-smi
+
+# 2. 许可证确认、80GB 下载水位与 SHA256 校验由安装器处理
+bash scripts/quickstart.sh --edition studio --install-models
+
+# 3. ComfyUI 管理界面仅绑定宿主机回环地址，不直接暴露公网
+docker compose --profile comfy-container ps
+```
+
+本机可打开 `http://127.0.0.1:8188`。如果 Docker 运行在远程服务器，
+先从你的电脑建立 SSH 隧道，再打开同一地址：
+
+```bash
+ssh -L 8188:127.0.0.1:8188 ubuntu@<服务器地址>
+```
+
+ComfyUI 本身不经过 Gateway 登录认证，因此不建议把
+`COMFYUI_HOST_BIND` 改成 `0.0.0.0`。
+
+草稿使用低分辨率、低采样步数；确认后上传已认可草稿，并复用相同
+checkpoint、seed 与 prompt 执行 img2img 高清精修。模型默认预算 30GB、
+输出预算 10GB、系统保留空间 30GB，输出超过保留期后自动清理。
+
+视频请求先用同一 SDXL 草稿流程生成一张低成本关键帧；确认后将该关键帧、
+prompt 和 seed 交给 `wan2.2-ti2v-5b-v1`，由 ComfyUI 原生
+Wan2.2 TI2V 5B 工作流生成 MP4。默认使用适合 15GB 显存的
+512×288、17 帧、8 fps 配置；失败时 fail-closed，不会重新调用 Agnes
+`/videos`。可单独安装视频模型：
+
+```bash
+bash scripts/model-manager.sh install wan2.2-ti2v-5b
 ```
 
 ### 环境变量

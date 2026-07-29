@@ -12,12 +12,9 @@ Validates:
 import os
 import sys
 
-import pytest
-
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 
 from aigateway_core.shared.config import (
-    IntegrationConfigs,
     parse_integration_configs,
 )
 from aigateway_core.shared.integration_configs import (
@@ -68,6 +65,20 @@ class TestParseIntegrationConfigsDefaults:
         assert c.connect_timeout == 10
         assert c.execution_timeout == 300
         assert c.ws_reconnect_attempts == 3
+        assert c.required is True
+        assert c.workflow_version == "image-v1"
+        assert c.checkpoint_name == "sd_xl_base_1.0.safetensors"
+        assert c.allowed_checkpoints == ["sd_xl_base_1.0.safetensors"]
+        assert c.max_concurrency == 1
+        assert c.min_free_gb == 30.0
+        assert c.model_budget_gb == 30.0
+        assert c.output_budget_gb == 10.0
+        assert c.video_enabled is False
+        assert c.video_workflow_version == "wan2.2-ti2v-5b-v1"
+        assert c.video_width == 512
+        assert c.video_height == 288
+        assert c.video_frames == 17
+        assert c.video_execution_timeout == 1200
 
     def test_default_rag_retriever_values(self):
         result = parse_integration_configs({})

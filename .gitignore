@@ -15,7 +15,7 @@ control-panel/coverage/
 
 # Environment
 .env
-.aigateway-install.env
+.aigateway-install.env*
 .env.local
 .env.production
 
@@ -56,6 +56,8 @@ repomix-output.md
 project-tasks/
 data/
 .gstack/
+/.aigateway/
+/models/
 
 # Benchmark reports (generated, not committed)
 benchmarks/reports/*.md
@@ -71,3 +73,11 @@ benchmarks/scripts/__pycache__/
 
 # Local-only docker override (e.g. GPU driver workaround) — never ship
 docker-compose.override.yml
+
+# ComfyUI runtime/model data (keep only repository documentation/placeholders)
+comfyui/models/*
+!comfyui/models/README.md
+comfyui/input/*
+!comfyui/input/.gitkeep
+comfyui/output/*
+!comfyui/output/.gitkeep

@@ -1,7 +1,7 @@
 """Regression tests for dispatcher post-processing paths."""
 
-import json
 import hashlib
+import json
 import os
 import sys
 from types import SimpleNamespace

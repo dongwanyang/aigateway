@@ -433,12 +433,17 @@ export function useChatSessions(): UseChatSessions {
     flushToStorage()
     try {
       const result = await confirmDraft(msg.draft.draftId)
-      if (result.mediaType === 'video') {
+      if ('videoId' in result) {
         patchMessage(msgId, m => ({ ...m, draft: undefined, videoId: result.videoId, intent: 'generation:video', model: 'video' }))
         flushToStorage()
         void pollVideoStatus(result.videoId, msgId)
       } else {
-        patchMessage(msgId, m => m.draft ? { ...m, draft: { ...m.draft, status: 'confirmed', resultDataUrl: result.upscaledUrl, errorMessage: undefined } } : m)
+        patchMessage(msgId, m => m.draft ? {
+          ...m,
+          intent: result.mediaType === 'video' ? 'generation:video' : m.intent,
+          model: result.mediaType === 'video' ? 'comfyui' : m.model,
+          draft: { ...m.draft, mediaType: result.mediaType, status: 'confirmed', resultDataUrl: result.upscaledUrl, errorMessage: undefined },
+        } : m)
         flushToStorage()
       }
     } catch (e) {

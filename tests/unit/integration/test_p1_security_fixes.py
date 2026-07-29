@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -16,8 +16,8 @@ sys.path.insert(0, str(ROOT / "aigateway-api/src"))
 sys.path.insert(0, str(ROOT / "aigateway-core/src"))
 
 from aigateway_api.admin_routes import _rag_document_identity
+from aigateway_api.auth_middleware import _hash_key, authenticate_admin
 from aigateway_api.auth_routes import router as auth_router
-from aigateway_api.auth_middleware import authenticate_admin, _hash_key
 from aigateway_core.prefix.cache.cache_manager import CacheManager
 from aigateway_core.route.streaming.sse import SSEGenerator
 from aigateway_core.shared.auth.sqlite_store import SQLiteStore
@@ -35,7 +35,7 @@ async def test_key_expiry_rotation_and_scopes_are_enforced(tmp_path: Path):
     created = await store.create(
         "admin-user",
         scopes=["admin", "chat", "embedding"],
-        expires_at=(datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+        expires_at=(datetime.now(UTC) + timedelta(days=1)).isoformat(),
     )
 
     validated = await store.validate(created["key"])
@@ -64,7 +64,7 @@ async def test_expired_key_is_rejected(tmp_path: Path):
     store._db = inline_db
     created = await store.create(
         "expired-user",
-        expires_at=(datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(),
+        expires_at=(datetime.now(UTC) - timedelta(minutes=1)).isoformat(),
     )
     with pytest.raises(AuthError, match="expired"):
         await store.validate(created["key"])
@@ -331,7 +331,7 @@ async def test_check_is_default_false_after_revocation(tmp_path: Path):
     old_hash = _hash_key(old_key)
     assert await store.check_is_default(old_hash) is True
 
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso = datetime.now(UTC).isoformat()
     with store.conn.transaction() as tx:
         tx.execute(
             "UPDATE api_keys SET status='revoked', rotated_at=?, revoked_at=? WHERE key_hash=?",

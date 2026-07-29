@@ -1,7 +1,6 @@
 """Verify aigateway_core.pipelines.generation re-exports."""
 import importlib
 
-
 SUBPACKAGES = {
     "director": [
         "aigateway_core.pipelines.generation.director.ai_director",

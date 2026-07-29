@@ -20,7 +20,8 @@ import hashlib
 import logging
 import threading
 import time
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from cachetools import LRUCache
 
@@ -110,7 +111,7 @@ class CacheManager:
     # L1: in-process cache (cachetools.LRUCache)
     # ------------------------------------------------------------------
 
-    def l1_get(self, key: str) -> Optional[str]:
+    def l1_get(self, key: str) -> str | None:
         """Read from L1 cache.
 
         DB_SCHEMA §3: Key is SHA-256(normalized_prompt + model + params)
@@ -127,7 +128,7 @@ class CacheManager:
                 logger.debug("L1 缓存命中: key=%s...", key[:16])
             return value
 
-    def l1_set(self, key: str, value: str, ttl: Optional[int] = None) -> None:
+    def l1_set(self, key: str, value: str, ttl: int | None = None) -> None:
         """Write to L1 cache, with large-object filter.
 
         Args:
@@ -157,7 +158,7 @@ class CacheManager:
         pipeline_version: str = "1",
         top_k: int = l2_search.L2_DEFAULT_TOP_K,
         min_score: float = l2_search.L2_DEFAULT_MIN_SCORE,
-    ) -> Optional[str]:
+    ) -> str | None:
         """L2 BM25 查询: 按相似 prompt 检索缓存响应.
 
         Args:
@@ -197,8 +198,8 @@ class CacheManager:
         self,
         key: str,
         value: str,
-        meta: Dict[str, Any],
-        ttl: Optional[int] = None,
+        meta: dict[str, Any],
+        ttl: int | None = None,
     ) -> None:
         """写入 L2 BM25 缓存索引项.
 
@@ -243,12 +244,12 @@ class CacheManager:
 
     async def l3_query(
         self,
-        vector: List[float],
+        vector: list[float],
         threshold: float = 0.95,
         limit: int = 1,
-        user_id: Optional[str] = None,
-        pipeline_version: Optional[str] = None,
-    ) -> Optional[Dict[str, Any]]:
+        user_id: str | None = None,
+        pipeline_version: str | None = None,
+    ) -> dict[str, Any] | None:
         """Qdrant vector similarity search (L3 semantic cache).
 
         DB_SCHEMA §Qdrant semantic cache collection query params:
@@ -332,8 +333,8 @@ class CacheManager:
         response_json: str,
         user_id: str,
         token_count: int,
-        vector: List[float],
-        ttl: Optional[int] = None,
+        vector: list[float],
+        ttl: int | None = None,
         embedding_model: str = "Qwen/Qwen3-Embedding-0.6B",
         management_mode: str = "auto",
         pipeline_version: str = "1",
@@ -349,7 +350,7 @@ class CacheManager:
         now = int(time.time())
         ttl_seconds = ttl or self.l3_default_ttl
 
-        payload: Dict[str, Any] = {
+        payload: dict[str, Any] = {
             "prompt_hash": prompt_hash,
             "prompt_normalized": prompt_normalized,
             "model": model,
@@ -398,8 +399,8 @@ class CacheManager:
         model: str,
         user_id: str,
         token_count: int,
-        compute_embedding_fn: Optional[Callable[[str], Awaitable[List[float]]]] = None,
-        meta: Optional[Dict[str, Any]] = None,
+        compute_embedding_fn: Callable[[str], Awaitable[list[float]]] | None = None,
+        meta: dict[str, Any] | None = None,
     ) -> None:
         """All-miss backfill: L1 + L2 BM25, L3 conditional async.
 
@@ -444,7 +445,7 @@ class CacheManager:
         model: str,
         user_id: str,
         token_count: int,
-        compute_embedding_fn: Callable[[str], Awaitable[List[float]]],
+        compute_embedding_fn: Callable[[str], Awaitable[list[float]]],
         pipeline_version: str = "1",
     ) -> None:
         """L3 async backfill; failure doesn't affect main flow."""
@@ -563,7 +564,7 @@ class CacheManager:
         family = "auto" if model == "auto" else _model_family(model)
 
         # Assemble key segments: fixed order to avoid same-params-different-order hash
-        parts: List[str] = [
+        parts: list[str] = [
             "v2",  # schema version, for smooth future v3 upgrade
             pipeline_kind or "understanding",
             pipeline_version or "1",
@@ -592,7 +593,7 @@ class CacheManager:
     # Multi-tier cache orchestration
     # ------------------------------------------------------------------
 
-    async def get(self, key: str, value_fn=None, **params: Any) -> Optional[Dict[str, Any]]:
+    async def get(self, key: str, value_fn=None, **params: Any) -> dict[str, Any] | None:
         """Multi-tier cache lookup.
 
         Checks L1 -> L2 -> L3 in order; on hit executes the corresponding
@@ -709,7 +710,7 @@ class L3CleanupScheduler:
     def __init__(self, cache_manager: CacheManager, interval_minutes: int = 60):
         self._cache_manager = cache_manager
         self._interval_minutes = interval_minutes
-        self._task: Optional[asyncio.Task] = None
+        self._task: asyncio.Task | None = None
 
     async def start(self) -> None:
         """Start the periodic cleanup task."""
@@ -755,7 +756,7 @@ class LightweightReranker:
     Use: fallback when no extra model load desired
     """
 
-    async def rerank(self, query: str, documents: List[str]) -> List[float]:
+    async def rerank(self, query: str, documents: list[str]) -> list[float]:
         """Score documents relative to query."""
         scores = []
         query_tokens = set(query.lower().split())
@@ -789,7 +790,7 @@ class CrossEncoderReranker:
                 logger.warning("sentence-transformers 未安装，CrossEncoderReranker 不可用")
                 raise
 
-    async def rerank(self, query: str, documents: List[str]) -> List[float]:
+    async def rerank(self, query: str, documents: list[str]) -> list[float]:
         """Cross-encoder scoring (run in thread pool to avoid blocking)."""
         self._ensure_model()
         loop = asyncio.get_event_loop()
@@ -823,9 +824,9 @@ class SemanticCacheWithRerank:
     async def query_with_rerank(
         self,
         query_text: str,
-        vector: List[float],
-        user_id: Optional[str] = None,
-    ) -> Optional[Dict[str, Any]]:
+        vector: list[float],
+        user_id: str | None = None,
+    ) -> dict[str, Any] | None:
         """Retrieve + Rerank two-stage semantic cache query.
 
         Args:
@@ -898,15 +899,15 @@ class SemanticCacheWithRerank:
 
 
 __all__ = [
-    "CacheManager",
-    "L3CleanupScheduler",
-    "LightweightReranker",
-    "CrossEncoderReranker",
-    "SemanticCacheWithRerank",
-    "_emit_cache_debug",
     "L1_MAX_VALUE_BYTES",
     "L2_MAX_VALUE_BYTES",
-    "L3_MIN_TOKEN_COUNT",
-    "L3_DEFAULT_TTL",
     "L3_CLEANUP_INTERVAL",
+    "L3_DEFAULT_TTL",
+    "L3_MIN_TOKEN_COUNT",
+    "CacheManager",
+    "CrossEncoderReranker",
+    "L3CleanupScheduler",
+    "LightweightReranker",
+    "SemanticCacheWithRerank",
+    "_emit_cache_debug",
 ]

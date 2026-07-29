@@ -14,7 +14,7 @@ import logging
 import re
 import time
 from collections import defaultdict
-from typing import Any, Optional, Set, Tuple
+from typing import Any
 
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
@@ -56,8 +56,8 @@ class RateLimiterMiddleware(BaseHTTPMiddleware):
         app: Any,
         max_requests: int = 30,
         window_seconds: int = 60,
-        protected_prefixes: Tuple[str, ...] = ("/admin",),
-        exempt_paths: Set[str] = frozenset({"/health", "/metrics"}),
+        protected_prefixes: tuple[str, ...] = ("/admin",),
+        exempt_paths: set[str] = frozenset({"/health", "/metrics"}),
     ) -> None:
         super().__init__(app)
         self.max_requests = max_requests
@@ -93,7 +93,7 @@ class RateLimiterMiddleware(BaseHTTPMiddleware):
 
         return await call_next(request)
 
-    def _check_in_memory(self, client_ip: str, path: str) -> Tuple[bool, int]:
+    def _check_in_memory(self, client_ip: str, path: str) -> tuple[bool, int]:
         """进程内滑动窗口计数器。"""
         now = time.time()
         # 按 (client_ip, 端点模板) 分桶。先剥离受保护前缀(如 "/admin"),

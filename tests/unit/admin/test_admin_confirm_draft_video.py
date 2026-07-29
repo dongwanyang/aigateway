@@ -13,19 +13,27 @@ Existing test_draft_routes.py covers the happy video return. These cover:
 
 import os
 import sys
+from unittest.mock import AsyncMock, patch
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-api", "src"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 
-from aigateway_core.pipelines.generation._common.models import VideoSubmitResult
+from aigateway_core.pipelines.generation._common.models import (
+    UpscaleResult,
+    VideoSubmitResult,
+)
 
 
 class _FakeDraft:
     user_id = None
     group_id = None
+    media_type = "image"
+
+
+class _FakeLocalVideoDraft(_FakeDraft):
+    media_type = "video"
 
 
 class _FakeRequest:
@@ -79,8 +87,7 @@ async def test_confirm_draft_failure_logs_and_returns_400(monkeypatch):
 @pytest.mark.asyncio
 async def test_confirm_video_record_log_failure_swallowed(monkeypatch, monkeypatched_video_strategy):
     """If _record_request_log raises, video confirm still returns the video_id dict."""
-    from aigateway_api import admin_routes
-    from aigateway_api import openai_compat
+    from aigateway_api import admin_routes, openai_compat
 
     # Force _record_request_log to raise; must patch where confirm_draft imports it from.
     with patch.object(openai_compat, "_record_request_log", new=AsyncMock(side_effect=RuntimeError("log db down"))):
@@ -113,6 +120,34 @@ async def test_confirm_video_record_log_success_path(monkeypatch, monkeypatched_
     assert "/admin/draft/" in call_kwargs["endpoint"]
     assert call_kwargs["status_code"] == 200
     assert call_kwargs["model"] == "agnes-video-v2.0"
+
+
+@pytest.mark.asyncio
+async def test_confirm_local_comfyui_video_returns_mp4_data_url(monkeypatch):
+    """The normal video path returns persisted ComfyUI MP4 bytes, not a video id."""
+    from aigateway_api import admin_routes
+
+    strategy = AsyncMock()
+    strategy.get_draft = AsyncMock(return_value=_FakeLocalVideoDraft())
+    strategy.confirm_draft = AsyncMock(
+        return_value=UpscaleResult(
+            draft_id="d_local",
+            output_data=b"\x00\x00\x00\x18ftypmp42video",
+            target_resolution=(512, 288),
+            algorithm_used="comfyui:wan2.2-ti2v-5b-v1",
+            duration_ms=1000,
+        )
+    )
+    monkeypatch.setattr(admin_routes, "_get_draft_strategy", lambda: strategy)
+
+    response = await admin_routes.confirm_draft(
+        "d_local", _FakeRequest(), {"user_id": "", "group_id": ""}
+    )
+
+    assert response["media_type"] == "video"
+    assert response["upscaled_url"].startswith("data:video/mp4;base64,")
+    assert "video_id" not in response
+    assert response["algorithm"] == "comfyui:wan2.2-ti2v-5b-v1"
 
 
 @pytest.mark.asyncio

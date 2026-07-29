@@ -15,7 +15,7 @@ Tests for IntentEvaluatorPlugin — 意图评估插件封装
 
 import os
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -27,13 +27,13 @@ from aigateway_core.pipelines.generation._common.config import (
     ModelRouterConfig,
 )
 from aigateway_core.pipelines.generation._common.models import ComplexityEvaluation
-from aigateway_core.pipelines.generation.intent.intent_evaluator_plugin import (
-    DEFAULT_COMPLEXITY_SCORE,
-    IntentEvaluatorPlugin,
-    NS_GENERATION_OPTIMIZATION,
-)
 from aigateway_core.pipelines.generation.intent.intent_evaluator import (
     IntentEvaluatorStrategy,
+)
+from aigateway_core.pipelines.generation.intent.intent_evaluator_plugin import (
+    DEFAULT_COMPLEXITY_SCORE,
+    NS_GENERATION_OPTIMIZATION,
+    IntentEvaluatorPlugin,
 )
 
 
@@ -316,7 +316,7 @@ class TestIntentEvaluatorPluginTracing:
             request={"messages": [{"role": "user", "content": "test"}]},
             trace_id="trace456",
         )
-        collector = TraceCollector.start("trace456")
+        TraceCollector.start("trace456")
 
         await plugin.execute(ctx)
 

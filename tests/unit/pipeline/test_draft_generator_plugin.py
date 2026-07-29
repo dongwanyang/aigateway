@@ -6,7 +6,11 @@ with media_type='video', so confirm_draft hits the video branch (not image upsca
 """
 
 import sys
+import time
 from pathlib import Path
+from unittest.mock import AsyncMock
+
+import pytest
 
 # Ensure aigateway-core src on path (matches conftest pattern)
 _CORE = Path(__file__).resolve().parents[2] / "aigateway-core" / "src"  # tests/unit/pipeline/ → tests/ (parents[2])
@@ -17,6 +21,7 @@ from aigateway_core.dispatch.context import PipelineContext
 from aigateway_core.pipelines.generation._common.config import (
     GenerationOptimizationConfig,
 )
+from aigateway_core.pipelines.generation._common.models import DraftResult
 from aigateway_core.pipelines.generation.draft.draft_generator_plugin import (
     DraftGeneratorPlugin,
 )
@@ -58,3 +63,32 @@ def test_build_request_understanding_kind_defaults_image():
     ctx = _ctx("understanding")
     req = plugin._build_generation_request(ctx)
     assert req.media_type == "image"
+
+
+@pytest.mark.asyncio
+async def test_execute_uses_explicit_browser_draft_owner_without_billing_group():
+    config = GenerationOptimizationConfig()
+    strategy = AsyncMock()
+    now = time.time()
+    strategy.generate_draft.return_value = DraftResult(
+        draft_id="draft-browser-owner",
+        previews=[],
+        generation_params={},
+        created_at=now,
+        expires_at=now + 60,
+        status="generating",
+    )
+    strategy.checkpoint_name = "test-checkpoint"
+    plugin = DraftGeneratorPlugin(strategy=strategy, config=config)
+    ctx = _ctx("generation:image")
+    ctx.user_id = "billing-user"
+    ctx.extra["group_id"] = "grp-default"
+    ctx.extra["draft_owner_user_id"] = "browser-admin-id"
+    ctx.extra["draft_owner_group_id"] = None
+    ctx.extra["chat_session_id"] = "sess-browser"
+
+    await plugin.execute(ctx)
+
+    assert strategy.generate_draft.await_args.kwargs["user_id"] == "browser-admin-id"
+    assert strategy.generate_draft.await_args.kwargs["group_id"] is None
+    assert strategy.generate_draft.await_args.kwargs["chat_session_id"] == "sess-browser"

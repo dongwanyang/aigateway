@@ -2,22 +2,40 @@ name: aigateway
 
 services:
   gateway:
+    image: ${GATEWAY_IMAGE:-aigateway-gateway:local}
+    pull_policy: ${AIGATEWAY_PULL_POLICY:-build}
     build:
       context: .
       dockerfile: aigateway-api/Dockerfile
       target: ${GATEWAY_IMAGE_TARGET:-gateway-runtime}
+      cache_from:
+        - ${GATEWAY_BUILD_CACHE_FROM:-type=registry,ref=ghcr.io/dongwanyang/aigateway-gateway:latest-lite}
+      cache_to:
+        - type=inline
     ports:
-      - "8000:8000"
+      - "${AIGATEWAY_API_BIND:-127.0.0.1}:${AIGATEWAY_API_PORT:-8000}:8000"
     env_file:
       - .env
     environment:
-      - AI_GATEWAY_REDIS_URL=redis://redis:6379/0
-      - AI_GATEWAY_QDRANT_URL=http://qdrant:6333
+      AI_GATEWAY_REDIS_URL: redis://redis:6379/0
+      AI_GATEWAY_QDRANT_URL: http://qdrant:6333
+      AI_GATEWAY_CONFIG_PATH: /app/config.yaml
+      AI_GATEWAY_EMBEDDING_API_BASE: ${EMBEDDING_API_BASE:-}
+      AI_GATEWAY_EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      AI_GATEWAY_CUDA_MEMORY_FRACTION: ${GATEWAY_CUDA_MEMORY_FRACTION:-}
+      CUDA_VISIBLE_DEVICES: ${GATEWAY_CUDA_VISIBLE_DEVICES:-0}
+      PYTORCH_CUDA_ALLOC_CONF: ${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
     volumes:
-      - ./config.yaml:/app/config.yaml
+      - ${AIGATEWAY_RUNTIME_CONFIG:-./config.yaml}:/app/config.yaml:ro
+      - ${AIGATEWAY_MODEL_DIR:-./models}:/models:ro
       - code_graphs_data:/data/code_graphs
       - ./data:/app/data
-      - .:/workspace:ro
+      - ${AIGATEWAY_COMFY_DATA_DIR:-./comfyui}/models:/comfyui/models:ro
+      - ${AIGATEWAY_COMFY_DATA_DIR:-./comfyui}/output:/comfyui/output
+      - ${AIGATEWAY_COMFY_DATA_DIR:-./comfyui}/workflows:/comfyui/workflows:ro
+      - ${AIGATEWAY_WORKSPACE:-.}:/workspace:ro
+    extra_hosts:
+      - host.docker.internal:host-gateway
     depends_on:
       redis:
         condition: service_healthy
@@ -26,13 +44,19 @@ services:
       - gateway-net
 
   control-panel:
+    image: ${CONTROL_PANEL_IMAGE:-aigateway-control-panel:local}
+    pull_policy: ${AIGATEWAY_PULL_POLICY:-build}
     build:
       context: ./control-panel
       dockerfile: ../Dockerfile.frontend
       args:
         VITE_API_BASE: /aigateway
+      cache_from:
+        - ${CONTROL_PANEL_BUILD_CACHE_FROM:-type=registry,ref=ghcr.io/dongwanyang/aigateway-control-panel:latest}
+      cache_to:
+        - type=inline
     ports:
-      - "3000:80"
+      - "${AIGATEWAY_UI_BIND:-127.0.0.1}:${AIGATEWAY_UI_PORT:-3000}:80"
     depends_on:
       - gateway
     restart: unless-stopped
@@ -42,8 +66,6 @@ services:
   redis:
     image: redis/redis-stack:7.2.0-v18
     ports:
-      # Bind to loopback only — these are dev/introspection ports, not for
-      # remote access. Neither Redis nor Qdrant is configured with auth here.
       - "127.0.0.1:6379:6379"
       - "127.0.0.1:8001:8001"
     volumes:
@@ -59,9 +81,9 @@ services:
       - gateway-net
 
   qdrant:
+    profiles: ["knowledge"]
     image: qdrant/qdrant:v1.13.4
     ports:
-      # Loopback only — see redis note above.
       - "127.0.0.1:6333:6333"
       - "127.0.0.1:6334:6334"
     volumes:
@@ -70,10 +92,48 @@ services:
     networks:
       - gateway-net
 
+  comfyui:
+    profiles: ["comfy-container"]
+    image: ${COMFYUI_IMAGE:-aigateway-comfyui:local}
+    pull_policy: ${AIGATEWAY_PULL_POLICY:-build}
+    build:
+      context: .
+      dockerfile: aigateway-api/Dockerfile
+      target: comfyui
+      args:
+        COMFYUI_VERSION: ${COMFYUI_VERSION:-v0.28.0}
+      cache_from:
+        - ${COMFYUI_BUILD_CACHE_FROM:-type=registry,ref=ghcr.io/dongwanyang/aigateway-comfyui:latest-cuda}
+      cache_to:
+        - type=inline
+    gpus: ${COMFYUI_GPUS:-all}
+    ports:
+      # ComfyUI does not use Gateway authentication; keep the UI loopback-only.
+      - "${COMFYUI_HOST_BIND:-127.0.0.1}:${COMFYUI_HOST_PORT:-8188}:8188"
+    environment:
+      CUDA_VISIBLE_DEVICES: ${COMFYUI_CUDA_VISIBLE_DEVICES:-0}
+      COMFYUI_VRAM_FLAG: ${COMFYUI_VRAM_FLAG:-}
+      PYTORCH_CUDA_ALLOC_CONF: ${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
+    command:
+      - /bin/sh
+      - -c
+      - >-
+        exec python main.py --listen 0.0.0.0 --port 8188
+        --disable-auto-launch --output-directory /opt/ComfyUI/output
+        --input-directory /opt/ComfyUI/input $${COMFYUI_VRAM_FLAG}
+    volumes:
+      - ${AIGATEWAY_COMFY_DATA_DIR:-./comfyui}/models:/opt/ComfyUI/models
+      - ${AIGATEWAY_COMFY_DATA_DIR:-./comfyui}/input:/opt/ComfyUI/input
+      - ${AIGATEWAY_COMFY_DATA_DIR:-./comfyui}/output:/opt/ComfyUI/output
+      - ${AIGATEWAY_COMFY_DATA_DIR:-./comfyui}/workflows:/opt/ComfyUI/user/default/workflows:ro
+    restart: unless-stopped
+    networks:
+      - gateway-net
+
   prometheus:
+    profiles: ["monitoring"]
     image: prom/prometheus:v3.3.0
     ports:
-      # Loopback only — dev/introspection, not for remote access.
       - "127.0.0.1:9090:9090"
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
@@ -81,7 +141,29 @@ services:
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
-      - --web.listen-address=0.0.0.0:9090
+      - --storage.tsdb.retention.time=30d
+    restart: unless-stopped
+    networks:
+      - gateway-net
+
+  grafana:
+    profiles: ["monitoring"]
+    image: grafana/grafana:11.5.0
+    ports:
+      - "127.0.0.1:3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      # Installer writes a random value whenever monitoring is enabled. A
+      # harmless inactive-profile default keeps Lite/Knowledge/Studio config
+      # validation from requiring a Grafana-only setting.
+      # GRAFANA_ADMIN_PASSWORD must be set by the installer before monitoring starts.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-monitoring-profile-disabled}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
     restart: unless-stopped
     networks:
       - gateway-net
@@ -95,3 +177,4 @@ volumes:
   qdrant-data:
   code_graphs_data:
   prometheus-data:
+  grafana-data:

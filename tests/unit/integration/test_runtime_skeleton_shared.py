@@ -1,7 +1,6 @@
 """Verify aigateway_core.shared exports are accessible from new paths."""
 import importlib
 
-
 # After the skeleton refactor, shared modules live exclusively under
 # aigateway_core.shared.*.  The old top-level shims (aigateway_core.config,
 # aigateway_core.tracing, etc.) were removed — this test verifies the

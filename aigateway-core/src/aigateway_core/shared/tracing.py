@@ -16,16 +16,22 @@ from __future__ import annotations
 import logging
 import os
 import time
-from typing import Any, Dict, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
+
+try:
+    from opentelemetry.trace import SpanKind, Status, StatusCode
+except ImportError:
+    # OpenTelemetry is optional; tests and embedders may inject compatible types.
+    SpanKind = Status = StatusCode = None
 
 
 # ------------------------------------------------------------------
 # 全局单例
 # ------------------------------------------------------------------
 
-_tracing_instance: Optional[TracingManager] = None
+_tracing_instance: TracingManager | None = None
 
 
 class TracingManager:
@@ -86,8 +92,7 @@ class TracingManager:
                 BatchSpanProcessor,
                 ConsoleSpanExporter,
             )
-            from opentelemetry.trace import SpanKind, Status, StatusCode
-
+            from opentelemetry.trace import SpanKind as OTelSpanKind
             # 设置 Resource
             resource = Resource.create({
                 "service.name": self.service_name,
@@ -111,7 +116,7 @@ class TracingManager:
             self._tracer = trace.get_tracer(
                 self.service_name,
                 version="1.0.0",
-                span_kind=SpanKind.SERVER,
+                span_kind=OTelSpanKind.SERVER,
             )
 
             self._initialized = True
@@ -144,9 +149,9 @@ class TracingManager:
     def create_request_span(
         self,
         request_id: str,
-        trace_id: Optional[str] = None,
+        trace_id: str | None = None,
         operation: str = "gateway_request",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """为请求创建 OTel span。
 
         创建后返回 span 上下文字典，供插件在执行期间设置属性和记录事件。
@@ -196,10 +201,10 @@ class TracingManager:
 
     def create_plugin_span(
         self,
-        span_context: Dict[str, Any],
+        span_context: dict[str, Any],
         plugin_name: str,
         request_id: str,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """为单个插件创建子 span。
 
         Args:
@@ -216,7 +221,7 @@ class TracingManager:
         self.ensure_initialized()
 
         tid = span_context.get("trace_id", "")
-        span_attrs: Dict[str, Any] = {
+        span_attrs: dict[str, Any] = {
             "plugin.name": plugin_name,
             "request.id": request_id,
             "trace.id": tid,
@@ -257,7 +262,7 @@ class TracingManager:
     def add_span_event(
         otel_span: Any,
         name: str,
-        attributes: Optional[Dict[str, Any]] = None,
+        attributes: dict[str, Any] | None = None,
     ) -> None:
         """为 OTel span 添加事件。
 
@@ -289,6 +294,8 @@ class TracingManager:
             return
 
         try:
+            if Status is None or StatusCode is None:
+                return
             otel_span.set_status(Status(StatusCode.ERROR, str(error)))
             otel_span.record_exception(error)
         except Exception as exc:
@@ -299,7 +306,7 @@ class TracingManager:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def inject_trace_context(headers: Dict[str, str], trace_id: str, span_id: str) -> None:
+    def inject_trace_context(headers: dict[str, str], trace_id: str, span_id: str) -> None:
         """将 trace context 注入 HTTP 请求头，用于跨服务传播。
 
         Args:
@@ -312,7 +319,7 @@ class TracingManager:
         headers["X-Span-ID"] = span_id
 
     @staticmethod
-    def extract_trace_context(headers: Dict[str, str]) -> Dict[str, str]:
+    def extract_trace_context(headers: dict[str, str]) -> dict[str, str]:
         """从 HTTP 请求头提取 trace context。
 
         Args:
@@ -341,7 +348,7 @@ class TracingManager:
     # 工具方法
     # ------------------------------------------------------------------
 
-    def get_trace_info(self) -> Dict[str, Any]:
+    def get_trace_info(self) -> dict[str, Any]:
         """获取当前追踪配置信息。
 
         Returns:

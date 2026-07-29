@@ -4,7 +4,7 @@
 """
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
@@ -19,7 +19,7 @@ router = APIRouter()
 async def retrieve_video(
     video_id: str,
     request: Request,
-    _auth: Dict[str, Any] = Depends(authenticate),
+    _auth: dict[str, Any] = Depends(authenticate),
 ) -> JSONResponse:
     """轮询视频任务状态."""
     require_scope(_auth, "chat")
@@ -31,11 +31,10 @@ async def retrieve_video(
             status_code=503,
         )
     try:
-        result: Dict[str, Any] = await bridge.retrieve_video(video_id)
+        result: dict[str, Any] = await bridge.retrieve_video(video_id)
         return JSONResponse(content=result)
     except Exception as exc:
         # 生产环境不暴露 provider 内部错误细节，仅 debug 模式下透传。
-        from aigateway_core.shared.debug_config import DebugConfig
         from aigateway_core.shared.trace_event import TraceCollector
         debug_detail = False
         try:

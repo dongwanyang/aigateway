@@ -18,8 +18,9 @@ import base64
 import json
 import logging
 import re
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from collections.abc import Callable
+from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
@@ -33,10 +34,10 @@ _embedding_model_cache: dict = {}
 RAG_INGESTION_VERSION = "1"
 
 
-def _detect_image_mime(data: bytes) -> str:
-    """根据文件头检测图片 MIME 类型。
+def _detect_media_mime(data: bytes) -> str:
+    """根据文件头检测图片或 MP4 MIME 类型。
 
-    优先级: PNG(8字节头) > JPEG(FFD8FF) > WebP(RIFF....WEBP)。
+    优先级: PNG > JPEG > WebP > ISO BMFF/MP4。
     默认 image/png。
     """
     if len(data) >= 8 and data[:4] == b'\x89PNG':
@@ -45,7 +46,14 @@ def _detect_image_mime(data: bytes) -> str:
         return 'image/jpeg'
     if len(data) >= 12 and data[:4] == b'RIFF' and data[8:12] == b'WEBP':
         return 'image/webp'
+    if len(data) >= 12 and data[4:8] == b'ftyp':
+        return 'video/mp4'
     return 'image/png'
+
+
+def _detect_image_mime(data: bytes) -> str:
+    """Backward-compatible image MIME helper."""
+    return _detect_media_mime(data)
 
 
 def _get_embedding_model():
@@ -77,7 +85,7 @@ def _rag_document_identity(
     return content_hash, f"doc_{document_hash[:16]}"
 
 
-async def _compute_embeddings_via_litellm(texts: List[str]) -> Optional[List[List[float]]]:
+async def _compute_embeddings_via_litellm(texts: list[str]) -> list[list[float]] | None:
     """使用 litellm 的 embedding API 计算向量（不需要本地模型）。
 
     尝试顺序:
@@ -93,7 +101,7 @@ async def _compute_embeddings_via_litellm(texts: List[str]) -> Optional[List[Lis
         config_manager = getattr(s, "config_manager", None)
 
         # 获取 embedding 配置
-        embedding_cfg = config_manager.get("embedding", {}) if config_manager else {}
+        config_manager.get("embedding", {}) if config_manager else {}
         providers_cfg = config_manager.get("providers", {}) if config_manager else {}
 
         # 尝试使用配置中有真实 API Key 的 provider
@@ -148,7 +156,7 @@ async def _compute_embeddings_via_litellm(texts: List[str]) -> Optional[List[Lis
     return _compute_hash_embeddings(texts)
 
 
-def _compute_hash_embeddings(texts: List[str]) -> List[List[float]]:
+def _compute_hash_embeddings(texts: list[str]) -> list[list[float]]:
     """基于哈希的简单向量生成（作为 embedding 不可用时的回退方案）。
 
     使用 SHA-256 哈希生成伪随机 1024 维向量。
@@ -183,7 +191,7 @@ router = APIRouter()
 @router.get("/capabilities")
 async def get_runtime_capabilities(
     request: Request,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """Report optional image features without importing them during startup."""
     from .capabilities import detect_runtime_capabilities
@@ -210,7 +218,7 @@ _GENERATION_PLUGIN_CONFIG_PATH: dict[str, list[str]] = {
 }
 
 
-def _atomic_write_yaml(config_path: str, file_config: Dict[str, Any]) -> None:
+def _atomic_write_yaml(config_path: str, file_config: dict[str, Any]) -> None:
     """原子写 YAML,保证 Watchdog 热重载永不读到半截文件。
 
     旧实现 open(path,'w') + yaml.dump 会先 truncate 再写,期间 Watchdog 的
@@ -222,9 +230,9 @@ def _atomic_write_yaml(config_path: str, file_config: Dict[str, Any]) -> None:
     原地写(truncate+write),配合 Watchdog 的 _load_yaml 共享锁同样消除竞态。
     """
     import errno
-    import fcntl
     import os
     import tempfile
+
     import yaml
 
     config_dir = os.path.dirname(os.path.abspath(config_path)) or "."
@@ -255,12 +263,51 @@ def _atomic_write_yaml(config_path: str, file_config: Dict[str, Any]) -> None:
         raise
 
 
-def _flocked_inplace_write(config_path: str, file_config: Dict[str, Any]) -> None:
+def _read_yaml(config_path: str) -> dict[str, Any]:
+    """Read the small runtime YAML file from disk."""
+    import yaml
+
+    with open(config_path, encoding="utf-8") as file:
+        return yaml.safe_load(file) or {}
+
+
+def _locked_update_yaml(
+    config_path: str,
+    update: Callable[[dict[str, Any]], None],
+) -> dict[str, Any]:
+    """Run a complete locked YAML read-modify-write transaction."""
+    import fcntl
+
+    lock_path = config_path + ".lock"
+    with open(lock_path, "w") as lock_file:
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": {
+                        "code": "config_update_busy",
+                        "message": "Another configuration update is in progress",
+                    }
+                },
+            ) from exc
+        try:
+            file_config = _read_yaml(config_path)
+            update(file_config)
+            _atomic_write_yaml(config_path, file_config)
+            return file_config
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+
+def _flocked_inplace_write(config_path: str, file_config: dict[str, Any]) -> None:
     """flocked 原地写回退(用于 os.replace 不可用的 bind-mount 场景)。
 
     排它锁保证 Watchdog 的 _load_yaml(共享锁)不会读到半截 YAML。
     """
     import fcntl
+
     import yaml
 
     with open(config_path, "w", encoding="utf-8") as f:
@@ -281,17 +328,17 @@ class CreateApiKeyRequest(BaseModel):
     """POST /admin/api-keys 请求体。"""
 
     user_id: str = Field(..., min_length=1, description="关联的用户 ID")
-    daily_tokens: Optional[int] = Field(default=None, description="每日 token 上限")
-    monthly_cost: Optional[float] = Field(default=None, description="每月成本上限（美元）")
-    rate_limit_rpm: Optional[int] = Field(default=None, description="每分钟请求数上限")
-    rate_limit_tpm: Optional[int] = Field(default=None, description="每分钟 token 数上限")
-    group_id: Optional[str] = Field(default=None, description="用户组 ID（grp-*）")
-    cache_scope: Optional[str] = Field(default=None, description="缓存范围: private/group/public")
-    scopes: List[str] = Field(
+    daily_tokens: int | None = Field(default=None, description="每日 token 上限")
+    monthly_cost: float | None = Field(default=None, description="每月成本上限（美元）")
+    rate_limit_rpm: int | None = Field(default=None, description="每分钟请求数上限")
+    rate_limit_tpm: int | None = Field(default=None, description="每分钟 token 数上限")
+    group_id: str | None = Field(default=None, description="用户组 ID（grp-*）")
+    cache_scope: str | None = Field(default=None, description="缓存范围: private/group/public")
+    scopes: list[str] = Field(
         default_factory=lambda: ["chat", "embedding"],
         description="权限范围: admin/chat/embedding",
     )
-    expires_at: Optional[str] = Field(
+    expires_at: str | None = Field(
         default=None, description="ISO-8601 到期时间；为空表示不过期"
     )
 
@@ -299,7 +346,7 @@ class CreateApiKeyRequest(BaseModel):
 class RotateApiKeyRequest(BaseModel):
     """POST /admin/api-keys/{key_id}/rotate 请求体。"""
 
-    expires_at: Optional[str] = Field(
+    expires_at: str | None = Field(
         default=None, description="替换 Key 的 ISO-8601 到期时间"
     )
 
@@ -307,10 +354,10 @@ class RotateApiKeyRequest(BaseModel):
 class UpdateQuotaRequest(BaseModel):
     """PUT /admin/api-keys/{key_id} 请求体 — 修改用户配额。"""
 
-    daily_tokens: Optional[int] = Field(default=None, ge=1, description="每日 token 上限")
-    monthly_cost: Optional[float] = Field(default=None, gt=0, description="每月成本上限（美元）")
-    rate_limit_rpm: Optional[int] = Field(default=None, ge=1, description="每分钟请求数上限")
-    rate_limit_tpm: Optional[int] = Field(default=None, ge=1, description="每分钟 token 数上限")
+    daily_tokens: int | None = Field(default=None, ge=1, description="每日 token 上限")
+    monthly_cost: float | None = Field(default=None, gt=0, description="每月成本上限（美元）")
+    rate_limit_rpm: int | None = Field(default=None, ge=1, description="每分钟请求数上限")
+    rate_limit_tpm: int | None = Field(default=None, ge=1, description="每分钟 token 数上限")
 
 
 # ------------------------------------------------------------------
@@ -321,10 +368,10 @@ class UpdateQuotaRequest(BaseModel):
 def _get_keystore_and_metrics(request: Request) -> tuple[Any, Any]:
     """从 app.state 获取 SQLiteStore 和 MetricsCollector。"""
     from .app_state import get_state
-    return getattr(get_state(), "key_store"), getattr(get_state(), "metrics_collector")
+    return get_state().key_store, get_state().metrics_collector
 
 
-def _get_auth_defaults() -> Dict[str, Any]:
+def _get_auth_defaults() -> dict[str, Any]:
     """从 config 获取 auth.defaults 配额默认值。"""
     from .app_state import get_state
     config_manager = getattr(get_state(), "config_manager", None)
@@ -356,8 +403,8 @@ def _get_budget_alert_threshold() -> float:
 
 
 def _format_quota_item(
-    key_data: Dict[str, Any], key_hash: str, group_name: Optional[str] = None,
-) -> Dict[str, Any]:
+    key_data: dict[str, Any], key_hash: str, group_name: str | None = None,
+) -> dict[str, Any]:
     """格式化单个 API Key 的配额信息。"""
     defaults = _get_auth_defaults()
     daily_limit = int(key_data.get("daily_tokens_limit", defaults["daily_tokens"]))
@@ -416,17 +463,17 @@ async def list_api_keys(
     request: Request,
     page: int = Query(default=1, ge=1, description="页码"),
     page_size: int = Query(default=20, ge=1, le=100, description="每页数量"),
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """列出所有 API Key 及其配额使用情况。"""
-    key_store, metrics = _get_keystore_and_metrics(request)
+    key_store, _metrics = _get_keystore_and_metrics(request)
 
     if key_store is None:
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Auth store not initialized"}})
 
     # Auto-reseed: 如果 SQLite 中没有 API Key，自动从 config.yaml 重新导入
     from .app_state import get_state
-    config_manager = getattr(get_state(), "config_manager")
+    config_manager = get_state().config_manager
     if config_manager:
         auth_config = config_manager.get("auth", {})
         keys_config = auth_config.get("api_keys", [])
@@ -445,13 +492,13 @@ async def list_api_keys(
     paginated = all_keys[start:end]
 
     # Resolve group_name for each key
-    s = get_state()
-    group_name_cache: Dict[str, Optional[str]] = {}
-    items: List[Dict[str, Any]] = []
+    get_state()
+    group_name_cache: dict[str, str | None] = {}
+    items: list[dict[str, Any]] = []
     for k in paginated:
         gid = k.get("group_id", "") or ""
         if gid and gid not in group_name_cache:
-            gname: Optional[str] = None
+            gname: str | None = None
             try:
                 gdata = await key_store.get_group(gid)
                 if gdata:
@@ -483,7 +530,7 @@ async def list_api_keys(
 async def create_api_key(
     request: Request,
     body: CreateApiKeyRequest,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
 
     """创建新的 API Key。"""
@@ -533,7 +580,7 @@ async def create_api_key(
 async def delete_api_key(
     request: Request,
     key_id: str,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
 
     """撤销指定 API Key，并保留审计元数据。"""
@@ -546,7 +593,7 @@ async def delete_api_key(
     if not success:
         raise HTTPException(status_code=404, detail={"error": {"code": "not_found", "message": f"API key '{key_id}' not found"}})
 
-    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now_iso = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     return {
         "data": {
@@ -563,7 +610,7 @@ async def rotate_api_key(
     request: Request,
     key_id: str,
     body: RotateApiKeyRequest,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """原子撤销旧 Key 并签发继承权限和配额的新 Key。"""
     key_store, _ = _get_keystore_and_metrics(request)
@@ -588,7 +635,7 @@ async def update_api_key_quota(
     request: Request,
     key_id: str,
     body: UpdateQuotaRequest,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """修改指定 API Key 的配额限制。
 
@@ -613,7 +660,7 @@ async def update_api_key_quota(
         raise HTTPException(status_code=404, detail={"error": {"code": "not_found", "message": f"API key '{key_id}' not found"}})
 
     # 仅更新非 None 字段
-    updated_fields: Dict[str, str] = {}
+    updated_fields: dict[str, str] = {}
     if body.daily_tokens is not None:
         updated_fields["daily_tokens_limit"] = str(body.daily_tokens)
     if body.monthly_cost is not None:
@@ -656,17 +703,17 @@ async def update_api_key_quota(
 @router.get("/metrics-json")
 async def get_metrics_json(
     request: Request,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
 
     """返回 Prometheus 指标的 JSON 格式，供前端仪表板使用。"""
     from .app_state import get_state
     s = get_state()
-    metrics_collector = getattr(s, "metrics_collector")
-    key_store = getattr(s, "key_store")
+    metrics_collector = s.metrics_collector
+    key_store = s.key_store
 
     # 收集 Prometheus 指标
-    prom_samples: Dict[str, Any] = {}
+    prom_samples: dict[str, Any] = {}
     try:
         from prometheus_client import generate_latest
         # 单 worker 模式：使用 MetricsCollector 持有的 registry
@@ -691,7 +738,7 @@ async def get_metrics_json(
         logger.warning("Failed to collect Prometheus metrics: %s", exc)
 
     # 收集 KeyStore 聚合数据 (SQLite)
-    key_stats: Dict[str, Any] = {"total_keys": 0, "total_daily_tokens_used": 0, "total_monthly_cost_used": 0.0}
+    key_stats: dict[str, Any] = {"total_keys": 0, "total_daily_tokens_used": 0, "total_monthly_cost_used": 0.0}
     if key_store:
         rows = key_store.conn.fetchall(
             "SELECT daily_tokens_used, monthly_cost_used FROM api_keys WHERE status='active'"
@@ -702,7 +749,7 @@ async def get_metrics_json(
             key_stats["total_monthly_cost_used"] += float(r["monthly_cost_used"])
 
     # 熔断器状态(从 litellm bridge tracker 读)
-    cb_states: Dict[str, Any] = {}
+    cb_states: dict[str, Any] = {}
     litellm_bridge_for_cb = getattr(s, "litellm_bridge", None)
     if litellm_bridge_for_cb is not None and hasattr(litellm_bridge_for_cb, "get_cooldown_status"):
         cb_states = litellm_bridge_for_cb.get_cooldown_status()
@@ -726,7 +773,7 @@ async def get_metrics_json(
 @router.get("/plugins-config")
 async def get_plugins_config(
     request: Request,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
 
     """返回当前 config.yaml 中实际的插件配置。
@@ -736,7 +783,7 @@ async def get_plugins_config(
     """
     from .app_state import get_state
     s = get_state()
-    config_manager = getattr(s, "config_manager")
+    config_manager = s.config_manager
     # 从 registry 查每个插件的 pipeline_kind（注册时由代码设置，不在 YAML 里）
     registry = getattr(s, "plugin_registry", None)
     reg_map = {}
@@ -785,11 +832,10 @@ async def get_plugins_config(
     if config_manager:
         try:
             import os
-            import yaml
+
             config_path = config_manager.config_path
             if config_path and os.path.isfile(config_path):
-                with open(config_path, "r", encoding="utf-8") as f:
-                    raw = yaml.safe_load(f) or {}
+                raw = _read_yaml(config_path)
                 raw_plugins = raw.get("plugins", [])
                 for p in raw_plugins:
                     if isinstance(p, dict):
@@ -828,7 +874,7 @@ async def get_plugins_config(
 @router.put("/plugins-config")
 async def update_plugins_config(
     request: Request,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
 
     """更新插件配置（启用/禁用）。
@@ -836,16 +882,14 @@ async def update_plugins_config(
     多 worker 场景下，内存缓存可能过期，直接从文件读取最新配置。
     使用文件锁防止并发写冲突。
     """
-    import fcntl
     import os
-    import yaml
+
     from pydantic import BaseModel, Field
 
     class PluginToggleRequest(BaseModel):
         name: str = Field(..., min_length=1)
         enabled: bool
 
-    body: PluginToggleRequest
     try:
         # 解析请求体
         raw = await request.json()
@@ -859,7 +903,7 @@ async def update_plugins_config(
 
     from .app_state import get_state
     s = get_state()
-    config_manager = getattr(s, "config_manager")
+    config_manager = s.config_manager
 
     if not config_manager:
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "ConfigManager not initialized"}})
@@ -869,15 +913,9 @@ async def update_plugins_config(
     if not config_path or not os.path.isfile(config_path):
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Config file not found"}})
 
-    # 文件锁：确保同一时刻只有一个 worker 读写 config.yaml
-    lock_path = config_path + ".lock"
-    lock_fd = open(lock_path, "w")
-    try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    gen_config_path = _GENERATION_PLUGIN_CONFIG_PATH.get(name)
 
-        with open(config_path, "r", encoding="utf-8") as f:
-            file_config = yaml.safe_load(f) or {}
-
+    def _update(file_config: dict[str, Any]) -> None:
         # 1) 理解管道插件：在 config.yaml 的 plugins 列表里。
         plugins_cfg = file_config.get("plugins", [])
         updated = False
@@ -891,7 +929,6 @@ async def update_plugins_config(
         # 2) 生成管道插件：不在 plugins 列表，由 generation_optimization 段控制。
         #    注册时 enabled = generation_optimization.enabled and <sub>.enabled，
         #    因此切换时写 <sub>.enabled，并保持全局 enabled=true（否则子项全被门控关闭）。
-        gen_config_path = _GENERATION_PLUGIN_CONFIG_PATH.get(name)
         if not updated and gen_config_path:
             gen_opt = file_config.setdefault("generation_optimization", {})
             gen_opt["enabled"] = True  # 全局门控：必须开，否则子插件 enabled 无意义
@@ -904,31 +941,22 @@ async def update_plugins_config(
         if not updated:
             raise HTTPException(status_code=404, detail={"error": {"code": "not_found", "message": f"Plugin '{name}' not found"}})
 
-        # 写回文件：保留全部 section（不再用 writable_keys 白名单——那会丢弃
-        # debug / cache / media_optimization / rate_limiter 等段，导致配置损坏级联）。
-        # 原子写(临时文件+os.replace),避免 Watchdog 读到半截 YAML。
-        _atomic_write_yaml(config_path, file_config)
+    file_config = _locked_update_yaml(config_path, _update)
+    plugins_cfg = file_config.get("plugins", [])
 
-        # 原子交换内存配置并触发热重载回调（重建插件实例等）。
-        # 直接 _set_nested 只改内存不通知，导致插件 enabled 改动不生效——
-        # 改用 atomic_swap 走标准的 swap + _notify_reload 流程。
-        import copy
-        new_config = copy.deepcopy(config_manager._config)
-        if gen_config_path:
-            config_manager._set_nested(
-                new_config,
-                "generation_optimization." + ".".join(gen_config_path),
-                enabled,
-            )
-            config_manager._set_nested(new_config, "generation_optimization.enabled", True)
-        else:
-            config_manager._set_nested(new_config, "plugins", plugins_cfg)
-
-        # 在锁内执行原子交换（atomic_swap 内部有自己的锁），触发 on_reload 回调
-        config_manager.atomic_swap(new_config)
-    finally:
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        lock_fd.close()
+    # 原子交换内存配置并触发热重载回调（重建插件实例等）。
+    import copy
+    new_config = copy.deepcopy(config_manager._config)
+    if gen_config_path:
+        config_manager._set_nested(
+            new_config,
+            "generation_optimization." + ".".join(gen_config_path),
+            enabled,
+        )
+        config_manager._set_nested(new_config, "generation_optimization.enabled", True)
+    else:
+        config_manager._set_nested(new_config, "plugins", plugins_cfg)
+    config_manager.atomic_swap(new_config)
 
     return {
         "data": {"name": name, "enabled": enabled},
@@ -940,7 +968,7 @@ async def update_plugins_config(
 async def get_quota(
     request: Request,
     key_id: str,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
 
     """查询指定 API Key 的详细配额状态。"""
@@ -970,7 +998,7 @@ async def get_quota(
     tpm_limit = int(data.get("rate_limit_tpm", defaults["rate_limit_tpm"]))
 
     # 计算重置时间
-    now_utc = datetime.now(timezone.utc)
+    now_utc = datetime.now(UTC)
     daily_reset = now_utc.replace(hour=0, minute=0, second=0, microsecond=0) + __import__("datetime").timedelta(days=1)
     if now_utc.hour >= 0:
         daily_reset_str = daily_reset.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -982,7 +1010,7 @@ async def get_quota(
     monthly_reset_str = monthly_reset.strftime("%Y-%m-%dT%H:%M:%SZ")
 
     # 告警检查
-    alerts: List[Dict[str, Any]] = []
+    alerts: list[dict[str, Any]] = []
     daily_pct = daily_used / daily_limit if daily_limit > 0 else 0
     monthly_pct = monthly_used / monthly_limit if monthly_limit > 0 else 0
 
@@ -1000,7 +1028,7 @@ async def get_quota(
             "message": f"Monthly cost usage has reached {monthly_pct:.0%}",
         })
 
-    rpm_window_start = int(data.get("rpm_window_start", 0))
+    int(data.get("rpm_window_start", 0))
     rpm_current = int(data.get("rpm_window_count", 0))
     tpm_current = int(data.get("tpm_window_count", 0))
 
@@ -1050,7 +1078,7 @@ async def get_quota(
 async def set_plugin_debug(
     plugin_name: str,
     request: Request,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """开关单个插件的 debug 日志 —— 写 config.yaml 的 debug.plugins.per_plugin[name]。
 
@@ -1058,10 +1086,10 @@ async def set_plugin_debug(
     写完后触发 atomic_swap → _notify_reload → DebugConfigWatcher 更新。
     """
     import os
-    import yaml
+
     from .app_state import get_state
     s = get_state()
-    config_manager = getattr(s, "config_manager")
+    config_manager = s.config_manager
     if not config_manager:
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "ConfigManager not initialized"}})
 
@@ -1072,22 +1100,16 @@ async def set_plugin_debug(
     if not config_path or not os.path.isfile(config_path):
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "config.yaml not found"}})
 
-    # 读改写:只更新 debug.plugins.per_plugin[plugin_name],不动其他 section。
-    # 不在此处再套一层 fcntl.flock —— _atomic_write_yaml 已保证原子写(临时文件
-    # +os.replace,或在 bind-mount 上回退到 _flocked_inplace_write 自带的 LOCK_EX)。
-    # 这里若再持一把 LOCK_EX,bind-mount 回退路径会尝试在同一文件上二次加锁 → 死锁。
-    # 与 update_plugins_config / update_global_config 两个兄弟写端点保持一致(均无外层锁)。
-    import yaml
-    with open(config_path, "r", encoding="utf-8") as f:
-        raw = yaml.safe_load(f) or {}
-    debug_section = raw.get("debug") or {}
-    plugins_section = debug_section.get("plugins") or {}
-    per_plugin = plugins_section.get("per_plugin") or {}
-    per_plugin[plugin_name] = enabled
-    plugins_section["per_plugin"] = per_plugin
-    debug_section["plugins"] = plugins_section
-    raw["debug"] = debug_section
-    _atomic_write_yaml(config_path, raw)
+    def _update(file_config: dict[str, Any]) -> None:
+        debug_section = file_config.get("debug") or {}
+        plugins_section = debug_section.get("plugins") or {}
+        per_plugin = plugins_section.get("per_plugin") or {}
+        per_plugin[plugin_name] = enabled
+        plugins_section["per_plugin"] = per_plugin
+        debug_section["plugins"] = plugins_section
+        file_config["debug"] = debug_section
+
+    raw = _locked_update_yaml(config_path, _update)
 
     # 内存更新 + 触发热重载(DebugConfigWatcher 在 on_reload 回调里 atomic swap)
     config_manager.set("debug", raw.get("debug", {}))
@@ -1099,7 +1121,7 @@ async def set_plugin_debug(
 @router.get("/config/debug")
 async def get_debug_config_endpoint(
     request: Request,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """返回当前 DebugConfig(5 维度 + plugins.enabled + per_plugin)。"""
     from aigateway_core.shared.debug_config import get_debug_config
@@ -1125,7 +1147,7 @@ async def get_debug_config_endpoint(
 @router.get("/global-config")
 async def get_global_config(
     request: Request,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
 
     """返回全局配置（热重载、调试模式）。
@@ -1133,20 +1155,19 @@ async def get_global_config(
     直接从文件读取，避免多 worker 内存不一致。
     """
     import os
-    import yaml
+
     from .app_state import get_state
     s = get_state()
-    config_manager = getattr(s, "config_manager")
+    config_manager = s.config_manager
 
     hot_reload = False
     debug_mode = False
-    debug: Dict[str, Any] = {}  # 5 维度 debug 开关(PR2)
+    debug: dict[str, Any] = {}  # 5 维度 debug 开关(PR2)
 
     if config_manager:
         config_path = config_manager.config_path
         if config_path and os.path.isfile(config_path):
-            with open(config_path, "r", encoding="utf-8") as f:
-                file_config = yaml.safe_load(f) or {}
+            file_config = _read_yaml(config_path)
             hot_reload = file_config.get("hot_reload", False)
             debug_mode = file_config.get("debug_mode", False)
             debug = file_config.get("debug", {}) or {}
@@ -1164,14 +1185,13 @@ async def get_global_config(
 @router.put("/global-config")
 async def update_global_config(
     request: Request,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
 
     """更新全局配置（热重载、调试模式）。"""
     from .app_state import get_state
     s = get_state()
-    config_manager = getattr(s, "config_manager")
-    import yaml
+    config_manager = s.config_manager
 
     if not config_manager:
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "ConfigManager not initialized"}})
@@ -1205,25 +1225,24 @@ async def update_global_config(
         debug_section["plugins"] = plugins_section
         debug_section["plugins_enabled"] = plugins_section["enabled"]
 
-    # 更新内存缓存
-    config_manager.set("hot_reload", hot_reload)
-    config_manager.set("debug_mode", debug_mode)
-    if isinstance(debug_section, dict):
-        config_manager.set("debug", debug_section)
-
     # 写回 config.yaml（只更新这些键，保留其余 section 不变）
     config_path = config_manager.config_path
     if config_path:
         import os
         if os.path.isfile(config_path):
-            with open(config_path, "r", encoding="utf-8") as f:
-                file_config = yaml.safe_load(f) or {}
-            # 仅覆写 admin 可编辑的键，不丢弃其他 section
-            file_config["hot_reload"] = hot_reload
-            file_config["debug_mode"] = debug_mode
-            if isinstance(debug_section, dict):
-                file_config["debug"] = debug_section
-            _atomic_write_yaml(config_path, file_config)
+            def _update(file_config: dict[str, Any]) -> None:
+                file_config["hot_reload"] = hot_reload
+                file_config["debug_mode"] = debug_mode
+                if isinstance(debug_section, dict):
+                    file_config["debug"] = debug_section
+
+            _locked_update_yaml(config_path, _update)
+
+    # 文件提交成功后再更新内存，避免写盘失败时两份配置分叉。
+    config_manager.set("hot_reload", hot_reload)
+    config_manager.set("debug_mode", debug_mode)
+    if isinstance(debug_section, dict):
+        config_manager.set("debug", debug_section)
 
     # 触发热重载回调（重建插件实例等）。config_manager.set 已改内存，
     # 但 set 不通知回调；这里显式 atomic_swap 走 _notify_reload。
@@ -1263,16 +1282,16 @@ async def get_request_logs(
     request: Request,
     page: int = Query(default=1, ge=1, description="页码"),
     page_size: int = Query(default=50, ge=1, le=200, description="每页数量"),
-    user_id: Optional[str] = Query(default=None, description="按用户筛选"),
-    model: Optional[str] = Query(default=None, description="按模型筛选"),
-    status: Optional[str] = Query(default=None, description="按状态码筛选"),
+    user_id: str | None = Query(default=None, description="按用户筛选"),
+    model: str | None = Query(default=None, description="按模型筛选"),
+    status: str | None = Query(default=None, description="按状态码筛选"),
     cache_only: bool = Query(default=False, description="仅缓存命中"),
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """从 Redis 查询最近的请求日志（支持服务端分页）。"""
     from .app_state import get_state
     s = get_state()
-    redis_mgr = getattr(s, "redis_manager")
+    redis_mgr = s.redis_manager
 
     if redis_mgr is None or redis_mgr.redis is None:
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Redis not connected"}})
@@ -1355,7 +1374,7 @@ async def get_request_logs(
 async def get_trace_detail(
     request: Request,
     trace_id: str,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """根据 trace_id 查询该请求的全链路信息（包括插件执行步骤）。
 
@@ -1366,7 +1385,7 @@ async def get_trace_detail(
     """
     from .app_state import get_state
     s = get_state()
-    redis_mgr = getattr(s, "redis_manager")
+    redis_mgr = s.redis_manager
 
     if redis_mgr is None or redis_mgr.redis is None:
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Redis not connected"}})
@@ -1438,12 +1457,12 @@ async def get_trace_detail(
 @router.delete("/logs")
 async def delete_all_logs(
     request: Request,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """清空所有请求日志。"""
     from .app_state import get_state
     s = get_state()
-    redis_mgr = getattr(s, "redis_manager")
+    redis_mgr = s.redis_manager
 
     if redis_mgr is None or redis_mgr.redis is None:
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Redis not connected"}})
@@ -1462,7 +1481,7 @@ async def delete_all_logs(
 
 
 class BatchDeleteLogsRequest(BaseModel):
-    request_ids: List[str] = Field(..., min_length=1, max_length=1000,
+    request_ids: list[str] = Field(..., min_length=1, max_length=1000,
                                     description="要删除的 request_id 列表(1-1000)")
 
 
@@ -1470,7 +1489,7 @@ class BatchDeleteLogsRequest(BaseModel):
 async def batch_delete_logs(
     payload: BatchDeleteLogsRequest,
     request: Request,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """按 request_id 批量删除请求日志。
 
@@ -1486,7 +1505,7 @@ async def batch_delete_logs(
     """
     from .app_state import get_state
     s = get_state()
-    redis_mgr = getattr(s, "redis_manager")
+    redis_mgr = s.redis_manager
 
     if redis_mgr is None or redis_mgr.redis is None:
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Redis not connected"}})
@@ -1498,7 +1517,7 @@ async def batch_delete_logs(
     # 因为大多数删除操作针对的是近期的请求。
     # zrevrange(..., withscores=True) 返回 [(member, score), ...]; member 是 JSON 字符串。
     entries = await redis_mgr.redis.zrevrange(zset_key, 0, 9999, withscores=True)
-    to_remove: List[bytes] = []
+    to_remove: list[bytes] = []
     for member, _score in entries:
         try:
             entry = json.loads(member.decode() if isinstance(member, bytes) else member)
@@ -1531,14 +1550,14 @@ async def batch_delete_logs(
 @router.get("/config")
 async def get_full_config(
     request: Request,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """返回当前 config.yaml 的完整内容（脱敏 API Key）。"""
     import os
-    import yaml
+
     from .app_state import get_state
     s = get_state()
-    config_manager = getattr(s, "config_manager")
+    config_manager = s.config_manager
 
     if not config_manager:
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "ConfigManager not initialized"}})
@@ -1547,13 +1566,12 @@ async def get_full_config(
     if not config_path or not os.path.isfile(config_path):
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Config file not found"}})
 
-    with open(config_path, "r", encoding="utf-8") as f:
-        file_config = yaml.safe_load(f) or {}
+    file_config = _read_yaml(config_path)
 
     # 脱敏 providers 中的 api_key（只返回前 8 位 + ***）
     safe_config = json.loads(json.dumps(file_config, default=str))
     if "providers" in safe_config:
-        for provider_name, provider_cfg in safe_config["providers"].items():
+        for provider_cfg in safe_config["providers"].values():
             if isinstance(provider_cfg, dict) and "api_key" in provider_cfg:
                 key_val = provider_cfg["api_key"]
                 if isinstance(key_val, str) and len(key_val) > 8 and not key_val.startswith("${"):
@@ -1568,15 +1586,14 @@ async def get_full_config(
 @router.put("/config")
 async def update_full_config(
     request: Request,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """更新 config.yaml 配置（部分更新，仅支持安全字段）。"""
-    import fcntl
     import os
-    import yaml
+
     from .app_state import get_state
     s = get_state()
-    config_manager = getattr(s, "config_manager")
+    config_manager = s.config_manager
 
     if not config_manager:
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "ConfigManager not initialized"}})
@@ -1593,14 +1610,7 @@ async def update_full_config(
     # 安全字段白名单（不允许通过 API 修改 auth.api_keys 中的密钥明文）
     writable_keys = {"server", "plugins", "providers", "embedding", "observability", "infrastructure", "hot_reload", "debug_mode"}
 
-    lock_path = config_path + ".lock"
-    lock_fd = open(lock_path, "w")
-    try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
-
-        with open(config_path, "r", encoding="utf-8") as f:
-            file_config = yaml.safe_load(f) or {}
-
+    def _update(file_config: dict[str, Any]) -> None:
         # 合并更新（只更新白名单内的字段）
         for key in writable_keys:
             if key in new_config:
@@ -1614,14 +1624,8 @@ async def update_full_config(
                                 pcfg["api_key"] = orig.get("api_key", pcfg["api_key"])
                 file_config[key] = new_config[key]
 
-        _atomic_write_yaml(config_path, file_config)
-
-        # 触发热重载
-        config_manager.load()
-
-    finally:
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        lock_fd.close()
+    _locked_update_yaml(config_path, _update)
+    config_manager.load()
 
     return {
         "data": {"updated": True},
@@ -1637,12 +1641,12 @@ async def update_full_config(
 @router.get("/rag/documents")
 async def list_rag_documents(
     request: Request,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """列出已导入的 RAG 文档。"""
     from .app_state import get_state
     s = get_state()
-    redis_mgr = getattr(s, "redis_manager")
+    redis_mgr = s.redis_manager
 
     if redis_mgr is None or redis_mgr.redis is None:
         return {"data": {"documents": []}, "message": "success"}
@@ -1666,7 +1670,7 @@ async def list_rag_documents(
 @router.post("/rag/documents")
 async def import_rag_document(
     request: Request,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """导入文档到 RAG 知识库。
 
@@ -1676,12 +1680,11 @@ async def import_rag_document(
     """
     import time as time_mod
     import uuid
-    import hashlib
 
     from .app_state import get_state
     s = get_state()
-    redis_mgr = getattr(s, "redis_manager")
-    qdrant_mgr = getattr(s, "qdrant_manager")
+    redis_mgr = s.redis_manager
+    qdrant_mgr = s.qdrant_manager
 
     if qdrant_mgr is None or qdrant_mgr._http is None:
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Qdrant not connected"}})
@@ -1770,7 +1773,9 @@ async def import_rag_document(
                 _cfg_mgr = getattr(get_state(), "config_manager", None)
                 _emb_cfg = _cfg_mgr.get("embedding", {}) if _cfg_mgr else {}
                 _model_name = _emb_cfg.get("model", "Qwen/Qwen3-Embedding-0.6B")
-                st_model = SentenceTransformer(_model_name)
+                _device = _emb_cfg.get("device", "auto")
+                _model_kwargs = {} if _device == "auto" else {"device": _device}
+                st_model = SentenceTransformer(_model_name, **_model_kwargs)
                 _set_embedding_model(st_model)
 
             # 批量 encode — 注意：encode() 是同步 CPU 密集型操作，
@@ -1869,13 +1874,13 @@ async def import_rag_document(
 async def delete_rag_document(
     request: Request,
     doc_id: str,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """删除指定 RAG 文档及其在 Qdrant 中的所有向量。"""
     from .app_state import get_state
     s = get_state()
-    redis_mgr = getattr(s, "redis_manager")
-    qdrant_mgr = getattr(s, "qdrant_manager")
+    redis_mgr = s.redis_manager
+    qdrant_mgr = s.qdrant_manager
 
     if qdrant_mgr is None or qdrant_mgr._http is None:
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Qdrant not connected"}})
@@ -1920,7 +1925,7 @@ async def delete_rag_document(
 # ------------------------------------------------------------------
 
 
-def _split_text(text: str, strategy: str = "fixed_size", chunk_size: int = 512, overlap: int = 64) -> List[str]:
+def _split_text(text: str, strategy: str = "fixed_size", chunk_size: int = 512, overlap: int = 64) -> list[str]:
     """将文本按策略分块。
 
     Args:
@@ -1999,14 +2004,12 @@ def _split_text(text: str, strategy: str = "fixed_size", chunk_size: int = 512, 
 @router.get("/cache/l3/config")
 async def get_l3_cache_config(
     request: Request,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """返回当前 L3 缓存管理配置。"""
-    import os
-    import yaml
     from .app_state import get_state
     s = get_state()
-    config_manager = getattr(s, "config_manager")
+    config_manager = s.config_manager
 
     # 从 config.yaml 读取 cache.l3 配置
     default_config = {
@@ -2035,13 +2038,12 @@ async def get_l3_cache_config(
 @router.put("/cache/l3/config")
 async def update_l3_cache_config(
     request: Request,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """更新 L3 缓存配置并持久化到 config.yaml。"""
-    import yaml
     from .app_state import get_state
     s = get_state()
-    config_manager = getattr(s, "config_manager")
+    config_manager = s.config_manager
 
     if not config_manager:
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "ConfigManager not initialized"}})
@@ -2089,15 +2091,15 @@ async def list_l3_entries(
     request: Request,
     page: int = Query(default=1, ge=1, description="页码"),
     page_size: int = Query(default=20, ge=1, le=100, description="每页数量"),
-    mode: Optional[str] = Query(default=None, description="按模式过滤: auto | manual"),
-    user_id: Optional[str] = Query(default=None, description="按用户过滤"),
+    mode: str | None = Query(default=None, description="按模式过滤: auto | manual"),
+    user_id: str | None = Query(default=None, description="按用户过滤"),
     sort_by: str = Query(default="created_at", description="排序字段"),
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """列出 L3 缓存条目，支持分页、按模式和用户过滤。"""
     from .app_state import get_state
     s = get_state()
-    qdrant_mgr = getattr(s, "qdrant_manager")
+    qdrant_mgr = s.qdrant_manager
 
     if qdrant_mgr is None or qdrant_mgr._http is None:
         return {
@@ -2172,7 +2174,7 @@ async def list_l3_entries(
 async def update_entry_mode(
     request: Request,
     point_id: str,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """切换缓存条目的管理模式。
 
@@ -2180,10 +2182,11 @@ async def update_entry_mode(
     manual → auto: 按 ttl_hours 设置过期时间
     """
     import time as time_mod
+
     from .app_state import get_state
     s = get_state()
-    qdrant_mgr = getattr(s, "qdrant_manager")
-    config_manager = getattr(s, "config_manager")
+    qdrant_mgr = s.qdrant_manager
+    config_manager = s.config_manager
 
     if qdrant_mgr is None or qdrant_mgr._http is None:
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Qdrant not connected"}})
@@ -2201,7 +2204,7 @@ async def update_entry_mode(
 
     # 构建 payload 更新
     now = int(time_mod.time())
-    update_payload: Dict[str, Any] = {"management_mode": new_mode}
+    update_payload: dict[str, Any] = {"management_mode": new_mode}
 
     if new_mode == "manual":
         update_payload["ttl"] = 0  # 永不过期
@@ -2233,12 +2236,12 @@ async def update_entry_mode(
 async def delete_l3_entry(
     request: Request,
     point_id: str,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """手动删除指定的 L3 缓存条目（任何模式均可删除）。"""
     from .app_state import get_state
     s = get_state()
-    qdrant_mgr = getattr(s, "qdrant_manager")
+    qdrant_mgr = s.qdrant_manager
 
     if qdrant_mgr is None or qdrant_mgr._http is None:
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Qdrant not connected"}})
@@ -2260,12 +2263,12 @@ async def delete_l3_entry(
 @router.post("/cache/l3/cleanup")
 async def trigger_l3_cleanup(
     request: Request,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """手动触发一次 L3 过期清理（只清理 mode=auto 且已过期的条目）。"""
     from .app_state import get_state
     s = get_state()
-    cache_manager = getattr(s, "cache_manager")
+    cache_manager = s.cache_manager
 
     if cache_manager is None:
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "CacheManager not initialized"}})
@@ -2287,7 +2290,7 @@ async def trigger_l3_cleanup(
 async def test_provider_connectivity(
     request: Request,
     provider: str,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """测试指定提供商的 API 连通性。
 
@@ -2295,11 +2298,10 @@ async def test_provider_connectivity(
     """
     import os
     import time as time_mod
-    import yaml
 
     from .app_state import get_state
     s = get_state()
-    config_manager = getattr(s, "config_manager")
+    config_manager = s.config_manager
 
     if not config_manager:
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "ConfigManager not initialized"}})
@@ -2309,8 +2311,7 @@ async def test_provider_connectivity(
     if not config_path or not os.path.isfile(config_path):
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Config file not found"}})
 
-    with open(config_path, "r", encoding="utf-8") as f:
-        file_config = yaml.safe_load(f) or {}
+    file_config = _read_yaml(config_path)
 
     providers_cfg = file_config.get("providers", {})
     if provider not in providers_cfg:
@@ -2404,15 +2405,14 @@ async def test_provider_connectivity(
 async def get_provider_models(
     request: Request,
     provider: str,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """从提供商 API 获取可用的模型列表。"""
     import os
-    import yaml
 
     from .app_state import get_state
     s = get_state()
-    config_manager = getattr(s, "config_manager")
+    config_manager = s.config_manager
 
     if not config_manager:
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "ConfigManager not initialized"}})
@@ -2421,8 +2421,7 @@ async def get_provider_models(
     if not config_path or not os.path.isfile(config_path):
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Config file not found"}})
 
-    with open(config_path, "r", encoding="utf-8") as f:
-        file_config = yaml.safe_load(f) or {}
+    file_config = _read_yaml(config_path)
 
     providers_cfg = file_config.get("providers", {})
     if provider not in providers_cfg:
@@ -2499,26 +2498,26 @@ class CreateGroupRequest(BaseModel):
     """POST /admin/groups 请求体。"""
 
     name: str = Field(..., min_length=1, description="组名称")
-    daily_tokens: Optional[int] = Field(default=None, description="每日 token 上限")
-    monthly_cost: Optional[float] = Field(default=None, description="每月成本上限（美元）")
-    rate_limit_rpm: Optional[int] = Field(default=None, description="每分钟请求数上限")
-    rate_limit_tpm: Optional[int] = Field(default=None, description="每分钟 token 数上限")
+    daily_tokens: int | None = Field(default=None, description="每日 token 上限")
+    monthly_cost: float | None = Field(default=None, description="每月成本上限（美元）")
+    rate_limit_rpm: int | None = Field(default=None, description="每分钟请求数上限")
+    rate_limit_tpm: int | None = Field(default=None, description="每分钟 token 数上限")
 
 
 class UpdateGroupRequest(BaseModel):
     """PUT /admin/groups/{group_id} 请求体。"""
 
-    daily_tokens: Optional[int] = Field(default=None, description="每日 token 上限")
-    monthly_cost: Optional[float] = Field(default=None, description="每月成本上限（美元）")
-    rate_limit_rpm: Optional[int] = Field(default=None, description="每分钟请求数上限")
-    rate_limit_tpm: Optional[int] = Field(default=None, description="每分钟 token 数上限")
-    status: Optional[str] = Field(default=None, description="active | suspended")
+    daily_tokens: int | None = Field(default=None, description="每日 token 上限")
+    monthly_cost: float | None = Field(default=None, description="每月成本上限（美元）")
+    rate_limit_rpm: int | None = Field(default=None, description="每分钟请求数上限")
+    rate_limit_tpm: int | None = Field(default=None, description="每分钟 token 数上限")
+    status: str | None = Field(default=None, description="active | suspended")
 
 
 @router.get("/groups")
 async def list_groups(
     request: Request,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """列出所有用户组及其成员数。"""
     from .app_state import get_state
@@ -2533,7 +2532,7 @@ async def list_groups(
 async def get_group(
     request: Request,
     group_id: str,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """获取单个用户组详情（含成员列表）。"""
     from .app_state import get_state
@@ -2550,7 +2549,7 @@ async def get_group(
 async def create_group(
     request: Request,
     body: CreateGroupRequest,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """创建新用户组。"""
     from .app_state import get_state
@@ -2580,7 +2579,7 @@ async def update_group(
     request: Request,
     group_id: str,
     body: UpdateGroupRequest,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """更新用户组配额或状态。"""
     from .app_state import get_state
@@ -2607,7 +2606,7 @@ async def update_group(
 async def delete_group(
     request: Request,
     group_id: str,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """删除用户组（必须为空）。"""
     from .app_state import get_state
@@ -2632,7 +2631,7 @@ class AssignKeyGroupRequest(BaseModel):
     """PUT /admin/api-keys/{key_id}/group 请求体。"""
 
     group_id: str = Field(..., description="目标组 ID（grp-*）")
-    cache_scope: Optional[str] = Field(default=None, description="private/group/public")
+    cache_scope: str | None = Field(default=None, description="private/group/public")
 
 
 @router.put("/api-keys/{key_id}/group")
@@ -2640,7 +2639,7 @@ async def assign_key_to_group(
     request: Request,
     key_id: str,
     body: AssignKeyGroupRequest,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """将 API Key 分配到用户组（迁移用量计数器）。"""
     key_store, _ = _get_keystore_and_metrics(request)
@@ -2690,19 +2689,20 @@ async def assign_key_to_group(
 async def prometheus_query(
     request: Request,
     query: str = Query(..., description="PromQL query string"),
-    time: Optional[str] = Query(None, description="RFC3339 timestamp (default now)"),
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    time: str | None = Query(None, description="RFC3339 timestamp (default now)"),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """Proxy to Prometheus /api/v1/query endpoint.
 
     Allows the frontend to run arbitrary PromQL queries against the
     Prometheus instance that scrapes the gateway.
     """
-    import httpx
     import os
+
+    import httpx
     prom_url = os.environ.get("AI_GATEWAY_PROMETHEUS_URL", "http://prometheus:9090")
     api_path = "/api/v1/query"
-    params: Dict[str, str] = {"query": query}
+    params: dict[str, str] = {"query": query}
     if time:
         params["time"] = time
 
@@ -2724,13 +2724,14 @@ async def prometheus_query_range(
     start: str = Query(..., description="Start timestamp (Unix seconds)"),
     end: str = Query(..., description="End timestamp (Unix seconds)"),
     step: str = Query("3600", description="Query resolution (seconds)"),
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """Proxy to Prometheus /api/v1/query_range endpoint."""
-    import httpx
     import os
+
+    import httpx
     prom_url = os.environ.get("AI_GATEWAY_PROMETHEUS_URL", "http://prometheus:9090")
-    params: Dict[str, str] = {"query": query, "start": start, "end": end, "step": step}
+    params: dict[str, str] = {"query": query, "start": start, "end": end, "step": step}
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(f"{prom_url.rstrip('/')}/api/v1/query_range", params=params)
@@ -2766,10 +2767,45 @@ def _get_draft_strategy():
     raise RuntimeError("DraftGeneratorStrategy 不可用 — 生成优化层未初始化")
 
 
+def _assert_draft_owner(
+    draft: Any,
+    auth: dict[str, Any],
+    *,
+    action: str,
+) -> None:
+    """Fail closed when an owned draft is accessed by another principal."""
+    draft_user_id = str(getattr(draft, "user_id", None) or "")
+    draft_group_id = str(getattr(draft, "group_id", None) or "")
+    if not draft_user_id and not draft_group_id:
+        # Compatibility for drafts created before owner metadata was persisted.
+        return
+    if not isinstance(auth, dict):
+        raise HTTPException(
+            status_code=403,
+            detail={"error": {"code": "forbidden", "message": "Invalid authentication"}},
+        )
+
+    auth_user_id = str(auth.get("user_id") or "")
+    auth_group_id = str(auth.get("group_id") or "")
+    if (
+        (draft_user_id and draft_user_id != auth_user_id)
+        or (draft_group_id and draft_group_id != auth_group_id)
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": {
+                    "code": "forbidden",
+                    "message": f"Only the draft owner can {action}",
+                }
+            },
+        )
+
+
 @router.get("/draft/{draft_id}")
 async def get_draft_status(
     draft_id: str,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """查询草稿状态与元信息.
 
@@ -2785,6 +2821,7 @@ async def get_draft_status(
     draft = await strategy.get_draft(draft_id)
     if draft is None:
         raise HTTPException(status_code=404, detail={"error": {"code": "draft_not_found", "message": f"Draft {draft_id} not found or expired"}})
+    _assert_draft_owner(draft, _auth, action="view its status")
 
     return {
         "draft_id": draft.draft_id,
@@ -2795,13 +2832,18 @@ async def get_draft_status(
         "max_attempts": draft.max_attempts,
         "created_at": draft.created_at,
         "expires_at": draft.expires_at,
+        "progress": getattr(draft, "progress", 0.0),
+        "stage": getattr(draft, "stage", draft.status),
+        "workflow_version": getattr(draft, "workflow_version", ""),
+        "comfy_prompt_id": getattr(draft, "comfy_prompt_id", None),
+        "gpu_seconds": getattr(draft, "gpu_seconds", 0.0),
     }
 
 
 @router.get("/draft/{draft_id}/preview")
 async def get_draft_preview(
     draft_id: str,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """获取草稿预览图（base64 data URL）.
 
@@ -2817,16 +2859,22 @@ async def get_draft_preview(
     draft = await strategy.get_draft(draft_id)
     if draft is None:
         raise HTTPException(status_code=404, detail={"error": {"code": "draft_not_found", "message": f"Draft {draft_id} not found or expired"}})
+    _assert_draft_owner(draft, _auth, action="view its preview")
 
     # generating：后台生成未完成，返回 202 让前端继续轮询
-    if draft.status == "generating":
+    if draft.status in {"generating", "queued", "running", "refining"}:
         return Response(
-            content=json.dumps({"draft_id": draft_id, "status": "generating"}),
+            content=json.dumps({
+                "draft_id": draft_id,
+                "status": draft.status,
+                "stage": getattr(draft, "stage", draft.status),
+                "progress": getattr(draft, "progress", 0.0),
+            }),
             status_code=202,
             media_type="application/json",
         )
     # failed：后台生成失败
-    if draft.status == "failed":
+    if draft.status in {"failed", "cancelled"}:
         raise HTTPException(status_code=410, detail={"error": {"code": "draft_failed", "message": f"Draft {draft_id} generation failed"}})
 
     if not draft.previews:
@@ -2846,7 +2894,7 @@ async def get_draft_preview(
 async def confirm_draft(
     draft_id: str,
     request: Request,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """确认草稿 → 触发高清放大 → 返回最终结果.
 
@@ -2858,27 +2906,11 @@ async def confirm_draft(
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail={"error": {"code": "draft_unavailable", "message": str(exc)}})
 
-    # Ownership check: only the draft owner can confirm
     try:
         draft_data = await strategy.get_draft(draft_id)
         if draft_data is None:
             raise HTTPException(status_code=404, detail={"error": {"code": "draft_not_found", "message": f"Draft '{draft_id}' not found"}})
-
-        # 直接从 DraftResult 属性读取 owner，不再走 metadata 子字段。
-        draft_user_id = getattr(draft_data, 'user_id', None) or ''
-        draft_group_id = getattr(draft_data, 'group_id', None) or ''
-
-        # Check if authenticated admin owns this draft
-        if not isinstance(_auth, dict):
-            raise HTTPException(status_code=403, detail={"error": {"code": "forbidden", "message": "Invalid authentication"}})
-        auth_user_id = _auth.get('user_id', '')
-        auth_group_id = _auth.get('group_id', '')
-
-        # 无 owner 信息时放行（本地测试 / 未透传的场景）
-        if draft_user_id and auth_user_id and draft_user_id != auth_user_id:
-            raise HTTPException(status_code=403, detail={"error": {"code": "forbidden", "message": "Only draft owner can confirm"}})
-        if draft_group_id and auth_group_id and draft_group_id != auth_group_id:
-            raise HTTPException(status_code=403, detail={"error": {"code": "forbidden", "message": "Only draft owner can confirm"}})
+        _assert_draft_owner(draft_data, _auth, action="confirm it")
     except HTTPException:
         raise
     except Exception as exc:
@@ -2888,6 +2920,45 @@ async def confirm_draft(
     try:
         result = await strategy.confirm_draft(draft_id)
     except Exception as exc:
+        error_text = str(exc)
+        if (
+            "comfyui_gpu_out_of_memory" in error_text
+            or "out of memory" in error_text.lower()
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": {
+                        "code": "gpu_out_of_memory",
+                        "message": (
+                            "GPU 显存不足，当前任务已终止。请降低生成分辨率或稍后重试。"
+                        ),
+                        "retryable": True,
+                    }
+                },
+            )
+        if "comfyui_storage_low" in error_text or "budget_exceeded" in error_text:
+            raise HTTPException(
+                status_code=507,
+                detail={
+                    "error": {
+                        "code": "comfyui_storage_unavailable",
+                        "message": error_text,
+                        "retryable": False,
+                    }
+                },
+            )
+        if "ComfyUI service is unavailable" in error_text:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": {
+                        "code": "comfyui_unavailable",
+                        "message": "ComfyUI generation service is unavailable.",
+                        "retryable": True,
+                    }
+                },
+            )
         # 上游瞬时不可用(Agnes /videos 返回 5xx,或连不上/超时等网络故障):返回 502 + retryable,
         # 而非 400。400 会误导前端"请求非法,不要重试",而真实情况是服务端临时故障。
         upstream_status = getattr(exc, "upstream_status", None)
@@ -2930,13 +3001,14 @@ async def confirm_draft(
             "media_type": "video",
         }
 
-    # 图片草稿:放大结果转 base64 data URL(原逻辑)
+    # 本地 ComfyUI 图片/视频结果转 base64 data URL。
     upscale_result = result
     output_data = upscale_result.output_data
+    media_type = getattr(draft_data, "media_type", "image")
     # 如果输出是 bytes，转为 base64 data URL
     if isinstance(output_data, bytes):
         b64 = base64.b64encode(output_data).decode("ascii")
-        content_url = f"data:{_detect_image_mime(output_data)};base64,{b64}"
+        content_url = f"data:{_detect_media_mime(output_data)};base64,{b64}"
     else:
         content_url = str(output_data)[:500]
 
@@ -2948,7 +3020,7 @@ async def confirm_draft(
         await _record_request_log(
             request=request, method="POST", endpoint=f"/admin/draft/{draft_id}/confirm",
             status_code=200, duration_ms=float(upscale_result.duration_ms or 0),
-            model=upscale_result.algorithm_used or "upscale", cache_hit=False, cache_tier=None,
+            model=upscale_result.algorithm_used or "comfyui", cache_hit=False, cache_tier=None,
         )
     except Exception as exc:
         logger.warning("草稿确认请求日志写入失败: %s", exc)
@@ -2959,13 +3031,14 @@ async def confirm_draft(
         "target_resolution": list(upscale_result.target_resolution),
         "algorithm": upscale_result.algorithm_used,
         "duration_ms": upscale_result.duration_ms,
+        "media_type": media_type,
     }
 
 
 @router.get("/draft/{draft_id}/result")
 async def get_draft_result(
     draft_id: str,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """获取 confirm 后的高清图 bytes(base64 data URL)。
 
@@ -2977,24 +3050,11 @@ async def get_draft_result(
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail={"error": {"code": "draft_unavailable", "message": str(exc)}})
 
-    # Ownership check: only the draft owner can read result
     try:
         draft_data = await strategy.get_draft(draft_id)
         if draft_data is None:
             raise HTTPException(status_code=404, detail={"error": {"code": "draft_not_found", "message": f"Draft '{draft_id}' not found"}})
-
-        draft_user_id = getattr(draft_data, 'user_id', None) or ''
-        draft_group_id = getattr(draft_data, 'group_id', None) or ''
-
-        if not isinstance(_auth, dict):
-            raise HTTPException(status_code=403, detail={"error": {"code": "forbidden", "message": "Invalid authentication"}})
-        auth_user_id = _auth.get('user_id', '')
-        auth_group_id = _auth.get('group_id', '')
-
-        if draft_user_id and auth_user_id and draft_user_id != auth_user_id:
-            raise HTTPException(status_code=403, detail={"error": {"code": "forbidden", "message": "Only draft owner can view result"}})
-        if draft_group_id and auth_group_id and draft_group_id != auth_group_id:
-            raise HTTPException(status_code=403, detail={"error": {"code": "forbidden", "message": "Only draft owner can view result"}})
+        _assert_draft_owner(draft_data, _auth, action="view its result")
     except HTTPException:
         raise
     except Exception as exc:
@@ -3015,18 +3075,19 @@ async def get_draft_result(
         )
 
     b64 = base64.b64encode(result_bytes).decode("ascii")
-    mime_type = _detect_image_mime(result_bytes)
+    mime_type = _detect_media_mime(result_bytes)
 
     return {
         "draft_id": draft_id,
         "result_data_url": f"data:{mime_type};base64,{b64}",
+        "media_type": getattr(draft_data, "media_type", "image"),
     }
 
 
 @router.delete("/drafts/session/{session_id}")
 async def delete_session_drafts(
     session_id: str,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """删除指定会话的所有草稿文件(会话关闭/清理时调用)。
 
@@ -3037,26 +3098,44 @@ async def delete_session_drafts(
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail={"error": {"code": "draft_unavailable", "message": str(exc)}})
 
-    # Ownership check: only the session owner can delete drafts
     if not isinstance(_auth, dict):
         raise HTTPException(status_code=403, detail={"error": {"code": "forbidden", "message": "Invalid authentication"}})
-    auth_user_id = _auth.get('user_id', '')
-    auth_group_id = _auth.get('group_id', '')
-
-    # session_id 格式为 {user_id}:{group_id} 或纯 uuid，这里按 group_id 匹配
-    # 若 session_id 以 group_id 开头则放行
-    if auth_group_id and not session_id.startswith(auth_group_id) and session_id != auth_group_id:
-        # 也允许 admin 按 session_id 精确删除（前端传的是完整 session id）
-        pass  # 前端已验证 session 归属，此处不额外拦截
-
-    deleted_count = await strategy.delete_session(session_id)
+    try:
+        deleted_count = await strategy.delete_session(
+            session_id,
+            user_id=str(_auth.get("user_id") or ""),
+            group_id=str(_auth.get("group_id") or ""),
+        )
+    except Exception as exc:
+        error_code = str(exc)
+        if error_code in {"draft_session_forbidden", "draft_session_owner_unknown"}:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": {
+                        "code": "forbidden",
+                        "message": "Only the draft owner can delete this session",
+                    }
+                },
+            ) from exc
+        if error_code == "invalid_session_id":
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": {
+                        "code": "validation_error",
+                        "message": "Invalid session ID",
+                    }
+                },
+            ) from exc
+        raise
     return {"session_id": session_id, "deleted_count": deleted_count}
 
 
 @router.post("/draft/{draft_id}/reject")
 async def reject_draft(
     draft_id: str,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """拒绝草稿 → 重新生成低分辨率草图.
 
@@ -3068,31 +3147,11 @@ async def reject_draft(
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail={"error": {"code": "draft_unavailable", "message": str(exc)}})
 
-    # Ownership check: only the draft owner can reject
     try:
         draft_data = await strategy.get_draft(draft_id)
         if draft_data is None:
             raise HTTPException(status_code=404, detail={"error": {"code": "draft_not_found", "message": f"Draft '{draft_id}' not found"}})
-
-        # 直接从 DraftResult 属性读取 owner，不再走 metadata 子字段。
-        draft_user_id = getattr(draft_data, 'user_id', None) or ''
-        draft_group_id = getattr(draft_data, 'group_id', None) or ''
-
-        # Check if authenticated admin owns this draft
-        auth_user_id = _auth.get('user_id', '') if isinstance(_auth, dict) else ''
-        auth_group_id = _auth.get('group_id', '') if isinstance(_auth, dict) else ''
-
-        if draft_user_id and auth_user_id and draft_user_id != auth_user_id:
-            raise HTTPException(
-                status_code=403,
-                detail={"error": {"code": "forbidden", "message": "Only draft owner can reject"}}
-            )
-        if draft_group_id and auth_group_id and draft_group_id != auth_group_id:
-            raise HTTPException(
-                status_code=403,
-                detail={"error": {"code": "forbidden", "message": "Only draft owner can reject"}}
-            )
-        # 无 owner 信息时放行（本地测试 / 未透传的场景）
+        _assert_draft_owner(draft_data, _auth, action="reject it")
     except HTTPException:
         raise
     except Exception as exc:
@@ -3124,16 +3183,16 @@ _LEDGER_PRUNE_INTERVAL_SEC: float = 3600.0  # 至多每小时清理一次
 async def get_cost_ledger(
     limit: int = Query(200, ge=1, le=1000),
     offset: int = Query(0, ge=0),
-    start: Optional[int] = Query(None, description="起始 unix 时间戳（含）"),
-    end: Optional[int] = Query(None, description="截止 unix 时间戳（含）"),
-    user_id: Optional[str] = Query(None),
-    group_id: Optional[str] = Query(None),
-    model: Optional[str] = Query(None),
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    start: int | None = Query(None, description="起始 unix 时间戳（含）"),
+    end: int | None = Query(None, description="截止 unix 时间戳（含）"),
+    user_id: str | None = Query(None),
+    group_id: str | None = Query(None),
+    model: str | None = Query(None),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """返回成本账本明细（每笔请求一行，SQLite 持久化）。"""
     from .app_state import get_state
-    key_store = getattr(get_state(), "key_store")
+    key_store = get_state().key_store
     if key_store is None or not hasattr(key_store, "query_ledger"):
         raise HTTPException(
             status_code=503,
@@ -3149,17 +3208,17 @@ async def get_cost_ledger(
 
 @router.get("/costs/summary")
 async def get_cost_summary(
-    days: Optional[int] = Query(None, ge=1, le=365, description="最近 N 天（与 start 二选一）"),
-    start: Optional[int] = Query(None, description="起始 unix 时间戳（含）"),
-    end: Optional[int] = Query(None, description="截止 unix 时间戳（含）"),
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    days: int | None = Query(None, ge=1, le=365, description="最近 N 天（与 start 二选一）"),
+    start: int | None = Query(None, description="起始 unix 时间戳（含）"),
+    end: int | None = Query(None, description="截止 unix 时间戳（含）"),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """返回成本汇总（按 model/user/group/day 聚合，SQLite 持久化）。
 
     每次调用顺带 best-effort 清理 90 天前的账本行，避免无限增长。
     """
     from .app_state import get_state
-    key_store = getattr(get_state(), "key_store")
+    key_store = get_state().key_store
     if key_store is None or not hasattr(key_store, "ledger_summary"):
         raise HTTPException(
             status_code=503,
@@ -3173,7 +3232,13 @@ async def get_cost_summary(
     import time as _time
     now = _time.monotonic()
     try:
-        if hasattr(key_store, "prune_ledger") and (now - _LAST_LEDGER_PRUNE_TS) >= _LEDGER_PRUNE_INTERVAL_SEC:
+        if (
+            hasattr(key_store, "prune_ledger")
+            and (
+                _LAST_LEDGER_PRUNE_TS == 0.0
+                or (now - _LAST_LEDGER_PRUNE_TS) >= _LEDGER_PRUNE_INTERVAL_SEC
+            )
+        ):
             await key_store.prune_ledger(keep_days=90)
             _LAST_LEDGER_PRUNE_TS = now
     except Exception as exc:
@@ -3182,15 +3247,15 @@ async def get_cost_summary(
     start_unix = start
     end_unix = end
     if start_unix is None and days:
-        end_unix = end_unix or int(datetime.now(timezone.utc).timestamp())
+        end_unix = end_unix or int(datetime.now(UTC).timestamp())
         start_unix = end_unix - days * 86400
     return await key_store.ledger_summary(start_unix=start_unix, end_unix=end_unix)
 
 
 @router.get("/chat/tasks")
 async def list_chat_tasks(
-    task_type: Optional[str] = Query(None, description="任务类型过滤 (video|draft)"),
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    task_type: str | None = Query(None, description="任务类型过滤 (video|draft)"),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """返回未完成任务列表（视频生成、草稿等）。"""
     from .app_state import get_state

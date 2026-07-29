@@ -6,14 +6,49 @@ Covers:
 - _get_auth_defaults: config-based defaults
 - _format_quota_item: quota formatting
 """
-import sys
+import fcntl
 import os
+import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-api", "src"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+import yaml
+from fastapi import HTTPException
+
+
+def test_locked_config_update_fails_fast_when_another_writer_holds_lock(
+    tmp_path,
+) -> None:
+    from aigateway_api import admin_routes as routes
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("hot_reload: false\n", encoding="utf-8")
+    lock_path = tmp_path / "config.yaml.lock"
+
+    with lock_path.open("w") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(HTTPException) as raised:
+            routes._locked_update_yaml(
+                str(config_path),
+                lambda config: config.update({"hot_reload": True}),
+            )
+
+    assert raised.value.status_code == 409
+    assert raised.value.detail["error"]["code"] == "config_update_busy"
+    assert yaml.safe_load(config_path.read_text(encoding="utf-8")) == {
+        "hot_reload": False
+    }
+
+
+def test_detect_media_mime_supports_comfyui_mp4():
+    from aigateway_api.admin_routes import _detect_media_mime
+
+    assert _detect_media_mime(b"\x00\x00\x00\x18ftypmp42video") == "video/mp4"
+    assert _detect_media_mime(b"\x89PNG\r\n\x1a\n") == "image/png"
 
 
 class TestSplitText:

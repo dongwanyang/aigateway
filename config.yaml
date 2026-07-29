@@ -128,6 +128,7 @@ plugins:
     collection_name: rag_documents
     embedding_backend: local
     embedding_model: Qwen/Qwen3-Embedding-0.6B
+    embedding_device: auto
     code_rag_enabled: true
     code_rag_graph_hops: 2
     code_rag_top_k: 5
@@ -447,8 +448,40 @@ generation_optimization:
     enabled: true
   draft_workflow:
     comfyui:
-      server_url: http://localhost:8188
+      server_url: http://comfyui:8188
       connect_timeout: 10
       execution_timeout: 300
+      required: true
+      workflow_version: image-v1
+      checkpoint_name: sd_xl_base_1.0.safetensors
+      allowed_checkpoints:
+      - sd_xl_base_1.0.safetensors
+      max_concurrency: 1
+      min_free_gb: 30
+      model_budget_gb: 30
+      output_budget_gb: 10
+      output_retention_hours: 24
+      models_path: /comfyui/models
+      output_path: /comfyui/output
+      workflow_path: /comfyui/workflows
+      video_enabled: true
+      video_workflow_version: wan2.2-ti2v-5b-v1
+      video_diffusion_model: wan2.2_ti2v_5B_fp16.safetensors
+      video_text_encoder: umt5_xxl_fp8_e4m3fn_scaled.safetensors
+      video_vae: wan2.2_vae.safetensors
+      allowed_video_diffusion_models:
+      - wan2.2_ti2v_5B_fp16.safetensors
+      allowed_video_text_encoders:
+      - umt5_xxl_fp8_e4m3fn_scaled.safetensors
+      allowed_video_vaes:
+      - wan2.2_vae.safetensors
+      video_width: 512
+      video_height: 288
+      video_frames: 17
+      video_fps: 8
+      video_steps: 20
+      video_cfg: 5
+      video_shift: 8
+      video_execution_timeout: 1200
     enabled: true
 debug_mode: false

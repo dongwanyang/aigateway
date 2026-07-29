@@ -1,8 +1,9 @@
 """Runtime model selection after policy constraints have been applied."""
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping, Sequence, Tuple
+from typing import Any
 
 from .policy_engine import RoutingConstraints
 
@@ -10,11 +11,11 @@ from .policy_engine import RoutingConstraints
 @dataclass(frozen=True)
 class RuntimeRouteDecision:
     model: str
-    fallback_models: Tuple[str, ...]
+    fallback_models: tuple[str, ...]
     reason: str
-    excluded_unhealthy: Tuple[str, ...] = ()
+    excluded_unhealthy: tuple[str, ...] = ()
 
-    def as_dict(self) -> Dict[str, Any]:
+    def as_dict(self) -> dict[str, Any]:
         return {
             "selected_model": self.model,
             "fallback_models": list(self.fallback_models),
@@ -49,7 +50,7 @@ class RuntimeModelRouter:
             model: index for index, model in enumerate(constraints.preferred_models)
         }
 
-        def rank(model: str) -> Tuple[Any, ...]:
+        def rank(model: str) -> tuple[Any, ...]:
             status = health.get(model) or {}
             failures = int(status.get("failure_count", 0) or 0)
             price = pricing.get(model)

@@ -9,11 +9,11 @@
 - 路由由 LLM 分类器决定, 偶发误判时 skip 而非假绿
 """
 import uuid
-import pytest
+
 import httpx
+import pytest
 
 from tests.conftest import AGNES_TEXT_MODEL
-
 
 # 强意图 prompt —— 让 LLM 分类器稳定判定为 image 生成
 _IMAGE_PROMPT = "画一只在月光下打盹的橘猫，写实摄影风格，4K"
@@ -57,7 +57,7 @@ def test_c1_understanding_dispatch(user_client, trace_helpers):
         pytest.fail("Upstream returned 502 — trace chain unverifiable")
     assert r.status_code in (200, 402, 429), f"Unexpected status {r.status_code}"
     evs = trace_helpers.wait(tid, timeout=5.0)
-    assert len(evs) > 0, f"No events for understanding request"
+    assert len(evs) > 0, "No events for understanding request"
     stage_names = {e.get("name") for e in evs if e.get("kind") == "stage"}
     # understanding 管道必含 pii_detector.sanitize (共用前置)
     assert "pii_detector.sanitize" in stage_names, \
@@ -87,7 +87,7 @@ def test_c2_generation_routed_by_intent(user_client, trace_helpers):
     if r.status_code == 502:
         pytest.fail("Upstream returned 502 — trace chain unverifiable")
     evs = trace_helpers.wait(tid, timeout=5.0)
-    assert len(evs) > 0, f"No events for generation request"
+    assert len(evs) > 0, "No events for generation request"
     plugin_names = {e.get("name") for e in evs if e.get("kind") == "plugin"}
     # 分类器应判定为 image -> generation 管道 -> gen-opt 插件执行
     if not (plugin_names & _GEN_OPT_PLUGINS):
@@ -138,7 +138,7 @@ def test_c3_generation_modality_inferred_image(user_client, trace_helpers):
             pytest.fail("Upstream returned 502 — trace chain unverifiable")
     # 请求可能因上游拒绝而 4xx/5xx,但 media/pii 都已埋点、finally 已 flush
     evs = trace_helpers.wait(tid, timeout=30.0)
-    assert evs, f"No events for multimodal request"
+    assert evs, "No events for multimodal request"
     stage_names = {e.get("name") for e in evs if e.get("kind") == "stage"}
     # 多模态输入必须含 pii 或 media 相关 stage
     assert "pii_detector.sanitize" in stage_names or \
@@ -165,7 +165,7 @@ def test_c4_generation_by_model_name(user_client, trace_helpers):
     if r.status_code == 502:
         pytest.fail("Upstream returned 502 — trace chain unverifiable")
     evs = trace_helpers.wait(tid, timeout=5.0)
-    assert len(evs) > 0, f"No events for image model request"
+    assert len(evs) > 0, "No events for image model request"
     plugin_names = {e.get("name") for e in evs if e.get("kind") == "plugin"}
     if not (plugin_names & _GEN_OPT_PLUGINS):
         stage_names = {e.get("name") for e in evs if e.get("kind") == "stage"}
@@ -197,7 +197,7 @@ def test_c5_auto_understanding(user_client, trace_helpers):
     if r.status_code == 502:
         pytest.fail("Upstream returned 502 — trace chain unverifiable")
     evs = trace_helpers.wait(tid, timeout=5.0)
-    assert len(evs) > 0, f"No events for auto-understanding request"
+    assert len(evs) > 0, "No events for auto-understanding request"
     stage_names = {e.get("name") for e in evs if e.get("kind") == "stage"}
     # uuid prompt 保证 cache miss -> auto 解析后应走到 bridge
     assert "litellm_bridge.completion" in stage_names, \
@@ -222,7 +222,7 @@ def test_c6_auto_generation(user_client, trace_helpers):
     if r.status_code == 502:
         pytest.fail("Upstream returned 502 — trace chain unverifiable")
     evs = trace_helpers.wait(tid, timeout=5.0)
-    assert len(evs) > 0, f"No events for auto-generation request"
+    assert len(evs) > 0, "No events for auto-generation request"
     plugin_names = {e.get("name") for e in evs if e.get("kind") == "plugin"}
     if not (plugin_names & _GEN_OPT_PLUGINS):
         stage_names = {e.get("name") for e in evs if e.get("kind") == "stage"}
@@ -262,7 +262,7 @@ def test_c7_pii_common_prelude_both_pipelines(user_client):
         if r.headers.get("content-type", "").startswith("application/json"):
             raw = r.text.lower()
             assert "test@example.com" not in raw, \
-                f"PII not masked. Response body contained the raw email."
+                "PII not masked. Response body contained the raw email."
             at_least_one_verified = True
     assert at_least_one_verified, \
         "No iterations verified (all returned 502; upstream unavailable)"

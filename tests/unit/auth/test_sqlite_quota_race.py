@@ -7,6 +7,7 @@ from exceeding quotas.
 import asyncio
 import os
 import sys
+
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
@@ -220,7 +221,7 @@ async def test_check_quota_unknown_key_returns_false():
     try:
         store = SQLiteStore(db_path=db_path)
 
-        ok, reason, retry = await store.check_quota(
+        ok, reason, _retry = await store.check_quota(
             key_hash="nonexistent_hash_1234567890abcdef",
             tokens=10,
             cost=0.0,

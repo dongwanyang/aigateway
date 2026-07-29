@@ -1,15 +1,17 @@
 """端到端: 单次 HTTP 请求全链路 trace_id 一致性 + collector 落 Redis."""
-import sys, os
+import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-api", "src"))
 
 from unittest.mock import AsyncMock
-import pytest
-from fastapi import FastAPI, Request
-from httpx import ASGITransport, AsyncClient
 
+import pytest
 from aigateway_api.trace_middleware import TraceMiddleware
 from aigateway_core.shared.trace_event import TraceCollector
+from fastapi import FastAPI, Request
+from httpx import ASGITransport, AsyncClient
 
 
 @pytest.mark.asyncio

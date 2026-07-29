@@ -12,9 +12,9 @@ image regex (vs keyword) path.
 import asyncio as _a
 import os
 import sys
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 

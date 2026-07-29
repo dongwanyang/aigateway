@@ -1,6 +1,5 @@
 """Tests for LiteLLMBridge stream path with image/video intents and extra_headers propagation."""
 
-import asyncio
 import os
 import sys
 from unittest.mock import AsyncMock, MagicMock

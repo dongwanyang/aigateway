@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Any, Dict, List, Optional, Type
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -41,11 +41,11 @@ class PluginRegistration:
     def __init__(
         self,
         name: str,
-        plugin_class: Type[Any],
+        plugin_class: type[Any],
         enabled: bool = True,
-        depends_on: Optional[List[str]] = None,
+        depends_on: list[str] | None = None,
         priority: int = 0,
-        config: Optional[Dict[str, Any]] = None,
+        config: dict[str, Any] | None = None,
         pipeline_kind: str = "understanding",
         timeout_seconds: float = 10.0,
         failure_policy: str = "continue",
@@ -85,9 +85,9 @@ class PluginRegistry:
         *,
         default_timeout_seconds: float = 30.0,
         default_failure_policy: str = "continue",
-        policies: Optional[Dict[str, Dict[str, Any]]] = None,
+        policies: dict[str, dict[str, Any]] | None = None,
     ) -> None:
-        self._registrations: Dict[str, PluginRegistration] = {}
+        self._registrations: dict[str, PluginRegistration] = {}
         self._lock = threading.Lock()
         self.default_timeout_seconds = max(0.001, float(default_timeout_seconds))
         if default_failure_policy not in {"continue", "fail_fast"}:
@@ -102,14 +102,14 @@ class PluginRegistry:
     def register(
         self,
         name: str,
-        plugin_class: Type[Any],
+        plugin_class: type[Any],
         enabled: bool = True,
-        depends_on: Optional[List[str]] = None,
+        depends_on: list[str] | None = None,
         priority: int = 0,
-        config: Optional[Dict[str, Any]] = None,
+        config: dict[str, Any] | None = None,
         pipeline_kind: str = "understanding",
-        timeout_seconds: Optional[float] = None,
-        failure_policy: Optional[str] = None,
+        timeout_seconds: float | None = None,
+        failure_policy: str | None = None,
     ) -> None:
         """注册一个插件。
 
@@ -184,7 +184,7 @@ class PluginRegistry:
     # 查询
     # ------------------------------------------------------------------
 
-    def get(self, name: str) -> Optional[PluginRegistration]:
+    def get(self, name: str) -> PluginRegistration | None:
         """查询插件注册信息。
 
         Args:
@@ -195,7 +195,7 @@ class PluginRegistry:
         """
         return self._registrations.get(name)
 
-    def get_all(self, pipeline_kind: Optional[str] = None) -> List[Any]:
+    def get_all(self, pipeline_kind: str | None = None) -> list[Any]:
         """获取已注册插件的实例列表。
 
         按 priority 升序排列（数字小的先执行）。
@@ -217,7 +217,7 @@ class PluginRegistry:
         if pipeline_kind is not None:
             registrations = [r for r in registrations if r.pipeline_kind == pipeline_kind]
 
-        instances: List[Any] = []
+        instances: list[Any] = []
         for reg in registrations:
             try:
                 # 使用 config 初始化插件实例
@@ -238,7 +238,7 @@ class PluginRegistry:
 
         return instances
 
-    def get_enabled_names(self) -> List[str]:
+    def get_enabled_names(self) -> list[str]:
         """获取所有已启用插件的名称列表。
 
         Returns:
@@ -251,7 +251,7 @@ class PluginRegistry:
     # 依赖校验
     # ------------------------------------------------------------------
 
-    def validate_dependencies(self) -> List[str]:
+    def validate_dependencies(self) -> list[str]:
         """校验所有插件的依赖关系。
 
         检查：
@@ -261,7 +261,7 @@ class PluginRegistry:
         Returns:
             校验失败的错误消息列表，为空表示全部通过。
         """
-        errors: List[str] = []
+        errors: list[str] = []
         names = set(self._registrations.keys())
 
         # 检查缺失依赖
@@ -275,7 +275,7 @@ class PluginRegistry:
         # 检查循环依赖（DFS）
         visited: set[str] = set()
         rec_stack: set[str] = set()
-        cycle_nodes: List[str] = []
+        cycle_nodes: list[str] = []
 
         def dfs(node: str) -> bool:
             visited.add(node)
@@ -295,12 +295,11 @@ class PluginRegistry:
             return False
 
         for name in self._registrations:
-            if name not in visited:
-                if dfs(name):
-                    errors.append(
-                        f"插件依赖存在循环: {cycle_nodes}"
-                    )
-                    break
+            if name not in visited and dfs(name):
+                errors.append(
+                    f"插件依赖存在循环: {cycle_nodes}"
+                )
+                break
 
         if errors:
             logger.warning("插件依赖校验失败: %s", errors)
@@ -313,7 +312,7 @@ class PluginRegistry:
     # 批量注册（从配置）
     # ------------------------------------------------------------------
 
-    def register_from_config(self, configs: List[Dict[str, Any]]) -> None:
+    def register_from_config(self, configs: list[dict[str, Any]]) -> None:
         """从配置字典列表批量注册插件。
 
         Args:
@@ -346,7 +345,7 @@ class PluginRegistry:
     # 统计信息
     # ------------------------------------------------------------------
 
-    def summary(self) -> Dict[str, Any]:
+    def summary(self) -> dict[str, Any]:
         """获取注册表的统计摘要。
 
         Returns:

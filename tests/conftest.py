@@ -4,10 +4,10 @@
 新增 e2e 层的全局常量、健康检查、以及测试数据隔离前缀。
 """
 import os
-import sys
 import tempfile
-import pytest
+
 import httpx
+import pytest
 
 # ---- 全局常量(Phase 1 各窗口从这里 import) ----
 BASE = "http://localhost:8000"
@@ -32,8 +32,7 @@ def _explicit_e2e_ui(args) -> bool:
     for a in args or []:
         s = str(a).rstrip("/")
         # e2e/ui paths trigger health-check gate
-        if s.endswith("tests/e2e") or s.endswith("tests/ui") or \
-           "tests/e2e/" in str(a) or "tests/ui/" in str(a):
+        if s.endswith(("tests/e2e", "tests/ui")) or "tests/e2e/" in str(a) or "tests/ui/" in str(a):
             return True
     return False
 

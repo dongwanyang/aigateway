@@ -28,7 +28,8 @@ from __future__ import annotations
 import logging
 import os
 import time
-from typing import Any, Dict, Optional, Tuple
+from types import TracebackType
+from typing import Any, Self
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +52,7 @@ def _ensure_initialized() -> None:
         return
 
     try:
-        from prometheus_client import Counter, Histogram, Gauge, CollectorRegistry
+        from prometheus_client import CollectorRegistry
     except ImportError:
         logger.warning(
             "prometheus-client 未安装，指标功能不可用。"
@@ -120,7 +121,7 @@ class MetricsCollector:
 
         _ensure_initialized()
 
-        from prometheus_client import Counter, Histogram, Gauge
+        from prometheus_client import Counter, Gauge, Histogram
 
         # 获取单 worker 模式的 registry
         registry = globals().get("__registry")
@@ -426,7 +427,7 @@ class MetricsCollector:
     # 指标导出
     # ------------------------------------------------------------------
 
-    def collect_all(self) -> Dict[str, Any]:
+    def collect_all(self) -> dict[str, Any]:
         """收集所有指标的当前值（用于调试 / 内省）。
 
         Returns:
@@ -435,7 +436,7 @@ class MetricsCollector:
         if not self.enabled:
             return {}
 
-        result: Dict[str, Any] = {}
+        result: dict[str, Any] = {}
 
         # 手动收集每个指标的采样值
         if self._active_requests_gauge:
@@ -493,7 +494,7 @@ class RequestTracker:
         self.method = method
         self.start_time: float = 0.0
 
-    def __enter__(self) -> "RequestTracker":
+    def __enter__(self) -> Self:
         """进入时记录起始时间并增加活跃计数。"""
         self.start_time = time.time()
         self.collector.inc_active()
@@ -501,9 +502,9 @@ class RequestTracker:
 
     def __exit__(
         self,
-        exc_type: Optional[type],
-        exc_val: Optional[Exception],
-        exc_tb: Any,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
     ) -> None:
         """退出时记录持续时间并减少活跃计数。"""
         duration = time.time() - self.start_time
@@ -523,7 +524,7 @@ class RequestTracker:
 # 全局单例
 # ------------------------------------------------------------------
 
-_collector_instance: Optional[MetricsCollector] = None
+_collector_instance: MetricsCollector | None = None
 
 
 def get_metrics_collector() -> MetricsCollector:

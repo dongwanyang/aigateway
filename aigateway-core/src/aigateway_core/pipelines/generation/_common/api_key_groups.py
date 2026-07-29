@@ -13,14 +13,14 @@ group 字段不影响资源隔离逻辑——模板和特征缓存仍按单独 A
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict
+from typing import Any
 
 from aigateway_core.pipelines.generation._common.metrics import DEFAULT_API_KEY_GROUP
 
 logger = logging.getLogger(__name__)
 
 
-def build_api_key_groups(auth_config: Dict[str, Any]) -> Dict[str, str]:
+def build_api_key_groups(auth_config: dict[str, Any]) -> dict[str, str]:
     """Build api_key_id to group mapping from auth config.
 
     Scans auth.api_keys and extracts the 'group' field for each key.
@@ -32,7 +32,7 @@ def build_api_key_groups(auth_config: Dict[str, Any]) -> Dict[str, str]:
     Returns:
         Dict mapping api_key user_id to group label
     """
-    groups: Dict[str, str] = {}
+    groups: dict[str, str] = {}
 
     if not auth_config or not isinstance(auth_config, dict):
         logger.debug("auth_config 为空或非字典，返回空映射")

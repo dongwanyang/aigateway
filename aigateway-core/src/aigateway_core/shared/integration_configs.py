@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional
 
 
 @dataclass
@@ -29,7 +28,7 @@ class PromptCompressConfig:
     compression_ratio: float = 0.5
     model_name: str = "microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbank"
     target_token: int = -1
-    force_tokens: List[str] = field(default_factory=list)
+    force_tokens: list[str] = field(default_factory=list)
     device: str = "cpu"
 
 
@@ -63,6 +62,42 @@ class ComfyUIConfig:
     connect_timeout: int = 10
     execution_timeout: int = 300
     ws_reconnect_attempts: int = 3
+    required: bool = True
+    workflow_version: str = "image-v1"
+    checkpoint_name: str = "sd_xl_base_1.0.safetensors"
+    allowed_checkpoints: list[str] = field(
+        default_factory=lambda: ["sd_xl_base_1.0.safetensors"]
+    )
+    max_concurrency: int = 1
+    min_free_gb: float = 30.0
+    model_budget_gb: float = 30.0
+    output_budget_gb: float = 10.0
+    output_retention_hours: int = 24
+    models_path: str = "/comfyui/models"
+    output_path: str = "/comfyui/output"
+    workflow_path: str = "/comfyui/workflows"
+    video_enabled: bool = False
+    video_workflow_version: str = "wan2.2-ti2v-5b-v1"
+    video_diffusion_model: str = "wan2.2_ti2v_5B_fp16.safetensors"
+    video_text_encoder: str = "umt5_xxl_fp8_e4m3fn_scaled.safetensors"
+    video_vae: str = "wan2.2_vae.safetensors"
+    allowed_video_diffusion_models: list[str] = field(
+        default_factory=lambda: ["wan2.2_ti2v_5B_fp16.safetensors"]
+    )
+    allowed_video_text_encoders: list[str] = field(
+        default_factory=lambda: ["umt5_xxl_fp8_e4m3fn_scaled.safetensors"]
+    )
+    allowed_video_vaes: list[str] = field(
+        default_factory=lambda: ["wan2.2_vae.safetensors"]
+    )
+    video_width: int = 512
+    video_height: int = 288
+    video_frames: int = 17
+    video_fps: float = 8.0
+    video_steps: int = 20
+    video_cfg: float = 5.0
+    video_shift: float = 8.0
+    video_execution_timeout: int = 1200
 
 
 @dataclass
@@ -75,6 +110,9 @@ class RAGRetrieverConfig:
         similarity_threshold: 相似度阈值 (默认: 0.7)
         rerank_enabled: 是否启用重排序 (默认: False)
         rerank_model: 重排序模型名称
+        rerank_device: 重排序设备。套餐配置必须固定为 cuda 或 mps，避免回退 CPU
+        rerank_backend: local 或 remote
+        rerank_api_base: remote reranker 的服务地址
         chunk_size: 文档分块大小 (默认: 512)
         chunk_overlap: 分块重叠字符数 (默认: 64)
         collection_name: Qdrant 集合名称 (默认: "rag_documents")
@@ -91,13 +129,18 @@ class RAGRetrieverConfig:
     similarity_threshold: float = 0.7
     rerank_enabled: bool = False
     rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    rerank_device: str = "auto"
+    rerank_backend: str = "local"
+    rerank_api_base: str | None = None
+    rerank_api_key: str | None = None
     chunk_size: int = 512
     chunk_overlap: int = 64
     collection_name: str = "rag_documents"
     embedding_backend: str = "local"
     embedding_model: str = "Qwen/Qwen3-Embedding-0.6B"
-    embedding_api_base: Optional[str] = None
-    embedding_api_key: Optional[str] = None
+    embedding_device: str = "auto"
+    embedding_api_base: str | None = None
+    embedding_api_key: str | None = None
     # ---- Code RAG(检索侧) ----
     # 打开后并行查询所有 rag_code_* 集合;调用图跳数决定 callers/callees 展开深度。
     # 检索侧策略是"tolerant on retrieval": 单一集合或图谱不可用时降级为
@@ -128,7 +171,7 @@ class ConvCompressorConfig:
     max_token_limit: int = 4000
     summary_interval: int = 5
     api_base: str = "http://localhost:8000/v1"
-    api_key: Optional[str] = None
+    api_key: str | None = None
 
 
 @dataclass
@@ -144,8 +187,8 @@ class PaddleOCRConfig:
 
     lang: str = "ch"
     use_angle_cls: bool = True
-    det_model_dir: Optional[str] = None
-    rec_model_dir: Optional[str] = None
+    det_model_dir: str | None = None
+    rec_model_dir: str | None = None
 
 
 @dataclass
@@ -159,5 +202,5 @@ class UnstructuredConfig:
     """
 
     strategy: str = "auto"
-    languages: List[str] = field(default_factory=lambda: ["chi_sim", "eng"])
+    languages: list[str] = field(default_factory=lambda: ["chi_sim", "eng"])
     extract_images: bool = False

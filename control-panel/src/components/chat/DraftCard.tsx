@@ -10,25 +10,25 @@ interface DraftCardProps {
 
 /** 草稿预览/确认/拒绝卡片。挂在 generation 意图助手消息上。 */
 export default function DraftCard({ draft, onConfirm, onReject }: DraftCardProps) {
-  const busy = draft.status === 'generating' || draft.status === 'confirming' || draft.status === 'rejecting'
-  const terminal = draft.status === 'expired' || draft.status === 'error'
+  const busy = ['queued', 'running', 'generating', 'refining', 'confirming', 'rejecting'].includes(draft.status)
+  const terminal = draft.status === 'expired' || draft.status === 'error' || draft.status === 'cancelled'
 
   return (
     <div className="flex flex-col gap-2" style={{ minWidth: 220 }}>
       {/* 状态文案 */}
-      {draft.status === 'generating' && (
+      {['queued', 'running', 'generating'].includes(draft.status) && (
         <span className="text-xs flex items-center gap-1" style={{ color: 'var(--color-text-secondary)' }}>
-          <Loader2 size={12} className="animate-spin" /> 正在生成草稿预览…
+          <Loader2 size={12} className="animate-spin" /> {draft.status === 'queued' ? 'ComfyUI 队列等待中…' : 'ComfyUI 正在生成草稿预览…'}
         </span>
       )}
       {draft.status === 'pending' && (
         <span className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
-          草稿预览({draft.mediaType === 'video' ? '视频' : '图片'})· 确认后高清放大
+          {draft.mediaType === 'video' ? '视频关键帧预览 · 确认后由 ComfyUI 生成本地视频' : '图片草稿预览 · 确认后由同一 ComfyUI 工作流生成高清结果'}
         </span>
       )}
-      {draft.status === 'confirming' && (
+      {(draft.status === 'confirming' || draft.status === 'refining') && (
         <span className="text-xs flex items-center gap-1" style={{ color: 'var(--color-text-secondary)' }}>
-          <Loader2 size={12} className="animate-spin" /> 正在高清放大…
+          <Loader2 size={12} className="animate-spin" /> {draft.mediaType === 'video' ? 'ComfyUI 正在生成视频…' : 'ComfyUI 正在精修高清图…'}
         </span>
       )}
       {draft.status === 'rejecting' && (
@@ -36,11 +36,11 @@ export default function DraftCard({ draft, onConfirm, onReject }: DraftCardProps
           <Loader2 size={12} className="animate-spin" /> 正在重新生成草稿…
         </span>
       )}
-      {draft.status === 'confirmed' && (
+      {(draft.status === 'confirmed' || draft.status === 'completed') && (
         <span className="text-xs" style={{ color: 'var(--color-success, #16a34a)' }}>
           {draft.resultLost
-            ? '✓ 已确认 · 刷新后仅保留预览(高清图未缓存,需重新生成)'
-            : `✓ 已确认 · ${draft.resultDataUrl ? '高清图已生成' : ''}`}
+            ? `✓ 已确认 · 刷新后仅保留预览(${draft.mediaType === 'video' ? '视频' : '高清图'}未缓存,需重新生成)`
+            : `✓ 已确认 · ${draft.resultDataUrl ? (draft.mediaType === 'video' ? '视频已生成' : '高清图已生成') : ''}`}
         </span>
       )}
       {(terminal) && (
@@ -51,8 +51,12 @@ export default function DraftCard({ draft, onConfirm, onReject }: DraftCardProps
       )}
 
       {/* 预览图(确认前)/ 高清图(确认后)。图片可点击放大查看 4K 细节。 */}
-      {draft.status === 'confirmed' && draft.resultDataUrl ? (
-        <ImageLightbox src={draft.resultDataUrl} alt="高清结果" thumbAlt="高清结果(点击放大)" />
+      {(draft.status === 'confirmed' || draft.status === 'completed') && draft.resultDataUrl ? (
+        draft.mediaType === 'video' ? (
+          <video src={draft.resultDataUrl} controls playsInline className="max-w-full rounded-md" />
+        ) : (
+          <ImageLightbox src={draft.resultDataUrl} alt="高清结果" thumbAlt="高清结果(点击放大)" />
+        )
       ) : draft.previewDataUrl ? (
         <ImageLightbox
           src={draft.previewDataUrl}
@@ -72,12 +76,12 @@ export default function DraftCard({ draft, onConfirm, onReject }: DraftCardProps
       <div className="flex gap-2">
         <button
           onClick={onConfirm}
-          disabled={busy || draft.status === 'confirmed'}
+          disabled={busy || draft.status === 'confirmed' || draft.status === 'completed'}
           className="flex items-center gap-1 px-3 py-1.5 rounded-md text-sm cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
           style={{ backgroundColor: 'var(--color-primary)', color: 'var(--color-text-inverse)' }}
         >
-          {draft.status === 'confirming' ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
-          确认放大
+          {(draft.status === 'confirming' || draft.status === 'refining') ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
+          {draft.mediaType === 'video' ? '确认生成视频' : '确认生成高清图'}
         </button>
         <button
           onClick={onReject}

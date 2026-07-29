@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, Optional
+from typing import Any
 
 from aigateway_core.pipelines.generation._common.config import CostTrackingConfig
 from aigateway_core.pipelines.generation._common.models import CostSavingRecord
@@ -29,6 +29,9 @@ METRIC_INVOCATIONS_TOTAL = "gen_opt_invocations_total"
 METRIC_NET_SAVINGS_USD = "gen_opt_net_savings_usd"
 METRIC_PROMPT_OPTIMIZATIONS_TOTAL = "gen_opt_prompt_optimizations_total"
 METRIC_DIRECTOR_COST_USD_TOTAL = "gen_opt_director_cost_usd_total"
+METRIC_COMFYUI_GPU_SECONDS_TOTAL = "gen_opt_comfyui_gpu_seconds_total"
+METRIC_EXTERNAL_MEDIA_COST_USD_TOTAL = "gen_opt_external_media_cost_usd_total"
+METRIC_DRAFTS_DISCARDED_TOTAL = "gen_opt_drafts_discarded_total"
 
 # 策略标签值
 STRATEGY_MODEL_ROUTING = "model_routing"
@@ -64,6 +67,9 @@ class PrometheusMetricsRegistry:
         self._net_savings_gauge: Any = None
         self._prompt_optimizations_counter: Any = None
         self._director_cost_counter: Any = None
+        self._comfyui_gpu_seconds_counter: Any = None
+        self._external_media_cost_counter: Any = None
+        self._drafts_discarded_counter: Any = None
         self._collector_registry: Any = None
 
         try:
@@ -105,6 +111,24 @@ class PrometheusMetricsRegistry:
                 METRIC_DIRECTOR_COST_USD_TOTAL,
                 "Total AI Director model invocation cost in USD by model",
                 labelnames=["model"],
+                registry=registry,
+            )
+            self._comfyui_gpu_seconds_counter = Counter(
+                METRIC_COMFYUI_GPU_SECONDS_TOTAL,
+                "Total wall-clock GPU execution seconds reported for ComfyUI jobs",
+                labelnames=["phase", "media_type"],
+                registry=registry,
+            )
+            self._external_media_cost_counter = Counter(
+                METRIC_EXTERNAL_MEDIA_COST_USD_TOTAL,
+                "External media generation API cost in USD",
+                labelnames=["provider", "media_type"],
+                registry=registry,
+            )
+            self._drafts_discarded_counter = Counter(
+                METRIC_DRAFTS_DISCARDED_TOTAL,
+                "Drafts rejected before final refinement",
+                labelnames=["media_type"],
                 registry=registry,
             )
 
@@ -208,9 +232,32 @@ class PrometheusMetricsRegistry:
         except Exception as exc:
             logger.debug("Prometheus inc_director_cost 失败: %s", exc)
 
+    def inc_comfyui_gpu_seconds(
+        self, phase: str, media_type: str, seconds: float
+    ) -> None:
+        if not self._available or seconds <= 0:
+            return
+        self._comfyui_gpu_seconds_counter.labels(
+            phase=phase, media_type=media_type
+        ).inc(seconds)
+
+    def inc_external_media_cost(
+        self, provider: str, media_type: str, amount: float
+    ) -> None:
+        if not self._available or amount <= 0:
+            return
+        self._external_media_cost_counter.labels(
+            provider=provider, media_type=media_type
+        ).inc(amount)
+
+    def inc_draft_discarded(self, media_type: str) -> None:
+        if not self._available:
+            return
+        self._drafts_discarded_counter.labels(media_type=media_type).inc()
+
 
 # 全局单例（惰性初始化）
-_prometheus_registry: Optional[PrometheusMetricsRegistry] = None
+_prometheus_registry: PrometheusMetricsRegistry | None = None
 
 
 def get_prometheus_registry() -> PrometheusMetricsRegistry:
@@ -231,7 +278,7 @@ def reset_prometheus_registry() -> None:
     _prometheus_registry = None
 
 
-def _get_api_key_group(api_key_id: str, api_key_groups: Optional[Dict[str, str]] = None) -> str:
+def _get_api_key_group(api_key_id: str, api_key_groups: dict[str, str] | None = None) -> str:
     """查找 API Key 的分组标签.
 
     根据 api_key_id 查找其所属的 group。如果未配置 group 或
@@ -268,8 +315,8 @@ class GenerationCostTracker:
     def __init__(
         self,
         config: CostTrackingConfig,
-        prometheus_registry: Optional[PrometheusMetricsRegistry] = None,
-        api_key_groups: Optional[Dict[str, str]] = None,
+        prometheus_registry: PrometheusMetricsRegistry | None = None,
+        api_key_groups: dict[str, str] | None = None,
     ) -> None:
         """初始化成本追踪器.
 
@@ -397,7 +444,7 @@ class GenerationCostTracker:
         director_cost: float,
         request_id: str,
         api_key_id: str = "",
-        model_used: Optional[str] = None,
+        model_used: str | None = None,
     ) -> float:
         """记录 Prompt 优化净节省.
 
@@ -513,7 +560,7 @@ class GenerationCostTracker:
         self,
         saving_record: CostSavingRecord,
         api_key_group: str = DEFAULT_API_KEY_GROUP,
-        model_used: Optional[str] = None,
+        model_used: str | None = None,
     ) -> None:
         """将成本节省记录上报到 Prometheus.
 

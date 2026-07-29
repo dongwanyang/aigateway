@@ -12,11 +12,10 @@ from __future__ import annotations
 
 import asyncio
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 import pytest_asyncio
-
 from aigateway_core.shared.auth.key_store import KeyStore
 
 
@@ -70,7 +69,7 @@ async def test_lua_check_quota_passes_under_limits(ks_real):
     """All dims under limit → pass, counters bumped atomically."""
     ks = ks_real
     await ks.redis.set_api_key("kh1", _key_data(daily_tokens_limit="1000"))
-    ok, reason, retry = await ks.check_quota("kh1", tokens=100, cost=0.0)
+    ok, reason, _retry = await ks.check_quota("kh1", tokens=100, cost=0.0)
     assert ok is True, f"expected pass, got {reason}"
     assert reason is None
     data = await ks.redis.get_api_key("kh1")
@@ -86,7 +85,7 @@ async def test_lua_check_quota_rejects_daily_limit(ks_real):
     ks = ks_real
     await ks.redis.set_api_key("kh1", _key_data(
         daily_tokens_limit="1000", daily_tokens_used="950"))
-    ok, reason, retry = await ks.check_quota("kh1", tokens=100, cost=0.0)
+    ok, reason, _retry = await ks.check_quota("kh1", tokens=100, cost=0.0)
     assert ok is False
     assert "Daily" in reason
     # Failed check must NOT bump counters
@@ -100,7 +99,7 @@ async def test_lua_check_quota_rejects_rpm(ks_real):
     previously made every request fail TPM before RPM was ever checked)."""
     ks = ks_real
     await ks.redis.set_api_key("kh1", _key_data(rate_limit_rpm="2",
-        rpm_window_count="2", rpm_window_start=str(int(datetime.now(timezone.utc).timestamp()))))
+        rpm_window_count="2", rpm_window_start=str(int(datetime.now(UTC).timestamp()))))
     ok, reason, retry = await ks.check_quota("kh1", tokens=10, cost=0.0)
     assert ok is False
     assert "RPM" in reason
@@ -112,8 +111,8 @@ async def test_lua_check_quota_rejects_tpm(ks_real):
     """TPM limit exceeded → reject with 'TPM' reason."""
     ks = ks_real
     await ks.redis.set_api_key("kh1", _key_data(rate_limit_tpm="100",
-        tpm_window_count="95", tpm_window_start=str(int(datetime.now(timezone.utc).timestamp()))))
-    ok, reason, retry = await ks.check_quota("kh1", tokens=10, cost=0.0)
+        tpm_window_count="95", tpm_window_start=str(int(datetime.now(UTC).timestamp()))))
+    ok, reason, _retry = await ks.check_quota("kh1", tokens=10, cost=0.0)
     assert ok is False
     assert "TPM" in reason
 
@@ -124,7 +123,7 @@ async def test_lua_check_quota_rejects_monthly_cost(ks_real):
     ks = ks_real
     await ks.redis.set_api_key("kh1", _key_data(
         monthly_cost_limit="50.0", monthly_cost_used="49.0"))
-    ok, reason, retry = await ks.check_quota("kh1", tokens=10, cost=2.0)
+    ok, reason, _retry = await ks.check_quota("kh1", tokens=10, cost=2.0)
     assert ok is False
     assert "Monthly" in reason
 
@@ -138,7 +137,7 @@ async def test_lua_check_quota_group_level_reject(ks_real):
         monthly_cost_limit="5000"))
     await ks.redis.set_api_key("kh1", _key_data(
         group_id="grp-g", daily_tokens_limit="1000000"))
-    ok, reason, retry = await ks.check_quota("kh1", tokens=10, cost=0.0)
+    ok, reason, _retry = await ks.check_quota("kh1", tokens=10, cost=0.0)
     assert ok is False
     assert reason.startswith("Group ")
     assert "daily" in reason.lower()
@@ -152,7 +151,7 @@ async def test_lua_increments_group_counters(ks_real):
         daily_tokens_limit="10000", monthly_cost_limit="5000"))
     await ks.redis.set_api_key("kh1", _key_data(
         group_id="grp-g", daily_tokens_limit="10000"))
-    ok, reason, retry = await ks.check_quota("kh1", tokens=100, cost=1.5)
+    ok, reason, _retry = await ks.check_quota("kh1", tokens=100, cost=1.5)
     assert ok is True, reason
     kdata = await ks.redis.get_api_key("kh1")
     gdata = await ks.redis.get_group("grp-g")
@@ -168,8 +167,8 @@ async def test_lua_writes_quota_period_records(ks_real):
     ks = ks_real
     await ks.redis.set_api_key("kh1", _key_data(daily_tokens_limit="10000"))
     await ks.check_quota("kh1", tokens=100, cost=2.0)
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    month = datetime.now(timezone.utc).strftime("%Y-%m")
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    month = datetime.now(UTC).strftime("%Y-%m")
     daily = await ks.redis.get_quota("kh1", f"daily:{today}")
     monthly = await ks.redis.get_quota("kh1", f"monthly:{month}")
     assert int(daily.get("tokens_in", 0)) == 100

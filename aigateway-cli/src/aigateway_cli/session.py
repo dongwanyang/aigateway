@@ -6,10 +6,8 @@
 """
 
 import json
-import os
 from pathlib import Path
 from typing import Any
-
 
 # 每个会话保留的最大消息数
 MAX_HISTORY: int = 50

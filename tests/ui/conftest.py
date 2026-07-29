@@ -7,7 +7,7 @@ runs before any page script.
 import pytest
 from playwright.sync_api import sync_playwright
 
-from tests.conftest import ADMIN_KEY, UI_BASE  # noqa: F401 -- re-exports for ui tests
+from tests.conftest import ADMIN_KEY
 
 
 @pytest.fixture(scope="session")

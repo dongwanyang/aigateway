@@ -10,8 +10,8 @@ from __future__ import annotations
 import json
 import time
 from contextvars import ContextVar
-from dataclasses import dataclass, field
-from typing import Any, Literal, Optional
+from dataclasses import dataclass
+from typing import Any, Literal
 
 
 @dataclass
@@ -22,9 +22,9 @@ class TraceEvent:
     stage: str                                 # "auth"|"dispatch"|"pii"|"media"|"cache"|"bridge"|"quota"|"compress"|插件名
     kind: Literal["stage", "plugin", "debug"]
     name: str                                  # 如 "prompt_cache.lookup" / "pii_detector.sanitize"
-    duration_ms: Optional[float]
+    duration_ms: float | None
     status: Literal["ok", "skip", "error"]
-    payload: Optional[dict[str, Any]] = None   # 仅 debug 事件或对应开关开时填
+    payload: dict[str, Any] | None = None   # 仅 debug 事件或对应开关开时填
 
 
 class TraceCollector:
@@ -34,7 +34,7 @@ class TraceCollector:
     TraceCollector.current() 拿到当前请求的 collector。
     """
 
-    _current: ContextVar[Optional["TraceCollector"]] = ContextVar(
+    _current: ContextVar[TraceCollector | None] = ContextVar(
         "trace_collector", default=None
     )
 
@@ -44,11 +44,11 @@ class TraceCollector:
         self._wall_start = time.time()
 
     @classmethod
-    def current(cls) -> Optional["TraceCollector"]:
+    def current(cls) -> TraceCollector | None:
         return cls._current.get()
 
     @classmethod
-    def start(cls, trace_id: str) -> "TraceCollector":
+    def start(cls, trace_id: str) -> TraceCollector:
         c = cls(trace_id)
         cls._current.set(c)
         return c

@@ -11,9 +11,8 @@ Qdrant 连接管理
 
 from __future__ import annotations
 
-import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from httpx import AsyncClient, Timeout
 
@@ -77,16 +76,16 @@ class QdrantClientManager:
             await self._http.aclose()
             self._http = None
 
-    def _headers(self) -> Dict[str, str]:
+    def _headers(self) -> dict[str, str]:
         """返回请求头（支持 API Key 鉴权）。"""
-        headers: Dict[str, str] = {"Content-Type": "application/json"}
+        headers: dict[str, str] = {"Content-Type": "application/json"}
         api_key = self._api_key_from_env()
         if api_key:
             headers["api-key"] = api_key
         return headers
 
     @staticmethod
-    def _api_key_from_env() -> Optional[str]:
+    def _api_key_from_env() -> str | None:
         """从环境变量获取 Qdrant API Key。"""
         import os
         return os.environ.get("QDRANT_API_KEY")
@@ -160,8 +159,8 @@ class QdrantClientManager:
     async def store_embedding(
         self,
         collection: str,
-        payload: Dict[str, Any],
-        vector: List[float],
+        payload: dict[str, Any],
+        vector: list[float],
     ) -> str:
         """存储向量及其 Payload 数据到集合。
 
@@ -216,12 +215,12 @@ class QdrantClientManager:
     async def query_vector(
         self,
         collection: str,
-        vector: List[float],
+        vector: list[float],
         limit: int = 1,
         score_threshold: float = 0.95,
-        user_id: Optional[str] = None,
-        payload_filters: Optional[Dict[str, Any]] = None,
-    ) -> Optional[Dict[str, Any]]:
+        user_id: str | None = None,
+        payload_filters: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
         """向量相似度搜索（L3 缓存查询）。
 
         DB_SCHEMA §Qdrant 语义缓存集合查询参数:
@@ -243,7 +242,7 @@ class QdrantClientManager:
         if self._http is None:
             raise RuntimeError("Qdrant 尚未连接，请先调用 connect()")
 
-        query_payload: Dict[str, Any] = {
+        query_payload: dict[str, Any] = {
             "vector": vector,
             "limit": limit,
             "with_payload": True,
@@ -251,7 +250,7 @@ class QdrantClientManager:
         }
 
         # 多租户隔离与调用方语义版本过滤。
-        must_filters: List[Dict[str, Any]] = []
+        must_filters: list[dict[str, Any]] = []
         if user_id:
             must_filters.append({
                 "key": "user_id",
@@ -313,11 +312,11 @@ class QdrantClientManager:
     async def query_vector_multi(
         self,
         collection: str,
-        vector: List[float],
+        vector: list[float],
         limit: int = 5,
         score_threshold: float = 0.90,
-        user_id: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
+        user_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         """向量相似度搜索 — 返回多个候选（供 rerank 使用）。
 
         与 query_vector 的区别：返回 List 而非单个 Optional。
@@ -335,7 +334,7 @@ class QdrantClientManager:
         if self._http is None:
             raise RuntimeError("Qdrant 尚未连接，请先调用 connect()")
 
-        query_payload: Dict[str, Any] = {
+        query_payload: dict[str, Any] = {
             "vector": vector,
             "limit": limit,
             "with_payload": True,
@@ -375,7 +374,7 @@ class QdrantClientManager:
     async def delete_by_filter(
         self,
         collection: str,
-        filter: Dict[str, Any],
+        filter: dict[str, Any],
     ) -> int:
         """按过滤条件批量删除向量点。
 
@@ -406,11 +405,11 @@ class QdrantClientManager:
     async def scroll_points(
         self,
         collection: str,
-        filter: Optional[Dict[str, Any]] = None,
+        filter: dict[str, Any] | None = None,
         limit: int = 20,
-        offset: Optional[str] = None,
+        offset: str | None = None,
         with_payload: bool = True,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """滚动获取集合中的点（分页浏览）。
 
         Args:
@@ -426,7 +425,7 @@ class QdrantClientManager:
         if self._http is None:
             raise RuntimeError("Qdrant 尚未连接，请先调用 connect()")
 
-        body: Dict[str, Any] = {
+        body: dict[str, Any] = {
             "limit": limit,
             "with_payload": with_payload,
         }
@@ -447,7 +446,7 @@ class QdrantClientManager:
             "next_page_offset": result.get("next_page_offset"),
         }
 
-    async def get_point(self, collection: str, point_id: str) -> Optional[Dict[str, Any]]:
+    async def get_point(self, collection: str, point_id: str) -> dict[str, Any] | None:
         """获取单个点的详情。
 
         Args:
@@ -474,7 +473,7 @@ class QdrantClientManager:
         self,
         collection: str,
         point_id: str,
-        payload: Dict[str, Any],
+        payload: dict[str, Any],
     ) -> bool:
         """更新指定点的 payload 字段。
 
@@ -502,7 +501,7 @@ class QdrantClientManager:
         resp.raise_for_status()
         return True
 
-    async def delete_points(self, collection: str, point_ids: List[str]) -> bool:
+    async def delete_points(self, collection: str, point_ids: list[str]) -> bool:
         """按 ID 列表删除向量点。
 
         Args:

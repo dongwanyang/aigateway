@@ -1,5 +1,4 @@
 import pytest
-
 from aigateway_core.route.model_resolution.policy_engine import (
     NoModelSatisfiesPolicy,
     RoutingPolicyConfigError,

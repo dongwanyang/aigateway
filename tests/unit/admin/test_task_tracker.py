@@ -14,7 +14,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway_api"
 
 from aigateway_api.task_tracker import TaskTracker
 
-
 # ==================================================================
 # Helper
 # ==================================================================

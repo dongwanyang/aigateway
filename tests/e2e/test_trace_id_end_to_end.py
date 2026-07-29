@@ -1,11 +1,12 @@
 """spec §5.2 — 全链路 trace_id 生命周期 (7 用例)."""
-import uuid
 import subprocess
-import pytest
+import uuid
+
 import httpx
+import pytest
 import redis as _redis
 
-from tests.conftest import BASE, REDIS_URL, ADMIN_KEY
+from tests.conftest import ADMIN_KEY, BASE, REDIS_URL
 
 
 def _tid() -> str:
@@ -124,7 +125,7 @@ def test_t6_logger_carries_trace_id(admin_client, trace_helpers):
     """5.2 #6: stdlib logger.info 里带 trace_id — 抓 docker logs."""
     tid = _tid()
     # 用 admin_client 打一个请求
-    r = httpx.post(
+    httpx.post(
         f"{BASE}/v1/chat/completions",
         headers={
             "Authorization": f"Bearer {ADMIN_KEY}",

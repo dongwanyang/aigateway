@@ -14,5 +14,5 @@ for _name in dir(_wrapped):
         globals()[_name] = getattr(_wrapped, _name)
         _names.append(_name)
 
-__all__ = _names
+__all__ = tuple(_names)
 del _wrapped, _names, _name

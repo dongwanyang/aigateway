@@ -8,7 +8,7 @@ GenerationPipeline — Generation Pipeline + Prompt Enhancement
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any
 
 from .config import GenerationConfig
 
@@ -31,8 +31,8 @@ class PromptEnhancer:
         self.level = level  # "off" | "light" | "aggressive"
 
     async def enhance(
-        self, request: Dict[str, Any], ctx: "PipelineContext"
-    ) -> Dict[str, Any]:
+        self, request: dict[str, Any], ctx: PipelineContext
+    ) -> dict[str, Any]:
         """增强请求。"""
         if self.level == "off":
             return request
@@ -84,14 +84,14 @@ class GenerationPipeline:
     def __init__(
         self,
         litellm_bridge: Any = None,
-        config: Optional[GenerationConfig] = None,
+        config: GenerationConfig | None = None,
     ) -> None:
         cfg = config or GenerationConfig()
         self._litellm = litellm_bridge
         self._config = cfg
         self._prompt_enhancer = PromptEnhancer(level=cfg.enhancement_level)
 
-    async def generate(self, ctx: "PipelineContext") -> Optional[str]:
+    async def generate(self, ctx: PipelineContext) -> str | None:
         """执行 Generation Pipeline。
 
         Args:
@@ -129,7 +129,7 @@ class GenerationPipeline:
             logger.error("Generation Pipeline LLM 调用失败: %s", exc)
             return None
 
-    def _select_model(self, ctx: "PipelineContext") -> str:
+    def _select_model(self, ctx: PipelineContext) -> str:
         """基于多模态内容类型选择最优模型。"""
         is_multimodal = ctx.extra.get("media_optimization", {}).get(
             "detected_types", []
@@ -138,7 +138,7 @@ class GenerationPipeline:
             return self._config.vision_model or "gpt-4o"
         return ctx.request.get("model", self._config.default_model)
 
-    def _extract_params(self, request: Dict[str, Any]) -> Dict[str, Any]:
+    def _extract_params(self, request: dict[str, Any]) -> dict[str, Any]:
         """提取 LLM 调用参数。"""
         return {
             k: v

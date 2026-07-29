@@ -30,7 +30,6 @@ from aigateway_core.pipelines.generation._common.config import (
     FeatureCacheConfig,
     TokenCompressorConfig,
 )
-from aigateway_core.pipelines.generation._common.models import CompressionResult
 from aigateway_core.pipelines.generation.token.feature_cache import (
     FeatureCacheManager,
 )
@@ -38,7 +37,6 @@ from aigateway_core.pipelines.generation.token.token_compressor import (
     TokenCompressorStrategy,
 )
 from aigateway_core.prefix.media.types import MediaContent, MediaType
-
 
 # ==================================================================
 # Fixtures
@@ -201,10 +199,10 @@ class TestProperty13TokenCompressionPassthrough:
             f"Expected empty feature_vector for unsupported mime_type={mime_type}"
         )
         assert result.compressed_token_count == result.original_token_count, (
-            f"Passthrough must have compressed == original tokens"
+            "Passthrough must have compressed == original tokens"
         )
         assert result.compression_ratio == 1.0, (
-            f"Passthrough must have compression_ratio=1.0"
+            "Passthrough must have compression_ratio=1.0"
         )
 
     @pytest.mark.asyncio

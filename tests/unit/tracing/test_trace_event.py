@@ -1,8 +1,11 @@
 """TraceEvent + TraceCollector 单元测试."""
-import sys, os, time
+import os
+import sys
+import time
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 
-from aigateway_core.shared.trace_event import TraceEvent, TraceCollector
+from aigateway_core.shared.trace_event import TraceCollector, TraceEvent
 
 
 def test_trace_event_fields():
@@ -39,8 +42,8 @@ def test_collector_current_none_when_not_started():
 
 def test_pipeline_context_trace_id_required():
     """trace_id 不再有默认值,必须显式传入."""
-    from aigateway_core.dispatch.context import PipelineContext
     import pytest
+    from aigateway_core.dispatch.context import PipelineContext
     with pytest.raises(TypeError):
         PipelineContext(request={"messages": [], "model": "gpt"})  # 缺 trace_id
 

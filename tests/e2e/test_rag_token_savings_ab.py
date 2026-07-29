@@ -147,7 +147,7 @@ def test_rag_reduces_input_tokens(restore_rag):
     saved = cumulative_prompt - b["prompt_tokens"]
     pct = (saved / cumulative_prompt * 100) if cumulative_prompt else 0
 
-    print(f"\n=== A/B 结果 ===")
+    print("\n=== A/B 结果 ===")
     print(f"A 组(关RAG,多轮read)累计 prompt_tokens: {cumulative_prompt}")
     print(f"B 组(开RAG,单轮注入)      prompt_tokens: {b['prompt_tokens']}")
     print(f"净节省输入 token: {saved}  ({pct:.1f}%)")

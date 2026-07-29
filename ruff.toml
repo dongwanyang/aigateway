@@ -1,0 +1,31 @@
+target-version = "py312"
+
+[lint]
+# These rules conflict with deliberate project-wide runtime contracts:
+# - provider/plugin boundaries catch Exception so one optional integration cannot
+#   take down the gateway;
+# - cleanup and best-effort telemetry paths intentionally pass/continue;
+# - plugin declarations expose mutable class metadata by framework convention;
+# - subprocess probes inspect return codes themselves and do not use check=True.
+ignore = [
+    "BLE001",
+    "G201",
+    "PLR0133",
+    "PLW1510",
+    "RUF012",
+    "S110",
+    "S112",
+    "SIM102",
+    "SIM117",
+    "TRY004",
+    "TRY401",
+]
+
+[lint.flake8-bugbear]
+# FastAPI evaluates dependency marker objects in function signatures by design.
+extend-immutable-calls = ["fastapi.Depends"]
+
+[lint.per-file-ignores]
+# This is an explicitly invoked live-system script. Its async Playwright tests use
+# a small synchronous urllib/file setup layer outside the gateway event loop.
+"tests/control_panel_e2e.py" = ["ASYNC210", "ASYNC230", "ASYNC251"]

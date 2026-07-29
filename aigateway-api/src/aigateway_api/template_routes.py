@@ -19,7 +19,7 @@ Template Routes — 提示词模板 CRUD API 端点
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -60,7 +60,7 @@ class UpdateTemplateRequest(BaseModel):
 class RenderTemplateRequest(BaseModel):
     """POST /templates/{name}/render 请求体."""
 
-    variables: Dict[str, str] = Field(default_factory=dict, description="模板占位符变量值映射")
+    variables: dict[str, str] = Field(default_factory=dict, description="模板占位符变量值映射")
 
 
 # ==================================================================
@@ -122,7 +122,7 @@ def _get_api_key_id(request: Request) -> str:
     return key_id
 
 
-def _template_to_dict(template) -> Dict[str, Any]:
+def _template_to_dict(template) -> dict[str, Any]:
     """将 PromptTemplate 转换为 API 响应字典."""
     return {
         "name": template.name,
@@ -143,7 +143,7 @@ def _template_to_dict(template) -> Dict[str, Any]:
 async def create_template(
     request: Request,
     body: CreateTemplateRequest,
-    _auth: Dict[str, Any] = Depends(authenticate),
+    _auth: dict[str, Any] = Depends(authenticate),
 ):
     """创建新的提示词模板.
 
@@ -199,7 +199,7 @@ async def list_templates(
     request: Request,
     page: int = Query(default=1, ge=1, description="页码"),
     page_size: int = Query(default=20, ge=1, le=100, description="每页数量"),
-    _auth: Dict[str, Any] = Depends(authenticate),
+    _auth: dict[str, Any] = Depends(authenticate),
 ):
     """列出当前 API Key 拥有的所有模板（分页）.
 
@@ -235,7 +235,7 @@ async def list_templates(
 async def get_template(
     request: Request,
     name: str,
-    _auth: Dict[str, Any] = Depends(authenticate),
+    _auth: dict[str, Any] = Depends(authenticate),
 ):
     """获取指定名称的模板.
 
@@ -271,7 +271,7 @@ async def update_template(
     request: Request,
     name: str,
     body: UpdateTemplateRequest,
-    _auth: Dict[str, Any] = Depends(authenticate),
+    _auth: dict[str, Any] = Depends(authenticate),
 ):
     """更新指定名称的模板.
 
@@ -352,7 +352,7 @@ async def update_template(
 async def delete_template(
     request: Request,
     name: str,
-    _auth: Dict[str, Any] = Depends(authenticate),
+    _auth: dict[str, Any] = Depends(authenticate),
 ):
     """删除指定名称的模板.
 
@@ -405,7 +405,6 @@ async def delete_template(
         )
 
     # 204 No Content — FastAPI 会自动返回空响应体
-    return None
 
 
 @router.post("/templates/{name}/render")
@@ -413,7 +412,7 @@ async def render_template(
     request: Request,
     name: str,
     body: RenderTemplateRequest,
-    _auth: Dict[str, Any] = Depends(authenticate),
+    _auth: dict[str, Any] = Depends(authenticate),
 ):
     """渲染模板，替换占位符变量.
 

@@ -11,7 +11,7 @@ caller that only needs the metrics-recording subset.
 """
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any
 
 from aigateway_core.route.metrics.costing import _estimate_cost
 
@@ -24,7 +24,7 @@ async def _wrap_stream_for_metrics(
     group_id: str = "",
 ) -> Any:
     """包装流式生成器，从最后一个 chunk 提取 usage 并记录指标。"""
-    last_chunk: Dict[str, Any] = {}
+    last_chunk: dict[str, Any] = {}
     async for chunk in completion_gen:
         last_chunk = chunk
         yield chunk

@@ -13,7 +13,6 @@ Tests for AIDirectorPlugin — AI 导演插件封装
 需求: 1.7, 1.8, 2.10
 """
 
-import asyncio
 import os
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -28,12 +27,12 @@ from aigateway_core.pipelines.generation._common.config import (
     GenerationOptimizationConfig,
 )
 from aigateway_core.pipelines.generation._common.models import PromptOptimizationResult
-from aigateway_core.pipelines.generation.director.ai_director_plugin import (
-    AIDirectorPlugin,
-    NS_GENERATION_OPTIMIZATION,
-)
 from aigateway_core.pipelines.generation.director.ai_director import (
     AIDirectorStrategy,
+)
+from aigateway_core.pipelines.generation.director.ai_director_plugin import (
+    NS_GENERATION_OPTIMIZATION,
+    AIDirectorPlugin,
 )
 from aigateway_core.prefix.media.types import MediaContent, MediaType
 
@@ -271,8 +270,8 @@ class TestAIDirectorPluginTracing:
     @pytest.mark.asyncio
     async def test_emits_plugin_trace_event(self, default_config, mock_strategy):
         """Engine emits kind='plugin' (always, no payload); plugin emits kind='debug' (gated by debug switch)."""
-        from aigateway_core.shared.trace_event import TraceCollector
         from aigateway_core.shared.debug_config import DebugConfig
+        from aigateway_core.shared.trace_event import TraceCollector
 
         plugin = AIDirectorPlugin(strategy=mock_strategy, config=default_config)
 

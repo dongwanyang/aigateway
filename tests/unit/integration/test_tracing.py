@@ -14,8 +14,6 @@ from __future__ import annotations
 
 import os
 import sys
-import uuid as _real_uuid
-from typing import Any, Dict
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -96,7 +94,7 @@ class TestInitializeSuccess:
         mock_trace_mod.get_tracer.return_value = mock_tracer
 
         # Replace the inner-import names via sys.modules / __dict__
-        mod = _get_mod()
+        _get_mod()
         orig_modules = {}
         otel_keys = [
             "opentelemetry",
@@ -192,7 +190,7 @@ class TestInitializeSuccess:
         def _raise(*_args, **_kwargs):
             raise RuntimeError("boom")
 
-        mod = _get_mod()
+        _get_mod()
         orig_modules = {}
         otel_keys = [
             "opentelemetry",
@@ -484,7 +482,7 @@ class TestInjectTraceContext:
     def test_injects_w3c_traceparent_and_x_headers(self):
         from aigateway_core.shared.tracing import TracingManager
 
-        headers: Dict[str, str] = {}
+        headers: dict[str, str] = {}
         TracingManager.inject_trace_context(headers, "aaaabbbbccccdddd", "1111222233334444")
 
         assert headers == {
@@ -902,7 +900,7 @@ class TestFullLifecycle:
             assert info["sample_rate"] == 0.5
             assert info["initialized"] is True
 
-            headers: Dict[str, str] = {}
+            headers: dict[str, str] = {}
             TracingManager.inject_trace_context(
                 headers, span_info["trace_id"], span_info["span_id"]
             )

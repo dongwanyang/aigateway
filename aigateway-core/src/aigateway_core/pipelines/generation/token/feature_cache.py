@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any, List, Optional
+from typing import Any
 
 from aigateway_core.pipelines.generation._common.config import FeatureCacheConfig
 
@@ -74,7 +74,7 @@ class FeatureCacheManager:
         character_id: str,
         model_version: str,
         timeout_ms: int = 500,
-    ) -> Optional[List[float]]:
+    ) -> list[float] | None:
         """查询缓存的特征向量.
 
         在指定超时时间内从 Redis 获取缓存的 Feature Vector。
@@ -111,7 +111,7 @@ class FeatureCacheManager:
             # 反序列化 JSON → List[float]
             if isinstance(raw, bytes):
                 raw = raw.decode("utf-8")
-            vector: List[float] = json.loads(raw)
+            vector: list[float] = json.loads(raw)
 
             # 缓存命中，自动续期 TTL（需求 5.4）
             # 异步续期，不阻塞返回
@@ -121,7 +121,7 @@ class FeatureCacheManager:
 
             return vector
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(
                 "feature_cache.get_feature: 缓存查找超时 (%dms)",
                 timeout_ms,
@@ -141,7 +141,7 @@ class FeatureCacheManager:
         owner_id: str,
         character_id: str,
         model_version: str,
-        vector: List[float],
+        vector: list[float],
         ttl_days: int = 30,
     ) -> None:
         """存储特征向量到缓存.

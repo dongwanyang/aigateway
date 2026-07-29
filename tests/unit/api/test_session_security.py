@@ -1,16 +1,21 @@
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
+import aigateway_api.routes as routes_module
 import pytest
-from fastapi import FastAPI, HTTPException
-from httpx import ASGITransport, AsyncClient
-
-from aigateway_api.auth_middleware import SESSION_COOKIE_NAME, authenticate, authenticate_admin
+from aigateway_api.auth_middleware import (
+    SESSION_COOKIE_NAME,
+    authenticate,
+    authenticate_admin,
+)
 from aigateway_api.auth_routes import router as auth_router
 from aigateway_api.browser_auth import BrowserAuthStore
 from aigateway_api.routes import router as routes_router
 from aigateway_core.shared.auth.sqlite_store import SQLiteStore
+from fastapi import FastAPI, HTTPException
+from httpx import ASGITransport, AsyncClient
 
 
 @pytest.mark.asyncio
@@ -185,3 +190,32 @@ async def test_console_chat_requires_server_side_api_key(tmp_path, monkeypatch):
 
     assert response.status_code == 503
     assert response.json()["detail"]["error"]["code"] == "console_chat_api_key_required"
+
+
+@pytest.mark.asyncio
+async def test_console_chat_preserves_browser_principal_as_draft_owner(monkeypatch):
+    monkeypatch.setenv("AI_GATEWAY_CONSOLE_CHAT_API_KEY", "gw-console-test")
+    authenticate_api_key = AsyncMock(
+        return_value={
+            "user_id": "billing-user",
+            "group_id": "grp-default",
+            "scopes": ["chat"],
+        }
+    )
+    monkeypatch.setattr(routes_module, "authenticate_api_key", authenticate_api_key)
+    request = MagicMock()
+    request.state = SimpleNamespace()
+
+    principal = await routes_module._bind_console_chat_api_key(
+        request,
+        resource_owner={
+            "user_id": "browser-admin-id",
+            "auth_type": "browser_session",
+        },
+    )
+
+    assert principal["user_id"] == "billing-user"
+    assert request.state.draft_owner == {
+        "user_id": "browser-admin-id",
+        "group_id": None,
+    }

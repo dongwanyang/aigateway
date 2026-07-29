@@ -7,13 +7,14 @@
 - 配额测试需 cache miss 才能走到 quota check
 - L3 backfill 超时从 45s 放宽到 60s (真实网络抖动)
 """
-import uuid
-import time
 import subprocess
-import pytest
-import httpx
+import time
+import uuid
 
-from tests.conftest import AGNES_TEXT_MODEL, QDRANT_URL, BASE, ADMIN_KEY
+import httpx
+import pytest
+
+from tests.conftest import AGNES_TEXT_MODEL, BASE, QDRANT_URL
 
 
 def _tid() -> str:
@@ -163,8 +164,8 @@ def test_c5_plugin_trace_shim(user_client, admin_client, trace_helpers):
     data = r.json()["data"]
     events = data.get("events", [])
     plugin_trace = data.get("plugin_trace", [])
-    ev_names = {e.get("name") for e in events if e.get("kind") == "plugin"}
-    pt_names = {p.get("plugin_name") if isinstance(p, dict) else str(p) for p in plugin_trace}
+    {e.get("name") for e in events if e.get("kind") == "plugin"}
+    {p.get("plugin_name") if isinstance(p, dict) else str(p) for p in plugin_trace}
     # cost_tracker 默认启用 -> 至少有 1 个 plugin_trace 条目
     assert len(plugin_trace) >= 1, \
         f"Expected at least 1 plugin_trace entry, got {len(plugin_trace)}. Events: {[e.get('name') for e in events]}"
@@ -276,7 +277,7 @@ def test_c8_async_l3_backfill(user_client, trace_helpers):
     prompt = f"l3 async backfill {uuid.uuid4().hex} " + ("填充内容 " * 60)  # >100 tokens
     tid = _tid()
     t0 = time.time()
-    r = user_client.post(
+    user_client.post(
         "/v1/chat/completions",
         json={
             "model": AGNES_TEXT_MODEL,

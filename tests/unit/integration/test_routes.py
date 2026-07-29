@@ -13,11 +13,11 @@ full create_app() lifespan which touches Redis/Qdrant/SQLite.
 
 import asyncio
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from fastapi import FastAPI
 import httpx
+from fastapi import FastAPI
 
 # Ensure the API package is importable
 sys.path.insert(0, "aigateway-api/src")
@@ -150,7 +150,7 @@ class TestHealthHealthy:
         )
         resp = client.get("/health")
         uptime = resp.json()["data"]["uptime_seconds"]
-        expected = int(datetime.now(timezone.utc).timestamp()) - 1000000
+        expected = int(datetime.now(UTC).timestamp()) - 1000000
         assert abs(uptime - expected) <= 2
 
     def test_start_time_zero_returns_zero_uptime(self):
@@ -185,7 +185,7 @@ class TestHealthHealthy:
         )
         resp = client.get("/health")
         ts = resp.json()["data"]["timestamp"]
-        datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ")
+        datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
 
 
 # ------------------------------------------------------------------
@@ -460,14 +460,13 @@ class TestMetricsSuccess:
         with patch(
             "aigateway_api.routes.generate_latest",
             return_value=b"fake metrics\n",
-        ) as mock_gen:
-            with patch(
-                "aigateway_api.routes.CONTENT_TYPE_LATEST",
-                "text/plain; version=0.0.4; charset=utf-8",
-            ):
-                resp = client.get("/metrics")
-                assert resp.status_code == 200
-                mock_gen.assert_called_once_with(mock_registry)
+        ) as mock_gen, patch(
+            "aigateway_api.routes.CONTENT_TYPE_LATEST",
+            "text/plain; version=0.0.4; charset=utf-8",
+        ):
+            resp = client.get("/metrics")
+            assert resp.status_code == 200
+            mock_gen.assert_called_once_with(mock_registry)
 
     def test_metrics_fallback_registry_when_collector_none(self):
         client, _ = _client(

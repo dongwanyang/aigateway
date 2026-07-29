@@ -9,18 +9,17 @@ LiteLLM Bridge 单元测试
 - completion / completion_stream 对未注册模型的处理
 """
 
-import asyncio
-import sys
 import os
+import sys
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
 
 # 确保导入路径正确
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-api", "src"))
 
 from aigateway_core.route.bridge.litellm_bridge import LiteLLMBridge
-
 
 # ==================================================================
 # Helper: 创建已初始化的 Bridge（不依赖真实 litellm）
@@ -273,7 +272,7 @@ class TestExceptionScopeFix:
         # Mock router 的 acompletion: await 后返回 async generator 再抛异常
         async def _failing_stream():
             raise RuntimeError("Connection refused")
-            yield  # noqa: unreachable - makes this an async generator
+            yield  # pragma: no cover - marks this as an async generator
 
         async def _failing_acompletion(**kwargs):
             return _failing_stream()

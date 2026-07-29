@@ -6,11 +6,13 @@ Registers all classic and generation-optimization plugins into a ``PluginRegistr
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict
+from typing import Any
 
+from aigateway_core.pipelines.understanding.compression.plugin import (
+    PromptCompressPlugin,
+)
 from aigateway_core.prefix.cache.plugin import PromptCachePlugin, SemanticCachePlugin
 from aigateway_core.prefix.pii.plugin import PIIDetectorPlugin
-from aigateway_core.pipelines.understanding.compression.plugin import PromptCompressPlugin
 from aigateway_core.shared.plugin_registry import PluginRegistry
 
 logger = logging.getLogger(__name__)
@@ -23,14 +25,13 @@ def _register_builtin_plugins(registry: PluginRegistry, config_manager: Any = No
         registry: PluginRegistry 实例。
         config_manager: 可选的配置管理器，用于读取插件配置。
     """
-    import json
 
     plugins_config = []
     if config_manager is not None:
         plugins_config = config_manager.get("plugins", []) or []
 
     # 获取集成配置（用于 PromptCompressPlugin 等）
-    prompt_compress_kwargs: Dict[str, Any] = {}
+    prompt_compress_kwargs: dict[str, Any] = {}
     if config_manager is not None:
         try:
             integration_cfgs = config_manager.integration_configs
@@ -47,7 +48,9 @@ def _register_builtin_plugins(registry: PluginRegistry, config_manager: Any = No
 
     # 注册 RAGRetrieverPlugin（可选依赖）
     try:
-        from aigateway_core.pipelines.understanding.rag.rag_retriever_plugin import RAGRetrieverPlugin
+        from aigateway_core.pipelines.understanding.rag.rag_retriever_plugin import (
+            RAGRetrieverPlugin,
+        )
 
         rag_config = None
         if config_manager is not None:
@@ -57,7 +60,7 @@ def _register_builtin_plugins(registry: PluginRegistry, config_manager: Any = No
             except Exception:
                 pass
 
-        rag_kwargs: Dict[str, Any] = {}
+        rag_kwargs: dict[str, Any] = {}
         if rag_config is not None:
             rag_kwargs["config"] = rag_config
 
@@ -74,7 +77,9 @@ def _register_builtin_plugins(registry: PluginRegistry, config_manager: Any = No
 
     # 注册 ConvCompressorPlugin（可选依赖）
     try:
-        from aigateway_core.pipelines.understanding.conversation.conv_compressor_plugin import ConvCompressorPlugin
+        from aigateway_core.pipelines.understanding.conversation.conv_compressor_plugin import (
+            ConvCompressorPlugin,
+        )
 
         conv_config = None
         if config_manager is not None:
@@ -84,7 +89,7 @@ def _register_builtin_plugins(registry: PluginRegistry, config_manager: Any = No
             except Exception:
                 pass
 
-        conv_kwargs: Dict[str, Any] = {}
+        conv_kwargs: dict[str, Any] = {}
         if conv_config is not None:
             conv_kwargs["config"] = conv_config
 

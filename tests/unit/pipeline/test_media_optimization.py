@@ -11,10 +11,9 @@ Media Optimization Layer 单元测试
 - 正确性属性验证
 """
 
-import asyncio
-import json
-import sys
 import os
+import sys
+
 import pytest
 
 # 确保导入路径正确
@@ -22,21 +21,20 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-api", "src"))
 
 
-from aigateway_core.prefix.media.types import MediaType, ProcessorPhase, MediaContent, ProcessorResult
-from aigateway_core.prefix.media.detector import ContentTypeDetector
+from aigateway_core.dispatch.context import PipelineContext
 from aigateway_core.prefix.media.cache import MediaCacheManager
 from aigateway_core.prefix.media.config import (
-    ImagePipelineConfig,
     AudioPipelineConfig,
-    VideoPipelineConfig,
     DocumentPipelineConfig,
-    MediaOptimizationConfig,
     GenerationConfig,
+    ImagePipelineConfig,
+    MediaOptimizationConfig,
+    VideoPipelineConfig,
 )
+from aigateway_core.prefix.media.detector import ContentTypeDetector
+from aigateway_core.prefix.media.generation import PromptEnhancer
 from aigateway_core.prefix.media.mol import MediaOptimizationLayer
-from aigateway_core.prefix.media.generation import PromptEnhancer, GenerationPipeline
-from aigateway_core.dispatch.context import PipelineContext
-
+from aigateway_core.prefix.media.types import MediaContent, MediaType
 
 # ==================================================================
 # ContentTypeDetector Tests
@@ -274,7 +272,7 @@ class TestMediaOptimizationLayer:
     def _make_mol(self):
         """创建一个带 mock pipeline 的 MOL。"""
         from aigateway_core.prefix.media.base import MediaPipeline
-        from aigateway_core.prefix.media.types import MediaContent, MediaType
+        from aigateway_core.prefix.media.types import MediaType
 
         class MockImagePipeline(MediaPipeline):
             media_type = MediaType.IMAGE
@@ -535,7 +533,7 @@ class TestCorrectnessProperties:
     async def test_property_1_openai_format_preserved(self):
         """P1: 处理后的消息仍符合 OpenAI ContentPart 格式"""
         from aigateway_core.prefix.media.base import MediaPipeline
-        from aigateway_core.prefix.media.types import MediaContent, MediaType
+        from aigateway_core.prefix.media.types import MediaType
 
         class MockPipeline(MediaPipeline):
             media_type = MediaType.IMAGE
@@ -587,8 +585,6 @@ class TestCorrectnessProperties:
     @pytest.mark.asyncio
     async def test_property_5_text_message_invariant(self):
         """P5: 纯文本消息处理后不变"""
-        from aigateway_core.prefix.media.base import MediaPipeline
-        from aigateway_core.prefix.media.types import MediaType
 
         mol = MediaOptimizationLayer(pipelines={})
         ctx = PipelineContext(request={"messages": []}, trace_id="test-trace")

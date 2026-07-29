@@ -56,7 +56,8 @@ def _make_png_bytes(width: int = 800, height: int = 600) -> bytes:
         from PIL import Image, ImageDraw
     except ImportError:
         # Pillow 未安装时生成最小合法 PNG (1x1 red pixel)
-        import struct, zlib
+        import struct
+        import zlib
         sig = b'\x89PNG\r\n\x1a\n'
         # IHDR
         ihdr_data = struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0)
@@ -123,9 +124,9 @@ class _MockLiteLLMBridge:
 @pytest.fixture
 def client_and_bridge():
     """构建 TestClient，override 鉴权，注入 mock bridge。"""
-    from fastapi.testclient import TestClient
     import aigateway_api.main as main_module
     from aigateway_api.auth_middleware import authenticate
+    from fastapi.testclient import TestClient
 
     # 处理器内部通过 `from aigateway_api.main import app` 使用模块级 app，
     # 因此测试必须使用同一个模块级 app 实例。
@@ -272,7 +273,7 @@ class TestE2EMultimodal:
 
     def test_models_endpoint(self, client_and_bridge):
         """GET /v1/models 端点可用。"""
-        client, bridge, app = client_and_bridge
+        client, bridge, _app = client_and_bridge
 
         async def _list_models():
             return [{"id": "gpt-4o", "object": "model"}]

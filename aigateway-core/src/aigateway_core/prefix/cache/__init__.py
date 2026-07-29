@@ -8,7 +8,7 @@ Authoritative implementations:
 from __future__ import annotations
 
 # Eagerly import only the lightweight key helpers (no heavy deps, no circular risk)
-from aigateway_core.prefix.cache.cache_keys import (  # noqa: F401
+from aigateway_core.prefix.cache.cache_keys import (
     _MAX_TOKENS_BUCKETS,
     _MODEL_SNAPSHOT_RE,
     _TEMPERATURE_BUCKETS,

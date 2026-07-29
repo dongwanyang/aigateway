@@ -22,7 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from aigateway_core.dispatch.context import PipelineContext
 from aigateway_core.pipelines.generation._common.config import AIDirectorConfig
@@ -88,8 +88,8 @@ class AIDirectorStrategy:
         self,
         config: AIDirectorConfig,
         litellm_bridge: Any = None,
-        rewrite_prompt: Optional[str] = None,
-        expand_prompt: Optional[str] = None,
+        rewrite_prompt: str | None = None,
+        expand_prompt: str | None = None,
         model_selector: Any = None,
     ) -> None:
         """初始化 AI Director 策略.
@@ -113,7 +113,7 @@ class AIDirectorStrategy:
     async def optimize_prompt(
         self,
         prompt: str,
-        reference_images: List[MediaContent],
+        reference_images: list[MediaContent],
         config: AIDirectorConfig,
         ctx: PipelineContext,
     ) -> PromptOptimizationResult:
@@ -167,7 +167,7 @@ class AIDirectorStrategy:
             optimized.duration_ms = _elapsed_ms(start_time)
             return optimized
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             elapsed = _elapsed_ms(start_time)
             logger.warning(
                 "generation_optimization.ai_director.timeout",
@@ -207,7 +207,7 @@ class AIDirectorStrategy:
     async def _do_optimize(
         self,
         prompt: str,
-        reference_images: List[MediaContent],
+        reference_images: list[MediaContent],
         config: AIDirectorConfig,
         ctx: PipelineContext,
     ) -> PromptOptimizationResult:
@@ -241,7 +241,7 @@ class AIDirectorStrategy:
         # Inject trace context into downstream LLM call headers for propagation
         from aigateway_core.shared.tracing import TracingManager
 
-        extra_headers: Dict[str, str] = {}
+        extra_headers: dict[str, str] = {}
         TracingManager.inject_trace_context(
             headers=extra_headers,
             trace_id=ctx.trace_id,
@@ -292,7 +292,7 @@ class AIDirectorStrategy:
     def _build_user_message(
         self,
         prompt: str,
-        reference_images: List[MediaContent],
+        reference_images: list[MediaContent],
         is_short: bool,
     ) -> str:
         """构建发送给改写模型的用户消息.
@@ -317,7 +317,7 @@ class AIDirectorStrategy:
 
         return "\n".join(parts)
 
-    def _extract_image_hints(self, reference_images: List[MediaContent]) -> str:
+    def _extract_image_hints(self, reference_images: list[MediaContent]) -> str:
         """从参考图中提取上下文提示信息.
 
         提取参考图的元数据（如描述、标签等）用于辅助短 prompt 扩展。
@@ -328,9 +328,9 @@ class AIDirectorStrategy:
         Returns:
             参考图提示信息文本
         """
-        hints: List[str] = []
+        hints: list[str] = []
         for i, img in enumerate(reference_images, 1):
-            img_info_parts: List[str] = []
+            img_info_parts: list[str] = []
 
             # Use media type
             if img.media_type:
@@ -361,7 +361,7 @@ class AIDirectorStrategy:
 
         return "\n".join(hints)
 
-    def _extract_response_text(self, response: Dict[str, Any]) -> str:
+    def _extract_response_text(self, response: dict[str, Any]) -> str:
         """从 LiteLLM Bridge 响应中提取文本内容.
 
         Args:
@@ -389,7 +389,7 @@ class AIDirectorStrategy:
     async def apply_template(
         self,
         template_name: str,
-        variables: Dict[str, str],
+        variables: dict[str, str],
         user_id: str,
     ) -> str:
         """应用提示词模板.

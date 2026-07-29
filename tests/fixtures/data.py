@@ -7,11 +7,12 @@
 """
 import sys
 import uuid
+
+import httpx
 import pytest
 import redis as _redis
-import httpx
 
-from tests.conftest import REDIS_URL, QDRANT_URL
+from tests.conftest import QDRANT_URL, REDIS_URL
 
 
 @pytest.fixture

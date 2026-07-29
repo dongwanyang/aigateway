@@ -14,5 +14,5 @@ for _name in dir(_plugin):
         globals()[_name] = getattr(_plugin, _name)
         _names.append(_name)
 
-__all__ = _names
+__all__ = tuple(_names)
 del _plugin, _names, _name

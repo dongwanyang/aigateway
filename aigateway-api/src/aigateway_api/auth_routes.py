@@ -5,7 +5,7 @@ import asyncio
 import os
 import secrets
 import tempfile
-from typing import Any, Dict
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field
@@ -177,7 +177,7 @@ def _matches_initial_password(candidate: str) -> bool:
 @router.post("/session")
 async def create_session(
     request: Request, response: Response, body: CreateSessionRequest
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     username = body.username.strip()
     password = body.password
     if not username or not password:
@@ -238,7 +238,7 @@ async def create_session(
 
 
 @router.get("/bootstrap")
-async def get_bootstrap_credentials(request: Request, response: Response) -> Dict[str, Any]:
+async def get_bootstrap_credentials(request: Request, response: Response) -> dict[str, Any]:
     """Expose installer credentials only before the admin account is provisioned."""
     response.headers["Cache-Control"] = "no-store, max-age=0"
     response.headers["Pragma"] = "no-cache"
@@ -260,7 +260,7 @@ async def get_bootstrap_credentials(request: Request, response: Response) -> Dic
 
 
 @router.get("/session")
-async def get_session(request: Request) -> Dict[str, Any]:
+async def get_session(request: Request) -> dict[str, Any]:
     raw_token = request.cookies.get(SESSION_COOKIE_NAME)
     if not raw_token:
         return {"data": {"authenticated": False}}
@@ -280,7 +280,7 @@ async def get_session(request: Request) -> Dict[str, Any]:
 
 
 @router.delete("/session")
-async def delete_session(request: Request, response: Response) -> Dict[str, Any]:
+async def delete_session(request: Request, response: Response) -> dict[str, Any]:
     raw_token = request.cookies.get(SESSION_COOKIE_NAME)
     if raw_token:
         await asyncio.to_thread(get_browser_auth_store(request).revoke_session, raw_token)
@@ -293,7 +293,7 @@ async def reset_password(
     request: Request,
     response: Response,
     body: ResetPasswordRequest,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     new_password = body.new_password.strip()
     if not new_password:
         raise HTTPException(

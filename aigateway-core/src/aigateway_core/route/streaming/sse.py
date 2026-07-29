@@ -10,7 +10,8 @@ import asyncio
 import json
 import logging
 import uuid
-from typing import Any, AsyncIterator, Dict
+from collections.abc import AsyncIterator
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -20,8 +21,8 @@ class SSEGenerator:
 
     def __init__(
         self,
-        completion_gen: AsyncIterator[Dict[str, Any]],
-        chat_id: str = None,
+        completion_gen: AsyncIterator[dict[str, Any]],
+        chat_id: str | None = None,
     ) -> None:
         self.completion_gen = completion_gen
         self.chat_id = chat_id or f"chatcmpl-{uuid.uuid4().hex[:12]}"

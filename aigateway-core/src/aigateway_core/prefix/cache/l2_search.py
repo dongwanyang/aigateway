@@ -40,7 +40,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Any, Dict, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -266,7 +266,7 @@ async def search(
     scope_id: str,
     top_k: int = L2_DEFAULT_TOP_K,
     min_score: float = L2_DEFAULT_MIN_SCORE,
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """BM25 全文检索相似 prompt，返回命中结果 dict。
 
     流程:
@@ -380,15 +380,15 @@ def _escape_query_text(text: str) -> str:
 
 
 __all__ = [
-    "L2_INDEX_NAME",
-    "L2_HASH_PREFIX",
     "L2_DEFAULT_MIN_SCORE",
     "L2_DEFAULT_TOP_K",
-    "ensure_index",
-    "store",
-    "search",
-    "_extract_plain_text",
+    "L2_HASH_PREFIX",
+    "L2_INDEX_NAME",
+    "_escape_query_text",
     "_escape_tag",
     "_escape_tag_query",
-    "_escape_query_text",
+    "_extract_plain_text",
+    "ensure_index",
+    "search",
+    "store",
 ]

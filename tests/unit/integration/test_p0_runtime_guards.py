@@ -254,12 +254,7 @@ def test_litellm_router_has_no_nested_retry_or_fallback():
 
 
 def test_grafana_has_no_default_admin_password():
-    # grafana 已拆到 docker-compose.monitoring.yml(commit 82dd7b7),核心 compose 不含 grafana。
-    # 两个文件都要检查:无硬编码 admin 口令,且必须显式要求设置 GRAFANA_ADMIN_PASSWORD。
-    monitoring = Path("docker-compose.monitoring.yml").read_text(encoding="utf-8")
-    core = Path("docker-compose.yml").read_text(encoding="utf-8")
-    for compose in (monitoring, core):
-        assert "GF_SECURITY_ADMIN_PASSWORD=admin" not in compose
-    # monitoring compose 用 ${GRAFANA_ADMIN_PASSWORD:?... must be set} fail-fast,
-    # 未设置环境变量时 compose 直接拒绝启动,而非静默用 admin。
-    assert "GRAFANA_ADMIN_PASSWORD must be set" in monitoring
+    compose = Path("docker-compose.yml").read_text(encoding="utf-8")
+    assert "GF_SECURITY_ADMIN_PASSWORD=admin" not in compose
+    assert 'profiles: ["monitoring"]' in compose
+    assert "GRAFANA_ADMIN_PASSWORD must be set" in compose

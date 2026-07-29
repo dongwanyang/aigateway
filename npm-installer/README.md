@@ -1,57 +1,26 @@
 # aigateway-installer
 
-AI Gateway 安装器。默认从源码安装，也可通过 `--docker` 使用 Docker Compose
-部署。支持 macOS、Linux 和 Windows WSL2，需要 Node.js 18+、Git 与 Bash。
-源码安装需要 Python 3.12；Docker 部署需要 Docker Engine/Desktop 与
-Docker Compose v2。
-
-## 安装
+AI Gateway 的 Docker Compose 安装器。Linux、Windows WSL2 与 Apple
+Silicon 使用相同的四档套餐和服务拓扑；`image` 拉取 GHCR 镜像，`source`
+从当前 checkout 构建同名 targets。
 
 ```bash
 npm install -g aigateway-installer
-aigateway-install
+aigateway-install --edition lite
+aigateway-install --edition full --distribution source --build
 ```
 
-也可以不做全局安装：
+主要参数：
 
-```bash
-npx aigateway-installer
-```
+- `--edition lite|knowledge|studio|full`
+- `--distribution image|source`
+- `--comfyui container|native|remote`
+- `--embedding container|native|remote`
+- `--monitoring`、`--production`、`--install-models`
 
-安装器会在当前 AI Gateway 仓库中运行；如果当前目录不是仓库，则下载到
-`~/.aigateway/runtime`。默认创建 `.venv`，以 editable 模式安装 Python
-源码，并安装控制台依赖：
+Windows 必须从启用 NVIDIA GPU 的 Docker Desktop WSL2 环境运行。Apple
+Silicon 的 Gateway/Redis/Qdrant/控制台保持容器化，ComfyUI 与 Embedding
+作为用户级 MPS 服务运行。
 
-```bash
-aigateway-install                 # 等同于 --source
-aigateway-install --source --profile full
-aigateway-install --source --no-frontend
-```
-
-## Docker 部署
-
-```bash
-aigateway-install --docker \
-  --non-interactive \
-  --profile full \
-  --accelerator cuda \
-  --monitoring \
-  --build
-```
-
-升级现有安装的能力：
-
-```bash
-aigateway-install --docker --add rag --build
-aigateway-install --docker --add vision --build
-aigateway-install --docker --show-plan
-```
-
-指定源码目录、Git 仓库或版本：
-
-```bash
-aigateway-install --dir /opt/aigateway
-aigateway-install --repo https://github.com/example/aigateway.git --ref v0.2.0
-```
-
-安装器不在 npm `postinstall` 阶段运行命令。Docker 模式不会自动删除数据卷。
+旧 `--source`、`--docker`、`--profile`、`--accelerator` 和增量
+`--add/--remove` 接口已移除；安装器会给出迁移提示，不会删除现有数据卷。

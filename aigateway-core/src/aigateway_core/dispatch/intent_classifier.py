@@ -2,13 +2,13 @@
 from __future__ import annotations
 
 import asyncio
-from collections import OrderedDict
 import hashlib
 import json
 import logging
 import re
 import time
-from typing import Any, Dict, List, Optional
+from collections import OrderedDict
+from typing import Any
 
 from aigateway_core.route.model_resolution.task_classifier import (
     TaskClassifier,
@@ -40,7 +40,7 @@ class IntentClassifier:
         self,
         bridge: Any,
         model_selector: Any,
-        config: Optional[Dict[str, Any]] = None,
+        config: dict[str, Any] | None = None,
     ) -> None:
         self._bridge = bridge
         self._model_selector = model_selector
@@ -63,16 +63,16 @@ class IntentClassifier:
                 "intent_classifier cache_ttl_seconds/cache_max_entries must be non-negative"
             )
         self._classification_cache: OrderedDict[
-            str, tuple[float, Dict[str, Any]]
+            str, tuple[float, dict[str, Any]]
         ] = OrderedDict()
 
     async def classify(
         self,
-        messages: List[Dict[str, Any]],
-        body_model: Optional[str],
+        messages: list[dict[str, Any]],
+        body_model: str | None,
         tools: Any = None,
         structured_output: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Return endpoint intent, optional model hint, and a Task Profile."""
         local_profile = self._task_classifier.classify(
             messages, tools=tools, structured_output=structured_output
@@ -115,7 +115,7 @@ class IntentClassifier:
             if str(result.get("classification_source", "")).startswith("llm"):
                 self._cache_set(cache_key, result)
             return result
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning("IntentClassifier 超时, 降级启发式")
             return self._fallback(messages, local_profile, "timeout_fallback")
         except Exception as exc:
@@ -124,10 +124,10 @@ class IntentClassifier:
 
     async def _do_classify(
         self,
-        messages: List[Dict[str, Any]],
-        body_model: Optional[str],
+        messages: list[dict[str, Any]],
+        body_model: str | None,
         local_profile: TaskProfile,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         text_model = await self._model_selector.select_text_model()
         user_text = self._extract_recent_user_context(messages)
         request_metadata = (
@@ -149,8 +149,8 @@ class IntentClassifier:
         content = self._extract_content(response)
         return self._parse(content, messages, local_profile)
 
-    def _extract_recent_user_context(self, messages: List[Dict[str, Any]]) -> str:
-        turns: List[str] = []
+    def _extract_recent_user_context(self, messages: list[dict[str, Any]]) -> str:
+        turns: list[str] = []
         for message in messages or []:
             if not isinstance(message, dict) or message.get("role") != "user":
                 continue
@@ -160,7 +160,7 @@ class IntentClassifier:
                 continue
             if not isinstance(content, list):
                 continue
-            parts: List[str] = []
+            parts: list[str] = []
             for block in content:
                 if not isinstance(block, dict):
                     continue
@@ -176,7 +176,7 @@ class IntentClassifier:
             turns.append(" ".join(parts))
         return "\n--- next user turn ---\n".join(turns[-3:])
 
-    def _extract_content(self, response: Dict[str, Any]) -> str:
+    def _extract_content(self, response: dict[str, Any]) -> str:
         if "error" in response and "data" not in response:
             return ""
         data = response.get("data", response)
@@ -190,9 +190,9 @@ class IntentClassifier:
     def _parse(
         self,
         content: str,
-        messages: List[Dict[str, Any]],
+        messages: list[dict[str, Any]],
         local_profile: TaskProfile,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         if not content:
             return self._fallback(messages, local_profile, "empty_response_fallback")
         # 抽取第一个 {...} JSON (支持嵌套大括号)
@@ -261,7 +261,7 @@ class IntentClassifier:
         re.IGNORECASE,
     )
 
-    def _heuristic_generation(self, messages: List[Dict[str, Any]]) -> str:
+    def _heuristic_generation(self, messages: list[dict[str, Any]]) -> str:
         """降级启发式: 仅按最后一条 user 文本的生成关键词判定, 带图输入默认 understanding.
 
         旧实现"带图→image"会把"描述这张图/图里有什么"这类 mllm 理解请求误判为生成,
@@ -284,10 +284,10 @@ class IntentClassifier:
 
     def _fallback(
         self,
-        messages: List[Dict[str, Any]],
-        profile: Optional[TaskProfile] = None,
+        messages: list[dict[str, Any]],
+        profile: TaskProfile | None = None,
         source: str = "heuristic",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         profile = profile or self._task_classifier.classify(messages)
         return self._result(
             self._heuristic_generation(messages),
@@ -297,7 +297,7 @@ class IntentClassifier:
         )
 
     # Backward-compatible helper used by older tests/callers.
-    def _heuristic(self, messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _heuristic(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
         return self._fallback(messages)
 
     @staticmethod
@@ -306,7 +306,7 @@ class IntentClassifier:
         hint: str,
         profile: TaskProfile,
         source: str,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         return {
             "generation": generation,
             "hint": hint,
@@ -324,7 +324,7 @@ class IntentClassifier:
 
     def _cache_key(
         self,
-        messages: List[Dict[str, Any]],
+        messages: list[dict[str, Any]],
         tools: Any,
         structured_output: bool,
     ) -> str:
@@ -336,7 +336,7 @@ class IntentClassifier:
         raw = json.dumps(payload, sort_keys=True, ensure_ascii=False)
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
-    def _cache_get(self, key: str) -> Optional[Dict[str, Any]]:
+    def _cache_get(self, key: str) -> dict[str, Any] | None:
         if self._cache_ttl == 0 or self._cache_max_entries == 0:
             return None
         cached = self._classification_cache.get(key)
@@ -349,7 +349,7 @@ class IntentClassifier:
         self._classification_cache.move_to_end(key)
         return json.loads(json.dumps(result))
 
-    def _cache_set(self, key: str, result: Dict[str, Any]) -> None:
+    def _cache_set(self, key: str, result: dict[str, Any]) -> None:
         if self._cache_ttl == 0 or self._cache_max_entries == 0:
             return
         self._classification_cache[key] = (

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Dict
+from typing import Any
 
 
 @dataclass
@@ -27,11 +27,11 @@ class DebugConfig:
     per_plugin: dict[str, bool] = field(default_factory=dict)
 
     @classmethod
-    def default(cls) -> "DebugConfig":
+    def default(cls) -> DebugConfig:
         return cls()
 
     @classmethod
-    def from_yaml(cls, d: dict[str, Any] | None) -> "DebugConfig":
+    def from_yaml(cls, d: dict[str, Any] | None) -> DebugConfig:
         """从 config.yaml 的 debug: 段构造(缺失返回默认).
 
         兼容两种写法:
@@ -88,7 +88,7 @@ class DebugConfigWatcher:
         if hasattr(config_manager, "_config"):
             self._on_config_reload(config_manager._config)
 
-    def _on_config_reload(self, new_full_config: Dict[str, Any]) -> None:
+    def _on_config_reload(self, new_full_config: dict[str, Any]) -> None:
         """ConfigManager 触发的回调 —— 接收整个新 config dict,取 debug: 段."""
         raw = new_full_config.get("debug", {}) if isinstance(new_full_config, dict) else {}
         new_cfg = DebugConfig.from_yaml(raw)
@@ -97,7 +97,7 @@ class DebugConfigWatcher:
 
 
 # 进程级单例(被 dispatcher/cache/bridge/pipeline 读取)
-_watcher: "DebugConfigWatcher | None" = None
+_watcher: DebugConfigWatcher | None = None
 
 
 def get_debug_config() -> DebugConfig:

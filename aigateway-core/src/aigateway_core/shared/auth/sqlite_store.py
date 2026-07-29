@@ -15,6 +15,7 @@ Config: AI_GATEWAY_AUTH_DB_PATH env var (default /app/data/auth.db)
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -23,10 +24,9 @@ import sqlite3
 import string
 import threading
 import uuid
-import asyncio
 from contextlib import contextmanager
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import UTC, datetime
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -159,11 +159,11 @@ CREATE INDEX IF NOT EXISTS idx_code_rag_tasks_document ON code_rag_tasks(documen
 # ── Helpers ─────────────────────────────────────────────────────────
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _now_unix() -> int:
-    return int(datetime.now(timezone.utc).timestamp())
+    return int(datetime.now(UTC).timestamp())
 
 
 def _hash_key(key_value: str) -> str:
@@ -225,11 +225,11 @@ def _serialize_scopes(value: Any, *, is_admin: bool = False) -> str:
     return ",".join(_normalize_scopes(value, is_admin=is_admin))
 
 
-def _validate_expiry(value: Optional[str]) -> Optional[str]:
+def _validate_expiry(value: str | None) -> str | None:
     if not value:
         return None
     try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(str(value))
     except ValueError as exc:
         raise ValueError("expires_at must be a valid ISO-8601 timestamp") from exc
     if parsed.tzinfo is None:
@@ -313,7 +313,7 @@ class SQLiteStore:
     DEFAULT_GROUP_ID = "grp-default"
     DEFAULT_GROUP_NAME = "default"
 
-    def __init__(self, db_path: Optional[str] = None):
+    def __init__(self, db_path: str | None = None):
         path = db_path or os.environ.get("AI_GATEWAY_AUTH_DB_PATH")
         if path is None:
             # 默认使用项目根目录下的 data/auth.db。
@@ -484,7 +484,7 @@ class SQLiteStore:
 
     # ── KeyStore-compatible API ───────────────────────────────────
 
-    async def validate(self, key: str) -> Optional[dict[str, Any]]:
+    async def validate(self, key: str) -> dict[str, Any] | None:
         """Validate API Key. Auto-reseed from config if empty."""
         key_hash = _hash_key(key)
 
@@ -514,10 +514,10 @@ class SQLiteStore:
         expires_at = data.get("expires_at")
         if expires_at:
             try:
-                expiry = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+                expiry = datetime.fromisoformat(str(expires_at))
                 if expiry.tzinfo is None:
-                    expiry = expiry.replace(tzinfo=timezone.utc)
-                if expiry <= datetime.now(timezone.utc):
+                    expiry = expiry.replace(tzinfo=UTC)
+                if expiry <= datetime.now(UTC):
                     from aigateway_core.shared.exceptions import AuthError
                     raise AuthError(f"API key '{data.get('key_id')}' has expired")
             except ValueError:
@@ -569,12 +569,12 @@ class SQLiteStore:
     async def create(
         self,
         user_id: str,
-        quotas: Optional[Dict[str, Any]] = None,
+        quotas: dict[str, Any] | None = None,
         group_id: str = "",
         cache_scope: str = "group",
-        scopes: Optional[List[str]] = None,
-        expires_at: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        scopes: list[str] | None = None,
+        expires_at: str | None = None,
+    ) -> dict[str, Any]:
         if not user_id:
             raise ValueError("user_id is required")
         requested_scopes = [str(scope).strip().lower() for scope in (scopes or [])]
@@ -589,8 +589,8 @@ class SQLiteStore:
         key_hash = _hash_key(raw_key)
         key_prefix = _prefix_key(raw_key)
         now_iso = _now_iso()
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        month = datetime.now(timezone.utc).strftime("%Y-%m")
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        month = datetime.now(UTC).strftime("%Y-%m")
 
         q = quotas or {}
         daily_tokens = q.get("daily_tokens", self.DEFAULT_DAILY_TOKENS)
@@ -698,14 +698,14 @@ class SQLiteStore:
             },
         }
 
-    async def seed_from_config(self, keys_config: List[Dict[str, Any]]) -> int:
+    async def seed_from_config(self, keys_config: list[dict[str, Any]]) -> int:
         if not keys_config:
             return 0
 
         imported = 0
         now_iso = _now_iso()
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        month = datetime.now(timezone.utc).strftime("%Y-%m")
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        month = datetime.now(UTC).strftime("%Y-%m")
         # Mark only the first admin-scoped key as "default" for force-reset flow
         default_admin_marked = False
 
@@ -878,7 +878,6 @@ class SQLiteStore:
 
         now_iso = _now_iso()
         user_id = ""
-        key_prefix = ""
         for kh in hashes:
             self.conn.execute(
                 """UPDATE api_keys
@@ -894,7 +893,7 @@ class SQLiteStore:
             if row:
                 d = dict(row)
                 user_id = d.get("user_id", "")
-                key_prefix = d.get("key_prefix", "")
+                d.get("key_prefix", "")
 
         self.conn.commit()
 
@@ -912,8 +911,8 @@ class SQLiteStore:
         return True
 
     async def rotate(
-        self, key_id: str, *, expires_at: Optional[str] = None
-    ) -> Dict[str, Any]:
+        self, key_id: str, *, expires_at: str | None = None
+    ) -> dict[str, Any]:
         """Atomically revoke an active key and issue its replacement."""
         if not key_id.startswith("key_"):
             raise ValueError("Invalid key_id format, should be key_xxx")
@@ -931,8 +930,8 @@ class SQLiteStore:
         new_id = f"key_{uuid.uuid4().hex[:8]}"
         now_iso = _now_iso()
         now_unix = _now_unix()
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        month = datetime.now(timezone.utc).strftime("%Y-%m")
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        month = datetime.now(UTC).strftime("%Y-%m")
         new_expiry = (
             _validate_expiry(expires_at)
             if expires_at is not None
@@ -1031,7 +1030,7 @@ class SQLiteStore:
 
         return True
 
-    async def ensure_seeded(self, keys_config: List[Dict[str, Any]]) -> int:
+    async def ensure_seeded(self, keys_config: list[dict[str, Any]]) -> int:
         row = self.conn.fetchone("SELECT 1 FROM api_keys LIMIT 1")
         if row:
             return 0
@@ -1045,7 +1044,7 @@ class SQLiteStore:
         key_hash: str,
         tokens: int,
         cost: float,
-    ) -> Tuple[bool, Optional[str], int]:
+    ) -> tuple[bool, str | None, int]:
         """Atomic check+reserve via conditional UPDATE.
 
         Checks RPM/TPM/daily/monthly for both key and group levels.
@@ -1194,7 +1193,7 @@ class SQLiteStore:
 
     @staticmethod
     def _check_key_dims(data: dict, tokens: int, cost: float, now_unix: int
-                        ) -> Tuple[bool, Optional[str], int]:
+                        ) -> tuple[bool, str | None, int]:
         resets: dict = {}
         rpm_limit = int(data.get("rate_limit_rpm", SQLiteStore.DEFAULT_RATE_LIMIT_RPM))
         rpm_ws = int(data.get("rpm_window_start", 0))
@@ -1232,7 +1231,7 @@ class SQLiteStore:
 
     @staticmethod
     def _check_group_dims(data: dict, tokens: int, cost: float, now_unix: int
-                          ) -> Tuple[bool, Optional[str], int]:
+                          ) -> tuple[bool, str | None, int]:
         rpm_limit = int(data.get("rate_limit_rpm", SQLiteStore.DEFAULT_RATE_LIMIT_RPM))
         rpm_ws = int(data.get("rpm_window_start", 0))
         rpm_wc = int(data.get("rpm_window_count", 0))
@@ -1328,8 +1327,8 @@ class SQLiteStore:
                 )
 
             # Quota period records
-            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            month = datetime.now(timezone.utc).strftime("%Y-%m")
+            today = datetime.now(UTC).strftime("%Y-%m-%d")
+            month = datetime.now(UTC).strftime("%Y-%m")
             dq = self._quota_period_rows("key", key_hash, today, month)
             daily_q = self._accumulate_quota(dq.get("daily"), tokens, cost, model, tokens_in, tokens_out)
             monthly_q = self._accumulate_quota(dq.get("monthly"), tokens, cost, model, tokens_in, tokens_out)
@@ -1424,13 +1423,13 @@ class SQLiteStore:
 
     @staticmethod
     def _compute_reconciled_updates(
-        data: Dict[str, Any],
+        data: dict[str, Any],
         token_delta: int,
         cost_delta: float,
         now_unix: int,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Compute counter updates for a delta between actual and reserved usage."""
-        updates: Dict[str, Any] = {}
+        updates: dict[str, Any] = {}
 
         if token_delta != 0:
             daily_used = max(0, int(data.get("daily_tokens_used", "0")) + token_delta)
@@ -1448,11 +1447,11 @@ class SQLiteStore:
         return updates
 
     @staticmethod
-    def _apply_counter_updates(tx, table: str, id_col: str, id_value: str, updates: Dict[str, Any]) -> None:
+    def _apply_counter_updates(tx, table: str, id_col: str, id_value: str, updates: dict[str, Any]) -> None:
         if (table, id_col) not in {("api_keys", "key_hash"), ("groups", "group_id")}:
             raise ValueError("unsupported quota counter target")
         allowed = {"daily_tokens_used", "monthly_cost_used", "tpm_window_count"}
-        fields = [k for k in updates.keys() if k in allowed]
+        fields = [k for k in updates if k in allowed]
         if not fields:
             return
         assignments = ", ".join(f"{field}=?" for field in fields)
@@ -1471,7 +1470,7 @@ class SQLiteStore:
             )
             raise ValueError(f"用户 '{user_id}' 已存在活跃 Key: {row['key_id'] if row else 'unknown'}")
 
-    async def _find_key_hashes_by_id(self, key_id: str) -> List[str]:
+    async def _find_key_hashes_by_id(self, key_id: str) -> list[str]:
         return self._lookup_by_id(key_id)
 
     async def migrate_groups(self, group_store=None) -> int:
@@ -1484,7 +1483,7 @@ class SQLiteStore:
         )
         for r in rows:
             kh = r["key_hash"]
-            cs = r["cache_scope"] or "group"
+            r["cache_scope"] or "group"
             with self.conn.transaction() as tx:
                 tx.execute(
                     "UPDATE api_keys SET group_id=? WHERE key_hash=?",
@@ -1516,7 +1515,7 @@ class SQLiteStore:
     # ── GroupStore-compatible API ─────────────────────────────────
 
     async def create_group(self, name: str,
-                           quotas: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                           quotas: dict[str, Any] | None = None) -> dict[str, Any]:
         if not name or not name.strip():
             raise ValueError("group name is required")
         name = name.strip()
@@ -1532,8 +1531,8 @@ class SQLiteStore:
 
         q = quotas or {}
         now_iso = _now_iso()
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        month = datetime.now(timezone.utc).strftime("%Y-%m")
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        month = datetime.now(UTC).strftime("%Y-%m")
 
         with self.conn.transaction() as tx:
             # Check name uniqueness
@@ -1588,13 +1587,13 @@ class SQLiteStore:
         logger.info("Group 创建: group_id=%s name=%s", group_id, name)
         return {"group_id": group_id, "name": name}
 
-    async def get_group(self, group_id: str) -> Optional[Dict[str, Any]]:
+    async def get_group(self, group_id: str) -> dict[str, Any] | None:
         row = self.conn.fetchone(
             "SELECT * FROM groups WHERE group_id=?", (group_id,)
         )
         return dict(row) if row else None
 
-    async def list_groups(self) -> List[Dict[str, Any]]:
+    async def list_groups(self) -> list[dict[str, Any]]:
         rows = self.conn.fetchall("SELECT * FROM groups")
         out: list[dict] = []
         for r in rows:
@@ -1614,9 +1613,9 @@ class SQLiteStore:
     async def update_group(
         self,
         group_id: str,
-        quotas: Optional[Dict[str, Any]] = None,
-        status: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        quotas: dict[str, Any] | None = None,
+        status: str | None = None,
+    ) -> dict[str, Any]:
         row = self.conn.fetchone(
             "SELECT * FROM groups WHERE group_id=?", (group_id,)
         )
@@ -1673,7 +1672,7 @@ class SQLiteStore:
         members = await self._get_members(group_id)
         if members:
             raise ValueError(f"group {group_id} still has {len(members)} members; reassign first")
-        name = row["name"]
+        row["name"]
 
         with self.conn.transaction() as tx:
             tx.execute("DELETE FROM groups WHERE group_id=?", (group_id,))
@@ -1701,7 +1700,7 @@ class SQLiteStore:
         )
         self.conn.commit()
 
-    async def _get_members(self, group_id: str) -> List[str]:
+    async def _get_members(self, group_id: str) -> list[str]:
         rows = self.conn.fetchall(
             "SELECT key_hash FROM group_members WHERE group_id=?", (group_id,)
         )
@@ -1710,7 +1709,7 @@ class SQLiteStore:
     async def get_member_count(self, group_id: str) -> int:
         return len(await self._get_members(group_id))
 
-    async def get_group_detail(self, group_id: str) -> Optional[Dict[str, Any]]:
+    async def get_group_detail(self, group_id: str) -> dict[str, Any] | None:
         data = await self.get_group(group_id)
         if not data:
             return None
@@ -1811,8 +1810,8 @@ class SQLiteStore:
             )
 
             # Quota period transfers
-            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            month = datetime.now(timezone.utc).strftime("%Y-%m")
+            today = datetime.now(UTC).strftime("%Y-%m-%d")
+            month = datetime.now(UTC).strftime("%Y-%m")
             if old_group_id:
                 oq = self._quota_period_rows("group", old_group_id, today, month)
                 for pt, pv in [("daily", today), ("monthly", month)]:
@@ -1844,11 +1843,11 @@ class SQLiteStore:
 
     # ── Legacy KeyStore/GroupStore compatibility methods ──────────
 
-    async def get_api_key(self, key_hash: str) -> Optional[Dict[str, Any]]:
+    async def get_api_key(self, key_hash: str) -> dict[str, Any] | None:
         row = self._api_key_row(key_hash)
         return self._row_to_dict(row)
 
-    async def set_api_key(self, key_hash: str, data: Dict[str, Any]) -> None:
+    async def set_api_key(self, key_hash: str, data: dict[str, Any]) -> None:
         # 运行时计数器列只能由 check_quota / increment_usage 修改 —— 这里若传进来
         # 会用旧快照覆盖并发的计数写入，静默回滚配额。调用方应只传要改的限制/元数据列。
         _RUNTIME_COUNTER_COLS = {
@@ -1898,7 +1897,7 @@ class SQLiteStore:
         # Not needed for SQLite (key_prefix stored in api_keys table)
         pass
 
-    async def get_key_lookup(self, key_prefix: str) -> Optional[str]:
+    async def get_key_lookup(self, key_prefix: str) -> str | None:
         row = self.conn.fetchone(
             "SELECT key_hash FROM api_keys WHERE key_prefix=?", (key_prefix,)
         )
@@ -1908,7 +1907,7 @@ class SQLiteStore:
         # Not needed for SQLite (name stored in groups table)
         pass
 
-    async def get_group_lookup(self, name: str) -> Optional[str]:
+    async def get_group_lookup(self, name: str) -> str | None:
         row = self.conn.fetchone(
             "SELECT group_id FROM groups WHERE name=?", (name,)
         )
@@ -1918,7 +1917,7 @@ class SQLiteStore:
         pass  # name is in groups table
 
     async def set_quota(self, entity_id: str, period: str,
-                        data: Dict[str, Any]) -> None:
+                        data: dict[str, Any]) -> None:
         parts = period.split(":", 1)
         if len(parts) != 2:
             return
@@ -1926,7 +1925,7 @@ class SQLiteStore:
         self._upsert_quota_record("key" if ":" in entity_id else "group",
                                   entity_id, period_type, period_value, data)
 
-    async def get_quota(self, entity_id: str, period: str) -> Optional[Dict[str, Any]]:
+    async def get_quota(self, entity_id: str, period: str) -> dict[str, Any] | None:
         parts = period.split(":", 1)
         if len(parts) != 2:
             return None
@@ -2054,7 +2053,7 @@ class SQLiteStore:
         self.conn.commit()
         return cur.rowcount
 
-    def read_code_rag_task(self, task_id: str) -> Optional[dict]:
+    def read_code_rag_task(self, task_id: str) -> dict | None:
         row = self.conn.fetchone(
             "SELECT * FROM code_rag_tasks WHERE task_id=?", (task_id,)
         )
@@ -2089,12 +2088,12 @@ class SQLiteStore:
         *,
         limit: int = 200,
         offset: int = 0,
-        start_unix: Optional[int] = None,
-        end_unix: Optional[int] = None,
-        user_id: Optional[str] = None,
-        group_id: Optional[str] = None,
-        model: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
+        start_unix: int | None = None,
+        end_unix: int | None = None,
+        user_id: str | None = None,
+        group_id: str | None = None,
+        model: str | None = None,
+    ) -> list[dict[str, Any]]:
         """Query ledger rows, newest first."""
         where: list[str] = []
         params: list = []
@@ -2129,9 +2128,9 @@ class SQLiteStore:
     async def ledger_summary(
         self,
         *,
-        start_unix: Optional[int] = None,
-        end_unix: Optional[int] = None,
-    ) -> Dict[str, Any]:
+        start_unix: int | None = None,
+        end_unix: int | None = None,
+    ) -> dict[str, Any]:
         """Aggregate cost/token stats grouped by model/user/group/day."""
         where: list[str] = []
         params: list = []

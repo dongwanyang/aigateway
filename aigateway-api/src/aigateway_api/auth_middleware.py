@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-from typing import Any, Dict, Optional
+from typing import Any
 
 from fastapi import Header, HTTPException, Request, status
 
@@ -15,9 +15,9 @@ SESSION_COOKIE_NAME = "aigateway_session"
 
 
 def _extract_api_key(
-    authorization: Optional[str] = None,
-    x_api_key: Optional[str] = None,
-) -> Optional[str]:
+    authorization: str | None = None,
+    x_api_key: str | None = None,
+) -> str | None:
     if x_api_key:
         return x_api_key
     if authorization:
@@ -32,12 +32,12 @@ def _hash_key(key_value: str) -> str:
     return hashlib.sha256(key_value.encode("utf-8")).hexdigest()
 
 
-def _get_session_cookie(request: Request) -> Optional[str]:
+def _get_session_cookie(request: Request) -> str | None:
     value = request.cookies.get(SESSION_COOKIE_NAME)
     return value if isinstance(value, str) and value else None
 
 
-def require_scope(key_data: Dict[str, Any], scope: str) -> None:
+def require_scope(key_data: dict[str, Any], scope: str) -> None:
     scopes = key_data.get("scopes") or []
     if isinstance(scopes, str):
         scopes = [item.strip() for item in scopes.split(",")]
@@ -53,7 +53,7 @@ def require_scope(key_data: Dict[str, Any], scope: str) -> None:
         )
 
 
-def _api_key_required(headers: Optional[Dict[str, str]] = None) -> HTTPException:
+def _api_key_required(headers: dict[str, str] | None = None) -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail={"error": {"code": "unauthorized", "message": "API key required"}},
@@ -73,12 +73,12 @@ def _password_change_required() -> HTTPException:
     )
 
 
-def _reject_force_reset(principal: Dict[str, Any]) -> None:
+def _reject_force_reset(principal: dict[str, Any]) -> None:
     if principal.get("auth_type") == "browser_session" and principal.get("requires_password_change"):
         raise _password_change_required()
 
 
-async def _authenticate_api_key(request: Request, key_value: str) -> Dict[str, Any]:
+async def _authenticate_api_key(request: Request, key_value: str) -> dict[str, Any]:
     key_store = getattr(request.app.state, "key_store", None)
     if key_store is None:
         logger.error("KeyStore is not initialized")
@@ -111,7 +111,7 @@ async def _authenticate_api_key(request: Request, key_value: str) -> Dict[str, A
     return key_data
 
 
-async def _authenticate_browser_session(request: Request, token: str) -> Dict[str, Any]:
+async def _authenticate_browser_session(request: Request, token: str) -> dict[str, Any]:
     import os
 
     ttl = int(os.environ.get("AI_GATEWAY_SESSION_TTL_SECONDS", "28800"))
@@ -140,9 +140,9 @@ async def _authenticate_browser_session(request: Request, token: str) -> Dict[st
 
 async def authenticate_api_key(
     request: Request,
-    api_key: Optional[str] = Header(None, alias="x-api-key"),
-    authorization: Optional[str] = Header(None),
-) -> Dict[str, Any]:
+    api_key: str | None = Header(None, alias="x-api-key"),
+    authorization: str | None = Header(None),
+) -> dict[str, Any]:
     """Authenticate machine/API endpoints with API-key headers only."""
     key_value = _extract_api_key(authorization, api_key)
     if not key_value:
@@ -152,14 +152,14 @@ async def authenticate_api_key(
 
 async def authenticate(
     request: Request,
-    api_key: Optional[str] = Header(None, alias="x-api-key"),
-    authorization: Optional[str] = Header(None),
-) -> Dict[str, Any]:
+    api_key: str | None = Header(None, alias="x-api-key"),
+    authorization: str | None = Header(None),
+) -> dict[str, Any]:
     """Compatibility dependency for /v1 endpoints: API-key headers only."""
     return await authenticate_api_key(request, api_key=api_key, authorization=authorization)
 
 
-async def authenticate_admin(request: Request) -> Dict[str, Any]:
+async def authenticate_admin(request: Request) -> dict[str, Any]:
     """Authenticate administrator routes with admin API keys or browser sessions.
 
     Browser sessions that still require an administrator password change may only

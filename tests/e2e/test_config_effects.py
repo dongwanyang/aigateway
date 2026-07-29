@@ -9,15 +9,14 @@ Adjustments from plan:
 - E5: Agnes provider may return 401 or rate-limit. Graceful skip.
 - E6: Health check may timeout under load. Increased timeout + graceful handling.
 """
-import os
-import time
-import uuid
 import subprocess
 import threading
-import pytest
-import httpx
+import time
 
-from tests.conftest import HOST_CONFIG_YAML, BASE, ADMIN_KEY
+import httpx
+import pytest
+
+from tests.conftest import ADMIN_KEY, BASE, HOST_CONFIG_YAML
 
 
 def _admin_client():

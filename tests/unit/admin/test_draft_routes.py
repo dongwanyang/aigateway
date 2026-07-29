@@ -8,15 +8,13 @@
 - _get_draft_strategy 辅助函数: app.state 两级查找
 """
 
-import json
-import sys
 import os
+import sys
+
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-api", "src"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
-
-from pydantic import ValidationError
 
 from aigateway_api.draft_routes import (
     DraftActionRequest,
@@ -24,7 +22,7 @@ from aigateway_api.draft_routes import (
     _get_draft_strategy,
     router,
 )
-
+from pydantic import ValidationError
 
 # ==================================================================
 # DraftActionRequest 校验测试
@@ -404,9 +402,10 @@ def draft_strategy_with_video_draft(monkeypatch):
     `aigateway_api.admin_routes._get_draft_strategy` 返回 mock strategy,
     与 TestDraftActionEndpoint 用 FakeRequest 注入 strategy 同义。
     """
-    from aigateway_core.pipelines.generation._common.models import VideoSubmitResult
     from unittest.mock import AsyncMock
+
     from aigateway_api import admin_routes, openai_compat
+    from aigateway_core.pipelines.generation._common.models import VideoSubmitResult
 
     class _FakeDraft:
         user_id = None

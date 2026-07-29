@@ -18,7 +18,6 @@ Tests for TokenCompressorStrategy — 视觉 Token 压缩核心逻辑
 import asyncio
 import os
 import sys
-from unittest.mock import AsyncMock, patch
 
 import pytest
 

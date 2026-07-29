@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any
 
 from aigateway_core.pipelines.generation._common.config import AIDirectorConfig
 
@@ -47,7 +47,7 @@ class PromptConfirmationHandler:
         self._config = config
         # In-memory store for pending confirmations.
         # Key: confirmation_id, Value: dict with original_prompt, optimized_prompt, request_id
-        self._pending_confirmations: Dict[str, Dict[str, str]] = {}
+        self._pending_confirmations: dict[str, dict[str, str]] = {}
 
     def needs_confirmation(self) -> bool:
         """判断是否需要用户确认优化后的 prompt.
@@ -62,7 +62,7 @@ class PromptConfirmationHandler:
         original_prompt: str,
         optimized_prompt: str,
         request_id: str,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """创建确认响应，包含原始和优化后的 prompt 供用户审核.
 
         生成唯一的 confirmation_id 并将待确认数据存入内存。
@@ -114,7 +114,7 @@ class PromptConfirmationHandler:
         self,
         confirmation_id: str,
         action: str,
-        edited_prompt: Optional[str] = None,
+        edited_prompt: str | None = None,
     ) -> str:
         """处理用户的确认响应.
 
@@ -177,7 +177,7 @@ class PromptConfirmationHandler:
 
     def get_pending_confirmation(
         self, confirmation_id: str
-    ) -> Optional[Dict[str, str]]:
+    ) -> dict[str, str] | None:
         """查询待确认的 prompt 数据.
 
         Args:

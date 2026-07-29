@@ -44,16 +44,20 @@ export async function pollDraftUntilSettled(draftId: string): Promise<DraftPollR
       await wait(DRAFT_POLL_INTERVAL_MS)
       try {
         const response = await getDraftPreview(draftId)
-        if (response.status === 'generating') continue
-        return response.previewDataUrl
-          ? { kind: 'ready', previewDataUrl: response.previewDataUrl }
-          : { kind: 'error', message: '预览响应缺少 data URL' }
+        // 202 in-progress responses carry a status (generating/queued/running/
+        // refining) but no previewDataUrl — keep polling until the 200 with
+        // the data URL lands. Only a present previewDataUrl means ready.
+        if (!response.previewDataUrl) continue
+        return { kind: 'ready', previewDataUrl: response.previewDataUrl }
       } catch (error) {
         const message = error instanceof Error ? error.message : '预览加载失败'
         if (message.includes('not_found') || message.includes('expired')) {
           return { kind: 'expired', message }
         }
         if (message.includes('draft_failed')) {
+          return { kind: 'error', message }
+        }
+        if (message.includes('forbidden') || message.includes('unauthorized')) {
           return { kind: 'error', message }
         }
         console.warn(`Failed to poll draft preview for ${draftId}:`, error)

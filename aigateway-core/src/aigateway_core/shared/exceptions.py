@@ -17,13 +17,11 @@ from __future__ import annotations
 class GatewayError(Exception):
     """Gateway 基类异常。"""
 
-    pass
 
 
 class AuthError(GatewayError):
     """API Key 认证失败。"""
 
-    pass
 
 
 class QuotaExceededError(GatewayError):

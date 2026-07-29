@@ -1,5 +1,7 @@
 """DebugConfig 单元测试 —— 5 维度 + AND 逻辑."""
-import sys, os
+import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 
 from aigateway_core.shared.debug_config import DebugConfig, DebugConfigWatcher

@@ -13,10 +13,11 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, List, Optional
 
 from aigateway_core.dispatch.context import PipelineContext
-from aigateway_core.pipelines.generation._common.config import GenerationOptimizationConfig
+from aigateway_core.pipelines.generation._common.config import (
+    GenerationOptimizationConfig,
+)
 from aigateway_core.pipelines.generation._common.models import (
     DraftResult,
     GenerationRequest,
@@ -54,7 +55,7 @@ class DraftGeneratorPlugin:
 
     name: str = "draft_generator"
     enabled: bool = True
-    depends_on: List[str] = ["token_compressor"]
+    depends_on: list[str] = ["token_compressor"]
 
     def __init__(
         self,
@@ -129,14 +130,25 @@ class DraftGeneratorPlugin:
             # 提取显式指定的关键帧数量（如果有）
             keyframe_count = self._extract_keyframe_count(ctx)
 
+            owner_user_id = (
+                ctx.extra["draft_owner_user_id"]
+                if "draft_owner_user_id" in ctx.extra
+                else (ctx.extra.get("user_id") or ctx.user_id)
+            )
+            owner_group_id = (
+                ctx.extra["draft_owner_group_id"]
+                if "draft_owner_group_id" in ctx.extra
+                else ctx.extra.get("group_id")
+            )
+
             # 调用 strategy.generate_draft()
             draft_result: DraftResult = await self._strategy.generate_draft(
                 request=generation_request,
                 config=self._config.draft_workflow,
                 keyframe_count=keyframe_count,
                 chat_session_id=ctx.extra.get("chat_session_id"),
-                user_id=ctx.extra.get("user_id"),
-                group_id=ctx.extra.get("group_id"),
+                user_id=owner_user_id,
+                group_id=owner_group_id,
             )
 
             # 计算耗时
@@ -153,9 +165,7 @@ class DraftGeneratorPlugin:
                 "expires_at": draft_result.expires_at,
                 "status": draft_result.status,
                 "generation_params": draft_result.generation_params,
-                # 预览实际调用的模型(配置项 draft_model,默认 agnes-image-2.1-flash),
-                # 供 dispatcher 写日志/账本时记录真实模型而非客户端的 auto。
-                "draft_model": getattr(self._config.draft_workflow, "draft_model", "agnes-image-2.1-flash"),
+                "draft_model": f"comfyui:{self._strategy.checkpoint_name}",
                 "duration_ms": duration_ms,
             }
 
@@ -322,7 +332,7 @@ class DraftGeneratorPlugin:
         # 直接从请求的 prompt 字段获取
         return ctx.request.get("prompt", "")
 
-    def _extract_keyframe_count(self, ctx: PipelineContext) -> Optional[int]:
+    def _extract_keyframe_count(self, ctx: PipelineContext) -> int | None:
         """从请求中提取显式指定的关键帧数量.
 
         Args:

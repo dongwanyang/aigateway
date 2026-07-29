@@ -7,8 +7,9 @@ Fixtures:
 热重载等待策略:文件写入后 sleep(3s) — spec §5.3 #7 明确 3s 是热重载观察窗口。
 """
 import time
-import yaml
+
 import pytest
+import yaml
 
 from tests.conftest import HOST_CONFIG_YAML
 

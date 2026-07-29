@@ -13,37 +13,39 @@ OpenAI 兼容接口实现
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import os
 import threading
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
-_st_model_cache: Dict[str, Any] = {}
+_st_model_cache: dict[tuple[str, str | None], Any] = {}
 _st_model_lock = threading.Lock()
 
 
 def _encode_with_sentence_transformer(
     model_name: str,
-    input_texts: List[str],
+    input_texts: list[str],
+    device: str | None,
 ) -> Any:
     """Load/cache and run sentence-transformers outside the event loop."""
     from sentence_transformers import SentenceTransformer
 
     # The cache and the shared model instance both require synchronization.
     with _st_model_lock:
-        model = _st_model_cache.get(model_name)
+        cache_key = (model_name, device)
+        model = _st_model_cache.get(cache_key)
         if model is None:
-            model = SentenceTransformer(model_name)
-            _st_model_cache[model_name] = model
+            kwargs = {"device": device} if device else {}
+            model = SentenceTransformer(model_name, **kwargs)
+            _st_model_cache[cache_key] = model
         return model.encode(input_texts, normalize_embeddings=True)
 
 # ------------------------------------------------------------------
@@ -55,25 +57,30 @@ class ChatCompletionRequest(BaseModel):
     """POST /v1/chat/completions 请求体。"""
 
     model: str
-    messages: List[Dict[str, Any]]
-    temperature: Optional[float] = Field(default=1.0, ge=0.0, le=2.0)
-    max_tokens: Optional[int] = None
-    top_p: Optional[float] = Field(default=1.0, ge=0.0, le=1.0)
-    frequency_penalty: Optional[float] = Field(default=0.0, ge=-2.0, le=2.0)
-    presence_penalty: Optional[float] = Field(default=0.0, ge=-2.0, le=2.0)
+    messages: list[dict[str, Any]]
+    temperature: float | None = Field(default=1.0, ge=0.0, le=2.0)
+    max_tokens: int | None = None
+    top_p: float | None = Field(default=1.0, ge=0.0, le=1.0)
+    frequency_penalty: float | None = Field(default=0.0, ge=-2.0, le=2.0)
+    presence_penalty: float | None = Field(default=0.0, ge=-2.0, le=2.0)
     stream: bool = False
-    tools: Optional[List[Dict[str, Any]]] = None
-    tool_choice: Optional[Any] = None
-    stop: Optional[Any] = None
-    user: Optional[str] = None
+    tools: list[dict[str, Any]] | None = None
+    tool_choice: Any | None = None
+    stop: Any | None = None
+    user: str | None = None
+    chat_session_id: str | None = Field(
+        default=None,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9._:-]+$",
+    )
 
 
 class EmbeddingRequest(BaseModel):
     """POST /v1/embeddings 请求体。"""
 
     model: str
-    input: str | List[str]
-    user: Optional[str] = None
+    input: str | list[str]
+    user: str | None = None
 
 
 # ------------------------------------------------------------------
@@ -88,28 +95,21 @@ class EmbeddingRequest(BaseModel):
 # Re-exported here so existing callers (including the core dispatcher's
 # lazy imports, which now point at the core modules directly) keep working.
 
-from aigateway_core.route.metrics.costing import _estimate_cost
-from aigateway_core.route.streaming.metrics_wrapper import _wrap_stream_for_metrics
-from aigateway_core.prefix.cache.l3_semantic import (
-    _compute_l3_vector,
-    _l3_model_cache,
-    _safe_l3_backfill,
-)
 
 
-def _get_app_state(request: Request | None = None) -> Dict[str, Any]:
+def _get_app_state(request: Request | None = None) -> dict[str, Any]:
     """从 FastAPI get_state() 获取全局组件。"""
     from .app_state import get_state
     s = get_state(request)
     return {
-        "cache_manager": getattr(s, "cache_manager"),
-        "key_store": getattr(s, "key_store"),
-        "litellm_bridge": getattr(s, "litellm_bridge"),
-        "metrics_collector": getattr(s, "metrics_collector"),
-        "config_manager": getattr(s, "config_manager"),
-        "plugin_registry": getattr(s, "plugin_registry"),
-        "redis_manager": getattr(s, "redis_manager"),
-        "qdrant_manager": getattr(s, "qdrant_manager"),
+        "cache_manager": s.cache_manager,
+        "key_store": s.key_store,
+        "litellm_bridge": s.litellm_bridge,
+        "metrics_collector": s.metrics_collector,
+        "config_manager": s.config_manager,
+        "plugin_registry": s.plugin_registry,
+        "redis_manager": s.redis_manager,
+        "qdrant_manager": s.qdrant_manager,
         "media_optimization_layer": getattr(s, "media_optimization_layer", None),
         "media_cache": getattr(s, "media_cache", None),
         "pii_detector_plugin": getattr(s, "pii_detector_plugin", None),
@@ -135,6 +135,7 @@ def _get_redis_client() -> Any:
     直接从环境变量连接 Redis 保证每个 worker 都有独立的连接。
     """
     import os
+
     import redis.asyncio as redis
 
     url = os.environ.get("AI_GATEWAY_REDIS_URL", "redis://localhost:6379/0")
@@ -157,11 +158,9 @@ async def _record_request_log(
     duration_ms: float,
     model: str,
     cache_hit: bool,
-    cache_tier: Optional[str],
+    cache_tier: str | None,
 ) -> None:
     """记录请求日志到 Redis ZSET，供前端 /admin/logs 查询。"""
-    import time
-    import uuid
 
     # 从 request.state 获取 request_id/trace_id/user_id
     request_id = getattr(request.state, "request_id", "") or str(uuid.uuid4().hex[:12])
@@ -207,10 +206,10 @@ async def _record_request_log(
 
 
 async def _apply_media_optimization(
-    body: "ChatCompletionRequest",
+    body: ChatCompletionRequest,
     request: Request,
-    state: Dict[str, Any],
-) -> Dict[str, Any]:
+    state: dict[str, Any],
+) -> dict[str, Any]:
     """对请求消息应用 Media Optimization Layer。
 
     检测并处理多模态内容（图片 OCR、音频转录等），
@@ -221,7 +220,7 @@ async def _apply_media_optimization(
         失败或无多模态内容时原样返回。
     """
     mol_plugin = state.get("media_optimization_layer")
-    result: Dict[str, Any] = {"messages": body.messages, "meta": {}}
+    result: dict[str, Any] = {"messages": body.messages, "meta": {}}
 
     if mol_plugin is None:
         return result
@@ -271,10 +270,10 @@ async def _apply_media_optimization(
 
 
 async def _apply_pii_detection(
-    body: "ChatCompletionRequest",
+    body: ChatCompletionRequest,
     request: Request,
-    state: Dict[str, Any],
-) -> Dict[str, Any]:
+    state: dict[str, Any],
+) -> dict[str, Any]:
     """Apply PII detection and sanitization to the request.
 
     Returns:
@@ -282,7 +281,7 @@ async def _apply_pii_detection(
         If reject strategy triggers, returns {"error": {...}, "status_code": 403}.
     """
     pii_plugin = state.get("pii_detector_plugin")
-    result: Dict[str, Any] = {"messages": body.messages, "meta": {}}
+    result: dict[str, Any] = {"messages": body.messages, "meta": {}}
 
     if pii_plugin is None:
         return result
@@ -332,9 +331,9 @@ async def _apply_pii_detection(
 
 
 async def _resolve_auto_model(
-    body: "ChatCompletionRequest",
-    state: Dict[str, Any],
-) -> Dict[str, Any]:
+    body: ChatCompletionRequest,
+    state: dict[str, Any],
+) -> dict[str, Any]:
     """Resolve model='auto' to the best available provider/model.
 
     Returns:
@@ -410,10 +409,10 @@ async def _resolve_auto_model(
 
 
 async def _apply_prompt_compression(
-    body: "ChatCompletionRequest",
+    body: ChatCompletionRequest,
     request: Request,
-    state: Dict[str, Any],
-) -> Dict[str, Any]:
+    state: dict[str, Any],
+) -> dict[str, Any]:
     """Apply prompt compression before LLM call.
 
     Returns:
@@ -421,7 +420,7 @@ async def _apply_prompt_compression(
         If plugin unavailable or passthrough, returns original messages.
     """
     compress_plugin = state.get("prompt_compress_plugin")
-    result: Dict[str, Any] = {"messages": body.messages, "meta": {}}
+    result: dict[str, Any] = {"messages": body.messages, "meta": {}}
 
     if compress_plugin is None:
         return result
@@ -535,11 +534,15 @@ async def create_embeddings(
     config_manager = state.get("config_manager")
     embedding_backend = "sentence_transformers"
     embedding_model = body.model or "all-MiniLM-L6-v2"
+    embedding_device: str | None = None
 
     if config_manager:
         emb_cfg = config_manager.get("embedding", {})
         if emb_cfg:
             embedding_backend = emb_cfg.get("backend", "sentence_transformers")
+            configured_device = emb_cfg.get("device", "auto")
+            if configured_device != "auto":
+                embedding_device = configured_device
             if not body.model:
                 embedding_model = emb_cfg.get("model", "all-MiniLM-L6-v2")
 
@@ -550,6 +553,7 @@ async def create_embeddings(
                 _encode_with_sentence_transformer,
                 embedding_model,
                 input_texts,
+                embedding_device,
             )
         except ImportError:
             return JSONResponse(
@@ -562,20 +566,15 @@ async def create_embeddings(
                 status_code=400,
             )
 
-        data_items = []
-        if isinstance(embeddings, list):
-            for i, emb in enumerate(embeddings):
-                data_items.append({
-                    "object": "embedding",
-                    "index": i,
-                    "embedding": emb.tolist() if hasattr(emb, "tolist") else list(emb),
-                })
-        else:
-            data_items.append({
+        embedding_rows = embeddings.tolist() if hasattr(embeddings, "tolist") else list(embeddings)
+        data_items = [
+            {
                 "object": "embedding",
-                "index": 0,
-                "embedding": embeddings.tolist() if hasattr(embeddings, "tolist") else list(embeddings),
-            })
+                "index": index,
+                "embedding": row.tolist() if hasattr(row, "tolist") else list(row),
+            }
+            for index, row in enumerate(embedding_rows)
+        ]
 
         return JSONResponse(content={
             "data": {
@@ -667,7 +666,8 @@ async def create_embeddings(
 
 def _setup_router() -> Any:
     """创建并配置 FastAPI router。"""
-    from fastapi import APIRouter, Depends, Request
+    from fastapi import APIRouter, Depends
+
     from .auth_middleware import authenticate, require_scope
 
     router_obj = APIRouter()
@@ -676,7 +676,7 @@ def _setup_router() -> Any:
     async def post_chat_completions(
         body: ChatCompletionRequest,
         request: Request,
-        _auth: Dict[str, Any] = Depends(authenticate),
+        _auth: dict[str, Any] = Depends(authenticate),
     ):
         require_scope(_auth, "chat")
         # 总分总架构：所有请求经 RequestDispatcher 分流到理解/生成管道，
@@ -687,14 +687,14 @@ def _setup_router() -> Any:
         return await dispatcher.dispatch(body, request)
 
     @router_obj.get("/models")
-    async def get_models(request: Request, _auth: Dict[str, Any] = Depends(authenticate)):
+    async def get_models(request: Request, _auth: dict[str, Any] = Depends(authenticate)):
         return await list_models(request)
 
     @router_obj.post("/embeddings")
     async def post_embeddings(
         body: EmbeddingRequest,
         request: Request,
-        _auth: Dict[str, Any] = Depends(authenticate),
+        _auth: dict[str, Any] = Depends(authenticate),
     ):
         require_scope(_auth, "embedding")
         return await create_embeddings(body, request)

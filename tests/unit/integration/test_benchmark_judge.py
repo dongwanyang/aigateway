@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from benchmarks.judge import _parse_judge_response, run_judge
-
 
 # ---------------------------------------------------------------------------
 # Parsing
@@ -86,7 +84,7 @@ class TestRunJudge:
         """API timeout → None, sample.status becomes judge_error."""
         mock_session = MagicMock()
         post_ctx = AsyncMock()
-        post_ctx.__aenter__.side_effect = asyncio.TimeoutError("timeout")
+        post_ctx.__aenter__.side_effect = TimeoutError("timeout")
         post_ctx.__aexit__.return_value = False
         mock_session.post.return_value = post_ctx
 

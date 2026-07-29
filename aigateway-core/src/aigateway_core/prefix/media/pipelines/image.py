@@ -15,7 +15,7 @@ import asyncio
 import io
 import logging
 import time
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING
 
 from ..base import MediaPipeline, MediaProcessor
 from ..config import ImagePipelineConfig
@@ -47,12 +47,13 @@ class ImageResizeProcessor(MediaProcessor):
         return content.media_type == MediaType.IMAGE
 
     async def process(
-        self, content: MediaContent, ctx: "PipelineContext"
+        self, content: MediaContent, ctx: PipelineContext
     ) -> ProcessorResult:
         """缩放图片到目标分辨率。"""
         start = time.monotonic()
         try:
-            from PIL import Image
+            import PIL
+            _ = PIL
 
             image_data = content.optimized_data or content.raw_data
             if image_data is None:
@@ -103,7 +104,7 @@ class ImageResizeProcessor(MediaProcessor):
                 error=str(exc),
             )
 
-    def _resize(self, image_data: bytes) -> Optional[bytes]:
+    def _resize(self, image_data: bytes) -> bytes | None:
         """同步执行缩放。"""
         from PIL import Image
 
@@ -138,12 +139,13 @@ class ImageCompressProcessor(MediaProcessor):
         return content.media_type == MediaType.IMAGE
 
     async def process(
-        self, content: MediaContent, ctx: "PipelineContext"
+        self, content: MediaContent, ctx: PipelineContext
     ) -> ProcessorResult:
         """压缩图片。"""
         start = time.monotonic()
         try:
-            from PIL import Image
+            import PIL
+            _ = PIL
 
             image_data = content.optimized_data or content.raw_data
             if image_data is None:
@@ -238,11 +240,11 @@ class OCRExtractor(MediaProcessor):
     }
 
     def __init__(
-        self, backend: str = "tesseract", languages: Optional[List[str]] = None
+        self, backend: str = "tesseract", languages: list[str] | None = None
     ) -> None:
         self.backend = backend
         self.languages = languages or ["eng"]
-        self._paddleocr_engine: Optional[object] = None
+        self._paddleocr_engine: object | None = None
 
         if backend == "paddleocr":
             self._init_paddleocr()
@@ -268,7 +270,7 @@ class OCRExtractor(MediaProcessor):
             self.backend = "tesseract"
             self._paddleocr_engine = None
 
-    def _map_language_code(self, languages: List[str]) -> str:
+    def _map_language_code(self, languages: list[str]) -> str:
         """将语言列表映射为 PaddleOCR 支持的 lang 参数。
 
         PaddleOCR 一次只支持单一语言参数，优先使用列表中第一个可映射的语言。
@@ -284,7 +286,7 @@ class OCRExtractor(MediaProcessor):
         return content.media_type == MediaType.IMAGE
 
     async def process(
-        self, content: MediaContent, ctx: "PipelineContext"
+        self, content: MediaContent, ctx: PipelineContext
     ) -> ProcessorResult:
         """提取图片中的文字。"""
         start = time.monotonic()
@@ -355,7 +357,7 @@ class OCRExtractor(MediaProcessor):
         results = self._paddleocr_engine.ocr(img_array, cls=True)
 
         # 按 y 坐标排序，保留文档布局
-        lines: List[tuple] = []
+        lines: list[tuple] = []
         if results:
             for line_result in results:
                 if line_result:
@@ -373,8 +375,8 @@ class OCRExtractor(MediaProcessor):
         lines.sort(key=lambda x: (x[0], x[1]))
 
         # 简单行分组：y 坐标差值小于阈值的归为同一行
-        grouped_lines: List[List[tuple]] = []
-        current_group: List[tuple] = [lines[0]]
+        grouped_lines: list[list[tuple]] = []
+        current_group: list[tuple] = [lines[0]]
         y_tolerance = 15  # 像素容差
 
         for i in range(1, len(lines)):
@@ -386,7 +388,7 @@ class OCRExtractor(MediaProcessor):
         grouped_lines.append(current_group)
 
         # 同一行内按 x 坐标排序，用空格连接
-        output_lines: List[str] = []
+        output_lines: list[str] = []
         for group in grouped_lines:
             group.sort(key=lambda x: x[1])
             line_text = "  ".join(text for _, _, text in group)
@@ -425,7 +427,7 @@ class VisionCaptionProcessor(MediaProcessor):
         return content.media_type == MediaType.IMAGE
 
     async def process(
-        self, content: MediaContent, ctx: "PipelineContext"
+        self, content: MediaContent, ctx: PipelineContext
     ) -> ProcessorResult:
         """生成图片描述（需要 Vision Model 支持）。"""
         start = time.monotonic()
@@ -545,7 +547,7 @@ class ImagePipeline(MediaPipeline):
 
     media_type = MediaType.IMAGE
 
-    def __init__(self, config: Optional[ImagePipelineConfig] = None) -> None:
+    def __init__(self, config: ImagePipelineConfig | None = None) -> None:
         cfg = config or ImagePipelineConfig()
         self.config = cfg
         self.resize_processor = ImageResizeProcessor(
@@ -573,7 +575,7 @@ class ImagePipeline(MediaPipeline):
         ]
 
     async def execute(
-        self, content: MediaContent, ctx: "PipelineContext"
+        self, content: MediaContent, ctx: PipelineContext
     ) -> MediaContent:
         """执行图像处理管线。"""
         # 检查文件大小限制
@@ -619,7 +621,7 @@ class ImagePipeline(MediaPipeline):
 
         return content
 
-    async def _download(self, url: str) -> Optional[bytes]:
+    async def _download(self, url: str) -> bytes | None:
         """下载图片内容。"""
         try:
             import httpx

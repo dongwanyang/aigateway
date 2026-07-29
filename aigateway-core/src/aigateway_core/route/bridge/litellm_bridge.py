@@ -17,11 +17,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, AsyncIterator, Dict, List, Optional
+from collections.abc import AsyncIterator
+from typing import Any
 
 import httpx
 
-from .cooldown import ProviderCooldownTracker
 from aigateway_core.dispatch.context import RequestContext
 from aigateway_core.route.model_resolution.policy_engine import (
     NoModelSatisfiesPolicy,
@@ -29,7 +29,12 @@ from aigateway_core.route.model_resolution.policy_engine import (
     RoutingPolicyEngine,
 )
 from aigateway_core.route.model_resolution.runtime_router import RuntimeModelRouter
-from aigateway_core.route.model_resolution.task_classifier import TaskClassifier, TaskProfile
+from aigateway_core.route.model_resolution.task_classifier import (
+    TaskClassifier,
+    TaskProfile,
+)
+
+from .cooldown import ProviderCooldownTracker
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +47,7 @@ _INTENT_TO_CAPABILITY = {
 
 
 def _emit_bridge_debug(start_monotonic: float, status: str,
-                       payload: Optional[Dict[str, Any]] = None) -> None:
+                       payload: dict[str, Any] | None = None) -> None:
     """Bridge 的 stage 事件已由 dispatcher._emit_stage 在 completion 路径发出,
     不需要额外发 kind=debug 事件 —— 否则 trace 里同一操作出现两行(stage+debug)。
     保留此 stub 以便后续需要时通过 stage 事件的 payload 字段查看 bridge 信息。
@@ -65,7 +70,7 @@ class LiteLLMBridge:
         _fallback_chain: 当前请求的 fallback 模型列表。
     """
 
-    def __init__(self, config: Optional[Dict[str, Any]] = None) -> None:
+    def __init__(self, config: dict[str, Any] | None = None) -> None:
         """
         Args:
             config: 提供商配置字典，格式见 TECH_SPEC.md config.yaml providers 段。
@@ -73,15 +78,15 @@ class LiteLLMBridge:
         self.config = config or {}
         self.router: Any = None
         self.cost_tracker: Any = None
-        self._fallback_chain: List[str] = []
-        self._model_alias_map: Dict[str, str] = {}  # 裸模型名 -> Router 注册名
-        self._model_providers: Dict[str, str] = {}  # 裸模型名 -> configured provider
-        self._model_fallbacks: Dict[str, List[str]] = {}  # 裸模型名 -> ordered fallbacks
-        self._model_capabilities: Dict[str, List[str]] = {}  # 裸模型名 -> capabilities 列表
-        self._model_tasks: Dict[str, List[str]] = {}  # 裸模型名 -> task capability 列表
-        self._model_features: Dict[str, List[str]] = {}  # 裸模型名 -> runtime features
-        self._model_pricing: Dict[str, Dict[str, float]] = {}  # litellm_model -> {prompt, completion}
-        self._model_latency_ms: Dict[str, float] = {}  # 裸模型名 -> EWMA latency
+        self._fallback_chain: list[str] = []
+        self._model_alias_map: dict[str, str] = {}  # 裸模型名 -> Router 注册名
+        self._model_providers: dict[str, str] = {}  # 裸模型名 -> configured provider
+        self._model_fallbacks: dict[str, list[str]] = {}  # 裸模型名 -> ordered fallbacks
+        self._model_capabilities: dict[str, list[str]] = {}  # 裸模型名 -> capabilities 列表
+        self._model_tasks: dict[str, list[str]] = {}  # 裸模型名 -> task capability 列表
+        self._model_features: dict[str, list[str]] = {}  # 裸模型名 -> runtime features
+        self._model_pricing: dict[str, dict[str, float]] = {}  # litellm_model -> {prompt, completion}
+        self._model_latency_ms: dict[str, float] = {}  # 裸模型名 -> EWMA latency
         self._task_classifier = TaskClassifier()
         self._policy_engine = RoutingPolicyEngine(self.config.get("task_routing", {}))
         self._expose_routing_metadata = (
@@ -94,7 +99,7 @@ class LiteLLMBridge:
             )
             or {}
         )
-        self._model_quality_scores: Dict[str, int] = dict(
+        self._model_quality_scores: dict[str, int] = dict(
             router_cfg.get("model_capabilities", {}) or {}
         )
         # auto 模型解析器(可选,由 main.py 注入)
@@ -102,7 +107,7 @@ class LiteLLMBridge:
         # (ModelRouterStrategy 内部仍用旧 llm/mllm/generative 分类, 见 Task 9)。
         self._auto_resolver: Any = None
         # cooldown tracker(在 initialize() 里创建,init 时占位)
-        self._cooldown_tracker: Optional[ProviderCooldownTracker] = None
+        self._cooldown_tracker: ProviderCooldownTracker | None = None
 
     def set_auto_resolver(self, resolver: Any) -> None:
         """注入 auto 模型解析器(通常是 ModelRouterStrategy 单例)。
@@ -114,11 +119,11 @@ class LiteLLMBridge:
     async def _resolve_by_intent(
         self,
         intent: str,
-        model_hint: Optional[str],
-        messages: Optional[List[Dict[str, Any]]] = None,
+        model_hint: str | None,
+        messages: list[dict[str, Any]] | None = None,
         apply_task_policy: bool = False,
-        task_profile: Optional[Any] = None,
-    ) -> Dict[str, Any]:
+        task_profile: Any | None = None,
+    ) -> dict[str, Any]:
         """按意图对应能力过滤候选池, 选最佳模型.
 
         Args:
@@ -180,7 +185,7 @@ class LiteLLMBridge:
                         "message": str(exc),
                     }
                 }
-            health: Dict[str, Dict[str, Any]] = {}
+            health: dict[str, dict[str, Any]] = {}
             if self._cooldown_tracker is not None:
                 try:
                     raw_health = self._cooldown_tracker.get_all_status() or {}
@@ -225,7 +230,7 @@ class LiteLLMBridge:
     # 初始化
     # ------------------------------------------------------------------
 
-    def initialize(self, providers_config: Optional[Dict[str, Any]] = None) -> None:
+    def initialize(self, providers_config: dict[str, Any] | None = None) -> None:
         """初始化 LiteLLM Router 和 CostTracker。
 
         从 providers_config 读取各提供商的 api_key / base_url / models 配置。
@@ -299,7 +304,7 @@ class LiteLLMBridge:
                     if tracker_ref is not None:
                         tracker_ref.on_success(model)
                     bare_model = str(model).split("/")[-1]
-                    elapsed_ms: Optional[float] = None
+                    elapsed_ms: float | None = None
                     try:
                         elapsed_ms = float((end_time - start_time).total_seconds() * 1000)
                     except Exception:
@@ -344,7 +349,7 @@ class LiteLLMBridge:
             logger.error("LiteLLM Router 初始化失败: %s", exc)
             raise
 
-    def _build_model_list(self, providers_config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _build_model_list(self, providers_config: dict[str, Any]) -> list[dict[str, Any]]:
         """从 providers_config 构建 LiteLLM Router model_list。
 
         格式: [{"model_name": "...", "litellm_params": {...}}, ...]
@@ -363,7 +368,7 @@ class LiteLLMBridge:
         Returns:
             model_list 列表。
         """
-        model_list: List[Dict[str, Any]] = []
+        model_list: list[dict[str, Any]] = []
 
         for provider_name, provider_cfg in providers_config.items():
             api_key = provider_cfg.get("api_key", "")
@@ -379,7 +384,7 @@ class LiteLLMBridge:
                     fallback_models = group.get("fallback_models", [])
                     for model_entry in group.get("models", []):
                         # 支持字符串或字典格式；capabilities 必须为 list
-                        model_base_url: Optional[str] = None
+                        model_base_url: str | None = None
                         if isinstance(model_entry, dict):
                             model_name = model_entry.get("name", "")
                             if not model_name:
@@ -511,7 +516,7 @@ class LiteLLMBridge:
         return model_list
 
     def _register_model_pricing(
-        self, group: Dict[str, Any], litellm_model: str, base_url: Optional[str], provider_name: str
+        self, group: dict[str, Any], litellm_model: str, base_url: str | None, provider_name: str
     ) -> None:
         """注册模型定价到 LiteLLM cost map，抑制 "not in built-in cost map" 告警。
 
@@ -602,17 +607,17 @@ class LiteLLMBridge:
                 pass
         return False
 
-    def get_registered_models(self) -> List[str]:
+    def get_registered_models(self) -> list[str]:
         """返回所有已注册的裸模型名列表。"""
         return list(self._model_alias_map.keys())
 
-    def get_cooldown_status(self) -> Dict[str, Any]:
+    def get_cooldown_status(self) -> dict[str, Any]:
         """返回所有 model 的 cooldown 状态(供 /admin/health 读)。"""
         if self._cooldown_tracker is None:
             return {}
         return self._cooldown_tracker.get_all_status()
 
-    def get_cooldown_status_by_provider(self) -> Dict[str, int]:
+    def get_cooldown_status_by_provider(self) -> dict[str, int]:
         """按 provider 聚合状态(供 /metrics 上报 Prometheus)。
 
         Returns:
@@ -622,7 +627,7 @@ class LiteLLMBridge:
             return {}
         return self._cooldown_tracker.get_provider_states()
 
-    def _build_routing_strategy(self, providers_config: Dict[str, Any]) -> str:
+    def _build_routing_strategy(self, providers_config: dict[str, Any]) -> str:
         """构建路由策略配置.
 
         Args:
@@ -648,7 +653,7 @@ class LiteLLMBridge:
         model_name: str,
         raw_caps: Any,
         raw_modality: Any,
-    ) -> List[str]:
+    ) -> list[str]:
         """兼容新旧配置格式：优先读 capabilities；没有时回退到旧 modality。"""
         if isinstance(raw_caps, list):
             caps = [str(x) for x in raw_caps if x]
@@ -661,7 +666,7 @@ class LiteLLMBridge:
         elif isinstance(raw_modality, str):
             modalities = [raw_modality]
 
-        inferred: List[str] = []
+        inferred: list[str] = []
         lower_name = (model_name or "").lower()
 
         if "llm" in modalities or "mllm" in modalities:
@@ -694,29 +699,29 @@ class LiteLLMBridge:
 
     async def completion(
         self,
-        messages: List[Dict[str, Any]],
+        messages: list[dict[str, Any]],
         model: str,
-        user_id: Optional[str] = None,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-        top_p: Optional[float] = None,
-        frequency_penalty: Optional[float] = None,
-        presence_penalty: Optional[float] = None,
+        user_id: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        top_p: float | None = None,
+        frequency_penalty: float | None = None,
+        presence_penalty: float | None = None,
         stream: bool = False,
-        tools: Optional[List[Dict[str, Any]]] = None,
-        tool_choice: Optional[str] = None,
-        stop: Optional[Any] = None,
-        fallback_chain: Optional[List[str]] = None,
-        max_retries: Optional[int] = None,
-        extra_headers: Optional[Dict[str, str]] = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | None = None,
+        stop: Any | None = None,
+        fallback_chain: list[str] | None = None,
+        max_retries: int | None = None,
+        extra_headers: dict[str, str] | None = None,
         intent: str = "understanding",
-        model_hint: Optional[str] = None,
+        model_hint: str | None = None,
         apply_task_routing: bool = False,
-        task_profile: Optional[Any] = None,
+        task_profile: Any | None = None,
         # 过渡别名:Task 6 之前 dispatcher 仍传 pipeline_kind=,Task 6 后移除。
-        pipeline_kind: Optional[str] = None,
-        request_context: Optional[RequestContext] = None,
-    ) -> Dict[str, Any]:
+        pipeline_kind: str | None = None,
+        request_context: RequestContext | None = None,
+    ) -> dict[str, Any]:
         """发送聊天补全请求到下游 LLM。
 
         支持按意图解析模型:bridge 内部按 intent 选模型,
@@ -759,8 +764,8 @@ class LiteLLMBridge:
         if request_context is not None:
             budget_deadline = min(budget_deadline, request_context.deadline)
         attempts = 0
-        last_error: Optional[Exception] = None
-        fallback_used: List[str] = []
+        last_error: Exception | None = None
+        fallback_used: list[str] = []
 
         # 过渡兼容:Task 6 之前 dispatcher 仍传 pipeline_kind= 而非 intent=。
         # 把旧值映射到 intent; 显式 intent= 优先,仅当 intent 取默认值且 pipeline_kind 显式传入时采用 pipeline_kind。
@@ -772,7 +777,7 @@ class LiteLLMBridge:
             intent = _PIPELINE_KIND_TO_INTENT.get(pipeline_kind, "understanding")
 
         # ===== 按意图解析模型(取消 auto 魔法字符串; 客户端 model 作 hint)=====
-        auto_router_meta: Optional[Dict[str, Any]] = None
+        auto_router_meta: dict[str, Any] | None = None
         required_capability = _INTENT_TO_CAPABILITY.get(intent, "text")
 
         explicit_model = model if (model and model != "auto") else None
@@ -971,10 +976,10 @@ class LiteLLMBridge:
 
     async def _do_completion(
         self,
-        messages: List[Dict[str, Any]],
+        messages: list[dict[str, Any]],
         model: str,
         **kwargs: Any,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """执行实际的 LiteLLM completion 调用。
 
         Args:
@@ -999,7 +1004,7 @@ class LiteLLMBridge:
         # 解析裸模型名为 Router 注册的全名
         resolved_model = self.resolve_model(model)
 
-        params: Dict[str, Any] = {
+        params: dict[str, Any] = {
             "model": resolved_model,
             "messages": messages,
             "stream": kwargs.get("stream", False),
@@ -1023,7 +1028,7 @@ class LiteLLMBridge:
         # 执行请求
         if kwargs.get("stream", False):
             # 流式：逐 chunk 聚合
-            chunks: List[str] = []
+            chunks: list[str] = []
             response = await self.router.acompletion(**params)
             async for chunk in response:
                 chunk_data = chunk.dict() if hasattr(chunk, "dict") else dict(chunk)
@@ -1044,12 +1049,12 @@ class LiteLLMBridge:
         self,
         prompt: str,
         model: str,
-        size: Optional[str] = None,
+        size: str | None = None,
         n: int = 1,
-        response_format: Optional[str] = None,
-        quality: Optional[str] = None,
-        extra_headers: Optional[Dict[str, str]] = None,
-    ) -> Dict[str, Any]:
+        response_format: str | None = None,
+        quality: str | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         """调 OpenAI Images API (/images/generations) 生成图片, 归一为 chat completions.
 
         请求体严格遵循 Agnes Image API 格式（兼容 OpenAI Images API 语义）:
@@ -1057,7 +1062,6 @@ class LiteLLMBridge:
         - response_format 放入 extra_body（Agnes 要求）
         - quality / n 非 Agnes 原生参数，忽略
         """
-        import httpx
 
         gen_cfg = (self.config.get("generation", {}) or {}).get("image", {}) or {}
         size = size or gen_cfg.get("default_size", "2K")
@@ -1067,7 +1071,7 @@ class LiteLLMBridge:
         endpoint = f"{base_url.rstrip('/')}/images/generations"
 
         # 构建符合 Agnes API 的请求体
-        body: Dict[str, Any] = {
+        body: dict[str, Any] = {
             "model": model,
             "prompt": prompt,
             "size": size,
@@ -1116,21 +1120,20 @@ class LiteLLMBridge:
 
     async def _do_video_generation(
         self,
-        messages: List[Dict[str, Any]],
+        messages: list[dict[str, Any]],
         model: str,
         seconds: str = "4",
-        size: Optional[str] = None,
-        input_reference: Optional[Dict[str, Any]] = None,
-        extra_headers: Optional[Dict[str, str]] = None,
-    ) -> Dict[str, Any]:
+        size: str | None = None,
+        input_reference: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         """调 OpenAI Videos API (POST /videos, 异步) 提交任务, 返回含 task_id 的 chat completions."""
-        import httpx
 
         base_url, api_key = self._get_model_endpoint(model)
         endpoint = f"{base_url.rstrip('/')}/videos"
 
         prompt = self._extract_prompt_from_messages(messages)
-        body: Dict[str, Any] = {
+        body: dict[str, Any] = {
             "model": model,
             "prompt": prompt,
             "seconds": seconds,
@@ -1161,9 +1164,8 @@ class LiteLLMBridge:
             "_meta": {"video_id": video_id},
         }
 
-    async def retrieve_video(self, video_id: str) -> Dict[str, Any]:
+    async def retrieve_video(self, video_id: str) -> dict[str, Any]:
         """轮询视频任务状态 (GET /videos/{id}), 对应 OpenAI Retrieve a video."""
-        import httpx
 
         # 使用 _get_model_endpoint 找第一个已注册模型的端点（优先 per-model base_url）
         base_url, api_key = self._get_model_endpoint(
@@ -1178,7 +1180,7 @@ class LiteLLMBridge:
         resp.raise_for_status()
         return resp.json()
 
-    def _extract_prompt_from_messages(self, messages: List[Dict[str, Any]]) -> str:
+    def _extract_prompt_from_messages(self, messages: list[dict[str, Any]]) -> str:
         for m in reversed(messages or []):
             if isinstance(m, dict) and m.get("role") == "user":
                 c = m.get("content")
@@ -1191,8 +1193,8 @@ class LiteLLMBridge:
         return ""
 
     def _aggregate_stream_chunks(
-        self, chunks: List[Dict[str, Any]]
-    ) -> Dict[str, Any]:
+        self, chunks: list[dict[str, Any]]
+    ) -> dict[str, Any]:
         """将流式 chunks 聚合成完整的非流式响应。
 
         Args:
@@ -1215,16 +1217,16 @@ class LiteLLMBridge:
         }
 
         # 聚合 content
-        content_parts: List[str] = []
+        content_parts: list[str] = []
         finish_reason = None
         role = None
-        tool_calls_map: Dict[int, Any] = {}
+        tool_calls_map: dict[int, Any] = {}
 
         for chunk in chunks:
             choices = chunk.get("choices", [])
             for choice in choices:
                 delta = choice.get("delta", {})
-                idx = choice.get("index", 0)
+                choice.get("index", 0)
 
                 if delta.get("role"):
                     role = delta["role"]
@@ -1252,7 +1254,7 @@ class LiteLLMBridge:
 
         content = "".join(content_parts)
 
-        message: Dict[str, Any] = {"role": role or "assistant", "content": content}
+        message: dict[str, Any] = {"role": role or "assistant", "content": content}
         if tool_calls_map:
             message["tool_calls"] = list(tool_calls_map.values())
 
@@ -1274,7 +1276,7 @@ class LiteLLMBridge:
     # 用量追踪
     # ------------------------------------------------------------------
 
-    def _track_usage(self, model: str, response: Dict[str, Any]) -> float:
+    def _track_usage(self, model: str, response: dict[str, Any]) -> float:
         """记录模型调用的 token 用量和成本。
 
         Args:
@@ -1364,13 +1366,13 @@ class LiteLLMBridge:
             return model.split("/")[0]
         # 根据模型名猜测提供商
         model_lower = model.lower()
-        if model_lower.startswith("gpt") or model_lower.startswith("davinci"):
+        if model_lower.startswith(("gpt", "davinci")):
             return "openai"
         if model_lower.startswith("claude"):
             return "anthropic"
         if model_lower.startswith("gemini"):
             return "gemini"
-        if model_lower.startswith("llama") or model_lower.startswith("ollama"):
+        if model_lower.startswith(("llama", "ollama")):
             return "ollama"
         return "unknown"
 
@@ -1401,7 +1403,7 @@ class LiteLLMBridge:
     # 模型列表
     # ------------------------------------------------------------------
 
-    async def list_models(self) -> List[Dict[str, Any]]:
+    async def list_models(self) -> list[dict[str, Any]]:
         """列出当前配置的可用模型。
 
         Returns:
@@ -1435,28 +1437,28 @@ class LiteLLMBridge:
 
     async def completion_stream(
         self,
-        messages: List[Dict[str, Any]],
+        messages: list[dict[str, Any]],
         model: str,
-        user_id: Optional[str] = None,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-        top_p: Optional[float] = None,
-        frequency_penalty: Optional[float] = None,
-        presence_penalty: Optional[float] = None,
-        tools: Optional[List[Dict[str, Any]]] = None,
-        tool_choice: Optional[str] = None,
-        stop: Optional[Any] = None,
-        fallback_chain: Optional[List[str]] = None,
-        max_retries: Optional[int] = None,
-        extra_headers: Optional[Dict[str, str]] = None,
+        user_id: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        top_p: float | None = None,
+        frequency_penalty: float | None = None,
+        presence_penalty: float | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | None = None,
+        stop: Any | None = None,
+        fallback_chain: list[str] | None = None,
+        max_retries: int | None = None,
+        extra_headers: dict[str, str] | None = None,
         intent: str = "understanding",
-        model_hint: Optional[str] = None,
+        model_hint: str | None = None,
         apply_task_routing: bool = False,
-        task_profile: Optional[Any] = None,
+        task_profile: Any | None = None,
         # 过渡别名:Task 6 之前 dispatcher 仍传 pipeline_kind=,Task 6 后移除。
-        pipeline_kind: Optional[str] = None,
-        request_context: Optional[RequestContext] = None,
-    ) -> AsyncIterator[Dict[str, Any]]:
+        pipeline_kind: str | None = None,
+        request_context: RequestContext | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
         """流式发送聊天补全请求到下游 LLM。
 
         支持按意图解析:按 intent 内部解析,首个 chunk 里 _meta 会带
@@ -1478,7 +1480,7 @@ class LiteLLMBridge:
         required_capability = _INTENT_TO_CAPABILITY.get(intent, "text")
 
         explicit_model = model if (model and model != "auto") else None
-        auto_router_meta: Optional[Dict[str, Any]] = None
+        auto_router_meta: dict[str, Any] | None = None
         if (
             apply_task_routing
             and self._policy_engine.model_selection_mode == "strict"
@@ -1629,7 +1631,7 @@ class LiteLLMBridge:
         if request_context is not None:
             budget_deadline = min(budget_deadline, request_context.deadline)
         attempts = 0
-        last_error: Optional[Exception] = None
+        last_error: Exception | None = None
 
         candidates = [model]
         effective_fallback_chain = (
@@ -1665,7 +1667,7 @@ class LiteLLMBridge:
             # 解析裸模型名为 Router 注册的全名
             resolved_model = self.resolve_model(current_model)
             try:
-                params: Dict[str, Any] = {
+                params: dict[str, Any] = {
                     "model": resolved_model,
                     "messages": messages,
                     "stream": True,
@@ -1727,7 +1729,7 @@ class LiteLLMBridge:
     # 工具方法
     # ------------------------------------------------------------------
 
-    def get_cost_summary(self) -> Dict[str, Any]:
+    def get_cost_summary(self) -> dict[str, Any]:
         """获取用量成本摘要。
 
         Returns:

@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING
 
 from ..base import MediaPipeline, MediaProcessor
 from ..config import AudioPipelineConfig
@@ -46,7 +46,7 @@ class AudioTranscriber(MediaProcessor):
         return content.media_type == MediaType.AUDIO
 
     async def process(
-        self, content: MediaContent, ctx: "PipelineContext"
+        self, content: MediaContent, ctx: PipelineContext
     ) -> ProcessorResult:
         """转录音频为文字。"""
         start = time.monotonic()
@@ -101,8 +101,8 @@ class AudioTranscriber(MediaProcessor):
 
     def _transcribe(self, audio_data: bytes) -> str:
         """同步转录。"""
-        import tempfile
         import os
+        import tempfile
 
         # 写入临时文件
         suffix = ".wav"
@@ -152,7 +152,7 @@ class AudioPipeline(MediaPipeline):
 
     media_type = MediaType.AUDIO
 
-    def __init__(self, config: Optional[AudioPipelineConfig] = None) -> None:
+    def __init__(self, config: AudioPipelineConfig | None = None) -> None:
         cfg = config or AudioPipelineConfig()
         self.config = cfg
         self.transcriber = AudioTranscriber(
@@ -164,7 +164,7 @@ class AudioPipeline(MediaPipeline):
         self.processors = [self.transcriber]
 
     async def execute(
-        self, content: MediaContent, ctx: "PipelineContext"
+        self, content: MediaContent, ctx: PipelineContext
     ) -> MediaContent:
         """执行音频处理管线。"""
         # 检查大小限制
@@ -189,7 +189,7 @@ class AudioPipeline(MediaPipeline):
 
         return content
 
-    async def _download(self, url: str) -> Optional[bytes]:
+    async def _download(self, url: str) -> bytes | None:
         """下载音频。"""
         try:
             import httpx

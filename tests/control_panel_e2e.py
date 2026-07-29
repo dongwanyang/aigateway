@@ -24,6 +24,7 @@ Environment variables:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -34,12 +35,11 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
-import asyncio
 import zipfile
 
 import pytest
 import pytest_asyncio
-from playwright.async_api import async_playwright, Page, Browser
+from playwright.async_api import Browser, Page, async_playwright
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -240,7 +240,7 @@ class TestOverviewPage:
         assert cards > 0, "Overview page should show stat cards"
         # At least some cards should have visible text content
         for i in range(min(cards, 3)):
-            card_text = await page.locator(f".stat-card, [class*='card']").nth(i).inner_text()
+            card_text = await page.locator(".stat-card, [class*='card']").nth(i).inner_text()
             assert card_text.strip(), f"Stat card {i} has no visible text"
 
 
@@ -692,7 +692,7 @@ class TestQuotasPage:
         assert ok
         key_id = result.get("data", {}).get("id", "")
 
-        ok2, result2 = await _direct_api("PUT", f"/admin/api-keys/{key_id}/group", body={
+        ok2, _result2 = await _direct_api("PUT", f"/admin/api-keys/{key_id}/group", body={
             "group_id": "grp-default",
         })
         assert not ok2, "Should have rejected assignment to default group"
@@ -873,7 +873,7 @@ class TestCostsPage:
 
     @pytest.mark.asyncio
     async def test_get_metrics_text(self):
-        ok, result = await _direct_api("GET", "/metrics")
+        ok, _result = await _direct_api("GET", "/metrics")
         assert ok, "GET /metrics failed"
 
     @pytest.mark.asyncio
@@ -1531,7 +1531,7 @@ async def run_standalone():
     ok3, result3 = await _direct_api("GET", "/admin/groups")
     group_item = next(g for g in result3.get("data", {}).get("items", []) if g["group_id"] == group_id3)
     assert group_item.get("member_count") == 1
-    print(f"  Group member_count = 1: OK")
+    print("  Group member_count = 1: OK")
 
     # Cleanup — delete group first
     await _direct_api("DELETE", f"/admin/groups/{group_id3}")

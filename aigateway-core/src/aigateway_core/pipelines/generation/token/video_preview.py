@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import List
 
 from aigateway_core.pipelines.generation._common.config import DraftWorkflowConfig
 from aigateway_core.pipelines.generation._common.exceptions import DraftWorkflowError
@@ -43,7 +42,7 @@ class VideoPreviewGenerator:
 
     async def generate_preview_video(
         self,
-        keyframes: List[bytes],
+        keyframes: list[bytes],
         config: DraftWorkflowConfig,
     ) -> bytes:
         """从确认的关键帧生成预览视频.
@@ -177,7 +176,7 @@ class VideoPreviewGenerator:
 
     async def generate_and_interpolate(
         self,
-        keyframes: List[bytes],
+        keyframes: list[bytes],
         config: DraftWorkflowConfig | None = None,
         target_fps: int | None = None,
     ) -> bytes:

@@ -14,14 +14,12 @@ test_generation_optimization_registration — 注册所有插件到 PipelineEngi
 
 from __future__ import annotations
 
-import sys
 import os
+import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 
 import pytest
-
-from aigateway_core.shared.plugin_registry import PluginRegistry
 from aigateway_core.pipelines.generation.registration import (
     AIDirectorPlugin,
     CostTrackerPlugin,
@@ -31,7 +29,7 @@ from aigateway_core.pipelines.generation.registration import (
     TokenCompressorPlugin,
     register_generation_optimization_plugins,
 )
-
+from aigateway_core.shared.plugin_registry import PluginRegistry
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -298,7 +296,7 @@ class TestDisabledPluginPassthrough:
         from aigateway_core.dispatch.context import PipelineContext
 
         ctx = PipelineContext(request={"messages": [{"role": "user", "content": "hello"}]}, trace_id="test-trace")
-        original_extra = dict(ctx.extra)
+        dict(ctx.extra)
 
         # Execute disabled plugin — should pass through
         result_ctx = await ai_director.execute(ctx)

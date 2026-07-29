@@ -11,18 +11,17 @@ Tests for API Key Group Field Support
 import os
 import sys
 
-import pytest
-
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 
-from aigateway_core.pipelines.generation._common.api_key_groups import build_api_key_groups
+from aigateway_core.pipelines.generation._common.api_key_groups import (
+    build_api_key_groups,
+)
+from aigateway_core.pipelines.generation._common.config import CostTrackingConfig
 from aigateway_core.pipelines.generation._common.metrics import (
     DEFAULT_API_KEY_GROUP,
     GenerationCostTracker,
     _get_api_key_group,
 )
-from aigateway_core.pipelines.generation._common.config import CostTrackingConfig
-
 
 # ==================================================================
 # Tests for build_api_key_groups

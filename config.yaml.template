@@ -113,9 +113,18 @@ plugins:
       top_k: 5              # 检索返回 top-K 文档块
       similarity_threshold: 0.7  # 相似度阈值
       rerank_enabled: false  # 是否启用重排序
+      rerank_device: auto    # 启用时由套餐固定为 cuda / mps，不静默回 CPU
+      rerank_backend: local  # local | remote（Apple 原生服务使用 remote）
+      rerank_api_base:
+      rerank_api_key:
       chunk_size: 512        # 文档分块大小（token）
       chunk_overlap: 64      # 分块重叠
       collection_name: rag_documents  # Qdrant 集合名称
+      embedding_backend: local  # local | openai（Apple/remote 由安装器生成）
+      embedding_model: Qwen/Qwen3-Embedding-0.6B
+      embedding_device: auto    # 套餐配置固定为 cuda / mps / remote，不静默回 CPU
+      embedding_api_base:
+      embedding_api_key:
       # Code RAG 检索增强（配合下方 code_rag 顶级块使用）
       code_rag_enabled: true       # 是否在检索时并行查询 rag_code_* 代码集合
       code_rag_graph_hops: 2       # CodeGraph 调用图跳数（callers/callees 展开深度）
@@ -426,9 +435,38 @@ generation_optimization:
       batch_size: 1          # 批量处理大小
   draft_workflow:             # Draft-to-HiRes 草图工作流
     comfyui:
-      server_url: "http://localhost:8188"  # ComfyUI API 地址
+      server_url: "http://comfyui:8188"  # Compose 内网地址；不直接暴露公网
       connect_timeout: 10    # 连接超时（秒）
       execution_timeout: 300 # 工作流执行超时（秒）
+      required: true         # 不可用时 fail-closed，不静默改走外部媒体 API
+      workflow_version: "image-v1"
+      checkpoint_name: "sd_xl_base_1.0.safetensors"
+      allowed_checkpoints: ["sd_xl_base_1.0.safetensors"]
+      max_concurrency: 1
+      min_free_gb: 30
+      model_budget_gb: 30
+      output_budget_gb: 10
+      output_retention_hours: 24
+      models_path: "/comfyui/models"
+      output_path: "/comfyui/output"
+      workflow_path: "/comfyui/workflows"
+      # 视频确认使用已批准的图片草稿作为首帧，原生 Wan2.2 TI2V 输出 MP4。
+      video_enabled: true
+      video_workflow_version: "wan2.2-ti2v-5b-v1"
+      video_diffusion_model: "wan2.2_ti2v_5B_fp16.safetensors"
+      video_text_encoder: "umt5_xxl_fp8_e4m3fn_scaled.safetensors"
+      video_vae: "wan2.2_vae.safetensors"
+      allowed_video_diffusion_models: ["wan2.2_ti2v_5B_fp16.safetensors"]
+      allowed_video_text_encoders: ["umt5_xxl_fp8_e4m3fn_scaled.safetensors"]
+      allowed_video_vaes: ["wan2.2_vae.safetensors"]
+      video_width: 512       # T4 低显存安全默认值；必须是 16 的倍数
+      video_height: 288
+      video_frames: 17       # 约 2 秒草稿视频（8 fps）
+      video_fps: 8
+      video_steps: 20
+      video_cfg: 5
+      video_shift: 8
+      video_execution_timeout: 1200
 
 # ==========================
 # 意图驱动路由（intent-driven routing）

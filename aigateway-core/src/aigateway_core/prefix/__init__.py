@@ -17,7 +17,7 @@ import importlib as _importlib
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover
-    from aigateway_core.prefix import cache, media, pii  # noqa: F401
+    from aigateway_core.prefix import cache, media, pii
 
 _LAZY_SUBMODULES = {"pii", "cache", "media"}
 
@@ -30,4 +30,4 @@ def __getattr__(name: str):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-__all__ = ["pii", "cache", "media"]
+__all__ = ["cache", "media", "pii"]

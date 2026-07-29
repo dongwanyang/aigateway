@@ -28,10 +28,10 @@ def test_prefix_pii_exports():
 def test_prefix_cache_exports():
     from aigateway_core.prefix import cache
     from aigateway_core.prefix.cache.cache_keys import (
-        _normalize_prompt,
-        _bucket_temperature,
         _bucket_max_tokens,
+        _bucket_temperature,
         _model_family,
+        _normalize_prompt,
     )
 
     assert cache._normalize_prompt is _normalize_prompt

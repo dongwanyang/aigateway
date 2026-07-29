@@ -17,8 +17,8 @@ import logging
 import secrets
 import string
 import uuid
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import UTC, datetime
+from typing import Any
 
 from aigateway_core.shared.exceptions import AuthError
 
@@ -62,7 +62,7 @@ class KeyStore:
         # Keys[1]=key_hash, Keys[2]=group_id (empty if none)
         # Args[1]=tokens, Args[2]=cost, Args[3]=now_unix, Args[4]=model
         # Args[5]=tokens_in, Args[6]=tokens_out
-        self._check_and_incr_sha: Optional[str] = None
+        self._check_and_incr_sha: str | None = None
         # Lua script: atomic check_quota + increment_usage for a single key hash.
         # Returns [ok(0/1), failure_reason_or_empty, retry_after_or_0]
         # Keys[1]=key_hash, Keys[2]=group_id (empty if none)
@@ -206,21 +206,21 @@ return {1, '', '0'}
     @staticmethod
     def _now_iso() -> str:
         """Return current UTC time as ISO 8601 string."""
-        return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     @staticmethod
     def _now_unix() -> int:
         """Return current Unix timestamp (seconds)."""
-        return int(datetime.now(timezone.utc).timestamp())
+        return int(datetime.now(UTC).timestamp())
 
     def _build_pubsub_message(
         self, event_type: str, key_id: str, user_id: str, **extra: Any
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Build Pub/Sub sync message body.
 
         DB_SCHEMA §4: aigateway:keys:sync channel message format
         """
-        msg: Dict[str, Any] = {
+        msg: dict[str, Any] = {
             "event_type": event_type,
             "key_id": key_id,
             "user_id": user_id,
@@ -233,7 +233,7 @@ return {1, '', '0'}
     # Core operations: validate / create / revoke
     # ------------------------------------------------------------------
 
-    async def validate(self, key: str) -> Optional[Dict[str, Any]]:
+    async def validate(self, key: str) -> dict[str, Any] | None:
         """Validate API Key.
 
         Looks up and validates status and quota from Redis
@@ -298,7 +298,7 @@ return {1, '', '0'}
             return False
 
         try:
-            cursor, keys = await self.redis.redis.scan(0, match="aigateway:key:*", count=5)
+            _cursor, keys = await self.redis.redis.scan(0, match="aigateway:key:*", count=5)
             if keys:
                 return False  # Redis has keys, no need to reseed
 
@@ -325,10 +325,10 @@ return {1, '', '0'}
     async def create(
         self,
         user_id: str,
-        quotas: Optional[Dict[str, Any]] = None,
+        quotas: dict[str, Any] | None = None,
         group_id: str = "",
         cache_scope: str = "group",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Create a new API Key and store in Redis.
 
         DB_SCHEMA §1: writes aigateway:key:{key_hash} Hash + aigateway:key_lookup Hash
@@ -366,7 +366,7 @@ return {1, '', '0'}
         await self._check_duplicate_user_key(user_id)
 
         # Write Key Hash
-        key_data: Dict[str, str] = {
+        key_data: dict[str, str] = {
             "key_id": key_id,
             "key_prefix": key_prefix,
             "user_id": user_id,
@@ -388,8 +388,8 @@ return {1, '', '0'}
         }
 
         # Initialize daily and monthly quota records (DB_SCHEMA §2)
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        month = datetime.now(timezone.utc).strftime("%Y-%m")
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        month = datetime.now(UTC).strftime("%Y-%m")
 
         quota_base = {
             "tokens_in": "0",
@@ -437,7 +437,7 @@ return {1, '', '0'}
             },
         }
 
-    async def seed_from_config(self, keys_config: List[Dict[str, Any]]) -> int:
+    async def seed_from_config(self, keys_config: list[dict[str, Any]]) -> int:
         """Import API Keys from config.yaml auth.api_keys into Redis.
 
         Called at startup to ensure config-file keys are written to Redis.
@@ -454,8 +454,8 @@ return {1, '', '0'}
 
         imported = 0
         now_iso = self._now_iso()
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        month = datetime.now(timezone.utc).strftime("%Y-%m")
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        month = datetime.now(UTC).strftime("%Y-%m")
 
         quota_base = {
             "tokens_in": "0",
@@ -504,7 +504,7 @@ return {1, '', '0'}
                 logger.info("API Key 已更新: user_id=%s, key_hash=%s", user_id, key_hash)
             else:
                 key_id = f"key_{uuid.uuid4().hex[:8]}"
-                key_data: Dict[str, str] = {
+                key_data: dict[str, str] = {
                     "key_id": key_id,
                     "key_prefix": key_prefix,
                     "user_id": user_id,
@@ -526,15 +526,42 @@ return {1, '', '0'}
                     "is_admin": str(is_admin),
                 }
                 # Atomic batch: key hash + lookup + daily quota + monthly quota + member
-                def _build(pipe):
+                def _build(
+                    pipe,
+                    *,
+                    bound_key_hash=key_hash,
+                    bound_key_data=key_data,
+                    bound_key_prefix=key_prefix,
+                    bound_today=today,
+                    bound_month=month,
+                    bound_quota_base=quota_base,
+                    bound_group=cfg_group,
+                ):
                     ops = [
-                        pipe.hset(f"aigateway:key:{key_hash}", mapping=key_data),
-                        pipe.set(f"aigateway:key_lookup:{key_prefix}", key_hash),
-                        pipe.hset(f"aigateway:quota:{key_hash}:daily:{today}", mapping=quota_base),
-                        pipe.hset(f"aigateway:quota:{key_hash}:monthly:{month}", mapping=quota_base),
+                        pipe.hset(
+                            f"aigateway:key:{bound_key_hash}",
+                            mapping=bound_key_data,
+                        ),
+                        pipe.set(
+                            f"aigateway:key_lookup:{bound_key_prefix}",
+                            bound_key_hash,
+                        ),
+                        pipe.hset(
+                            f"aigateway:quota:{bound_key_hash}:daily:{bound_today}",
+                            mapping=bound_quota_base,
+                        ),
+                        pipe.hset(
+                            f"aigateway:quota:{bound_key_hash}:monthly:{bound_month}",
+                            mapping=bound_quota_base,
+                        ),
                     ]
-                    if cfg_group:
-                        ops.append(pipe.sadd(f"aigateway:group:{cfg_group}:members", key_hash))
+                    if bound_group:
+                        ops.append(
+                            pipe.sadd(
+                                f"aigateway:group:{bound_group}:members",
+                                bound_key_hash,
+                            )
+                        )
                     return ops
 
                 await self.redis.pipe_batch(lambda pipe: _build(pipe))
@@ -626,7 +653,7 @@ return {1, '', '0'}
 
         return True
 
-    async def ensure_seeded(self, keys_config: List[Dict[str, Any]]) -> int:
+    async def ensure_seeded(self, keys_config: list[dict[str, Any]]) -> int:
         """Check if Redis has any API Key; if empty, reseed.
 
         Used for auto-recovery after Redis is cleared.
@@ -641,7 +668,7 @@ return {1, '', '0'}
             return 0
 
         # Check if any key exists
-        cursor, keys = await self.redis.redis.scan(0, match="aigateway:key:*", count=10)
+        _cursor, keys = await self.redis.redis.scan(0, match="aigateway:key:*", count=10)
         if keys:
             return 0  # Keys exist, no reseed needed
 
@@ -655,17 +682,17 @@ return {1, '', '0'}
 
     @staticmethod
     def _check_dims(
-        data: Dict[str, Any],
+        data: dict[str, Any],
         tokens: int,
         cost: float,
         now_unix: int,
-    ) -> Tuple[bool, Optional[str], int, Dict[str, str]]:
+    ) -> tuple[bool, str | None, int, dict[str, str]]:
         """Check RPM/TPM/daily/monthly against a data dict.
 
         Returns (passed, reason, retry_after, resets) where ``resets`` holds
         window fields to write back when a window expired (caller persists).
         """
-        resets: Dict[str, str] = {}
+        resets: dict[str, str] = {}
 
         rpm_limit = int(data.get("rate_limit_rpm", KeyStore.DEFAULT_RATE_LIMIT_RPM))
         rpm_window_start = int(data.get("rpm_window_start", "0"))
@@ -710,7 +737,7 @@ return {1, '', '0'}
         key_hash: str,
         tokens: int,
         cost: float,
-    ) -> Tuple[bool, Optional[str], int]:
+    ) -> tuple[bool, str | None, int]:
         """Atomic check+reserve via Lua script.
 
         DB_SCHEMA §2 quota counting + §5 rate-limit windows.
@@ -737,8 +764,8 @@ return {1, '', '0'}
 
         group_id = data.get("group_id") or ""
         now_unix = self._now_unix()
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        month = datetime.now(timezone.utc).strftime("%Y-%m")
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        month = datetime.now(UTC).strftime("%Y-%m")
 
         # Register Lua script if not already done
         if self._check_and_incr_sha is None:
@@ -784,7 +811,7 @@ return {1, '', '0'}
         key_hash: str,
         tokens: int,
         cost: float,
-    ) -> Tuple[bool, Optional[str], int]:
+    ) -> tuple[bool, str | None, int]:
         """Non-atomic quota check fallback for environments without Lua eval support.
 
         Used when FakeRedis or other test mocks don't support conn.eval().
@@ -817,10 +844,10 @@ return {1, '', '0'}
 
     @staticmethod
     def _compute_usage_updates(
-        data: Dict[str, Any], tokens: int, cost: float, now_unix: int,
-    ) -> Dict[str, str]:
+        data: dict[str, Any], tokens: int, cost: float, now_unix: int,
+    ) -> dict[str, str]:
         """Pure: compute RPM/TPM/daily/monthly counter updates from a data dict."""
-        updates: Dict[str, str] = {}
+        updates: dict[str, str] = {}
 
         rpm_window_start = int(data.get("rpm_window_start", "0"))
         rpm_window_count = int(data.get("rpm_window_count", "0")) + 1
@@ -844,13 +871,13 @@ return {1, '', '0'}
 
     @staticmethod
     def _accumulate_quota_record(
-        quota: Optional[Dict[str, Any]],
+        quota: dict[str, Any] | None,
         tokens: int,
         cost: float,
         model: str,
         tokens_in: int,
         tokens_out: int,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Pure: accumulate one request into a quota record dict (DB_SCHEMA §2)."""
         if not quota:
             quota = {"tokens_in": "0", "tokens_out": "0", "cost_usd": "0.0",
@@ -943,8 +970,8 @@ return {1, '', '0'}
             await self.redis.set_api_key(key_hash, updates)
 
         # ---- Key-level quota period records ----
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        month = datetime.now(timezone.utc).strftime("%Y-%m")
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        month = datetime.now(UTC).strftime("%Y-%m")
         try:
             daily_quota = await self.redis.get_quota(key_hash, f"daily:{today}")
             await self.redis.set_quota(key_hash, f"daily:{today}",
@@ -1030,8 +1057,8 @@ return {1, '', '0'}
 
     @staticmethod
     def _compute_reconciled_updates(
-        data: Dict[str, Any], token_delta: int, cost_delta: float, now_unix: int,
-    ) -> Dict[str, str]:
+        data: dict[str, Any], token_delta: int, cost_delta: float, now_unix: int,
+    ) -> dict[str, str]:
         """Pure: compute counter updates for a delta (actual − reserved).
 
         Applies the token/cost delta to daily_tokens_used / monthly_cost_used /
@@ -1044,20 +1071,18 @@ return {1, '', '0'}
         already reset, so the reserved value is also gone. Acceptable: the
         delta is typically small (estimate vs actual).
         """
-        updates: Dict[str, str] = {}
+        updates: dict[str, str] = {}
 
         if token_delta != 0:
             daily_used = int(data.get("daily_tokens_used", "0")) + token_delta
-            if daily_used < 0:
-                daily_used = 0
+            daily_used = max(daily_used, 0)
             updates["daily_tokens_used"] = str(daily_used)
 
             # TPM window: only adjust if we're still inside the same window.
             tpm_window_start = int(data.get("tpm_window_start", "0"))
             if now_unix - tpm_window_start < 60:
                 tpm_window_count = int(data.get("tpm_window_count", "0")) + token_delta
-                if tpm_window_count < 0:
-                    tpm_window_count = 0
+                tpm_window_count = max(tpm_window_count, 0)
                 updates["tpm_window_count"] = str(tpm_window_count)
 
         if cost_delta != 0:
@@ -1091,9 +1116,9 @@ return {1, '', '0'}
             if cursor == 0:
                 break
 
-    async def _find_key_hashes_by_id(self, key_id: str) -> List[str]:
+    async def _find_key_hashes_by_id(self, key_id: str) -> list[str]:
         """Find all matching key_hash by key_id."""
-        hashes: List[str] = []
+        hashes: list[str] = []
         if self.redis.redis is None:
             return hashes
         cursor = 0

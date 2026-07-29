@@ -7,8 +7,9 @@ classify_request 调 IntentClassifier(LLM 预判)输出带媒介 pipeline_kind:
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Any, Iterator, Optional
+from typing import Any
 
 from aigateway_core.route.model_resolution.task_classifier import TaskProfile
 
@@ -24,8 +25,8 @@ class ClassificationResult:
     """
 
     pipeline_kind: str
-    model_hint: Optional[str] = None
-    task_profile: Optional[TaskProfile] = None
+    model_hint: str | None = None
+    task_profile: TaskProfile | None = None
     source: str = "fallback"
 
     def __iter__(self) -> Iterator[Any]:
@@ -36,7 +37,7 @@ class ClassificationResult:
 async def classify_request(
     body: Any,
     config_manager: Any,
-    intent_classifier: Optional[Any] = None,
+    intent_classifier: Any | None = None,
 ) -> ClassificationResult:
     """把请求分类为 understanding | generation:image | generation:video.
 

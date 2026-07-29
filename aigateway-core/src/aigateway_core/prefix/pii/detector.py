@@ -9,7 +9,6 @@ import hashlib
 import re
 import uuid
 from re import Pattern
-from typing import List, Optional, Tuple
 
 # ------------------------------------------------------------------
 # PII detection patterns
@@ -79,14 +78,14 @@ class PIIDetector:
     def __init__(
         self,
         strategy: str = "sanitize",
-        patterns: Optional[List[Tuple[str, str]]] = None,
-        exclusion_patterns: Optional[List[Tuple[str, Optional[str]]]] = None,
+        patterns: list[tuple[str, str]] | None = None,
+        exclusion_patterns: list[tuple[str, str | None]] | None = None,
     ) -> None:
         self.strategy = strategy
         self._compiled_exclusions = [(re.compile(p), m) for p, m in (exclusion_patterns or _EXCLUSION_PATTERNS)]
         self._compiled_named = [(re.compile(p), m) for p, m in (patterns or _PII_NAMED_FIELDS)]
         self._compiled_standalone = [(re.compile(p), m) for p, m in (patterns or _PII_STANDALONE)]
-        self.detected_categories: List[str] = []
+        self.detected_categories: list[str] = []
 
     def process(self, text: str) -> str:
         """Process text, detect and mask PII.
@@ -100,7 +99,7 @@ class PIIDetector:
         self.detected_categories = []
 
         # Step 1: exclusion pass — temporarily replace excluded patterns
-        excluded: List[Tuple[str, str, str]] = []  # (placeholder, original, mask)
+        excluded: list[tuple[str, str, str]] = []  # (placeholder, original, mask)
         temp_text = text
         for pattern, _ in self._compiled_exclusions:
             for match in pattern.finditer(temp_text):
@@ -127,7 +126,7 @@ class PIIDetector:
     def _apply_masks(
         self,
         text: str,
-        patterns: List[Tuple[Pattern, str]],
+        patterns: list[tuple[Pattern, str]],
     ) -> str:
         """Apply mask replacement."""
         for pattern, mask in patterns:

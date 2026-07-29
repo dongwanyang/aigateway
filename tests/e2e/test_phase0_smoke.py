@@ -2,7 +2,8 @@
 import httpx
 import pytest
 import redis
-from tests.conftest import BASE, REDIS_URL, QDRANT_URL, ADMIN_KEY
+
+from tests.conftest import ADMIN_KEY, BASE, QDRANT_URL, REDIS_URL
 
 
 def test_gateway_health():

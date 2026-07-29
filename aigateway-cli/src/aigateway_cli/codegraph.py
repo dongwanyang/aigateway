@@ -19,8 +19,7 @@ status 不需要 -d。
 """
 
 import json
-import sys
-from typing import Any, Optional
+from typing import Any
 
 import httpx
 from rich.console import Console
@@ -36,7 +35,7 @@ def _admin_headers(api_key: str) -> dict[str, str]:
     }
 
 
-def _get_json(base_url: str, api_key: str, path: str, *, params: Optional[dict[str, Any]] = None) -> Any:
+def _get_json(base_url: str, api_key: str, path: str, *, params: dict[str, Any] | None = None) -> Any:
     url = f"{base_url}{path}"
     try:
         resp = httpx.get(url, headers=_admin_headers(api_key), params=params, timeout=30.0)
@@ -78,7 +77,7 @@ def _cmd_status(api_key: str, base_url: str, **_: Any) -> int:
     return 0
 
 
-def _cmd_query(api_key: str, base_url: str, *, symbol: str, document: str, kind: Optional[str], limit: int, as_json: bool, **_: Any) -> int:
+def _cmd_query(api_key: str, base_url: str, *, symbol: str, document: str, kind: str | None, limit: int, as_json: bool, **_: Any) -> int:
     params: dict[str, Any] = {"symbol": symbol, "limit": limit}
     if kind:
         params["kind"] = kind
@@ -196,9 +195,9 @@ def main(
     api_key: str,
     base_url: str,
     action: str,
-    symbol: Optional[str],
-    document: Optional[str],
-    kind: Optional[str],
+    symbol: str | None,
+    document: str | None,
+    kind: str | None,
     limit: int,
     depth: int,
     as_json: bool,

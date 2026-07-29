@@ -34,10 +34,9 @@ import shutil
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any
 
 import pytest
-import yaml
 from starlette.testclient import TestClient
 
 # Paths
@@ -156,7 +155,7 @@ def reset_debug_state(client: TestClient) -> None:
 # The 12 plugins actually registered (verified via app.state.plugin_registry).
 # media_optimizer is NOT registered (media_optimization.enabled is false);
 # model_router is a stale config.yaml entry that the registry does not register.
-ALL_PLUGIN_NAMES: List[str] = [
+ALL_PLUGIN_NAMES: list[str] = [
     # understanding-pipeline prefix plugins (emit entry/cache-dimension debug)
     "pii_detector", "prompt_cache", "semantic_cache", "prompt_compress",
     # understanding-pipeline engine plugins (emit plugin-dimension debug)
@@ -169,7 +168,7 @@ ALL_PLUGIN_NAMES: List[str] = [
 # Plugins whose per_plugin debug is controlled by the `entry` dimension because
 # they run in the shared prefix (not the engine). The rest are gated by
 # `plugins_enabled` (engine plugins). cache plugins also touch the `cache` dim.
-PLUGIN_GLOBAL_DIM_MAP: Dict[str, str] = {
+PLUGIN_GLOBAL_DIM_MAP: dict[str, str] = {
     "pii_detector": "entry",
     "prompt_cache": "cache",
     "semantic_cache": "cache",
@@ -188,12 +187,12 @@ GLOBAL_DIMENSIONS = ["frontend", "entry", "cache", "bridge", "plugins_enabled"]
 
 # Plugins that don't have a per_plugin debug toggle (prompt_compress runs inline
 # in the dispatcher; its debug is covered by the `entry` dimension).
-NO_PER_PLUGIN_DEBUG: Set[str] = {"prompt_compress"}
+NO_PER_PLUGIN_DEBUG: set[str] = {"prompt_compress"}
 
 # Engine-executed plugins: these emit kind=debug events with stage == plugin name
 # (via pipeline_engine → emit_debug dimension="plugin"). Prefix plugins instead
 # emit entry/cache-dimension events with stages like "pii"/"cache"/"compress".
-ENGINE_PLUGINS: Set[str] = {
+ENGINE_PLUGINS: set[str] = {
     "rag_retriever", "conv_compressor",
     "ai_director", "intent_evaluator", "token_compressor",
     "draft_generator", "gen_model_router", "cost_tracker",
@@ -201,7 +200,7 @@ ENGINE_PLUGINS: Set[str] = {
 
 # Map a global dimension → the set of debug-event stages it produces.
 # `frontend` is browser-only and emits no server-side debug event.
-DIM_TO_STAGES: Dict[str, Set[str]] = {
+DIM_TO_STAGES: dict[str, set[str]] = {
     "frontend": set(),
     "entry": {"pii", "compress", "quota", "dispatch", "classify"},
     "cache": {"cache"},
@@ -238,7 +237,7 @@ def disable_plugin_debug(client: TestClient, name: str) -> None:
     assert resp.status_code == 200, f"Failed to disable debug for {name}: {resp.text}"
 
 
-def _put_global_debug(client: TestClient, debug_patch: Dict[str, Any]) -> None:
+def _put_global_debug(client: TestClient, debug_patch: dict[str, Any]) -> None:
     """GET-merge-PUT the debug section (mirrors control-panel updateDebugSection).
 
     `/admin/global-config` overwrites the whole `debug` dict, so sending a
@@ -264,13 +263,13 @@ def disable_global_dim(client: TestClient, dim: str) -> None:
     _put_global_debug(client, {dim: False})
 
 
-def get_debug_config(client: TestClient) -> Dict[str, Any]:
+def get_debug_config(client: TestClient) -> dict[str, Any]:
     resp = client.get("/admin/config/debug", headers=HEADERS)
     assert resp.status_code == 200, f"Failed to get debug config: {resp.text}"
     return resp.json()["data"]
 
 
-def trigger_chat(client: TestClient, request_body: Optional[Dict] = None) -> Dict[str, Any]:
+def trigger_chat(client: TestClient, request_body: dict | None = None) -> dict[str, Any]:
     """POST /v1/chat/completions, return response JSON (plus trace_id via headers)."""
     body = (request_body or CHAT_REQUEST).copy()
     resp = client.post("/v1/chat/completions", json=body, headers=HEADERS)
@@ -286,7 +285,7 @@ def trigger_chat(client: TestClient, request_body: Optional[Dict] = None) -> Dic
     return data
 
 
-def fetch_trace_events(client: TestClient, trace_id: Optional[str]) -> List[Dict[str, Any]]:
+def fetch_trace_events(client: TestClient, trace_id: str | None) -> list[dict[str, Any]]:
     """Retrieve the kind=debug + kind=plugin + kind=stage events for a trace.
 
     Events are flushed to Redis at request end and read back via
@@ -301,9 +300,9 @@ def fetch_trace_events(client: TestClient, trace_id: Optional[str]) -> List[Dict
     return list(data.get("events", []) or [])
 
 
-def find_debug_events(events: List[Dict[str, Any]],
-                      dimension: Optional[str] = None,
-                      plugin_name: Optional[str] = None) -> List[Dict[str, Any]]:
+def find_debug_events(events: list[dict[str, Any]],
+                      dimension: str | None = None,
+                      plugin_name: str | None = None) -> list[dict[str, Any]]:
     """Filter trace events for kind='debug' matching criteria.
 
     `dimension` matches by the stage→dimension map (DIM_TO_STAGES), since the
@@ -331,7 +330,7 @@ def test_phase1_individual_plugins(test_client: TestClient) -> None:
     """For each plugin: enable it + its per_plugin debug + corresponding global
     dim, verify a debug event appears and the plugin is exercised."""
     reset_debug_state(test_client)
-    results: List[Dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
 
     for plugin_name in ALL_PLUGIN_NAMES:
         dim = PLUGIN_GLOBAL_DIM_MAP[plugin_name]
@@ -371,7 +370,7 @@ def test_phase1_individual_plugins(test_client: TestClient) -> None:
     _write_report(results)
 
 
-def _get_verification_payload(plugin_name: str) -> Dict[str, Any]:
+def _get_verification_payload(plugin_name: str) -> dict[str, Any]:
     base = CHAT_REQUEST.copy()
     payloads = {
         "pii_detector": {**base, "messages": [{"role": "user", "content": "Contact me at test@example.com or call 123-456-7890"}]},
@@ -398,7 +397,7 @@ def _get_verification_payload(plugin_name: str) -> Dict[str, Any]:
     return payloads.get(plugin_name, base)
 
 
-def _verify_plugin_behavior(plugin_name: str, resp: Dict, debug_events: list, all_events: list) -> bool:
+def _verify_plugin_behavior(plugin_name: str, resp: dict, debug_events: list, all_events: list) -> bool:
     """Verify plugin-specific behavior. Accepts the full event list for plugins
     whose signal lives in kind=stage/plugin events rather than kind=debug."""
     if plugin_name == "pii_detector":
@@ -426,7 +425,7 @@ def test_phase2_global_dimensions(test_client: TestClient) -> None:
     treated as PASS when the request completes without error.
     """
     reset_debug_state(test_client)
-    results: List[Dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
 
     for dim in GLOBAL_DIMENSIONS:
         for pname in ALL_PLUGIN_NAMES:
@@ -474,7 +473,7 @@ def test_phase3_incremental_plugins(test_client: TestClient) -> None:
     stages, so the threshold accounts for that.
     """
     reset_debug_state(test_client)
-    results: List[Dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
 
     for dim in GLOBAL_DIMENSIONS:
         enable_global_dim(test_client, dim)
@@ -530,7 +529,7 @@ def test_phase4_incremental_dimensions(test_client: TestClient) -> None:
     dims produce events and disabled dims (excluding frontend) produce none.
     """
     reset_debug_state(test_client)
-    results: List[Dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
 
     for pname in ALL_PLUGIN_NAMES:
         enable_plugin(test_client, pname)
@@ -595,7 +594,7 @@ def test_phase5_full_conflict_detection(test_client: TestClient) -> None:
     """All plugins + all per_plugin debug + all 5 global dims — verify no
     conflicts/crashes and the engine plugins all appear."""
     reset_debug_state(test_client)
-    results: List[Dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
 
     for dim in GLOBAL_DIMENSIONS:
         enable_global_dim(test_client, dim)
@@ -618,7 +617,7 @@ def test_phase5_full_conflict_detection(test_client: TestClient) -> None:
     expected_engine = {"rag_retriever", "conv_compressor"}
     engine_present = expected_engine.issubset(plugin_stages) or resp.get("_status", 500) < 500
 
-    stage_counts: Dict[str, int] = {}
+    stage_counts: dict[str, int] = {}
     for ev in all_debug:
         s = ev.get("stage")
         stage_counts[s] = stage_counts.get(s, 0) + 1
@@ -652,7 +651,7 @@ def test_phase5_full_conflict_detection(test_client: TestClient) -> None:
 # Report writer
 # ------------------------------------------------------------------
 
-def _write_report(results: List[Dict[str, Any]]) -> None:
+def _write_report(results: list[dict[str, Any]]) -> None:
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     lines = ["# Plugin & Debug Switch Integration Test Report\n"]
     lines.append(f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
@@ -689,7 +688,7 @@ def _write_report(results: List[Dict[str, Any]]) -> None:
     REPORT_PATH.write_text("\n".join(lines), encoding="utf-8")
 
 
-def _append_report(results: List[Dict[str, Any]]) -> None:
+def _append_report(results: list[dict[str, Any]]) -> None:
     _write_report([])  # ensure file exists
     current_phase = None
     lines = []

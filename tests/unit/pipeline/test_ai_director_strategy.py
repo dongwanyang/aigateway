@@ -17,7 +17,7 @@ Tests for AIDirectorStrategy — AI 导演 Prompt 优化核心逻辑
 import asyncio
 import os
 import sys
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -27,9 +27,9 @@ from aigateway_core.dispatch.context import PipelineContext
 from aigateway_core.pipelines.generation._common.config import AIDirectorConfig
 from aigateway_core.pipelines.generation._common.models import PromptOptimizationResult
 from aigateway_core.pipelines.generation.director.ai_director import (
-    AIDirectorStrategy,
     _EXPAND_SYSTEM_PROMPT,
     _REWRITE_SYSTEM_PROMPT,
+    AIDirectorStrategy,
 )
 from aigateway_core.prefix.media.types import MediaContent, MediaType
 
@@ -111,7 +111,9 @@ class TestAIDirectorStrategyOptimizePrompt:
     @pytest.mark.asyncio
     async def test_uses_model_selector_when_provided(self, default_config, pipeline_ctx, mock_bridge):
         """When model_selector is provided, use it to select the model instead of config.rewrite_model."""
-        from aigateway_core.pipelines.generation.director.ai_director import AIDirectorStrategy
+        from aigateway_core.pipelines.generation.director.ai_director import (
+            AIDirectorStrategy,
+        )
 
         selector = MagicMock()
         selector.select_text_model = AsyncMock(return_value="deepseek-v4-flash")
@@ -252,7 +254,7 @@ class TestAIDirectorStrategyOptimizePrompt:
         )
 
         strategy = AIDirectorStrategy(config=config, litellm_bridge=bridge)
-        result = await strategy.optimize_prompt(
+        await strategy.optimize_prompt(
             prompt="cat",
             reference_images=[ref_image],
             config=config,

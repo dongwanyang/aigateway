@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING
 
 from ..base import MediaPipeline, MediaProcessor
 from ..config import DocumentPipelineConfig
@@ -43,8 +43,8 @@ class DocumentParser(MediaProcessor):
 
     def __init__(
         self,
-        supported_formats: Optional[List[str]] = None,
-        config: Optional["UnstructuredConfig"] = None,
+        supported_formats: list[str] | None = None,
+        config: UnstructuredConfig | None = None,
     ) -> None:
         self.supported_formats = supported_formats or [
             "pdf", "docx", "xlsx", "pptx", "md", "csv", "html"
@@ -60,7 +60,8 @@ class DocumentParser(MediaProcessor):
     def _check_unstructured() -> bool:
         """检测 unstructured 包是否可用。"""
         try:
-            from unstructured.partition.auto import partition  # noqa: F401
+            from unstructured.partition.auto import partition
+            _ = partition
             return True
         except ImportError:
             logger.warning("Unstructured 未安装，回退到多库实现")
@@ -70,7 +71,7 @@ class DocumentParser(MediaProcessor):
         return content.media_type == MediaType.DOCUMENT
 
     async def process(
-        self, content: MediaContent, ctx: "PipelineContext"
+        self, content: MediaContent, ctx: PipelineContext
     ) -> ProcessorResult:
         """解析文档。"""
         start = time.monotonic()
@@ -147,7 +148,7 @@ class DocumentParser(MediaProcessor):
         elements = partition(**kwargs)
 
         # 构建输出 — 保留结构信息
-        text_parts: List[str] = []
+        text_parts: list[str] = []
         for element in elements:
             # 表格元素：优先使用 HTML 表示以保留结构
             if hasattr(element, "metadata"):
@@ -170,9 +171,7 @@ class DocumentParser(MediaProcessor):
             return self._parse_pdf(data)
         elif "word" in mime_type or "docx" in mime_type:
             return self._parse_docx(data)
-        elif "csv" in mime_type:
-            return data.decode("utf-8", errors="replace")
-        elif "markdown" in mime_type or "text/" in mime_type:
+        elif "csv" in mime_type or "markdown" in mime_type or "text/" in mime_type:
             return data.decode("utf-8", errors="replace")
         elif "html" in mime_type:
             return self._parse_html(data)
@@ -194,6 +193,7 @@ class DocumentParser(MediaProcessor):
             # Fallback: 尝试 PyPDF2
             try:
                 from io import BytesIO
+
                 from PyPDF2 import PdfReader
 
                 reader = PdfReader(BytesIO(data))
@@ -209,6 +209,7 @@ class DocumentParser(MediaProcessor):
     def _parse_docx(self, data: bytes) -> str:
         """解析 DOCX。"""
         from io import BytesIO
+
         from docx import Document
 
         doc = Document(BytesIO(data))
@@ -250,7 +251,7 @@ class TextChunker(MediaProcessor):
         return content.media_type == MediaType.DOCUMENT
 
     async def process(
-        self, content: MediaContent, ctx: "PipelineContext"
+        self, content: MediaContent, ctx: PipelineContext
     ) -> ProcessorResult:
         """分块文本。"""
         start = time.monotonic()
@@ -272,13 +273,13 @@ class TextChunker(MediaProcessor):
             output=chunks,
         )
 
-    def _chunk(self, text: str) -> List[str]:
+    def _chunk(self, text: str) -> list[str]:
         """按 token 大小分块（简化为按字符数）。"""
         chars_per_token = 4  # 粗略估算
         char_size = self.chunk_size * chars_per_token
         char_overlap = self.chunk_overlap * chars_per_token
 
-        chunks: List[str] = []
+        chunks: list[str] = []
         start = 0
         while start < len(text):
             end = start + char_size
@@ -300,7 +301,7 @@ class DocumentPipeline(MediaPipeline):
 
     media_type = MediaType.DOCUMENT
 
-    def __init__(self, config: Optional[DocumentPipelineConfig] = None) -> None:
+    def __init__(self, config: DocumentPipelineConfig | None = None) -> None:
         cfg = config or DocumentPipelineConfig()
         self.config = cfg
         self.parser = DocumentParser(
@@ -314,7 +315,7 @@ class DocumentPipeline(MediaPipeline):
         self.processors = [self.parser, self.chunker]
 
     async def execute(
-        self, content: MediaContent, ctx: "PipelineContext"
+        self, content: MediaContent, ctx: PipelineContext
     ) -> MediaContent:
         """执行文档处理管线。"""
         if content.size_bytes > self.config.max_file_size_mb * 1024 * 1024:
@@ -352,7 +353,7 @@ class DocumentPipeline(MediaPipeline):
 
         return content
 
-    async def _download(self, url: str) -> Optional[bytes]:
+    async def _download(self, url: str) -> bytes | None:
         """下载文档。"""
         try:
             import httpx

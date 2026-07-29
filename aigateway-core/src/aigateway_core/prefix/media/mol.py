@@ -16,7 +16,7 @@ import asyncio
 import hashlib
 import logging
 import time
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any
 
 from .base import MediaPipeline
 from .cache import MediaCacheManager
@@ -40,8 +40,8 @@ class MediaOptimizationLayer:
 
     def __init__(
         self,
-        pipelines: Dict[MediaType, MediaPipeline],
-        media_cache: Optional[MediaCacheManager] = None,
+        pipelines: dict[MediaType, MediaPipeline],
+        media_cache: MediaCacheManager | None = None,
         max_concurrent: int = 4,
     ) -> None:
         self._pipelines = pipelines
@@ -51,9 +51,9 @@ class MediaOptimizationLayer:
 
     async def process_messages(
         self,
-        messages: List[Dict[str, Any]],
-        ctx: "PipelineContext",
-    ) -> List[Dict[str, Any]]:
+        messages: list[dict[str, Any]],
+        ctx: PipelineContext,
+    ) -> list[dict[str, Any]]:
         """处理消息列表中的所有媒体内容。
 
         Args:
@@ -65,8 +65,8 @@ class MediaOptimizationLayer:
         """
         optimized_messages = []
         total_savings = 0
-        detected_types: List[str] = []
-        processors_executed: List[str] = []
+        detected_types: list[str] = []
+        processors_executed: list[str] = []
 
         for message in messages:
             optimized, savings, types, procs = await self._process_message(
@@ -87,8 +87,8 @@ class MediaOptimizationLayer:
 
     async def _process_message(
         self,
-        message: Dict[str, Any],
-        ctx: "PipelineContext",
+        message: dict[str, Any],
+        ctx: PipelineContext,
     ) -> tuple:
         """处理单条消息。
 
@@ -97,8 +97,8 @@ class MediaOptimizationLayer:
         """
         content = message.get("content", "")
         total_savings = 0
-        detected_types: List[str] = []
-        processors_executed: List[str] = []
+        detected_types: list[str] = []
+        processors_executed: list[str] = []
 
         if isinstance(content, str):
             return message, 0, [], []
@@ -152,7 +152,7 @@ class MediaOptimizationLayer:
 
         return message, 0, [], []
 
-    async def _cache_lookup(self, content: MediaContent) -> Optional[MediaContent]:
+    async def _cache_lookup(self, content: MediaContent) -> MediaContent | None:
         """查找媒体缓存。"""
         if self._media_cache is None:
             return None
@@ -176,7 +176,7 @@ class MediaOptimizationLayer:
 
         await self._media_cache.set(original.media_type, cache_key, processed)
 
-    def _compute_cache_key(self, content: MediaContent) -> Optional[str]:
+    def _compute_cache_key(self, content: MediaContent) -> str | None:
         """计算缓存 key。"""
         if content.source_url:
             identifier = content.source_url
@@ -193,8 +193,8 @@ class MediaOptimizationLayer:
 
     @staticmethod
     def _to_content_part(
-        content: MediaContent, fallback: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
+        content: MediaContent, fallback: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         """将处理后的 MediaContent 转换回 OpenAI ContentPart 格式。
 
         Args:
