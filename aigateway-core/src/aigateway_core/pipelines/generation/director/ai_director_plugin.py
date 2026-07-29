@@ -95,6 +95,19 @@ class AIDirectorPlugin:
             )
             return ctx
 
+        generation_options = ctx.request.get("generation_options", {})
+        if (
+            isinstance(generation_options, dict)
+            and generation_options.get("prompt_mode") == "raw"
+        ):
+            gen_opt = ctx.extra.setdefault(NS_GENERATION_OPTIMIZATION, {})
+            gen_opt["ai_director"] = {
+                "applicable": False,
+                "reason": "raw_prompt_requested",
+                "duration_ms": 0.0,
+            }
+            return ctx
+
         start_time = time.monotonic()
         duration_ms = 0.0
         try:

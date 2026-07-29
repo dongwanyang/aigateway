@@ -45,6 +45,7 @@ class GenerationRequest:
     """
 
     prompt: str
+    source_prompt: str | None = None
     reference_images: list[MediaContent] = field(default_factory=list)
     target_model: str | None = None
     routing_hint: str | None = None
@@ -55,9 +56,12 @@ class GenerationRequest:
     target_resolution: tuple[int, int] = (1920, 1080)
     target_fps: int = 60
     media_type: str = "image"  # "image" | "video"
+    quality: str = "standard"  # standard | creative_refine | faithful_4k
+    preset_id: str | None = None
     injection_method: str = "ip-adapter"
     api_key_id: str = ""
     request_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    trace_id: str = ""
 
 
 @dataclass
@@ -192,6 +196,7 @@ class DraftResult:
     workflow_version: str = ""
     comfy_prompt_id: str | None = None
     gpu_seconds: float = 0.0
+    error: str | None = None
 
 
 # DraftResult 合法状态值

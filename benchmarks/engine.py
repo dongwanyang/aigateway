@@ -104,14 +104,19 @@ def _get_admin_headers() -> Dict[str, str]:
 
 async def set_plugins(enabled: bool, session: aiohttp.ClientSession, base_url: str) -> None:
     """Toggle all plugins in PLUGINS_TO_TOGGLE via PUT /admin/plugins-config."""
-    payload = {}
-    for name in PLUGINS_TO_TOGGLE:
-        payload[name] = {"enabled": enabled}
     url = f"{base_url}/admin/plugins-config"
-    async with session.put(url, headers=_get_admin_headers(), json=payload) as resp:
-        if resp.status >= 400:
-            text = await resp.text()
-            raise RuntimeError(f"set_plugins({enabled}) failed: {resp.status} {text}")
+    for name in PLUGINS_TO_TOGGLE:
+        payload = {"name": name, "enabled": enabled}
+        async with session.put(
+            url,
+            headers=_get_admin_headers(),
+            json=payload,
+        ) as resp:
+            if resp.status >= 400:
+                text = await resp.text()
+                raise RuntimeError(
+                    f"set_plugins({enabled}, {name}) failed: {resp.status} {text}"
+                )
 
 
 async def restart_gateway(base_url: str, timeout: int = 30) -> None:
@@ -203,13 +208,14 @@ async def one_request(
                 return sample
 
             body = await resp.json()
+            payload = body.get("data", body)
 
             # Extract usage
-            usage = body.get("usage", {})
+            usage = payload.get("usage", {})
             sample.prompt_tokens = usage.get("prompt_tokens", 0)
             sample.completion_tokens = usage.get("completion_tokens", 0)
             sample.total_tokens = usage.get("total_tokens", 0)
-            sample.model = body.get("model", model)
+            sample.model = payload.get("model", model)
             sample.ok = True
             sample.status = "ok"
 
@@ -231,7 +237,11 @@ async def fetch_recent_logs(session: aiohttp.ClientSession, base_url: str, limit
         if resp.status >= 400:
             logger.warning(f"Failed to fetch logs: {resp.status}")
             return []
-        return await resp.json()
+        body = await resp.json()
+        payload = body.get("data", body) if isinstance(body, dict) else body
+        if isinstance(payload, dict):
+            payload = payload.get("items", payload.get("logs", []))
+        return payload if isinstance(payload, list) else []
 
 
 def match_cache_hits_by_trace_id(samples: List[Sample], logs: List[Dict[str, Any]]) -> None:

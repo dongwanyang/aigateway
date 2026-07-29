@@ -872,12 +872,26 @@ class _HTTPClientContext:
 @pytest.mark.asyncio
 async def test_provider_connectivity_and_models_use_configured_upstream(tmp_path):
     config_path = tmp_path / "config.yaml"
-    config_path.write_text(yaml.safe_dump({
+    file_config = {
         "providers": {
-            "custom": {"api_key": "secret", "base_url": "https://provider.test/v1"},
+            "custom": {
+                "api_key": "${CUSTOM_API_KEY}",
+                "base_url": "https://provider.test/v1",
+            },
         },
-    }), encoding="utf-8")
-    manager = _config_manager(config_path, {})
+    }
+    config_path.write_text(yaml.safe_dump(file_config), encoding="utf-8")
+    manager = _config_manager(
+        config_path,
+        {
+            "providers": {
+                "custom": {
+                    "api_key": "secret",
+                    "base_url": "https://provider.test/v1",
+                },
+            },
+        },
+    )
     state = _state(config_manager=manager)
     response = MagicMock()
     response.status_code = 200
@@ -973,6 +987,7 @@ async def test_draft_image_workflow_exposes_preview_confirm_result_reject_and_cl
         "workflow_version": "",
         "comfy_prompt_id": None,
         "gpu_seconds": 0.0,
+        "progress_source": "stage",
     }
     assert preview["preview_data_url"].startswith("data:image/png;base64,")
     assert confirmed["upscaled_url"].startswith("data:image/jpeg;base64,")
@@ -1066,6 +1081,9 @@ async def test_draft_preview_reports_each_persisted_state(
 ):
     strategy = MagicMock()
     strategy.get_draft = AsyncMock(return_value=draft)
+    # generating/queued/running/refining 状态会触发 sync_draft_runtime_state 回查；
+    # 用 AsyncMock 返回同一 draft，避免 MagicMock 不可 await。
+    strategy.sync_draft_runtime_state = AsyncMock(return_value=draft)
     with patch.object(routes, "_get_draft_strategy", return_value=strategy):
         if expected_status == 202:
             response = await routes.get_draft_preview("draft-state", _auth={})
@@ -1194,7 +1212,7 @@ async def test_prometheus_proxy_forwards_instant_and_range_queries(monkeypatch):
 @pytest.mark.asyncio
 async def test_provider_error_responses_remain_actionable(tmp_path):
     config_path = tmp_path / "config.yaml"
-    config_path.write_text(yaml.safe_dump({
+    initial = {
         "providers": {
             "unknown": {"api_key": "secret"},
             "custom": {
@@ -1202,8 +1220,9 @@ async def test_provider_error_responses_remain_actionable(tmp_path):
                 "base_url": "https://provider.test/v1",
             },
         },
-    }), encoding="utf-8")
-    manager = _config_manager(config_path, {})
+    }
+    config_path.write_text(yaml.safe_dump(initial), encoding="utf-8")
+    manager = _config_manager(config_path, initial)
     state = _state(config_manager=manager)
     rejected = MagicMock()
     rejected.status_code = 401

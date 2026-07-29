@@ -1,21 +1,40 @@
 import { useState, useRef, type KeyboardEvent } from 'react'
 import { Send, Square } from 'lucide-react'
+import type { GenerationOptions } from '@/types'
 
 interface ChatComposerProps {
   streaming: boolean
   disabled: boolean
-  onSend: (text: string) => void
+  onSend: (text: string, opts?: { generationOptions?: GenerationOptions }) => void
   onStop: () => void
 }
 
 export default function ChatComposer({ streaming, disabled, onSend, onStop }: ChatComposerProps) {
   const [text, setText] = useState('')
+  const [backend, setBackend] = useState<GenerationOptions['backend']>('auto')
+  const [quality, setQuality] = useState<NonNullable<GenerationOptions['quality']>>('standard')
+  const [size, setSize] = useState('')
   const taRef = useRef<HTMLTextAreaElement>(null)
 
   function submit() {
     const t = text.trim()
     if (!t || streaming || disabled) return
-    onSend(t)
+    if (backend === 'auto' && quality === 'standard' && !size) {
+      onSend(t)
+    } else {
+      const [width, height] = size
+        ? size.split('x').map(value => Number(value))
+        : [undefined, undefined]
+      onSend(t, {
+        generationOptions: {
+          backend,
+          quality,
+          prompt_mode: 'auto',
+          width,
+          height,
+        },
+      })
+    }
     setText('')
     if (taRef.current) taRef.current.style.height = 'auto'
   }
@@ -36,7 +55,35 @@ export default function ChatComposer({ streaming, disabled, onSend, onStop }: Ch
   }
 
   return (
-    <div className="flex items-end gap-2 p-3" style={{ borderTop: '1px solid var(--color-border)' }}>
+    <div className="p-3" style={{ borderTop: '1px solid var(--color-border)' }}>
+      <div className="flex flex-wrap gap-2 mb-2">
+        <label className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
+          后端{' '}
+          <select value={backend} onChange={event => setBackend(event.target.value as GenerationOptions['backend'])}>
+            <option value="auto">自动</option>
+            <option value="local">本地</option>
+            <option value="cloud">云端</option>
+          </select>
+        </label>
+        <label className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
+          图片质量{' '}
+          <select value={quality} onChange={event => setQuality(event.target.value as NonNullable<GenerationOptions['quality']>)}>
+            <option value="standard">标准</option>
+            <option value="creative_refine">创意精修</option>
+            <option value="faithful_4k">4K 保真</option>
+          </select>
+        </label>
+        <label className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
+          尺寸{' '}
+          <select value={size} onChange={event => setSize(event.target.value)}>
+            <option value="">自动</option>
+            <option value="1024x1024">1024 × 1024</option>
+            <option value="1344x768">1344 × 768</option>
+            <option value="768x1344">768 × 1344</option>
+          </select>
+        </label>
+      </div>
+      <div className="flex items-end gap-2">
       <textarea
         ref={taRef}
         value={text}
@@ -72,6 +119,7 @@ export default function ChatComposer({ streaming, disabled, onSend, onStop }: Ch
           <Send size={16} /> 发送
         </button>
       )}
+      </div>
     </div>
   )
 }

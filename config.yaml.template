@@ -157,10 +157,8 @@ providers:
           #                 一个模型可同时属于多个能力，如 [text, image, video]
           #   tasks: 文本任务能力，可选值 coding | reasoning | summary | vision | general
           #   features: 运行时能力，可选值 vision | tool_calling | structured_output | long_context
-          #   base_url:    API 基地址（可选）。若设置，覆盖 providers.<name>.base_url。
-          #                留空或省略时，继承 providers.<name>.base_url。
           - name: agnes-2.0-flash
-            capabilities: [text, image, video]   # 多模态理解 + 生成，继承提供商 base_url
+            capabilities: [text, image, video]   # 多模态理解 + 生成，使用提供商 base_url
             tasks: [general, summary, vision]
             features: [vision, tool_calling, structured_output, long_context]
           - name: agnes-image-2.1-flash
@@ -436,20 +434,35 @@ generation_optimization:
   draft_workflow:             # Draft-to-HiRes 草图工作流
     comfyui:
       server_url: "http://comfyui:8188"  # Compose 内网地址；不直接暴露公网
+      public_url: "http://localhost:8188" # 浏览器打开 ComfyUI/Manager 的地址
+      manager_enabled: true
       connect_timeout: 10    # 连接超时（秒）
-      execution_timeout: 300 # 工作流执行超时（秒）
+      execution_timeout: 1200 # T4 上的大模型工作流可达数分钟；超时会主动取消 ComfyUI 任务
       required: true         # 不可用时 fail-closed，不静默改走外部媒体 API
       workflow_version: "image-v1"
       checkpoint_name: "sd_xl_base_1.0.safetensors"
       allowed_checkpoints: ["sd_xl_base_1.0.safetensors"]
       max_concurrency: 1
       min_free_gb: 30
-      model_budget_gb: 30
+      model_budget_gb: 80
       output_budget_gb: 10
       output_retention_hours: 24
       models_path: "/comfyui/models"
       output_path: "/comfyui/output"
       workflow_path: "/comfyui/workflows"
+      upscale_enabled: true
+      upscale_model: "RealESRGAN_x4plus.pth"
+      allowed_upscale_models: ["RealESRGAN_x4plus.pth"]
+      max_upscale_long_edge: 4096
+      qwen_image_enabled: true
+      qwen_image_diffusion_model: "qwen_image_fp8_e4m3fn.safetensors"
+      qwen_image_text_encoder: "qwen_2.5_vl_7b_fp8_scaled.safetensors"
+      qwen_image_vae: "qwen_image_vae.safetensors"
+      qwen_image_draft_steps: 12       # 草稿优先速度；确认后再做高清处理
+      qwen_image_max_draft_edge: 768   # T4 15GB 安全上限，保持宽高比并对齐 16
+      allowed_qwen_image_diffusion_models: ["qwen_image_fp8_e4m3fn.safetensors"]
+      allowed_qwen_image_text_encoders: ["qwen_2.5_vl_7b_fp8_scaled.safetensors"]
+      allowed_qwen_image_vaes: ["qwen_image_vae.safetensors"]
       # 视频确认使用已批准的图片草稿作为首帧，原生 Wan2.2 TI2V 输出 MP4。
       video_enabled: true
       video_workflow_version: "wan2.2-ti2v-5b-v1"

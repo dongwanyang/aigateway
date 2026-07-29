@@ -18,6 +18,7 @@ from aigateway_core.dispatch.context import PipelineContext
 from aigateway_core.pipelines.generation._common.config import (
     GenerationOptimizationConfig,
 )
+from aigateway_core.pipelines.generation._common.exceptions import DraftWorkflowError
 from aigateway_core.pipelines.generation._common.models import (
     DraftResult,
     GenerationRequest,
@@ -101,6 +102,29 @@ class DraftGeneratorPlugin:
             )
             return ctx
 
+        generation_options = ctx.request.get("generation_options", {})
+        if (
+            isinstance(generation_options, dict)
+            and generation_options.get("backend") == "cloud"
+        ):
+            gen_opt = ctx.extra.setdefault(NS_GENERATION_OPTIMIZATION, {})
+            faithful_4k = generation_options.get("quality") == "faithful_4k"
+            gen_opt["draft_generator"] = {
+                "applicable": False,
+                "reason": (
+                    "invalid_generation_options"
+                    if faithful_4k
+                    else "cloud_backend_requested"
+                ),
+                "local_error": (
+                    "faithful_4k requires the local ComfyUI backend"
+                    if faithful_4k
+                    else None
+                ),
+                "duration_ms": 0.0,
+            }
+            return ctx
+
         start_time = time.monotonic()
 
         try:
@@ -126,6 +150,27 @@ class DraftGeneratorPlugin:
 
             # 从上下文构建 GenerationRequest
             generation_request = self._build_generation_request(ctx)
+            backend = (
+                generation_options.get("backend", "auto")
+                if isinstance(generation_options, dict)
+                else "auto"
+            )
+            try:
+                await self._strategy.check_local_dependencies(generation_request)
+            except DraftWorkflowError as exc:
+                gen_opt = ctx.extra.setdefault(NS_GENERATION_OPTIMIZATION, {})
+                gen_opt["draft_generator"] = {
+                    "applicable": False,
+                    "reason": (
+                        "local_backend_unavailable"
+                        if backend == "local"
+                        or generation_request.quality == "faithful_4k"
+                        else "auto_fallback_to_cloud"
+                    ),
+                    "local_error": str(exc),
+                    "duration_ms": (time.monotonic() - start_time) * 1000.0,
+                }
+                return ctx
 
             # 提取显式指定的关键帧数量（如果有）
             keyframe_count = self._extract_keyframe_count(ctx)
@@ -156,6 +201,10 @@ class DraftGeneratorPlugin:
 
             # 将 draft_id 和 previews 写入 ctx.extra
             gen_opt = ctx.extra.setdefault(NS_GENERATION_OPTIMIZATION, {})
+            actual_checkpoint = draft_result.generation_params.get(
+                "checkpoint",
+                self._strategy.checkpoint_name,
+            )
             gen_opt["draft_generator"] = {
                 "applicable": True,
                 "draft_id": draft_result.draft_id,
@@ -165,7 +214,7 @@ class DraftGeneratorPlugin:
                 "expires_at": draft_result.expires_at,
                 "status": draft_result.status,
                 "generation_params": draft_result.generation_params,
-                "draft_model": f"comfyui:{self._strategy.checkpoint_name}",
+                "draft_model": f"comfyui:{actual_checkpoint}",
                 "duration_ms": duration_ms,
             }
 
@@ -271,7 +320,18 @@ class DraftGeneratorPlugin:
         prompt = self._extract_prompt(ctx)
 
         # 从请求中提取目标分辨率
-        target_resolution = ctx.request.get("target_resolution", (1920, 1080))
+        generation_options = ctx.request.get("generation_options", {})
+        if (
+            isinstance(generation_options, dict)
+            and generation_options.get("width")
+            and generation_options.get("height")
+        ):
+            target_resolution = (
+                int(generation_options["width"]),
+                int(generation_options["height"]),
+            )
+        else:
+            target_resolution = ctx.request.get("target_resolution", (1920, 1080))
         if isinstance(target_resolution, list):
             target_resolution = tuple(target_resolution)
 
@@ -286,15 +346,47 @@ class DraftGeneratorPlugin:
         # media_type 由意图分类的 pipeline_kind 决定（generation:video → video）
         # 否则 GenerationRequest 默认 "image"，confirm_draft 永远走图片放大分支。
         media_type = "video" if ctx.pipeline_kind == "generation:video" else "image"
+        generation_options = ctx.request.get("generation_options", {})
+        quality = (
+            generation_options.get("quality", "standard")
+            if isinstance(generation_options, dict)
+            else "standard"
+        )
+        preset_id = (
+            generation_options.get("preset_id")
+            if isinstance(generation_options, dict)
+            else None
+        )
 
         return GenerationRequest(
             prompt=prompt,
+            source_prompt=self._extract_original_prompt(ctx),
             target_resolution=target_resolution,
             target_fps=target_fps,
             media_type=media_type,
+            quality=quality,
+            preset_id=preset_id,
             api_key_id=api_key_id or "",
             request_id=ctx.request_id,
+            trace_id=ctx.trace_id,
         )
+
+    @staticmethod
+    def _extract_original_prompt(ctx: PipelineContext) -> str:
+        messages = ctx.request.get("messages", [])
+        for message in reversed(messages):
+            if message.get("role") != "user":
+                continue
+            content = message.get("content", "")
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                return " ".join(
+                    str(part.get("text", ""))
+                    for part in content
+                    if isinstance(part, dict) and part.get("type") == "text"
+                )
+        return ""
 
     def _extract_prompt(self, ctx: PipelineContext) -> str:
         """从请求中提取用户 prompt.

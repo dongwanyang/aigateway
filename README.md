@@ -350,7 +350,30 @@ Wan2.2 TI2V 5B 工作流生成 MP4。默认使用适合 15GB 显存的
 
 ```bash
 bash scripts/model-manager.sh install wan2.2-ti2v-5b
+bash scripts/model-manager.sh install realesrgan-x4plus
+bash scripts/model-manager.sh install qwen-image
 ```
+
+### ComfyUI Manager 与 4K 保真
+
+Studio/Full 的 ComfyUI 镜像固定版本预装官方 ComfyUI-Manager，并以
+`normal` 安全级别启动。`comfyui/custom_nodes` 与 `comfyui/user` 会持久化，
+因此第三方节点、Manager 配置、快照和安装记录在容器重建后仍会保留；
+首次创建的空用户目录才会写入默认配置，后续启动不会覆盖管理员设置。
+ComfyUI 端口默认只绑定本机，节点和高级工作流继续在原生 ComfyUI 页面管理。
+
+聊天生成可选择“自动 / 本地 / 云端”与“标准 / 创意精修 / 4K 保真”。
+4K 保真使用 ComfyUI Core 节点和批准的 `RealESRGAN_x4plus.pth`，保持宽高比、
+不裁剪，最长边默认不超过 4096。模型不会在普通启动时静默下载；可显式运行：
+
+```bash
+bash scripts/model-manager.sh install realesrgan-x4plus
+bash scripts/model-manager.sh verify realesrgan-x4plus
+```
+
+未安装 ComfyUI 的 Lite/Knowledge 版本仍可选择云端图片或视频模型。
+Qwen-Image FP8 由三个文件组成，合计约 30.1GB；安装后中文图片提示词会优先
+使用 Qwen-Image，未安装时继续由 AI Director 为 SDXL 做保真翻译和精简。
 
 ### 环境变量
 

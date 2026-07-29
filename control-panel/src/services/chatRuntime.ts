@@ -10,7 +10,10 @@ export const pollingDraftIds = new Set<string>()
 export const VIDEO_POLL_INTERVAL_MS = 5_000
 export const VIDEO_POLL_MAX_ATTEMPTS = 360
 export const DRAFT_POLL_INTERVAL_MS = 1_000
-export const DRAFT_POLL_MAX_ATTEMPTS = 120
+// Backend image execution timeout is 20 minutes on the supported T4 profile.
+// Keep the browser window slightly longer so the backend, not the UI, owns the
+// terminal timeout and can cancel the matching ComfyUI job first.
+export const DRAFT_POLL_MAX_ATTEMPTS = 1_260
 
 export function nextMessageId(): string {
   messageIdCounter += 1
@@ -36,7 +39,17 @@ export type DraftPollResult =
   | { kind: 'expired'; message: string }
   | { kind: 'error'; message: string }
 
-export async function pollDraftUntilSettled(draftId: string): Promise<DraftPollResult> {
+export interface DraftPollProgress {
+  status?: string
+  stage?: string
+  progress?: number
+  progressSource?: string
+}
+
+export async function pollDraftUntilSettled(
+  draftId: string,
+  onProgress?: (progress: DraftPollProgress) => void,
+): Promise<DraftPollResult> {
   if (pollingDraftIds.has(draftId)) return { kind: 'duplicate' }
   pollingDraftIds.add(draftId)
   try {
@@ -47,14 +60,30 @@ export async function pollDraftUntilSettled(draftId: string): Promise<DraftPollR
         // 202 in-progress responses carry a status (generating/queued/running/
         // refining) but no previewDataUrl — keep polling until the 200 with
         // the data URL lands. Only a present previewDataUrl means ready.
-        if (!response.previewDataUrl) continue
+        if (!response.previewDataUrl) {
+          onProgress?.({
+            status: response.status ?? 'running',
+            stage: response.stage,
+            progress: response.progress,
+            progressSource: response.progressSource,
+          })
+          continue
+        }
+        onProgress?.({ status: 'pending', stage: 'preview_ready', progress: 1, progressSource: 'complete' })
         return { kind: 'ready', previewDataUrl: response.previewDataUrl }
       } catch (error) {
         const message = error instanceof Error ? error.message : '预览加载失败'
         if (message.includes('not_found') || message.includes('expired')) {
           return { kind: 'expired', message }
         }
-        if (message.includes('draft_failed')) {
+        if (
+          message.includes('draft_failed')
+          || message.includes('draft_worker_lost')
+          || message.includes('comfyui_job_lost')
+          || message.includes('comfyui_recovery_failed')
+          || message.includes('comfyui_')
+          || message.includes('draft_cancelled')
+        ) {
           return { kind: 'error', message }
         }
         if (message.includes('forbidden') || message.includes('unauthorized')) {

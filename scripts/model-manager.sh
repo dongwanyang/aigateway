@@ -14,6 +14,10 @@ sdxl-base|Stability AI SDXL Base 1.0|CreativeML Open RAIL++-M|约 6.94GB|$comfy_
 wan2.2-ti2v-5b-diffusion|Wan2.2 TI2V 5B diffusion (fp16)|Apache-2.0|约 9.4GB|$comfy_models/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors|456f901338bd9eadbded3828b819109a9b68e8a525ca5cf8d0049a69fcfeca1e
 wan2.2-ti2v-5b-encoder|Wan2.2 TI2V 5B text encoder (umt5_xxl fp8)|Apache-2.0|约 6.3GB|$comfy_models/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors|c3355d30191f1f066b26d93fba017ae9809dce6c627dda5f6a66eaa651204f68
 wan2.2-ti2v-5b-vae|Wan2.2 TI2V 5B VAE|Apache-2.0|约 1.4GB|$comfy_models/vae/wan2.2_vae.safetensors|e40321bd36b9709991dae2530eb4ac303dd168276980d3e9bc4b6e2b75fed156
+qwen-image-diffusion|Qwen-Image diffusion (fp8)|Apache-2.0|约 20.4GB|$comfy_models/diffusion_models/qwen_image_fp8_e4m3fn.safetensors|98763a127701eb6fb59096f7742cb3aa7d64ed510b9f4e882d8351f8176e3ce3
+qwen-image-encoder|Qwen-Image text encoder (Qwen2.5-VL 7B fp8)|Apache-2.0|约 9.38GB|$comfy_models/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors|cb5636d852a0ea6a9075ab1bef496c0db7aef13c02350571e388aea959c5c0b4
+qwen-image-vae|Qwen-Image VAE|Apache-2.0|约 254MB|$comfy_models/vae/qwen_image_vae.safetensors|a70580f0213e67967ee9c95f05bb400e8fb08307e017a924bf3441223e023d1f
+realesrgan-x4plus|RealESRGAN x4plus|BSD-3-Clause|约 67MB|$comfy_models/upscale_models/RealESRGAN_x4plus.pth|4fa0d38905f75ac06eb49a7951b426670021be3018265fd191d2125df9d682f1
 qwen3-embedding-0.6b|Qwen3-Embedding-0.6B|Apache-2.0|约 1.21GB|$model_dir/qwen3-embedding-0.6b/model.safetensors|0437e45c94563b09e13cb7a64478fc406947a93cb34a7e05870fc8dcd48e23fd
 EOF
 }
@@ -30,6 +34,8 @@ commands:
 approved models:
   sdxl-base                 SDXL Base 1.0（图片草稿/精修）
   wan2.2-ti2v-5b            Wan2.2 TI2V 5B（视频，含 diffusion+encoder+vae 三个文件）
+  qwen-image                Qwen-Image FP8（中英文图片，含 diffusion+encoder+vae）
+  realesrgan-x4plus         RealESRGAN x4plus（4K 保真放大）
   qwen3-embedding-0.6b      Qwen3 Embedding（知识库 RAG）
 EOF
 }
@@ -45,10 +51,11 @@ comfy_root="${AIGATEWAY_COMFY_DATA_DIR:-$repo_root/comfyui}"
 mkdir -p "$model_root" "$comfy_root"
 
 require_download_space() {
+  local minimum_gb="${1:-80}"
   local available_kb
-  available_kb="$(df -Pk "$model_root" | awk 'NR==2 {print $4}')"
-  (( available_kb >= 80 * 1024 * 1024 )) || {
-    echo "模型下载已拒绝：可用空间低于 80GB" >&2
+  available_kb="$(df -Pk "$comfy_root" | awk 'NR==2 {print $4}')"
+  (( available_kb >= minimum_gb * 1024 * 1024 )) || {
+    echo "模型下载已拒绝：可用空间低于 ${minimum_gb}GB" >&2
     exit 1
   }
 }
@@ -132,6 +139,74 @@ install_qwen_embedding() {
   echo "已安装: $target"
 }
 
+install_realesrgan() {
+  local target_dir="$comfy_root/models/upscale_models"
+  local target="$target_dir/RealESRGAN_x4plus.pth"
+  local url="https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth"
+  local sha256="4fa0d38905f75ac06eb49a7951b426670021be3018265fd191d2125df9d682f1"
+  confirm_license "RealESRGAN x4plus" "BSD-3-Clause" "约 67MB"
+  mkdir -p "$target_dir"
+  if [[ -f "$target" ]]; then
+    printf '%s  %s\n' "$sha256" "$target" | sha256sum -c -
+    echo "模型已安装且校验通过: $target"
+    return
+  fi
+  local temp
+  temp="$(mktemp "$target_dir/.realesrgan-x4plus.XXXXXX")"
+  trap 'rm -f "$temp"' EXIT
+  curl -fL --retry 3 -o "$temp" "$url"
+  printf '%s  %s\n' "$sha256" "$temp" | sha256sum -c -
+  chmod 0644 "$temp"
+  mv "$temp" "$target"
+  trap - EXIT
+  echo "已安装: $target"
+}
+
+install_qwen_image() {
+  local revision="46839d338df81ce625d5fae27d7e370314c0fbc9"
+  confirm_license "Qwen-Image FP8 (ComfyUI repackaged)" "Apache-2.0" "约 30.1GB"
+
+  local diffusion_dir="$comfy_root/models/diffusion_models"
+  local encoder_dir="$comfy_root/models/text_encoders"
+  local vae_dir="$comfy_root/models/vae"
+  mkdir -p "$diffusion_dir" "$encoder_dir" "$vae_dir"
+  local specs=(
+    "split_files/diffusion_models/qwen_image_fp8_e4m3fn.safetensors|$diffusion_dir/qwen_image_fp8_e4m3fn.safetensors|98763a127701eb6fb59096f7742cb3aa7d64ed510b9f4e882d8351f8176e3ce3"
+    "split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors|$encoder_dir/qwen_2.5_vl_7b_fp8_scaled.safetensors|cb5636d852a0ea6a9075ab1bef496c0db7aef13c02350571e388aea959c5c0b4"
+    "split_files/vae/qwen_image_vae.safetensors|$vae_dir/qwen_image_vae.safetensors|a70580f0213e67967ee9c95f05bb400e8fb08307e017a924bf3441223e023d1f"
+  )
+  local all_installed="true"
+  local spec source target sha256
+  for spec in "${specs[@]}"; do
+    IFS='|' read -r source target sha256 <<< "$spec"
+    if [[ ! -f "$target" ]]; then
+      all_installed="false"
+      break
+    fi
+  done
+  [[ "$all_installed" == "true" ]] || require_download_space 40
+
+  local temp url
+  for spec in "${specs[@]}"; do
+    IFS='|' read -r source target sha256 <<< "$spec"
+    if [[ -f "$target" ]]; then
+      printf '%s  %s\n' "$sha256" "$target" | sha256sum -c -
+      continue
+    fi
+    temp="$(mktemp "$(dirname "$target")/.qwen-image.XXXXXX")"
+    trap 'rm -f "$temp"' EXIT
+    url="https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/$revision/$source"
+    local headers=()
+    [[ -n "${HF_TOKEN:-}" ]] && headers=(-H "Authorization: Bearer $HF_TOKEN")
+    curl -fL --retry 3 "${headers[@]}" -o "$temp" "$url"
+    printf '%s  %s\n' "$sha256" "$temp" | sha256sum -c -
+    chmod 0644 "$temp"
+    mv "$temp" "$target"
+    trap - EXIT
+    echo "已安装: $target"
+  done
+}
+
 install_wan_video() {
   local revision="fb1388adc906ab39ffc26ee40e96b22886b56bc4"
   confirm_license "Wan2.2 TI2V 5B (ComfyUI repackaged)" "Apache-2.0" "约 18.1GB"
@@ -156,7 +231,7 @@ install_wan_video() {
       break
     fi
   done
-  [[ "$all_installed" == "true" ]] || require_download_space
+  [[ "$all_installed" == "true" ]] || require_download_space 40
 
   local spec source target sha256 temp url
   for spec in "${specs[@]}"; do
@@ -201,7 +276,7 @@ report_specs() {
   local spec name label license size target sha256 status
   while IFS='|' read -r name label license size target sha256; do
     [[ -z "$name" ]] && continue
-    status="$(check_one "$target" "$sha256")"
+    status="$(check_one "$target" "$sha256")" || true
     case "$status" in
       ok) ;;
       missing) missing=$((missing + 1)) ;;
@@ -235,17 +310,19 @@ case "$action" in
       exit $?
     fi
     # 复用 install 的别名 → 过滤相关 spec 行
-    printf '%s\n' "$model" | grep -qE '^(sdxl-base|wan2.2-ti2v-5b|qwen3-embedding-0.6b)$' \
+    printf '%s\n' "$model" | grep -qE '^(sdxl-base|wan2.2-ti2v-5b|qwen-image|realesrgan-x4plus|qwen3-embedding-0.6b)$' \
       || { echo "unknown approved model: $model" >&2; exit 1; }
     missing=0; bad=0
     while IFS='|' read -r name label license size target sha256; do
       [[ -z "$name" ]] && continue
       case "$model" in
         sdxl-base) [[ "$name" == "sdxl-base" ]] || continue ;;
+        realesrgan-x4plus) [[ "$name" == "realesrgan-x4plus" ]] || continue ;;
         qwen3-embedding-0.6b) [[ "$name" == "qwen3-embedding-0.6b" ]] || continue ;;
         wan2.2-ti2v-5b) [[ "$name" == wan2.2-ti2v-5b-* ]] || continue ;;
+        qwen-image) [[ "$name" == qwen-image-* ]] || continue ;;
       esac
-      status="$(check_one "$target" "$sha256")"
+      status="$(check_one "$target" "$sha256")" || true
       printf '%-28s %-8s %-10s %s\n' "$name" "$status" "$size" "$target"
       case "$status" in
         missing) missing=$((missing + 1)) ;;
@@ -258,7 +335,9 @@ esac
 
 case "$model" in
   sdxl-base) install_sdxl ;;
+  realesrgan-x4plus) install_realesrgan ;;
   qwen3-embedding-0.6b) install_qwen_embedding ;;
   wan2.2-ti2v-5b) install_wan_video ;;
+  qwen-image) install_qwen_image ;;
   *) echo "unknown approved model: $model" >&2; exit 1 ;;
 esac

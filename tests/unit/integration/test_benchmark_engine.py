@@ -11,10 +11,12 @@ from benchmarks.engine import (
     Sample,
     compute_savings,
     compute_stats,
+    fetch_recent_logs,
     match_cache_hits_by_trace_id,
     render_html,
     render_markdown,
     restart_gateway,
+    set_plugins,
 )
 
 # ---------------------------------------------------------------------------
@@ -128,6 +130,43 @@ class TestBaselineReset:
              patch("os.path.exists", return_value=False):
             with pytest.raises(RuntimeError, match="Cannot restart gateway"):
                 await restart_gateway("http://localhost:8000", timeout=5)
+
+
+class TestBenchmarkAdminContracts:
+    @pytest.mark.asyncio
+    async def test_set_plugins_uses_one_admin_contract_request_per_plugin(self):
+        response = MagicMock(status=200)
+        response.__aenter__ = AsyncMock(return_value=response)
+        response.__aexit__ = AsyncMock(return_value=False)
+        session = MagicMock()
+        session.put.return_value = response
+
+        await set_plugins(False, session, "http://gateway.test")
+
+        assert session.put.call_count > 1
+        assert all(
+            set(call.kwargs["json"]) == {"name", "enabled"}
+            for call in session.put.call_args_list
+        )
+        assert all(
+            call.kwargs["json"]["enabled"] is False
+            for call in session.put.call_args_list
+        )
+
+    @pytest.mark.asyncio
+    async def test_fetch_recent_logs_unwraps_admin_response(self):
+        response = MagicMock(status=200)
+        response.json = AsyncMock(
+            return_value={"data": {"items": [{"trace_id": "trace-1"}]}}
+        )
+        response.__aenter__ = AsyncMock(return_value=response)
+        response.__aexit__ = AsyncMock(return_value=False)
+        session = MagicMock()
+        session.get.return_value = response
+
+        logs = await fetch_recent_logs(session, "http://gateway.test")
+
+        assert logs == [{"trace_id": "trace-1"}]
 
 
 # ---------------------------------------------------------------------------

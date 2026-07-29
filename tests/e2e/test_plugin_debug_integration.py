@@ -30,6 +30,7 @@ Reality notes (verified against the running app — see design doc):
     plugins (rag_retriever, conv_compressor, + the 6 generation plugins) emit
     plugin-dimension debug events with stage=plugin_name.
 """
+import os
 import shutil
 import sys
 import time
@@ -49,14 +50,15 @@ REPORT_PATH = REPO_ROOT / "docs" / "test" / "plugin_debug_test_report.md"
 sys.path.insert(0, str(REPO_ROOT / "aigateway-api" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "aigateway-core" / "src"))
 
-# Admin API key from config.yaml
-ADMIN_KEY = "gw-rRIop4dpcyJJNUTJbHmHpr9Bj3M11s5o"
+# The E2E gate requires this credential and callers inject it at runtime.
+# Never keep a usable API key in the repository.
+ADMIN_KEY = os.environ["AI_GATEWAY_ADMIN_KEY"]
 HEADERS = {"Authorization": f"Bearer {ADMIN_KEY}"}
 
 # A model that is actually registered in config.yaml providers (agnes). The
 # previous "gpt-4o" was never registered → every request 404'd before reaching
 # the pipeline, so no debug events were ever emitted.
-CHAT_MODEL = "agnes-2.0-flash"
+CHAT_MODEL = os.environ.get("AIGATEWAY_TEST_MODEL", "agnes-2.0-flash")
 
 
 # Base chat request template

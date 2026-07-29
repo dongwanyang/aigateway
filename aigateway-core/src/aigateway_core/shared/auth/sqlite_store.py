@@ -125,7 +125,9 @@ CREATE TABLE IF NOT EXISTS request_cost_ledger (
     tokens_in INTEGER DEFAULT 0,
     tokens_out INTEGER DEFAULT 0,
     tokens_total INTEGER DEFAULT 0,
+    tokens_saved INTEGER DEFAULT 0,
     cost_usd REAL DEFAULT 0.0,
+    duration_ms REAL DEFAULT 0.0,
     cached INTEGER DEFAULT 0,
     stream INTEGER DEFAULT 0,
     status TEXT DEFAULT 'ok'
@@ -347,6 +349,20 @@ class SQLiteStore:
         for column, definition in lifecycle_columns.items():
             if column not in existing_columns:
                 conn.execute(f"ALTER TABLE api_keys ADD COLUMN {column} {definition}")
+        ledger_columns = {
+            row["name"]
+            for row in conn.execute(
+                "PRAGMA table_info(request_cost_ledger)"
+            ).fetchall()
+        }
+        for column, definition in {
+            "tokens_saved": "INTEGER DEFAULT 0",
+            "duration_ms": "REAL DEFAULT 0.0",
+        }.items():
+            if column not in ledger_columns:
+                conn.execute(
+                    f"ALTER TABLE request_cost_ledger ADD COLUMN {column} {definition}"
+                )
         conn.execute(
             """UPDATE api_keys
                SET scopes=CASE
@@ -1967,7 +1983,9 @@ class SQLiteStore:
         tokens_in: int = 0,
         tokens_out: int = 0,
         tokens_total: int = 0,
+        tokens_saved: int = 0,
         cost_usd: float = 0.0,
+        duration_ms: float = 0.0,
         cached: bool = False,
         stream: bool = False,
         status: str = "ok",
@@ -1982,15 +2000,17 @@ class SQLiteStore:
             self.conn.execute(
                 """INSERT INTO request_cost_ledger
                    (trace_id, ts, ts_unix, user_id, group_id, model, provider,
-                    pipeline_kind, tokens_in, tokens_out, tokens_total, cost_usd,
-                    cached, stream, status)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    pipeline_kind, tokens_in, tokens_out, tokens_total,
+                    tokens_saved, cost_usd, duration_ms, cached, stream, status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     trace_id or "", _now_iso(), _now_unix(),
                     user_id or "", group_id or "", model or "", provider or "",
                     pipeline_kind or "",
                     int(tokens_in or 0), int(tokens_out or 0), int(tokens_total or 0),
+                    int(tokens_saved or 0),
                     float(cost_usd or 0.0),
+                    max(0.0, float(duration_ms or 0.0)),
                     1 if cached else 0, 1 if stream else 0, status or "ok",
                 ),
             )
@@ -2148,7 +2168,10 @@ class SQLiteStore:
                 "COALESCE(SUM(tokens_in),0) AS tokens_in, "
                 "COALESCE(SUM(tokens_out),0) AS tokens_out, "
                 "COALESCE(SUM(tokens_total),0) AS tokens_total, "
+                "COALESCE(SUM(tokens_saved),0) AS tokens_saved, "
                 "COALESCE(SUM(cost_usd),0) AS cost_usd, "
+                "COALESCE(AVG(CASE WHEN duration_ms > 0 THEN duration_ms END),0) "
+                "AS avg_latency_ms, "
                 "COALESCE(SUM(CASE WHEN cached=1 THEN 1 ELSE 0 END),0) AS cache_hits "
                 f"FROM request_cost_ledger{clause} "
                 f"GROUP BY {group_cols} ORDER BY cost_usd DESC"
@@ -2160,7 +2183,10 @@ class SQLiteStore:
                 "COALESCE(SUM(tokens_in),0) AS tokens_in, "
                 "COALESCE(SUM(tokens_out),0) AS tokens_out, "
                 "COALESCE(SUM(tokens_total),0) AS tokens_total, "
+                "COALESCE(SUM(tokens_saved),0) AS tokens_saved, "
                 "COALESCE(SUM(cost_usd),0) AS cost_usd, "
+                "COALESCE(AVG(CASE WHEN duration_ms > 0 THEN duration_ms END),0) "
+                "AS avg_latency_ms, "
                 "COALESCE(SUM(CASE WHEN cached=1 THEN 1 ELSE 0 END),0) AS cache_hits "
                 f"FROM request_cost_ledger{clause}",
                 tuple(params),
@@ -2176,16 +2202,33 @@ class SQLiteStore:
                 "GROUP BY substr(ts,1,10) ORDER BY k ASC",
                 tuple(params),
             )
+            hour_rows = self.conn.fetchall(
+                "SELECT substr(ts,1,13) || ':00:00Z' AS k, "
+                "COUNT(CASE WHEN duration_ms > 0 THEN 1 END) AS samples, "
+                "COALESCE(AVG(CASE WHEN duration_ms > 0 THEN duration_ms END),0) "
+                "AS avg_latency_ms "
+                f"FROM request_cost_ledger{clause} "
+                "GROUP BY substr(ts,1,13) ORDER BY k ASC",
+                tuple(params),
+            )
             return {
                 "total": dict(total_row) if total_row else {},
                 "by_model": by_model,
                 "by_user": by_user,
                 "by_group": by_group,
                 "by_day": [dict(r) for r in day_rows],
+                "latency_by_hour": [dict(r) for r in hour_rows],
             }
         except Exception as exc:
             logger.warning("ledger_summary 失败: %s", exc)
-            return {"total": {}, "by_model": [], "by_user": [], "by_group": [], "by_day": []}
+            return {
+                "total": {},
+                "by_model": [],
+                "by_user": [],
+                "by_group": [],
+                "by_day": [],
+                "latency_by_hour": [],
+            }
 
     # ── Cleanup ───────────────────────────────────────────────────
 

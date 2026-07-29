@@ -711,6 +711,11 @@ async def lifespan(app: "FastAPI"):
         if draft_strategy is not None and task_tracker is not None:
             draft_strategy._task_tracker = task_tracker
             logger.info("DraftGeneratorStrategy 已绑定 task_tracker")
+        if draft_strategy is not None and getattr(draft_strategy, "_redis_client", None) is None:
+            draft_redis = getattr(redis_mgr, "redis", None)
+            if draft_redis is not None:
+                draft_strategy._redis_client = draft_redis
+                logger.info("DraftGeneratorStrategy 已绑定 Redis 客户端")
         if draft_strategy is not None:
             from aigateway_core.pipelines.generation.draft.draft_cleaner import (
                 DraftSessionCleaner,

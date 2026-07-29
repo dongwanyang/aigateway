@@ -6,7 +6,7 @@ import httpx
 import pytest
 import redis as _redis
 
-from tests.conftest import ADMIN_KEY, BASE, REDIS_URL
+from tests.conftest import ADMIN_KEY, AGNES_TEXT_MODEL, BASE, REDIS_URL
 
 
 def _tid() -> str:
@@ -18,7 +18,7 @@ def test_t1_auto_generated_trace_id(user_client, trace_helpers):
     r = user_client.post(
         "/v1/chat/completions",
         json={
-            "model": "agnes-2.0-flash",
+            "model": AGNES_TEXT_MODEL,
             "messages": [{"role": "user", "content": "hello no trace"}],
         },
         timeout=60,
@@ -39,7 +39,7 @@ def test_t2_custom_trace_id_passthrough(user_client, trace_helpers):
     r = user_client.post(
         "/v1/chat/completions",
         json={
-            "model": "agnes-2.0-flash",
+            "model": AGNES_TEXT_MODEL,
             "messages": [{"role": "user", "content": "hello with trace"}],
         },
         headers={"X-Trace-Id": tid},
@@ -61,7 +61,7 @@ def test_t3_events_cover_stage_and_plugin(user_client, trace_helpers):
     r = user_client.post(
         "/v1/chat/completions",
         json={
-            "model": "agnes-2.0-flash",
+            "model": AGNES_TEXT_MODEL,
             "messages": [{"role": "user", "content": "coverage test"}],
         },
         headers={"X-Trace-Id": tid},
@@ -82,7 +82,7 @@ def test_t4_5xx_exception_handler_carries_trace(admin_client):
     r = admin_client.post(
         "/v1/chat/completions",
         json={
-            "model": "agnes-2.0-flash",
+            "model": AGNES_TEXT_MODEL,
             "messages": [{"role": "user", "content": "exception trace check"}],
         },
         headers={"X-Trace-Id": tid},
@@ -99,7 +99,7 @@ def test_t5_redis_trace_key_and_ttl(user_client, admin_client, trace_helpers):
     user_client.post(
         "/v1/chat/completions",
         json={
-            "model": "agnes-2.0-flash",
+            "model": AGNES_TEXT_MODEL,
             "messages": [{"role": "user", "content": "redis ttl check"}],
         },
         headers={"X-Trace-Id": tid},
@@ -132,7 +132,7 @@ def test_t6_logger_carries_trace_id(admin_client, trace_helpers):
             "X-Trace-Id": tid,
         },
         json={
-            "model": "agnes-2.0-flash",
+            "model": AGNES_TEXT_MODEL,
             "messages": [{"role": "user", "content": "log test"}],
         },
         timeout=60,
@@ -175,7 +175,7 @@ def test_t7_early_return_emits_skip(admin_client, unique_prefix, trace_helpers):
         # 先耗掉配额(用唯一 prompt 避免 cache hit;cache 命中会短路在 quota check 之前)
         tid = _tid()
         c.post("/v1/chat/completions",
-               json={"model": "agnes-2.0-flash",
+               json={"model": AGNES_TEXT_MODEL,
                      "messages": [{"role": "user", "content": f"quota drain {uuid.uuid4().hex}"}]},
                headers={"X-Trace-Id": tid},
                timeout=60)
@@ -183,7 +183,7 @@ def test_t7_early_return_emits_skip(admin_client, unique_prefix, trace_helpers):
         # 用唯一 prompt 避免 cache hit —— cache 命中时 quota check 不执行(status=ok 而非 error)
         tid2 = _tid()
         c.post("/v1/chat/completions",
-               json={"model": "agnes-2.0-flash",
+               json={"model": AGNES_TEXT_MODEL,
                      "messages": [{"role": "user", "content": f"quota exhausted {uuid.uuid4().hex}"}]},
                headers={"X-Trace-Id": tid2},
                timeout=60)

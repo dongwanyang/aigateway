@@ -133,7 +133,12 @@ def client_and_bridge():
     app = main_module.app
 
     async def _fake_auth(request=None):
-        return {"key_id": "test", "user_id": "tester", "status": "active"}
+        return {
+            "key_id": "test",
+            "user_id": "tester",
+            "status": "active",
+            "scopes": ["chat", "embedding"],
+        }
 
     app.dependency_overrides[authenticate] = _fake_auth
 
@@ -295,6 +300,7 @@ class TestE2EWithRealBridgeSubset:
     @pytest.mark.asyncio
     async def test_model_resolution_calls_real_bridge(self):
         """Bypass mock bridge for model resolution tests (no external API calls)."""
+        from aigateway_api.auth_middleware import authenticate
         from aigateway_api.main import app as real_app
         from aigateway_core.route.bridge.litellm_bridge import LiteLLMBridge
 
@@ -307,9 +313,21 @@ class TestE2EWithRealBridgeSubset:
             return [{"id": "gpt-4o", "object": "model"}]
         bridge.list_models = mock_list_models
 
+        async def _fake_auth(request=None):
+            return {
+                "key_id": "test",
+                "user_id": "tester",
+                "status": "active",
+                "scopes": ["chat", "embedding"],
+            }
+
+        real_app.dependency_overrides[authenticate] = _fake_auth
         from fastapi.testclient import TestClient
-        with TestClient(real_app) as client:
-            resp = client.get("/v1/models")
+        try:
+            with TestClient(real_app) as client:
+                resp = client.get("/v1/models")
+        finally:
+            real_app.dependency_overrides.pop(authenticate, None)
 
         assert resp.status_code == 200
         data = resp.json()

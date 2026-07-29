@@ -177,6 +177,10 @@ def register_generation_optimization_plugins(
     comfyui_dict = gen_opt_dict.get("draft_workflow", {}).get("comfyui", {})
     comfyui_config = ComfyUIConfig(
         server_url=comfyui_dict.get("server_url", ComfyUIConfig.server_url),
+        public_url=comfyui_dict.get("public_url", ComfyUIConfig.public_url),
+        manager_enabled=comfyui_dict.get(
+            "manager_enabled", ComfyUIConfig.manager_enabled
+        ),
         connect_timeout=comfyui_dict.get("connect_timeout", ComfyUIConfig.connect_timeout),
         execution_timeout=comfyui_dict.get("execution_timeout", ComfyUIConfig.execution_timeout),
         ws_reconnect_attempts=comfyui_dict.get(
@@ -211,6 +215,56 @@ def register_generation_optimization_plugins(
         output_path=comfyui_dict.get("output_path", ComfyUIConfig.output_path),
         workflow_path=comfyui_dict.get(
             "workflow_path", ComfyUIConfig.workflow_path
+        ),
+        upscale_enabled=comfyui_dict.get(
+            "upscale_enabled", ComfyUIConfig.upscale_enabled
+        ),
+        upscale_model=comfyui_dict.get(
+            "upscale_model", ComfyUIConfig.upscale_model
+        ),
+        allowed_upscale_models=list(
+            comfyui_dict.get(
+                "allowed_upscale_models", ComfyUIConfig().allowed_upscale_models
+            )
+        ),
+        max_upscale_long_edge=comfyui_dict.get(
+            "max_upscale_long_edge", ComfyUIConfig.max_upscale_long_edge
+        ),
+        qwen_image_enabled=comfyui_dict.get(
+            "qwen_image_enabled", ComfyUIConfig.qwen_image_enabled
+        ),
+        qwen_image_diffusion_model=comfyui_dict.get(
+            "qwen_image_diffusion_model", ComfyUIConfig.qwen_image_diffusion_model
+        ),
+        qwen_image_text_encoder=comfyui_dict.get(
+            "qwen_image_text_encoder", ComfyUIConfig.qwen_image_text_encoder
+        ),
+        qwen_image_vae=comfyui_dict.get(
+            "qwen_image_vae", ComfyUIConfig.qwen_image_vae
+        ),
+        qwen_image_draft_steps=comfyui_dict.get(
+            "qwen_image_draft_steps", ComfyUIConfig.qwen_image_draft_steps
+        ),
+        qwen_image_max_draft_edge=comfyui_dict.get(
+            "qwen_image_max_draft_edge", ComfyUIConfig.qwen_image_max_draft_edge
+        ),
+        allowed_qwen_image_diffusion_models=list(
+            comfyui_dict.get(
+                "allowed_qwen_image_diffusion_models",
+                ComfyUIConfig().allowed_qwen_image_diffusion_models,
+            )
+        ),
+        allowed_qwen_image_text_encoders=list(
+            comfyui_dict.get(
+                "allowed_qwen_image_text_encoders",
+                ComfyUIConfig().allowed_qwen_image_text_encoders,
+            )
+        ),
+        allowed_qwen_image_vaes=list(
+            comfyui_dict.get(
+                "allowed_qwen_image_vaes",
+                ComfyUIConfig().allowed_qwen_image_vaes,
+            )
         ),
         video_enabled=comfyui_dict.get(
             "video_enabled", ComfyUIConfig.video_enabled

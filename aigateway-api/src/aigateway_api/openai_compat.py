@@ -19,7 +19,7 @@ import os
 import threading
 import time
 import uuid
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -53,6 +53,17 @@ def _encode_with_sentence_transformer(
 # ------------------------------------------------------------------
 
 
+class GenerationOptions(BaseModel):
+    """Optional generation routing and quality controls."""
+
+    backend: Literal["auto", "local", "cloud"] = "auto"
+    preset_id: str | None = Field(default=None, max_length=128)
+    prompt_mode: Literal["raw", "auto", "enhance"] = "auto"
+    quality: Literal["standard", "creative_refine", "faithful_4k"] = "standard"
+    width: int | None = Field(default=None, ge=64, le=8192)
+    height: int | None = Field(default=None, ge=64, le=8192)
+
+
 class ChatCompletionRequest(BaseModel):
     """POST /v1/chat/completions 请求体。"""
 
@@ -71,8 +82,9 @@ class ChatCompletionRequest(BaseModel):
     chat_session_id: str | None = Field(
         default=None,
         max_length=128,
-        pattern=r"^[A-Za-z0-9._:-]+$",
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
     )
+    generation_options: GenerationOptions | None = None
 
 
 class EmbeddingRequest(BaseModel):

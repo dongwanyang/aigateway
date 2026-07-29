@@ -69,7 +69,13 @@ if [ $EXIT_CODE -eq 0 ]; then
     echo ""
     echo "=== Benchmark completed successfully ==="
     echo "Reports:"
-    ls -la benchmarks/reports/*.md 2>/dev/null | tail -5
+    shopt -s nullglob
+    REPORTS=(benchmarks/reports/*.md)
+    if [ ${#REPORTS[@]} -gt 0 ]; then
+        ls -la "${REPORTS[@]}" | tail -5
+    else
+        echo "(no report generated in dry-run mode)"
+    fi
 else
     echo ""
     echo "=== Benchmark failed with exit code $EXIT_CODE ==="

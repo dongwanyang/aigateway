@@ -304,7 +304,7 @@
 │    - fallback 链 (主模型失败自动降级)                                  │
 │    - litellm 内置 cooldown 熔断(allowed_fails/cooldown_time,          │
 │      与 fallback 同一调度链协同;`ProviderCooldownTracker` 镜像状态)   │
-│    - per-model base_url 覆盖(Agnes 文/图/视频走不同端点)               │
+│    - provider 级 base_url + 后缀拼接(/images/generations, /videos)   │
 └──────────────────────────────┬───────────────────────────────────────┘
                                ▼
 ┌──────────────────────────────────────────────────────────────────────┐

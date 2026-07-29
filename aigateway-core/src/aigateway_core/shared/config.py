@@ -897,6 +897,7 @@ _FIELD_VALIDATORS: dict[tuple[type, str], Any] = {
     (ComfyUIConfig, "model_budget_gb"): {"min": 1},
     (ComfyUIConfig, "output_budget_gb"): {"min": 1},
     (ComfyUIConfig, "output_retention_hours"): {"min": 1},
+    (ComfyUIConfig, "max_upscale_long_edge"): {"min": 512, "max": 8192},
     (ComfyUIConfig, "video_width"): {"min": 16},
     (ComfyUIConfig, "video_height"): {"min": 16},
     (ComfyUIConfig, "video_frames"): {"min": 1},

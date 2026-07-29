@@ -1,13 +1,10 @@
 """Playwright browser + page fixtures for tests/ui/*.
 
-Auth strategy: control-panel has no login page; useAuth reads
-localStorage['aigateway_api_key']. We inject via add_init_script so it
-runs before any page script.
+The control panel authenticates with an HttpOnly browser-session cookie.
+API keys must never be injected into browser storage.
 """
 import pytest
 from playwright.sync_api import sync_playwright
-
-from tests.conftest import ADMIN_KEY
 
 
 @pytest.fixture(scope="session")
@@ -21,9 +18,6 @@ def browser():
 @pytest.fixture
 def page(browser):
     ctx = browser.new_context()
-    ctx.add_init_script(
-        f"localStorage.setItem('aigateway_api_key', '{ADMIN_KEY}');"
-    )
     p = ctx.new_page()
     yield p
     ctx.close()

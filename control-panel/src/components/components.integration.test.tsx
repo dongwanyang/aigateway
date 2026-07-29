@@ -191,6 +191,44 @@ describe('shared UI components', () => {
     expect(screen.getByText(/高清图未缓存/)).toBeInTheDocument()
   })
 
+  it('renders indeterminate progress for running backend work', () => {
+    render(<DraftCard
+      draft={{
+        draftId: 'd-progress',
+        previewUrl: '/preview',
+        mediaType: 'image',
+        status: 'running',
+        stage: 'comfyui.workflow_submitted',
+        progress: 0.42,
+      }}
+      onConfirm={vi.fn()}
+      onReject={vi.fn()}
+    />)
+
+    expect(screen.getByText(/ComfyUI 正在生成草稿预览.*comfyui.workflow_submitted/)).toBeInTheDocument()
+    expect(screen.queryByText(/42%/)).not.toBeInTheDocument()
+    expect(screen.getByRole('progressbar', { name: /草稿生成进度/ })).not.toHaveAttribute('aria-valuenow')
+  })
+
+  it('renders real ComfyUI sampling progress when provided by backend', () => {
+    render(<DraftCard
+      draft={{
+        draftId: 'd-real-progress',
+        previewUrl: '/preview',
+        mediaType: 'image',
+        status: 'running',
+        stage: 'sampling 6/12',
+        progress: 0.6,
+        progressSource: 'comfyui',
+      }}
+      onConfirm={vi.fn()}
+      onReject={vi.fn()}
+    />)
+
+    expect(screen.getByText(/60%.*sampling 6\/12/)).toBeInTheDocument()
+    expect(screen.getByRole('progressbar', { name: /草稿生成进度/ })).toHaveAttribute('aria-valuenow', '60')
+  })
+
   it('renders a local ComfyUI video result without an Agnes video id', () => {
     render(<DraftCard
       draft={{

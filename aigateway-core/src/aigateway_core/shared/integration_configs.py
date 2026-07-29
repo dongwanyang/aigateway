@@ -54,13 +54,15 @@ class ComfyUIConfig:
     Attributes:
         server_url: ComfyUI 服务地址 (默认: "http://localhost:8188")
         connect_timeout: 连接超时时间/秒 (默认: 10)
-        execution_timeout: 工作流执行超时时间/秒 (默认: 300)
+        execution_timeout: 工作流执行超时时间/秒 (默认: 1200)
         ws_reconnect_attempts: WebSocket 重连尝试次数 (默认: 3)
     """
 
     server_url: str = "http://localhost:8188"
+    public_url: str = "http://localhost:8188"
+    manager_enabled: bool = True
     connect_timeout: int = 10
-    execution_timeout: int = 300
+    execution_timeout: int = 1200
     ws_reconnect_attempts: int = 3
     required: bool = True
     workflow_version: str = "image-v1"
@@ -70,13 +72,34 @@ class ComfyUIConfig:
     )
     max_concurrency: int = 1
     min_free_gb: float = 30.0
-    model_budget_gb: float = 30.0
+    model_budget_gb: float = 80.0
     output_budget_gb: float = 10.0
     output_retention_hours: int = 24
     models_path: str = "/comfyui/models"
     output_path: str = "/comfyui/output"
     workflow_path: str = "/comfyui/workflows"
-    video_enabled: bool = False
+    upscale_enabled: bool = True
+    upscale_model: str = "RealESRGAN_x4plus.pth"
+    allowed_upscale_models: list[str] = field(
+        default_factory=lambda: ["RealESRGAN_x4plus.pth"]
+    )
+    max_upscale_long_edge: int = 4096
+    qwen_image_enabled: bool = True
+    qwen_image_diffusion_model: str = "qwen_image_fp8_e4m3fn.safetensors"
+    qwen_image_text_encoder: str = "qwen_2.5_vl_7b_fp8_scaled.safetensors"
+    qwen_image_vae: str = "qwen_image_vae.safetensors"
+    qwen_image_draft_steps: int = 12
+    qwen_image_max_draft_edge: int = 768
+    allowed_qwen_image_diffusion_models: list[str] = field(
+        default_factory=lambda: ["qwen_image_fp8_e4m3fn.safetensors"]
+    )
+    allowed_qwen_image_text_encoders: list[str] = field(
+        default_factory=lambda: ["qwen_2.5_vl_7b_fp8_scaled.safetensors"]
+    )
+    allowed_qwen_image_vaes: list[str] = field(
+        default_factory=lambda: ["qwen_image_vae.safetensors"]
+    )
+    video_enabled: bool = True
     video_workflow_version: str = "wan2.2-ti2v-5b-v1"
     video_diffusion_model: str = "wan2.2_ti2v_5B_fp16.safetensors"
     video_text_encoder: str = "umt5_xxl_fp8_e4m3fn_scaled.safetensors"

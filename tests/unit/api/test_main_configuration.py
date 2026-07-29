@@ -449,6 +449,7 @@ async def test_lifespan_wires_runtime_services_reload_and_shutdown(monkeypatch):
     assert ai_strategy._model_selector is selector
     assert draft_strategy._litellm_bridge is bridge
     assert draft_strategy._task_tracker is tracker
+    assert draft_strategy._redis_client is redis.redis
     cleaner_factory.assert_called_once_with(
         store_dir="/tmp/drafts",
         session_ttl_hours=12,

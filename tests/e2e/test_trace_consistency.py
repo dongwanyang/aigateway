@@ -299,14 +299,29 @@ def test_c8_async_l3_backfill(user_client, trace_helpers):
         if coll_resp.status_code == 200:
             collections = [c["name"] for c in coll_resp.json().get("result", {}).get("collections", [])]
         for cname in collections:
-            resp = httpx.post(f"{QDRANT_URL}/collections/{cname}/points/scroll",
-                              json={"limit": 20, "with_payload": True}, timeout=5)
-            if resp.status_code == 200:
-                for p in resp.json().get("result", {}).get("points", []):
+            offset = None
+            while True:
+                scroll_body = {"limit": 100, "with_payload": True}
+                if offset is not None:
+                    scroll_body["offset"] = offset
+                resp = httpx.post(
+                    f"{QDRANT_URL}/collections/{cname}/points/scroll",
+                    json=scroll_body,
+                    timeout=5,
+                )
+                if resp.status_code != 200:
+                    break
+                result = resp.json().get("result", {})
+                for p in result.get("points", []):
                     payload = p.get("payload") or {}
                     if any(prompt[:20] in str(v) for v in payload.values()):
                         found = True
                         break
+                if found:
+                    break
+                offset = result.get("next_page_offset")
+                if offset is None:
+                    break
             if found:
                 break
         if found:

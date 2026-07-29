@@ -742,7 +742,12 @@ class RequestDispatcher:
             try:
                 ctx = PipelineContext(
                     request={"messages": body.messages, "model": body.model,
-                             "stream": getattr(body, "stream", False)},
+                             "stream": getattr(body, "stream", False),
+                             "generation_options": (
+                                 body.generation_options.model_dump()
+                                 if getattr(body, "generation_options", None)
+                                 else {}
+                             )},
                     trace_id=request.state.trace_id,
                     pipeline_kind=pipeline_kind,
                     user_id=user_id,
@@ -780,6 +785,37 @@ class RequestDispatcher:
         if ctx is not None:
             gen_opt = getattr(ctx, 'extra', {}) or {}
             draft_info = gen_opt.get("generation_optimization", {}).get("draft_generator", {})
+            draft_reason = draft_info.get("reason")
+            if draft_reason in {
+                "local_backend_unavailable",
+                "invalid_generation_options",
+            }:
+                await self._release_quota_reservation(
+                    request,
+                    key_store,
+                    key_hash,
+                )
+                invalid_options = draft_reason == "invalid_generation_options"
+                return JSONResponse(
+                    status_code=400 if invalid_options else 503,
+                    content={
+                        "error": {
+                            "code": (
+                                "invalid_generation_options"
+                                if invalid_options
+                                else "local_generation_unavailable"
+                            ),
+                            "message": draft_info.get(
+                                "local_error",
+                                (
+                                    "The selected generation options are incompatible."
+                                    if invalid_options
+                                    else "Local ComfyUI is unavailable; choose cloud to continue."
+                                ),
+                            ),
+                        }
+                    },
+                )
             if draft_info.get("applicable") and draft_info.get("draft_id"):
                 draft_id = draft_info["draft_id"]
                 _emit_stage(request.state.trace_id, "draft", "draft_workflow.pending_confirmation", 0, "ok",
@@ -810,7 +846,9 @@ class RequestDispatcher:
                             model=draft_model, provider="draft",
                             pipeline_kind=pipeline_kind,
                             tokens_in=0, tokens_out=0, tokens_total=0,
+                            tokens_saved=0,
                             cost_usd=0.0, cached=False, stream=False,
+                            duration_ms=draft_duration_ms,
                             status="pending_confirmation",
                         )
                     except Exception as exc:
@@ -1037,7 +1075,11 @@ class RequestDispatcher:
                     model=logged_model, provider=_provider,
                     pipeline_kind=pipeline_kind,
                     tokens_in=pt, tokens_out=ct, tokens_total=tt,
+                    tokens_saved=0,
                     cost_usd=final_cost if (tt > 0 and final_cost > 0) else 0.0,
+                    duration_ms=round(
+                        (time.time() - request_start_time) * 1000, 1
+                    ),
                     cached=False, stream=False, status="ok",
                 )
             except Exception as exc:
@@ -1295,13 +1337,14 @@ class RequestDispatcher:
         # 真实模型:优先用从 chunk 提取的 _stream_model,否则回退到传入的 model(可能 auto)。
         # 统一用于 metrics/账本/缓存回填/日志,避免 auto 渗透到前端"模型"列与缓存值。
         logged_model = _stream_model or model
+        stream_duration_ms = round((time.time() - llm_start) * 1000, 1)
 
         # 流式日志:在流结束后写(此时真实模型已知)。原实现是在流开始前写并记 body.model(auto),
         # 改到此处可记录解析后的模型。即使 usage 缺失(提前 return)也补记,保证日志不丢。
         try:
             from aigateway_api.openai_compat import _record_request_log
             await _record_request_log(request=request, method="POST", endpoint="/v1/chat/completions",
-                                      status_code=200, duration_ms=0,
+                                      status_code=200, duration_ms=stream_duration_ms,
                                       model=logged_model, cache_hit=False, cache_tier=None)
         except Exception as exc:
             logger.warning("流式请求日志写入失败: %s", exc)
@@ -1331,7 +1374,9 @@ class RequestDispatcher:
                     model=logged_model, provider=_stream_provider,
                     pipeline_kind=pipeline_kind,
                     tokens_in=pt, tokens_out=ct, tokens_total=tt,
+                    tokens_saved=0,
                     cost_usd=final_cost if (tt > 0 and final_cost > 0) else 0.0,
+                    duration_ms=stream_duration_ms,
                     cached=False, stream=True, status="ok",
                 )
             except Exception as exc:
@@ -1477,7 +1522,7 @@ class RequestDispatcher:
                                       model=cached_model, cache_hit=True, cache_tier=hit_tier)
             await self._record_cache_hit_ledger(
                 key_store, request, cached_model, user_id, group_id, saved, stream=True,
-                pipeline_kind=pipeline_kind,
+                pipeline_kind=pipeline_kind, duration_ms=cache_duration_ms,
             )
             return create_sse_response(stream_gen, chat_id=chat_id)
 
@@ -1503,7 +1548,7 @@ class RequestDispatcher:
                                   model=cached_model, cache_hit=True, cache_tier=hit_tier)
         await self._record_cache_hit_ledger(
             key_store, request, cached_model, user_id, group_id, saved, stream=False,
-            pipeline_kind=pipeline_kind,
+            pipeline_kind=pipeline_kind, duration_ms=cache_duration_ms,
         )
 
         meta = {
@@ -1522,13 +1567,12 @@ class RequestDispatcher:
 
     async def _record_cache_hit_ledger(
         self, key_store, request, model, user_id, group_id, _saved_tokens, *, stream: bool,
-        pipeline_kind: str = "understanding",
+        pipeline_kind: str = "understanding", duration_ms: float = 0.0,
     ) -> None:
         """缓存命中也写一笔账本（cost=0），让成本分析能看到缓存命中数。
 
-        tokens_total 记 0(缓存命中不消耗 token);节省的 token 数由 cache_hits 计数体现,
+        tokens_total 记 0(缓存命中不消耗 token)，tokens_saved 单独保存，
         避免与真实用量混入 SUM(tokens_total) 导致前端"tokens"虚高。
-        _saved_tokens 参数保留以兼容调用方,实际不再写入(真实用量为 0)。
         """
         if not key_store or not hasattr(key_store, "record_request_cost"):
             return
@@ -1539,7 +1583,9 @@ class RequestDispatcher:
                 model=model, provider="cache",
                 pipeline_kind=pipeline_kind,
                 tokens_in=0, tokens_out=0, tokens_total=0,
+                tokens_saved=max(0, int(_saved_tokens or 0)),
                 cost_usd=0.0, cached=True, stream=stream, status="ok",
+                duration_ms=duration_ms,
             )
         except Exception as exc:
             logger.warning("缓存命中账本写入失败: %s", exc)

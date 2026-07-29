@@ -12,6 +12,20 @@ interface DraftCardProps {
 export default function DraftCard({ draft, onConfirm, onReject }: DraftCardProps) {
   const busy = ['queued', 'running', 'generating', 'refining', 'confirming', 'rejecting'].includes(draft.status)
   const terminal = draft.status === 'expired' || draft.status === 'error' || draft.status === 'cancelled'
+  const progressPercent = typeof draft.progress === 'number'
+    ? Math.round(Math.min(1, Math.max(0, draft.progress)) * 100)
+    : null
+  const hasRealComfyProgress = draft.progressSource === 'comfyui'
+  const indeterminateProgress = busy
+    && progressPercent !== null
+    && progressPercent < 100
+    && ['running', 'refining', 'confirming'].includes(draft.status)
+    && !hasRealComfyProgress
+  const progressText = (!indeterminateProgress && progressPercent !== null && (hasRealComfyProgress || progressPercent >= 100))
+    ? ` ${progressPercent}%`
+    : ''
+  const stageText = draft.stage && draft.stage !== draft.status ? draft.stage : ''
+  const stageLabel = stageText ? ` · ${stageText}` : ''
 
   return (
     <div className="flex flex-col gap-2" style={{ minWidth: 220 }}>
@@ -19,6 +33,8 @@ export default function DraftCard({ draft, onConfirm, onReject }: DraftCardProps
       {['queued', 'running', 'generating'].includes(draft.status) && (
         <span className="text-xs flex items-center gap-1" style={{ color: 'var(--color-text-secondary)' }}>
           <Loader2 size={12} className="animate-spin" /> {draft.status === 'queued' ? 'ComfyUI 队列等待中…' : 'ComfyUI 正在生成草稿预览…'}
+          {progressText}
+          {stageLabel}
         </span>
       )}
       {draft.status === 'pending' && (
@@ -29,6 +45,8 @@ export default function DraftCard({ draft, onConfirm, onReject }: DraftCardProps
       {(draft.status === 'confirming' || draft.status === 'refining') && (
         <span className="text-xs flex items-center gap-1" style={{ color: 'var(--color-text-secondary)' }}>
           <Loader2 size={12} className="animate-spin" /> {draft.mediaType === 'video' ? 'ComfyUI 正在生成视频…' : 'ComfyUI 正在精修高清图…'}
+          {progressText}
+          {stageLabel}
         </span>
       )}
       {draft.status === 'rejecting' && (
@@ -48,6 +66,26 @@ export default function DraftCard({ draft, onConfirm, onReject }: DraftCardProps
           <AlertTriangle size={12} /> {draft.status === 'expired' ? '草稿已过期' : '操作失败'}
           {draft.errorMessage ? `:${draft.errorMessage}` : ''}
         </span>
+      )}
+      {busy && progressPercent !== null && (
+        <div
+          aria-label="草稿生成进度"
+          role="progressbar"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={indeterminateProgress ? undefined : progressPercent}
+          style={{ height: 4, borderRadius: 999, overflow: 'hidden', backgroundColor: 'var(--color-bg-overlay)' }}
+        >
+          <div
+            className={indeterminateProgress ? 'animate-pulse' : undefined}
+            style={{
+              height: '100%',
+              width: indeterminateProgress ? '36%' : `${progressPercent}%`,
+              backgroundColor: 'var(--color-primary)',
+              transition: 'width 180ms ease',
+            }}
+          />
+        </div>
       )}
 
       {/* 预览图(确认前)/ 高清图(确认后)。图片可点击放大查看 4K 细节。 */}

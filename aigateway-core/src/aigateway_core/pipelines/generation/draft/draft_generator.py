@@ -22,11 +22,13 @@ import math
 import os
 import re
 import shutil
-import threading
 import time
 import uuid
-from dataclasses import dataclass
+from io import BytesIO
 from typing import Any
+from urllib.parse import quote, urlparse, urlunparse
+
+from PIL import Image
 
 from aigateway_core.pipelines.generation._common.config import DraftWorkflowConfig
 from aigateway_core.pipelines.generation._common.exceptions import DraftWorkflowError
@@ -52,22 +54,12 @@ logger = logging.getLogger(__name__)
 _DRAFT_KEY_PREFIX = "aigateway:draft"
 # Redis set: 记录一个 session 下所有 draft_id，供 delete_session 批量删 key
 _DRAFT_SESSION_KEY_PREFIX = "aigateway:draft:session"
+_MODELS_SIZE_CACHE_TTL_SECONDS = 60.0
+_DRAFT_RUNTIME_STALE_GRACE_SECONDS = 60.0
 
 # Default negative prompt for image generation
 _DEFAULT_NEGATIVE_PROMPT = "ugly, blurry, low quality, distorted, deformed"
 _SAFE_PATH_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
-
-
-@dataclass
-class _SuperResolveResult:
-    """像素级超分辨率结果（内部类型）.
-
-    携带放大后的图片字节和真实输出尺寸（等比放大后可能与请求的
-    target_resolution 不同），供调用方校正 UpscaleResult.target_resolution。
-    """
-
-    output_bytes: bytes
-    output_resolution: tuple[int, int] | None = None
 
 
 class DraftGeneratorStrategy:
@@ -85,7 +77,7 @@ class DraftGeneratorStrategy:
       后台 _generate_draft_async 跑 ComfyUI，完成写 preview.bin + status=pending。
 
     图片草稿与确认必须使用 ComfyUI；服务不可用或执行失败时明确失败。
-    视频最终生成在第二阶段工作流启用前保持关闭。
+    视频最终生成由 ``ComfyUIConfig.video_enabled`` 显式控制。
 
     Attributes:
         _config: Draft 工作流配置
@@ -124,14 +116,9 @@ class DraftGeneratorStrategy:
         )
         # 仅保留给显式人工降级路径；正常草稿/确认链路不调用 provider bridge。
         self._litellm_bridge: Any = None
-        # 超分模型懒加载锁：避免并发 confirm 同时构造 RealESRGANer（~64MB 权重重复加载）
-        self._sr_model: Any = None
-        self._sr_model_lock = asyncio.Lock()
-        # 超分推理串行锁：PyTorch module.forward() 非线程安全，并发 enhance 会竞态
-        # 共享张量导致输出损坏或崩溃。enhance 在线程池执行，故用 threading.Lock
-        # （而非 asyncio.Lock）保护线程内的临界区。
-        self._sr_infer_lock = threading.Lock()
         self._draft_state_lock = asyncio.Lock()
+        self._models_size_cache: tuple[float, int] | None = None
+        self._models_size_cache_lock = asyncio.Lock()
         # In-memory fallback when no Redis client is provided (for testing)
         self._memory_store: dict[str, str] = {}
         # session → set(draft_id) 的内存镜像（无 Redis 时测试用）
@@ -208,6 +195,7 @@ class DraftGeneratorStrategy:
         is_video = self._is_video_request(request)
         media_type = "video" if is_video else "image"
         seed = int(uuid.uuid4().int % (2**32))
+        uses_qwen_image = self._should_use_qwen_image(request)
 
         # generation_params 快照（后台 task 也要用，这里先建好）
         generation_params: dict[str, Any] = {
@@ -217,8 +205,18 @@ class DraftGeneratorStrategy:
             "draft_resolution": list(config.draft_resolution),
             "request_id": request.request_id,
             "seed": seed,
-            "checkpoint": self._comfyui_config.checkpoint_name,
+            "checkpoint": (
+                self._comfyui_config.qwen_image_diffusion_model
+                if uses_qwen_image
+                else self._comfyui_config.checkpoint_name
+            ),
+            "preset_id": (
+                request.preset_id
+                or ("qwen-image" if uses_qwen_image else "sdxl-draft")
+            ),
             "workflow_version": self._comfyui_config.workflow_version,
+            "quality": request.quality,
+            "trace_id": request.trace_id,
         }
         if is_video and keyframe_count is not None:
             generation_params["explicit_keyframe_count"] = keyframe_count
@@ -261,11 +259,22 @@ class DraftGeneratorStrategy:
                         "group_id": group_id,
                         "media_type": media_type,
                         "request_id": request.request_id,
+                        "trace_id": request.trace_id,
                     },
                     ttl_seconds=ttl_seconds,
                 )
             except Exception as exc:
                 logger.warning("TaskTracker register draft failed: %s", exc)
+
+        await self._emit_draft_trace(
+            request.trace_id,
+            "draft.queued",
+            payload={
+                "draft_id": draft_id,
+                "media_type": media_type,
+                "request_id": request.request_id,
+            },
+        )
 
         # 起后台生成任务（不 await —— 立即返回 draft_id）。
         # 必须持有强引用：事件循环仅用 WeakSet 跟踪 Task，若被 GC 回收则协程
@@ -302,6 +311,40 @@ class DraftGeneratorStrategy:
 
         return draft
 
+    async def _emit_draft_trace(
+        self,
+        trace_id: str | None,
+        name: str,
+        *,
+        status: str = "ok",
+        duration_ms: float | None = None,
+        payload: dict[str, Any] | None = None,
+        stage: str = "draft",
+    ) -> None:
+        if not trace_id:
+            return
+        try:
+            from aigateway_core.shared.trace_event import append_trace_event
+
+            await append_trace_event(
+                self._redis_client,
+                trace_id=trace_id,
+                stage=stage,
+                name=name,
+                duration_ms=duration_ms,
+                status=status,
+                payload=payload,
+            )
+        except Exception as exc:
+            logger.warning(
+                "draft trace append failed",
+                extra={
+                    "trace_id": trace_id,
+                    "event_name": name,
+                    "error_type": type(exc).__name__,
+                },
+            )
+
     async def _generate_draft_async(
         self,
         draft_id: str,
@@ -325,6 +368,7 @@ class DraftGeneratorStrategy:
         start_time = time.monotonic()
         attempt_number = 1
         max_attempts = config.max_regeneration_attempts
+        trace_id = request.trace_id or str(generation_params.get("trace_id") or "")
         try:
             running = await self._load_draft(draft_id)
             if running is not None:
@@ -333,7 +377,13 @@ class DraftGeneratorStrategy:
                 running.status = DRAFT_STATUS_RUNNING
                 running.stage = "running"
                 running.progress = 0.1
+                running.generation_params["progress_source"] = "stage"
                 await self._store_draft(running, ttl_seconds)
+                await self._emit_draft_trace(
+                    trace_id,
+                    "draft.running",
+                    payload={"draft_id": draft_id, "media_type": media_type},
+                )
 
             if is_video:
                 previews = await self._generate_video_previews_with_comfyui(
@@ -371,6 +421,7 @@ class DraftGeneratorStrategy:
                 workflow_version=self._comfyui_config.workflow_version,
                 gpu_seconds=gpu_seconds,
             )
+            draft.generation_params["progress_source"] = "complete"
             await self._store_draft(draft, max(1, int(expires_at - time.time())))
             from aigateway_core.pipelines.generation._common.metrics import (
                 get_prometheus_registry,
@@ -387,6 +438,18 @@ class DraftGeneratorStrategy:
                     )
                 except Exception as exc:
                     logger.debug("TaskTracker update succeeded failed: %s", exc)
+
+            await self._emit_draft_trace(
+                trace_id,
+                "draft.preview_ready",
+                duration_ms=round(gpu_seconds * 1000, 2),
+                payload={
+                    "draft_id": draft_id,
+                    "media_type": media_type,
+                    "preview_count": len(previews),
+                    "gpu_seconds": round(gpu_seconds, 2),
+                },
+            )
 
             logger.info(
                 "generation_optimization.draft_generator.draft_created",
@@ -405,6 +468,17 @@ class DraftGeneratorStrategy:
                 extra={"draft_id": draft_id, "error": str(exc)},
                 exc_info=True,
             )
+            await self._emit_draft_trace(
+                trace_id,
+                "draft.preview_failed",
+                status="error",
+                duration_ms=round((time.monotonic() - start_time) * 1000, 2),
+                payload={
+                    "draft_id": draft_id,
+                    "media_type": media_type,
+                    "error": type(exc).__name__,
+                },
+            )
             # 标记 failed（写 meta + Redis，前端轮询据此报错）
             try:
                 draft_dir = self._ensure_draft_dir(chat_session_id, draft_id)
@@ -412,6 +486,8 @@ class DraftGeneratorStrategy:
                 error_text = str(exc).lower()
                 if "gpu_out_of_memory" in error_text or "out of memory" in error_text:
                     public_error = "comfyui_gpu_out_of_memory"
+                elif "执行超时" in error_text or "timeout" in error_text:
+                    public_error = "comfyui_execution_timeout"
                 elif "storage" in error_text:
                     public_error = "comfyui_storage_low"
                 else:
@@ -496,7 +572,9 @@ class DraftGeneratorStrategy:
                         self._comfyui_config.video_height,
                     )
                     if draft.media_type == "video"
-                    else self._get_target_resolution(draft)
+                    else self._reported_image_resolution(
+                        output_data, self._get_target_resolution(draft)
+                    )
                 )
                 return UpscaleResult(
                     draft_id=draft_id,
@@ -540,10 +618,19 @@ class DraftGeneratorStrategy:
                 output_data = await self._upscale_with_comfyui(
                     draft, target_resolution
                 )
-                algorithm_used = f"comfyui:{self._comfyui_config.workflow_version}"
+                quality = str(draft.generation_params.get("quality", "standard"))
+                algorithm_used = (
+                    f"comfyui:realesrgan:{self._comfyui_config.upscale_model}"
+                    if quality == "faithful_4k"
+                    else f"comfyui:{self._comfyui_config.workflow_version}"
+                )
             if output_data is None:
                 raise DraftWorkflowError("ComfyUI returned no confirmed media")
-            actual_resolution = target_resolution
+            actual_resolution = (
+                target_resolution
+                if is_video
+                else self._reported_image_resolution(output_data, target_resolution)
+            )
         except Exception:
             await self._mark_draft_confirmation_failed(
                 draft, f"{draft.media_type} confirmation failed"
@@ -576,6 +663,7 @@ class DraftGeneratorStrategy:
             draft.progress = 1.0
             draft.gpu_seconds += max(0.0, duration_ms / 1000.0)
             draft.generation_params["confirmed_algorithm"] = algorithm_used
+            draft.generation_params["progress_source"] = "complete"
             ttl_remaining = max(1, int(draft.expires_at - time.time()))
             await self._store_draft(draft, ttl_remaining)
         except Exception as exc:
@@ -748,6 +836,182 @@ return {3, raw}
         """
         return await self._load_draft(draft_id)
 
+    async def sync_draft_runtime_state(self, draft_id: str) -> DraftResult | None:
+        """Reconcile an in-progress draft with the real ComfyUI runtime state.
+
+        Browser polling can outlive the Python background task that originally
+        submitted the ComfyUI job (for example after a gateway restart). Without
+        this reconciliation, the persisted draft may stay at 10%/50% forever
+        even though ComfyUI no longer has matching work. This method is called
+        from read-only status/preview endpoints to fail stale drafts closed or
+        recover a completed preview from ComfyUI history.
+        """
+        draft = await self._load_draft(draft_id)
+        if draft is None:
+            return None
+        in_progress = {
+            DRAFT_STATUS_GENERATING,
+            DRAFT_STATUS_QUEUED,
+            DRAFT_STATUS_RUNNING,
+            DRAFT_STATUS_REFINING,
+        }
+        if draft.status not in in_progress:
+            return draft
+
+        age_seconds = max(0.0, time.time() - float(draft.created_at or 0.0))
+        prompt_id = str(draft.comfy_prompt_id or "")
+        trace_id = str(draft.generation_params.get("trace_id") or "")
+
+        if not prompt_id:
+            if age_seconds < _DRAFT_RUNTIME_STALE_GRACE_SECONDS:
+                return draft
+            return await self._mark_in_progress_draft_lost(
+                draft,
+                "draft_worker_lost",
+                "Draft background worker disappeared before submitting ComfyUI job",
+            )
+
+        try:
+            prompt_state = await self._get_comfy_prompt_state(prompt_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "generation_optimization.draft_generator.runtime_sync_transient_error",
+                extra={
+                    "draft_id": draft_id,
+                    "prompt_id": prompt_id,
+                    "error_type": type(exc).__name__,
+                },
+            )
+            return draft
+        if prompt_state == "unknown":
+            return draft
+        if prompt_state in {"queued", "running"}:
+            return draft
+        if prompt_state == "completed":
+            if draft.status == DRAFT_STATUS_REFINING:
+                return draft
+            try:
+                previews = await self._poll_results(
+                    prompt_id,
+                    timeout=1,
+                    trace_id=trace_id,
+                    draft_id=draft_id,
+                )
+            except Exception as exc:
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
+                return await self._mark_in_progress_draft_lost(
+                    draft,
+                    "comfyui_recovery_failed",
+                    f"Completed ComfyUI job could not be recovered: {type(exc).__name__}",
+                )
+            draft.previews = previews
+            draft.status = DRAFT_STATUS_PENDING
+            draft.stage = "pending"
+            draft.progress = 1.0
+            await self._store_draft(draft, max(1, int(draft.expires_at - time.time())))
+            if self._task_tracker is not None:
+                try:
+                    await self._task_tracker.update_status(
+                        "draft", draft_id, "succeeded",
+                        metadata={"preview_count": len(previews), "recovered": True},
+                    )
+                except Exception as exc:
+                    logger.debug("TaskTracker recovery update failed: %s", exc)
+            await self._emit_draft_trace(
+                trace_id,
+                "draft.preview_recovered",
+                payload={"draft_id": draft_id, "prompt_id": prompt_id},
+            )
+            return draft
+
+        if age_seconds < _DRAFT_RUNTIME_STALE_GRACE_SECONDS:
+            return draft
+        if draft.status == DRAFT_STATUS_REFINING:
+            await self._mark_draft_confirmation_failed(
+                draft,
+                "ComfyUI refinement job disappeared",
+            )
+            return await self._load_draft(draft_id)
+        return await self._mark_in_progress_draft_lost(
+            draft,
+            "comfyui_job_lost",
+            "ComfyUI job is no longer queued, running, or present in history",
+        )
+
+    async def _get_comfy_prompt_state(self, prompt_id: str) -> str:
+        """Return queued/running/completed/missing/unknown for a ComfyUI prompt."""
+        import httpx
+
+        base_url = self._comfyui_config.server_url
+        try:
+            async with httpx.AsyncClient(
+                timeout=self._comfyui_config.connect_timeout
+            ) as client:
+                queue_response = await client.get(f"{base_url}/queue")
+                if queue_response.status_code == 200:
+                    queue = queue_response.json()
+                    running_ids = {
+                        item[1]
+                        for item in queue.get("queue_running", [])
+                        if isinstance(item, list) and len(item) > 1
+                    }
+                    pending_ids = {
+                        item[1]
+                        for item in queue.get("queue_pending", [])
+                        if isinstance(item, list) and len(item) > 1
+                    }
+                    if prompt_id in running_ids:
+                        return "running"
+                    if prompt_id in pending_ids:
+                        return "queued"
+
+                history_response = await client.get(f"{base_url}/history/{prompt_id}")
+                if history_response.status_code == 200:
+                    history = history_response.json()
+                    if prompt_id in history:
+                        return "completed"
+        except (httpx.TimeoutException, httpx.TransportError, ValueError) as exc:
+            logger.debug(
+                "ComfyUI prompt state check unavailable: prompt_id=%s error=%s",
+                prompt_id,
+                type(exc).__name__,
+            )
+            return "unknown"
+        return "missing"
+
+    async def _mark_in_progress_draft_lost(
+        self,
+        draft: DraftResult,
+        code: str,
+        reason: str,
+    ) -> DraftResult:
+        draft.status = DRAFT_STATUS_FAILED
+        draft.stage = code
+        draft.progress = 0.0
+        draft.error = code
+        draft.generation_params["last_runtime_error"] = reason
+        await self._store_draft(draft, max(1, int(draft.expires_at - time.time())))
+        if self._task_tracker is not None:
+            try:
+                await self._task_tracker.update_status(
+                    "draft",
+                    draft.draft_id,
+                    "failed",
+                    metadata={"error": code, "reason": reason},
+                )
+            except Exception as exc:
+                logger.debug("TaskTracker lost update failed: %s", exc)
+        await self._emit_draft_trace(
+            str(draft.generation_params.get("trace_id") or ""),
+            "draft.runtime_lost",
+            status="error",
+            payload={"draft_id": draft.draft_id, "error": code, "reason": reason},
+        )
+        return draft
+
     # ===================================================================
     # ComfyUI API 集成方法
     # ===================================================================
@@ -783,6 +1047,42 @@ return {3, raw}
                 raise
             raise DraftWorkflowError("ComfyUI service is unavailable") from exc
 
+    async def check_local_dependencies(self, request: GenerationRequest) -> None:
+        """Fail before draft creation when an explicitly selected local path is unusable."""
+        await self._check_comfyui()
+        if self._should_use_qwen_image(request):
+            diffusion, encoder, vae = self._validate_qwen_image_models()
+            required: list[tuple[str, str]] = [
+                ("diffusion_models", diffusion),
+                ("text_encoders", encoder),
+                ("vae", vae),
+            ]
+        else:
+            required = [("checkpoints", self._validate_checkpoint())]
+        if request.media_type == "video":
+            diffusion, encoder, vae = self._validate_video_models()
+            required.extend(
+                [
+                    ("diffusion_models", diffusion),
+                    ("text_encoders", encoder),
+                    ("vae", vae),
+                ]
+            )
+        if request.quality == "faithful_4k" and request.media_type != "video":
+            required.append(("upscale_models", self._validate_upscale_model()))
+        root = self._comfyui_config.models_path
+        missing = await asyncio.to_thread(
+            lambda: [
+                f"{folder}/{name}"
+                for folder, name in required
+                if not os.path.isfile(os.path.join(root, folder, name))
+            ]
+        )
+        if missing:
+            raise DraftWorkflowError(
+                f"comfyui_missing_dependencies: {', '.join(missing)}"
+            )
+
     @staticmethod
     def _directory_size(path: str) -> int:
         total = 0
@@ -795,6 +1095,24 @@ return {3, raw}
                 except OSError:
                     continue
         return total
+
+    async def _get_models_size(self) -> int:
+        """Return the models directory size without rescanning it per request."""
+        now = time.monotonic()
+        cached = self._models_size_cache
+        if cached is not None and now - cached[0] < _MODELS_SIZE_CACHE_TTL_SECONDS:
+            return cached[1]
+
+        async with self._models_size_cache_lock:
+            now = time.monotonic()
+            cached = self._models_size_cache
+            if cached is not None and now - cached[0] < _MODELS_SIZE_CACHE_TTL_SECONDS:
+                return cached[1]
+            size = await asyncio.to_thread(
+                self._directory_size, self._comfyui_config.models_path
+            )
+            self._models_size_cache = (time.monotonic(), size)
+            return size
 
     def _cleanup_expired_outputs(self) -> int:
         output_path = os.path.realpath(self._comfyui_config.output_path)
@@ -838,9 +1156,7 @@ return {3, raw}
             )
 
         models_size, output_size = await asyncio.gather(
-            asyncio.to_thread(
-                self._directory_size, self._comfyui_config.models_path
-            ),
+            self._get_models_size(),
             asyncio.to_thread(
                 self._directory_size, self._comfyui_config.output_path
             ),
@@ -867,6 +1183,63 @@ return {3, raw}
             )
         return checkpoint
 
+    def _validate_qwen_image_models(self) -> tuple[str, str, str]:
+        config = self._comfyui_config
+        approved = (
+            (
+                config.qwen_image_diffusion_model,
+                set(config.allowed_qwen_image_diffusion_models),
+                "diffusion model",
+            ),
+            (
+                config.qwen_image_text_encoder,
+                set(config.allowed_qwen_image_text_encoders),
+                "text encoder",
+            ),
+            (
+                config.qwen_image_vae,
+                set(config.allowed_qwen_image_vaes),
+                "VAE",
+            ),
+        )
+        for name, allowlist, label in approved:
+            if (
+                name not in allowlist
+                or not _SAFE_PATH_COMPONENT.fullmatch(name)
+                or "/" in name
+                or "\\" in name
+            ):
+                raise DraftWorkflowError(
+                    f"ComfyUI Qwen-Image {label} is not allowlisted: {name}"
+                )
+        return (
+            config.qwen_image_diffusion_model,
+            config.qwen_image_text_encoder,
+            config.qwen_image_vae,
+        )
+
+    def _qwen_image_models_installed(self) -> bool:
+        if not self._comfyui_config.qwen_image_enabled:
+            return False
+        diffusion, encoder, vae = self._validate_qwen_image_models()
+        root = self._comfyui_config.models_path
+        return all(
+            os.path.isfile(os.path.join(root, folder, name))
+            for folder, name in (
+                ("diffusion_models", diffusion),
+                ("text_encoders", encoder),
+                ("vae", vae),
+            )
+        )
+
+    def _should_use_qwen_image(self, request: GenerationRequest) -> bool:
+        if request.preset_id == "qwen-image":
+            return True
+        source_prompt = request.source_prompt or request.prompt
+        return bool(re.search(r"[\u3400-\u9fff]", source_prompt)) and (
+            self._qwen_image_models_installed()
+        )
+
     async def _upload_image(self, image_data: bytes, filename: str) -> str:
         import httpx
 
@@ -886,7 +1259,12 @@ return {3, raw}
             raise DraftWorkflowError("ComfyUI image upload returned no filename")
         return stored_name
 
-    async def _submit_workflow(self, workflow_json: dict) -> str:
+    async def _submit_workflow(
+        self,
+        workflow_json: dict,
+        *,
+        client_id: str | None = None,
+    ) -> str:
         """提交工作流到 ComfyUI.
 
         通过 POST /prompt 提交工作流 JSON，返回 prompt_id。
@@ -903,7 +1281,9 @@ return {3, raw}
         import httpx
 
         url = f"{self._comfyui_config.server_url}/prompt"
-        payload = {"prompt": workflow_json}
+        payload: dict[str, Any] = {"prompt": workflow_json}
+        if client_id:
+            payload["client_id"] = client_id
 
         async with httpx.AsyncClient(
             timeout=self._comfyui_config.connect_timeout
@@ -938,13 +1318,173 @@ return {3, raw}
         draft.status = (
             DRAFT_STATUS_REFINING if stage == "refining" else DRAFT_STATUS_RUNNING
         )
-        draft.progress = 0.5
+        draft.progress = 0.35 if stage == "refining" else 0.15
+        draft.generation_params["progress_source"] = "stage"
         await self._store_draft(
             draft, max(1, int(draft.expires_at - time.time()))
         )
+        await self._emit_draft_trace(
+            str(draft.generation_params.get("trace_id") or ""),
+            "comfyui.workflow_submitted",
+            payload={
+                "draft_id": draft_id,
+                "prompt_id": prompt_id,
+                "stage": stage,
+            },
+            stage="comfyui",
+        )
+
+    def _comfy_client_id(self, draft_id: str | None, stage: str) -> str:
+        safe_draft = draft_id or uuid.uuid4().hex
+        return f"aigateway-{safe_draft}-{stage}-{uuid.uuid4().hex[:8]}"
+
+    def _comfy_ws_url(self, client_id: str) -> str:
+        parsed = urlparse(self._comfyui_config.server_url)
+        scheme = "wss" if parsed.scheme == "https" else "ws"
+        path = parsed.path.rstrip("/") + "/ws"
+        return urlunparse(
+            (scheme, parsed.netloc, path, "", f"clientId={quote(client_id, safe='')}", "")
+        )
+
+    async def _watch_comfyui_progress(
+        self,
+        prompt_id: str,
+        *,
+        draft_id: str | None,
+        trace_id: str | None,
+        client_id: str,
+        stage: str,
+    ) -> None:
+        """Consume ComfyUI WebSocket progress events and persist real step ratio."""
+        if not draft_id:
+            return
+        try:
+            import websockets
+        except ImportError:
+            logger.warning("ComfyUI progress websocket dependency is not installed")
+            return
+
+        last_ratio = -1.0
+        try:
+            async with websockets.connect(
+                self._comfy_ws_url(client_id),
+                open_timeout=self._comfyui_config.connect_timeout,
+                ping_interval=None,
+            ) as websocket:
+                async for raw in websocket:
+                    try:
+                        message = json.loads(raw)
+                    except (TypeError, json.JSONDecodeError):
+                        continue
+                    if not isinstance(message, dict):
+                        continue
+                    data = message.get("data")
+                    if not isinstance(data, dict):
+                        continue
+                    msg_prompt_id = data.get("prompt_id")
+                    if msg_prompt_id and msg_prompt_id != prompt_id:
+                        continue
+                    message_type = message.get("type")
+                    if message_type == "executing" and data.get("node") is None:
+                        break
+                    if message_type == "progress_state":
+                        node_states = data.get("nodes")
+                        if not isinstance(node_states, dict):
+                            continue
+                        running_states = [
+                            node_state
+                            for node_state in node_states.values()
+                            if isinstance(node_state, dict)
+                            and node_state.get("prompt_id") == prompt_id
+                            and isinstance(node_state.get("value"), (int, float))
+                            and isinstance(node_state.get("max"), (int, float))
+                            and float(node_state.get("max") or 0) > 0
+                        ]
+                        if not running_states:
+                            continue
+                        data = max(
+                            running_states,
+                            key=lambda node_state: float(node_state.get("max") or 0),
+                        )
+                    elif message_type != "progress":
+                        continue
+                    value = data.get("value")
+                    max_value = data.get("max")
+                    if not isinstance(value, (int, float)) or not isinstance(
+                        max_value, (int, float)
+                    ) or max_value <= 0:
+                        continue
+                    ratio = min(0.99, max(0.0, float(value) / float(max_value)))
+                    if ratio - last_ratio < 0.01 and ratio < 0.99:
+                        continue
+                    last_ratio = ratio
+                    await self._apply_comfyui_progress(
+                        draft_id,
+                        prompt_id,
+                        ratio,
+                        value=int(value),
+                        max_value=int(max_value),
+                        stage=stage,
+                        trace_id=trace_id,
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.debug(
+                "ComfyUI progress websocket ended: prompt_id=%s error=%s",
+                prompt_id,
+                type(exc).__name__,
+            )
+
+    async def _apply_comfyui_progress(
+        self,
+        draft_id: str,
+        prompt_id: str,
+        ratio: float,
+        *,
+        value: int,
+        max_value: int,
+        stage: str,
+        trace_id: str | None,
+    ) -> None:
+        draft = await self._load_draft(draft_id)
+        if draft is None or draft.comfy_prompt_id != prompt_id:
+            return
+        if draft.status not in {
+            DRAFT_STATUS_GENERATING,
+            DRAFT_STATUS_QUEUED,
+            DRAFT_STATUS_RUNNING,
+            DRAFT_STATUS_REFINING,
+        }:
+            return
+        base = 0.35 if stage == "refining" else 0.10
+        span = 0.60 if stage == "refining" else 0.85
+        draft.progress = min(0.99, base + ratio * span)
+        draft.stage = f"sampling {value}/{max_value}"
+        draft.generation_params["progress_source"] = "comfyui"
+        await self._store_draft(draft, max(1, int(draft.expires_at - time.time())))
+        await self._emit_draft_trace(
+            trace_id,
+            "comfyui.progress",
+            payload={
+                "draft_id": draft_id,
+                "prompt_id": prompt_id,
+                "value": value,
+                "max": max_value,
+                "progress": round(draft.progress, 4),
+            },
+            stage="comfyui",
+        )
 
     async def _poll_results(
-        self, prompt_id: str, timeout: int | None = None
+        self,
+        prompt_id: str,
+        timeout: int | None = None,
+        *,
+        trace_id: str | None = None,
+        draft_id: str | None = None,
+        progress_client_id: str | None = None,
+        progress_stage: str = "running",
     ) -> list[bytes]:
         """轮询 ComfyUI 获取工作流执行结果.
 
@@ -968,98 +1508,255 @@ return {3, raw}
 
         history_url = f"{self._comfyui_config.server_url}/history/{prompt_id}"
         poll_interval = 1.0  # seconds
-        elapsed = 0.0
+        deadline = time.monotonic() + timeout
+        transient_errors = 0
+        progress_task: asyncio.Task[None] | None = None
+        if progress_client_id and draft_id:
+            progress_task = asyncio.create_task(
+                self._watch_comfyui_progress(
+                    prompt_id,
+                    draft_id=draft_id,
+                    trace_id=trace_id,
+                    client_id=progress_client_id,
+                    stage=progress_stage,
+                )
+            )
 
-        async with httpx.AsyncClient(
-            timeout=self._comfyui_config.connect_timeout
-        ) as client:
-            while elapsed < timeout:
-                response = await client.get(history_url)
-                if response.status_code == 200:
-                    history = response.json()
-                    if prompt_id in history:
-                        # Workflow completed — extract output image
-                        prompt_data = history[prompt_id]
-                        status_messages = prompt_data.get("status", {}).get(
-                            "messages", []
-                        )
-                        for message in status_messages:
-                            if not isinstance(message, (list, tuple)):
-                                continue
-                            message_text = json.dumps(
-                                message, ensure_ascii=False, default=str
-                            ).lower()
-                            if (
-                                "out of memory" in message_text
-                                or "cuda error: memory" in message_text
-                            ):
-                                raise DraftWorkflowError(
-                                    "comfyui_gpu_out_of_memory"
-                                )
-                            if message and message[0] == "execution_error":
-                                raise DraftWorkflowError(
-                                    "comfyui_workflow_execution_failed"
-                                )
-                        outputs = prompt_data.get("outputs", {})
-                        results: list[bytes] = []
-                        for node_output in outputs.values():
-                            media_entries: list[dict[str, Any]] = []
-                            for output_key in (
-                                "images",
-                                "videos",
-                                "video",
-                                "gifs",
-                                "audio",
-                            ):
-                                value = node_output.get(output_key, [])
-                                if isinstance(value, dict):
-                                    media_entries.append(value)
-                                elif isinstance(value, list):
-                                    media_entries.extend(
-                                        entry
-                                        for entry in value
-                                        if isinstance(entry, dict)
-                                    )
-                            for media_info in media_entries:
-                                filename = media_info.get("filename", "")
-                                if not filename:
+        async def sleep_until_next_poll() -> None:
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                await asyncio.sleep(min(poll_interval, remaining))
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=self._comfyui_config.connect_timeout
+            ) as client:
+                while time.monotonic() < deadline:
+                    try:
+                        response = await client.get(history_url)
+                    except (httpx.TimeoutException, httpx.TransportError) as exc:
+                        transient_errors += 1
+                        if transient_errors == 1 or transient_errors % 10 == 0:
+                            logger.warning(
+                                "generation_optimization.draft_generator.poll_transient_error",
+                                extra={
+                                    "prompt_id": prompt_id,
+                                    "error_type": type(exc).__name__,
+                                    "attempts": transient_errors,
+                                },
+                            )
+                            await self._emit_draft_trace(
+                                trace_id,
+                                "comfyui.poll_transient_error",
+                                status="error",
+                                payload={
+                                    "draft_id": draft_id,
+                                    "prompt_id": prompt_id,
+                                    "error_type": type(exc).__name__,
+                                    "attempts": transient_errors,
+                                },
+                                stage="comfyui",
+                            )
+                        await sleep_until_next_poll()
+                        continue
+                    if response.status_code == 200:
+                        history = response.json()
+                        if prompt_id in history:
+                            # Workflow completed — extract output image
+                            prompt_data = history[prompt_id]
+                            status_messages = prompt_data.get("status", {}).get(
+                                "messages", []
+                            )
+                            for message in status_messages:
+                                if not isinstance(message, (list, tuple)):
                                     continue
-                                subfolder = media_info.get("subfolder", "")
-                                media_type = media_info.get("type", "output")
-                                view_url = (
-                                    f"{self._comfyui_config.server_url}/view"
-                                    f"?filename={filename}"
-                                    f"&subfolder={subfolder}"
-                                    f"&type={media_type}"
-                                )
-                                media_response = await client.get(view_url)
-                                if media_response.status_code == 200:
-                                    logger.info(
-                                        "generation_optimization.draft_generator.result_received",
-                                        extra={
-                                            "prompt_id": prompt_id,
-                                            "output_filename": filename,
-                                        },
+                                message_text = json.dumps(
+                                    message, ensure_ascii=False, default=str
+                                ).lower()
+                                if (
+                                    "out of memory" in message_text
+                                    or "cuda error: memory" in message_text
+                                ):
+                                    raise DraftWorkflowError(
+                                        "comfyui_gpu_out_of_memory"
                                     )
-                                    results.append(media_response.content)
-                        if results:
-                            return results
-                        raise DraftWorkflowError(
-                            f"ComfyUI workflow completed without media output: prompt_id={prompt_id}"
-                        )
+                                if message and message[0] == "execution_error":
+                                    raise DraftWorkflowError(
+                                        "comfyui_workflow_execution_failed"
+                                    )
+                            outputs = prompt_data.get("outputs", {})
+                            results: list[bytes] = []
+                            for node_output in outputs.values():
+                                media_entries: list[dict[str, Any]] = []
+                                for output_key in (
+                                    "images",
+                                    "videos",
+                                    "video",
+                                    "gifs",
+                                    "audio",
+                                ):
+                                    value = node_output.get(output_key, [])
+                                    if isinstance(value, dict):
+                                        media_entries.append(value)
+                                    elif isinstance(value, list):
+                                        media_entries.extend(
+                                            entry
+                                            for entry in value
+                                            if isinstance(entry, dict)
+                                        )
+                                download_deferred = False
+                                for media_info in media_entries:
+                                    filename = media_info.get("filename", "")
+                                    if not filename:
+                                        continue
+                                    subfolder = media_info.get("subfolder", "")
+                                    media_type = media_info.get("type", "output")
+                                    view_url = (
+                                        f"{self._comfyui_config.server_url}/view"
+                                        f"?filename={filename}"
+                                        f"&subfolder={subfolder}"
+                                        f"&type={media_type}"
+                                    )
+                                    try:
+                                        media_response = await client.get(view_url)
+                                    except (
+                                        httpx.TimeoutException,
+                                        httpx.TransportError,
+                                    ) as exc:
+                                        download_deferred = True
+                                        logger.warning(
+                                            "generation_optimization.draft_generator.media_download_transient_error",
+                                            extra={
+                                                "prompt_id": prompt_id,
+                                                "output_filename": filename,
+                                                "error_type": type(exc).__name__,
+                                            },
+                                        )
+                                        await self._emit_draft_trace(
+                                            trace_id,
+                                            "comfyui.media_download_transient_error",
+                                            status="error",
+                                            payload={
+                                                "draft_id": draft_id,
+                                                "prompt_id": prompt_id,
+                                                "output_filename": filename,
+                                                "error_type": type(exc).__name__,
+                                            },
+                                            stage="comfyui",
+                                        )
+                                        continue
+                                    if media_response.status_code == 200:
+                                        logger.info(
+                                            "generation_optimization.draft_generator.result_received",
+                                            extra={
+                                                "prompt_id": prompt_id,
+                                                "output_filename": filename,
+                                            },
+                                        )
+                                        results.append(media_response.content)
+                                        await self._emit_draft_trace(
+                                            trace_id,
+                                            "comfyui.media_downloaded",
+                                            payload={
+                                                "draft_id": draft_id,
+                                                "prompt_id": prompt_id,
+                                                "output_filename": filename,
+                                                "bytes": len(media_response.content),
+                                            },
+                                            stage="comfyui",
+                                        )
+                            if results:
+                                await self._emit_draft_trace(
+                                    trace_id,
+                                    "comfyui.workflow_completed",
+                                    payload={
+                                        "draft_id": draft_id,
+                                        "prompt_id": prompt_id,
+                                        "outputs": len(results),
+                                    },
+                                    stage="comfyui",
+                                )
+                                return results
+                            if download_deferred:
+                                await sleep_until_next_poll()
+                                continue
+                            raise DraftWorkflowError(
+                                "ComfyUI workflow completed without media output: "
+                                f"prompt_id={prompt_id}"
+                            )
 
-                await asyncio.sleep(poll_interval)
-                elapsed += poll_interval
+                    await sleep_until_next_poll()
+        except asyncio.CancelledError:
+            await asyncio.shield(self._cancel_comfyui_workflow(prompt_id))
+            raise
+        finally:
+            if progress_task is not None and not progress_task.done():
+                progress_task.cancel()
+                await asyncio.gather(progress_task, return_exceptions=True)
 
+        await self._cancel_comfyui_workflow(prompt_id)
         raise DraftWorkflowError(
             f"ComfyUI 工作流执行超时 ({timeout}s): prompt_id={prompt_id}"
         )
 
+    async def _cancel_comfyui_workflow(self, prompt_id: str) -> None:
+        """Cancel only the matching pending/running ComfyUI workflow."""
+        import httpx
+
+        base_url = self._comfyui_config.server_url
+        try:
+            async with httpx.AsyncClient(
+                timeout=self._comfyui_config.connect_timeout
+            ) as client:
+                response = await client.get(f"{base_url}/queue")
+                if response.status_code != 200:
+                    return
+                queue = response.json()
+                running_ids = {
+                    item[1]
+                    for item in queue.get("queue_running", [])
+                    if isinstance(item, list) and len(item) > 1
+                }
+                pending_ids = {
+                    item[1]
+                    for item in queue.get("queue_pending", [])
+                    if isinstance(item, list) and len(item) > 1
+                }
+                if prompt_id in pending_ids:
+                    await client.post(
+                        f"{base_url}/queue",
+                        json={"delete": [prompt_id]},
+                    )
+                elif prompt_id in running_ids:
+                    await client.post(f"{base_url}/interrupt")
+        except (httpx.HTTPError, ValueError, TypeError) as exc:
+            logger.warning(
+                "Failed to cancel ComfyUI workflow %s: %s",
+                prompt_id,
+                type(exc).__name__,
+            )
+
     async def _poll_result(
-        self, prompt_id: str, timeout: int | None = None
+        self,
+        prompt_id: str,
+        timeout: int | None = None,
+        *,
+        trace_id: str | None = None,
+        draft_id: str | None = None,
+        progress_client_id: str | None = None,
+        progress_stage: str = "running",
     ) -> bytes:
         """Backward-compatible first-output wrapper."""
-        return (await self._poll_results(prompt_id, timeout))[0]
+        return (
+            await self._poll_results(
+                prompt_id,
+                timeout,
+                trace_id=trace_id,
+                draft_id=draft_id,
+                progress_client_id=progress_client_id,
+                progress_stage=progress_stage,
+            )
+        )[0]
 
     # ===================================================================
     # ComfyUI 工作流 JSON 构建器
@@ -1093,6 +1790,8 @@ return {3, raw}
         需求: 4.2
         """
         cfg = config or self._config
+        if self._should_use_qwen_image(request):
+            return self._build_qwen_image_workflow(request, cfg, seed=seed)
         prompt_text = request.prompt or "a beautiful image"
         draft_w, draft_h = cfg.draft_resolution
 
@@ -1157,6 +1856,90 @@ return {3, raw}
         }
 
         return workflow
+
+    def _build_qwen_image_workflow(
+        self,
+        request: GenerationRequest,
+        config: DraftWorkflowConfig,
+        *,
+        seed: int | None,
+    ) -> dict:
+        """Build the official Core-node Qwen-Image text-to-image graph."""
+        diffusion, encoder, vae = self._validate_qwen_image_models()
+        width, height = config.draft_resolution
+        max_edge = max(256, int(self._comfyui_config.qwen_image_max_draft_edge))
+        scale = min(1.0, max_edge / max(width, height))
+        width = max(256, (int(width * scale) // 16) * 16)
+        height = max(256, (int(height * scale) // 16) * 16)
+        steps = max(1, int(self._comfyui_config.qwen_image_draft_steps))
+        prompt = request.source_prompt or request.prompt or "一幅精美的图片"
+        return {
+            "1": {
+                "class_type": "VAELoader",
+                "inputs": {"vae_name": vae},
+            },
+            "2": {
+                "class_type": "CLIPLoader",
+                "inputs": {
+                    "clip_name": encoder,
+                    "type": "qwen_image",
+                    "device": "default",
+                },
+            },
+            "3": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {"text": "", "clip": ["2", 0]},
+            },
+            "4": {
+                "class_type": "UNETLoader",
+                "inputs": {
+                    "unet_name": diffusion,
+                    "weight_dtype": "default",
+                },
+            },
+            "5": {
+                "class_type": "ModelSamplingAuraFlow",
+                "inputs": {"shift": 3.1, "model": ["4", 0]},
+            },
+            "6": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {"text": prompt, "clip": ["2", 0]},
+            },
+            "7": {
+                "class_type": "EmptySD3LatentImage",
+                "inputs": {
+                    "width": width,
+                    "height": height,
+                    "batch_size": 1,
+                },
+            },
+            "8": {
+                "class_type": "KSampler",
+                "inputs": {
+                    "seed": seed if seed is not None else int(uuid.uuid4().int % (2**32)),
+                    "steps": steps,
+                    "cfg": 4.0,
+                    "sampler_name": "euler",
+                    "scheduler": "simple",
+                    "denoise": 1.0,
+                    "model": ["5", 0],
+                    "positive": ["6", 0],
+                    "negative": ["3", 0],
+                    "latent_image": ["7", 0],
+                },
+            },
+            "9": {
+                "class_type": "VAEDecode",
+                "inputs": {"samples": ["8", 0], "vae": ["1", 0]},
+            },
+            "10": {
+                "class_type": "SaveImage",
+                "inputs": {
+                    "filename_prefix": f"qwen_image_{request.request_id}",
+                    "images": ["9", 0],
+                },
+            },
+        }
 
     def _build_refine_workflow(
         self,
@@ -1228,6 +2011,94 @@ return {3, raw}
         }
 
         return workflow
+
+    def _validate_upscale_model(self) -> str:
+        """Return an approved basename-only upscaler model."""
+        config = self._comfyui_config
+        name = config.upscale_model
+        if (
+            not config.upscale_enabled
+            or name not in set(config.allowed_upscale_models)
+            or not _SAFE_PATH_COMPONENT.fullmatch(name)
+            or "/" in name
+            or "\\" in name
+        ):
+            raise DraftWorkflowError(
+                f"ComfyUI upscale model is not enabled or allowlisted: {name}"
+            )
+        return name
+
+    @staticmethod
+    def _read_image_resolution(image_data: bytes) -> tuple[int, int]:
+        try:
+            with Image.open(BytesIO(image_data)) as image:
+                width, height = image.size
+        except Exception as exc:
+            raise DraftWorkflowError("ComfyUI returned an invalid image") from exc
+        if width < 1 or height < 1:
+            raise DraftWorkflowError("ComfyUI returned an image with invalid dimensions")
+        return width, height
+
+    @classmethod
+    def _reported_image_resolution(
+        cls,
+        image_data: bytes,
+        fallback: tuple[int, int],
+    ) -> tuple[int, int]:
+        """Use decoded output dimensions; retain a fallback for legacy/mock payloads."""
+        try:
+            return cls._read_image_resolution(image_data)
+        except DraftWorkflowError:
+            logger.warning("unable to decode confirmed image dimensions; using bounded target")
+            return fallback
+
+    def _faithful_upscale_resolution(self, image_data: bytes) -> tuple[int, int]:
+        width, height = self._read_image_resolution(image_data)
+        max_edge = self._comfyui_config.max_upscale_long_edge
+        scale = max(1.0, max_edge / max(width, height))
+        return max(1, round(width * scale)), max(1, round(height * scale))
+
+    def _build_faithful_upscale_workflow(
+        self,
+        input_name: str,
+        target_resolution: tuple[int, int],
+    ) -> dict:
+        """Build a Core-node-only RealESRGAN workflow without diffusion denoise."""
+        target_width, target_height = target_resolution
+        return {
+            "1": {
+                "class_type": "LoadImage",
+                "inputs": {"image": input_name},
+            },
+            "2": {
+                "class_type": "UpscaleModelLoader",
+                "inputs": {"model_name": self._validate_upscale_model()},
+            },
+            "3": {
+                "class_type": "ImageUpscaleWithModel",
+                "inputs": {
+                    "upscale_model": ["2", 0],
+                    "image": ["1", 0],
+                },
+            },
+            "4": {
+                "class_type": "ImageScale",
+                "inputs": {
+                    "image": ["3", 0],
+                    "upscale_method": "lanczos",
+                    "width": target_width,
+                    "height": target_height,
+                    "crop": "disabled",
+                },
+            },
+            "5": {
+                "class_type": "SaveImage",
+                "inputs": {
+                    "filename_prefix": "faithful_4k",
+                    "images": ["4", 0],
+                },
+            },
+        }
 
     def _validate_video_models(self) -> tuple[str, str, str]:
         """Return the approved Wan model files and reject path/model injection."""
@@ -1370,9 +2241,18 @@ return {3, raw}
                 workflow = self._build_image_draft_workflow(
                     request, config, seed=seed
                 )
-                prompt_id = await self._submit_workflow(workflow)
+                client_id = self._comfy_client_id(draft_id, "draft")
+                prompt_id = await self._submit_workflow(
+                    workflow, client_id=client_id
+                )
                 await self._record_comfy_job(draft_id, prompt_id, "running")
-                image_data = await self._poll_result(prompt_id)
+                image_data = await self._poll_result(
+                    prompt_id,
+                    trace_id=request.trace_id,
+                    draft_id=draft_id,
+                    progress_client_id=client_id,
+                    progress_stage="running",
+                )
                 logger.info(
                     "generation_optimization.draft_generator.comfyui_image_preview",
                     extra={"request_id": request.request_id, "size": len(image_data)},
@@ -1417,11 +2297,16 @@ return {3, raw}
             draft_id=draft.draft_id,
         )
         async with self._comfyui_semaphore:
-            prompt_id = await self._submit_workflow(workflow)
+            client_id = self._comfy_client_id(draft.draft_id, "video")
+            prompt_id = await self._submit_workflow(workflow, client_id=client_id)
             await self._record_comfy_job(draft.draft_id, prompt_id, "refining")
             result = await self._poll_result(
                 prompt_id,
                 timeout=self._comfyui_config.video_execution_timeout,
+                trace_id=str(draft.generation_params.get("trace_id") or ""),
+                draft_id=draft.draft_id,
+                progress_client_id=client_id,
+                progress_stage="refining",
             )
         logger.info(
             "generation_optimization.draft_generator.comfyui_video_completed",
@@ -1448,8 +2333,15 @@ return {3, raw}
             精修后的 bytes 数据
         """
         try:
-            # Use the first preview as input for upscale
+            # Use the first preview as input for upscale. Confirming a draft
+            # first moves the metadata to ``refining``; the preview itself is
+            # persisted on disk and may need to be loaded lazily after that
+            # state transition.
             draft_data = draft.previews[0] if draft.previews else b""
+            if not draft_data:
+                draft_dir = self._draft_dir(draft.session_id, draft.draft_id)
+                draft.previews = self._read_preview_bytes(draft_dir, draft.media_type)
+                draft_data = draft.previews[0] if draft.previews else b""
             if not draft_data:
                 raise DraftWorkflowError("Draft has no preview image to refine")
 
@@ -1457,21 +2349,49 @@ return {3, raw}
             input_name = await self._upload_image(
                 draft_data, f"draft-{draft.draft_id}.png"
             )
-            workflow = self._build_refine_workflow(
-                input_name=input_name,
-                prompt=str(draft.generation_params.get("prompt", "")),
-                seed=int(draft.generation_params.get("seed", 0)),
-                target_resolution=target_resolution,
-            )
+            quality = str(draft.generation_params.get("quality", "standard"))
+            if quality == "faithful_4k":
+                target_resolution = self._faithful_upscale_resolution(draft_data)
+                workflow = self._build_faithful_upscale_workflow(
+                    input_name=input_name,
+                    target_resolution=target_resolution,
+                )
+            else:
+                workflow = self._build_refine_workflow(
+                    input_name=input_name,
+                    prompt=str(draft.generation_params.get("prompt", "")),
+                    seed=int(draft.generation_params.get("seed", 0)),
+                    target_resolution=target_resolution,
+                )
             async with self._comfyui_semaphore:
-                prompt_id = await self._submit_workflow(workflow)
+                client_id = self._comfy_client_id(draft.draft_id, "refine")
+                prompt_id = await self._submit_workflow(
+                    workflow, client_id=client_id
+                )
                 draft.comfy_prompt_id = prompt_id
                 draft.stage = "refining"
-                draft.progress = 0.5
+                draft.progress = 0.35
+                draft.generation_params["progress_source"] = "stage"
                 await self._store_draft(
                     draft, max(1, int(draft.expires_at - time.time()))
                 )
-                result_data = await self._poll_result(prompt_id)
+                await self._emit_draft_trace(
+                    str(draft.generation_params.get("trace_id") or ""),
+                    "comfyui.workflow_submitted",
+                    payload={
+                        "draft_id": draft.draft_id,
+                        "prompt_id": prompt_id,
+                        "stage": "refining",
+                    },
+                    stage="comfyui",
+                )
+                result_data = await self._poll_result(
+                    prompt_id,
+                    trace_id=str(draft.generation_params.get("trace_id") or ""),
+                    draft_id=draft.draft_id,
+                    progress_client_id=client_id,
+                    progress_stage="refining",
+                )
             logger.info(
                 "generation_optimization.draft_generator.comfyui_upscale",
                 extra={
@@ -1484,154 +2404,6 @@ return {3, raw}
             if isinstance(exc, DraftWorkflowError):
                 raise
             raise DraftWorkflowError("ComfyUI image refinement failed") from exc
-
-    # ===================================================================
-    # 内部方法 — 像素级超分辨率
-    # ===================================================================
-
-    def _build_sr_model(self, model_path: str) -> Any:
-        """同步构造 RealESRGANer（含 ~64MB 权重加载）。
-
-        预期由 run_in_executor 调用，不在事件循环线程执行。返回构造好的
-        RealESRGANer，或权重/依赖缺失时返回 None。
-        """
-        try:
-            import torch
-            from basicsr.archs.rrdbnet_arch import (
-                RRDBNet,
-            )
-            from realesrgan import RealESRGANer
-        except ImportError as exc:
-            logger.warning("RealESRGAN 依赖未就绪，跳过超分: %s", exc)
-            return None
-        # RealESRGAN_x4plus 对应 RRDBNet(x4) 架构
-        device = torch.device('cuda') if torch.cuda.is_available() else 'cpu'
-        model = RRDBNet(
-            num_in_ch=3,
-            num_out_ch=3,
-            num_feat=64,
-            num_block=23,
-            num_grow_ch=32,
-            scale=4,
-        )
-        return RealESRGANer(
-            scale=4,  # RealESRGAN 默认 4x 放大
-            model_path=model_path,
-            model=model,
-            half=torch.cuda.is_available(),  # FP16 加速(仅 GPU)
-            device=device,
-            tile=512,  # 分块推理, 降低显存峰值
-            tile_pad=10,
-        )
-
-    async def _super_resolve(
-        self,
-        draft: DraftResult,
-        target_resolution: tuple[int, int],
-    ) -> _SuperResolveResult | None:
-        """像素级超分辨率放大.
-
-        使用 RealESRGAN (RRDBNet x4) 将草稿图片等比放大到长边 4096，
-        不调用 LLM API，只消耗本地计算资源。等比放大保持长宽比、不裁剪。
-
-        Args:
-            draft: 已确认的草图结果
-            target_resolution: 请求的目标分辨率（仅用于日志/回退参考；
-                超分实际按等比放大到长边 4096，输出尺寸由真实源图决定）
-
-        Returns:
-            _SuperResolveResult（含输出字节和真实输出尺寸），失败返回 None
-        """
-        if not draft.previews:
-            return None
-
-        draft_data = draft.previews[0]
-
-        try:
-            import cv2
-            import numpy as np
-            import torch
-            from basicsr.archs.rrdbnet_arch import RRDBNet
-            from realesrgan import RealESRGANer
-            _ = (torch, RRDBNet, RealESRGANer)
-        except ImportError as exc:
-            # realesrgan/basicsr/cv2/torch 任一缺失（或 basicsr 的 functional_tensor
-            # 兼容补丁未生效）都会在此暴露。warning 而非 debug，避免超分静默失效。
-            logger.warning("RealESRGAN 依赖未就绪，跳过超分: %s", exc)
-            return None
-
-        # 先解码图片拿到真实尺寸（Agnes 可能不严格遵循请求的 size）
-        try:
-            img_array = cv2.imdecode(
-                np.frombuffer(draft_data, np.uint8),
-                cv2.IMREAD_COLOR,
-            )
-        except Exception as exc:
-            logger.warning("草稿图片解码失败，跳过超分: %s", exc)
-            return None
-        if img_array is None:
-            logger.warning("草稿图片解码为空（数据非有效图片），跳过超分")
-            return None
-
-        src_h, src_w = img_array.shape[0], img_array.shape[1]
-        # 等比放大到长边 4096（保持长宽比，不裁剪）
-        # outscale 是相对原始输入的总缩放因子（RealESRGANer.enhance 内部
-        # cv2.resize 到 w_input*outscale），故 scale_factor = 4096 / 源长边。
-        sr_target = 4096
-        scale_factor = sr_target / max(src_w, src_h)
-
-        try:
-            # 权重路径: Dockerfile 预下载到 /app/weights/RealESRGAN_x4plus.pth
-            # 本地开发环境回退到包内置 weights 目录或环境变量指定路径
-            model_path = os.environ.get(
-                "RealESRGAN_MODEL_PATH",
-                "/app/weights/RealESRGAN_x4plus.pth",
-            )
-            if not os.path.isfile(model_path):
-                try:
-                    from realesrgan import ROOT_DIR
-                    model_path = os.path.join(ROOT_DIR, "weights", "RealESRGAN_x4plus.pth")
-                except Exception:
-                    pass
-            if not os.path.isfile(model_path):
-                logger.warning("RealESRGAN 权重未找到，跳过超分: %s", model_path)
-                return None
-
-            # 加锁懒加载超分模型，避免并发 confirm 重复构造 RealESRGANer
-            if self._sr_model is None:
-                async with self._sr_model_lock:
-                    if self._sr_model is None:
-                        # 模型构造 + ~64MB 权重加载是同步重 I/O/CPU，
-                        # 卸载到线程池避免阻塞单 worker uvicorn 事件循环。
-                        loop = asyncio.get_running_loop()
-                        built = await loop.run_in_executor(
-                            None, lambda: self._build_sr_model(model_path)
-                        )
-                        if built is None:
-                            return None
-                        self._sr_model = built
-
-            # enhance 是同步重计算（CPU 上 1024→4096 数秒到数十秒），
-            # 卸载到线程池避免阻塞单 worker uvicorn 事件循环。
-            # PyTorch module.forward() 非线程安全：并发 enhance 会竞态共享张量，
-            # 故用 _sr_infer_lock 串行化推理（在线程内加锁，保护真正的临界区）。
-            def _do_enhance():
-                with self._sr_infer_lock:
-                    return self._sr_model.enhance(img_array, outscale=scale_factor)
-
-            loop = asyncio.get_running_loop()
-            output, _ = await loop.run_in_executor(None, _do_enhance)
-
-            _, encoded = cv2.imencode('.png', output)
-            out_h, out_w = output.shape[0], output.shape[1]
-            return _SuperResolveResult(
-                output_bytes=encoded.tobytes(),
-                output_resolution=(out_w, out_h),
-            )
-
-        except Exception as exc:
-            logger.warning("超分失败: %s", exc)
-            return None
 
     # ===================================================================
     # 内部方法 — 关键帧计算
@@ -1926,7 +2698,10 @@ return {3, raw}
                 )
             ),
             media_type=media_type,
+            quality=str(generation_params.get("quality", "standard")),
+            preset_id=generation_params.get("preset_id"),
             request_id=str(generation_params.get("request_id") or uuid.uuid4().hex),
+            trace_id=str(generation_params.get("trace_id") or ""),
         )
 
         new_draft = DraftResult(
@@ -2180,6 +2955,7 @@ return {3, raw}
             "workflow_version": draft.workflow_version,
             "comfy_prompt_id": draft.comfy_prompt_id,
             "gpu_seconds": draft.gpu_seconds,
+            "error": draft.error,
             "store_dir": draft_dir,  # 供 _load_draft 定位文件
         }
         data = json.dumps(serialized)
@@ -2233,16 +3009,17 @@ return {3, raw}
         media_type = data.get("media_type", "image")
         draft_dir = data.get("store_dir") or self._draft_dir(data.get("session_id"), draft_id)
 
-        # previews 懒加载：generating 阶段无文件，返回空列表（调用方按需再读）
-        in_progress = {
+        # previews 懒加载：草稿预览生成前无文件，返回空列表（调用方按需再读）。
+        # ``refining`` 已经发生在用户确认之后，必须继续加载已持久化的 preview，
+        # 否则 confirm 路径会看不到刚生成好的草稿图。
+        pre_preview_statuses = {
             DRAFT_STATUS_GENERATING,
             DRAFT_STATUS_QUEUED,
             DRAFT_STATUS_RUNNING,
-            DRAFT_STATUS_REFINING,
         }
         previews = (
             self._read_preview_bytes(draft_dir, media_type)
-            if data.get("status") not in in_progress
+            if data.get("status") not in pre_preview_statuses
             else []
         )
 
@@ -2265,6 +3042,7 @@ return {3, raw}
             workflow_version=data.get("workflow_version", ""),
             comfy_prompt_id=data.get("comfy_prompt_id"),
             gpu_seconds=float(data.get("gpu_seconds", 0.0)),
+            error=data.get("error"),
         )
 
     async def get_result_bytes(self, draft_id: str) -> bytes:
@@ -2369,10 +3147,18 @@ return {3, raw}
             draft_ids = list(self._memory_session_index.get(safe_session_id, set()))
 
         session_dir = os.path.join(self._store_dir, safe_session_id)
+        session_has_entries = False
         if os.path.isdir(session_dir):
             for entry in os.listdir(session_dir):
+                session_has_entries = True
                 entry_path = os.path.join(session_dir, entry)
                 if os.path.isdir(entry_path) and entry not in draft_ids:
+                    if _SAFE_PATH_COMPONENT.fullmatch(entry) is None:
+                        logger.warning(
+                            "skipping invalid draft directory name during session deletion",
+                            extra={"session_id": safe_session_id},
+                        )
+                        continue
                     draft_ids.append(entry)
         for draft_id in draft_ids:
             self._safe_path_component(draft_id, "draft_id")
@@ -2403,7 +3189,7 @@ return {3, raw}
                     or (draft_group_id and draft_group_id != str(group_id or ""))
                 ):
                     raise DraftWorkflowError("draft_session_forbidden")
-            if os.path.isdir(session_dir) and draft_ids and not verified_metadata:
+            if os.path.isdir(session_dir) and session_has_entries and not verified_metadata:
                 raise DraftWorkflowError("draft_session_owner_unknown")
 
         # 2) 删每个 draft 的 Redis key

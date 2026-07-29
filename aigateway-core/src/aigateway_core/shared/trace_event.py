@@ -118,6 +118,81 @@ class TraceCollector:
         if redis_client is None:
             return
         key = f"aigateway:trace:{self.trace_id}"
-        value = json.dumps(self.to_dict())
+        value = json.dumps(await _merge_trace_data(redis_client, key, self.to_dict()))
         await redis_client.hset(key, "data", value)
         await redis_client.expire(key, 7 * 24 * 3600)  # TTL 7 天
+
+
+async def _merge_trace_data(
+    redis_client: Any,
+    key: str,
+    new_data: dict[str, Any],
+) -> dict[str, Any]:
+    existing: dict[str, Any] | None = None
+    try:
+        raw = await redis_client.hget(key, "data")
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        if raw:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                existing = parsed
+    except (AttributeError, TypeError, json.JSONDecodeError):
+        existing = None
+
+    if existing is None:
+        merged = dict(new_data)
+        merged["events"] = list(new_data.get("events", []))
+        return merged
+
+    merged = dict(existing)
+    merged["trace_id"] = existing.get("trace_id") or new_data.get("trace_id")
+    merged["wall_start"] = existing.get("wall_start") or new_data.get("wall_start")
+    merged["events"] = [
+        *(existing.get("events") or []),
+        *(new_data.get("events") or []),
+    ]
+    try:
+        merged["events"].sort(key=lambda event: float(event.get("ts", 0.0)))
+    except (TypeError, ValueError, AttributeError):
+        pass
+    return merged
+
+
+def _redis_conn(redis_client: Any) -> Any:
+    return getattr(redis_client, "redis", None) or redis_client
+
+
+async def append_trace_event(
+    redis_client: Any,
+    *,
+    trace_id: str,
+    stage: str,
+    name: str,
+    duration_ms: float | None = None,
+    status: str = "ok",
+    payload: dict[str, Any] | None = None,
+    kind: Literal["stage", "plugin", "debug"] = "stage",
+) -> None:
+    """Append an event for work that outlives the original HTTP request."""
+    if redis_client is None or not trace_id:
+        return
+    conn = _redis_conn(redis_client)
+    key = f"aigateway:trace:{trace_id}"
+    event = {
+        "ts": time.monotonic(),
+        "stage": stage,
+        "kind": kind,
+        "name": name,
+        "duration_ms": round(duration_ms, 2) if duration_ms is not None else None,
+        "status": status,
+        "payload": payload,
+    }
+    data = {
+        "trace_id": trace_id,
+        "wall_start": time.time(),
+        "events": [event],
+    }
+    merged = await _merge_trace_data(conn, key, data)
+    await conn.hset(key, "data", json.dumps(merged))
+    await conn.expire(key, 7 * 24 * 3600)

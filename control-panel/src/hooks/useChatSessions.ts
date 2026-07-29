@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react'
 import { requestChatCompletion } from '@/api/consoleChat'
+import type { GenerationOptions } from '@/types'
 import {
   getDraftResult,
   confirmDraft,
@@ -27,6 +28,34 @@ function hasActiveAsyncTask(msg: ChatPageMessage): boolean {
   if (msg.videoId && !msg.error && !msg.incomplete) return true
   if (msg.draft && ['generating', 'pending', 'confirming', 'rejecting'].includes(msg.draft.status)) return true
   return false
+}
+
+const CHAT_DRAFT_STATUSES = new Set<ChatDraftState['status']>([
+  'queued',
+  'running',
+  'generating',
+  'pending',
+  'refining',
+  'confirming',
+  'completed',
+  'confirmed',
+  'rejecting',
+  'rejected',
+  'cancelled',
+  'expired',
+  'error',
+])
+
+function normalizeDraftStatus(status: string | undefined): ChatDraftState['status'] {
+  if (status && CHAT_DRAFT_STATUSES.has(status as ChatDraftState['status'])) {
+    return status as ChatDraftState['status']
+  }
+  return 'running'
+}
+
+function normalizeDraftProgress(progress: number | undefined): number | undefined {
+  if (typeof progress !== 'number' || Number.isNaN(progress)) return undefined
+  return Math.min(1, Math.max(0, progress))
 }
 
 export interface UseChatSessions {
@@ -228,14 +257,38 @@ export function useChatSessions(): UseChatSessions {
   }, [stop, activeId, patchActiveMessages])
 
   const pollDraftPreview = useCallback(async (draftId: string, msgId: string) => {
-    const result = await pollDraftUntilSettled(draftId)
+    const result = await pollDraftUntilSettled(draftId, progress => {
+      patchMessage(msgId, message => {
+        if (message.draft?.draftId !== draftId) return message
+        return {
+          ...message,
+          draft: {
+            ...message.draft,
+            status: normalizeDraftStatus(progress.status),
+            stage: progress.stage ?? message.draft.stage,
+            progress: normalizeDraftProgress(progress.progress) ?? message.draft.progress,
+            progressSource: progress.progressSource ?? message.draft.progressSource,
+            errorMessage: undefined,
+          },
+          awaitingDraft: true,
+        }
+      })
+    })
     if (result.kind === 'duplicate') return
     patchMessage(msgId, message => {
       if (message.draft?.draftId !== draftId) return message
       if (result.kind === 'ready') {
         return {
           ...message,
-          draft: { ...message.draft, status: 'pending', previewDataUrl: result.previewDataUrl, errorMessage: undefined },
+          draft: {
+            ...message.draft,
+            status: 'pending',
+            stage: 'preview_ready',
+            progress: 1,
+            progressSource: 'complete',
+            previewDataUrl: result.previewDataUrl,
+            errorMessage: undefined,
+          },
           awaitingDraft: false,
         }
       }
@@ -248,7 +301,10 @@ export function useChatSessions(): UseChatSessions {
     flushToStorage()
   }, [patchMessage, flushToStorage])
 
-  const send = useCallback(async (text: string, opts?: { resume?: boolean; dropLastAssistant?: boolean }) => {
+  const send = useCallback(async (
+    text: string,
+    opts?: { resume?: boolean; dropLastAssistant?: boolean; generationOptions?: GenerationOptions },
+  ) => {
     const trimmed = text.trim()
     if (!trimmed || streaming || inflightRef.current) return
     inflightRef.current = true
@@ -280,7 +336,13 @@ export function useChatSessions(): UseChatSessions {
 
     try {
       const resp = await requestChatCompletion(
-        { model: 'auto', messages: wireMessages, stream: true, chat_session_id: activeId ?? undefined },
+        {
+          model: 'auto',
+          messages: wireMessages,
+          stream: true,
+          chat_session_id: activeId ?? undefined,
+          generation_options: opts?.generationOptions,
+        },
         controller.signal,
       )
 

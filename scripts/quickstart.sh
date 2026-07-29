@@ -419,6 +419,10 @@ if [[ "$install_models" == "true" ]]; then
     AIGATEWAY_COMFY_DATA_DIR="$comfy_data_dir" \
       "$ROOT_DIR/scripts/model-manager.sh" install sdxl-base
     AIGATEWAY_COMFY_DATA_DIR="$comfy_data_dir" \
+      "$ROOT_DIR/scripts/model-manager.sh" install realesrgan-x4plus
+    AIGATEWAY_COMFY_DATA_DIR="$comfy_data_dir" \
+      "$ROOT_DIR/scripts/model-manager.sh" install qwen-image
+    AIGATEWAY_COMFY_DATA_DIR="$comfy_data_dir" \
       "$ROOT_DIR/scripts/model-manager.sh" install wan2.2-ti2v-5b
   fi
 fi

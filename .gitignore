@@ -77,6 +77,10 @@ docker-compose.override.yml
 # ComfyUI runtime/model data (keep only repository documentation/placeholders)
 comfyui/models/*
 !comfyui/models/README.md
+comfyui/custom_nodes/*
+!comfyui/custom_nodes/.gitkeep
+comfyui/user/*
+!comfyui/user/.gitkeep
 comfyui/input/*
 !comfyui/input/.gitkeep
 comfyui/output/*

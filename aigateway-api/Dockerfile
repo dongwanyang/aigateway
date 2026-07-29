@@ -240,10 +240,14 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 FROM gateway-cuda-common AS comfyui
 ARG COMFYUI_VERSION=v0.28.0
+ARG COMFYUI_MANAGER_VERSION=4.2.1
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-      git libegl1 libgbm1 libx11-6 libxdamage1 libxext6 libxfixes3 libxrandr2
+      build-essential git libegl1 libgbm1 libx11-6 libxdamage1 libxext6 libxfixes3 libxrandr2
+# build-essential 提供 gcc；Qwen-Image 的 Llama 文本编码器在 triton JIT 编译
+# RoPE kernel (precompute_freqs_cis) 时需要 C 编译器，否则 comfyui_generation_failed。
+# 与 gateway Dockerfile 2026-07-09 的修复同款（见 CLAUDE.md gotcha）。
 WORKDIR /opt
 RUN git clone --branch "${COMFYUI_VERSION}" --depth 1 \
     https://github.com/Comfy-Org/ComfyUI.git /opt/ComfyUI
@@ -253,13 +257,16 @@ RUN --mount=type=cache,target=/root/.cache/pip \
       "$TORCH_VERSION" "$TORCHVISION_VERSION" "$TORCHAUDIO_VERSION" \
       > /tmp/comfyui-constraints.txt \
     && pip install --no-build-isolation \
-      -r requirements.txt --constraint /tmp/comfyui-constraints.txt
-RUN mkdir -p models input output user/default/workflows
+      -r requirements.txt --constraint /tmp/comfyui-constraints.txt \
+    && pip install --no-build-isolation \
+      "comfyui-manager==${COMFYUI_MANAGER_VERSION}"
+COPY scripts/comfyui-entrypoint.sh /usr/local/bin/comfyui-entrypoint
+COPY scripts/comfyui-manager-config.ini /opt/comfyui-manager-config.ini
+RUN chmod 0755 /usr/local/bin/comfyui-entrypoint \
+    && mkdir -p models custom_nodes input output user/default/workflows
 EXPOSE 8188
 HEALTHCHECK --interval=15s --timeout=5s --retries=10 \
     CMD curl -fsS http://127.0.0.1:8188/system_stats >/dev/null || exit 1
-CMD ["python", "main.py", "--listen", "0.0.0.0", "--port", "8188", \
-     "--disable-auto-launch", "--output-directory", "/opt/ComfyUI/output", \
-     "--input-directory", "/opt/ComfyUI/input"]
+ENTRYPOINT ["/usr/local/bin/comfyui-entrypoint"]
 
 FROM gateway-runtime AS gateway

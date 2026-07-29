@@ -26,7 +26,7 @@ services:
       CUDA_VISIBLE_DEVICES: ${GATEWAY_CUDA_VISIBLE_DEVICES:-0}
       PYTORCH_CUDA_ALLOC_CONF: ${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
     volumes:
-      - ${AIGATEWAY_RUNTIME_CONFIG:-./config.yaml}:/app/config.yaml:ro
+      - ${AIGATEWAY_RUNTIME_CONFIG:-./config.yaml}:/app/config.yaml
       - ${AIGATEWAY_MODEL_DIR:-./models}:/models:ro
       - code_graphs_data:/data/code_graphs
       - ./data:/app/data
@@ -102,6 +102,7 @@ services:
       target: comfyui
       args:
         COMFYUI_VERSION: ${COMFYUI_VERSION:-v0.28.0}
+        COMFYUI_MANAGER_VERSION: ${COMFYUI_MANAGER_VERSION:-4.2.1}
       cache_from:
         - ${COMFYUI_BUILD_CACHE_FROM:-type=registry,ref=ghcr.io/dongwanyang/aigateway-comfyui:latest-cuda}
       cache_to:
@@ -113,18 +114,18 @@ services:
     environment:
       CUDA_VISIBLE_DEVICES: ${COMFYUI_CUDA_VISIBLE_DEVICES:-0}
       COMFYUI_VRAM_FLAG: ${COMFYUI_VRAM_FLAG:-}
+      # CORS for the control-panel "打开 ComfyUI" link (cross-port = cross-site).
+      # Default "*" is safe because the port above is loopback-only. Set
+      # COMFYUI_CORS_ORIGIN=http://host:3000 if you expose ComfyUI beyond loopback.
+      COMFYUI_CORS_ENABLED: ${COMFYUI_CORS_ENABLED:-true}
+      COMFYUI_CORS_ORIGIN: ${COMFYUI_CORS_ORIGIN:-}
       PYTORCH_CUDA_ALLOC_CONF: ${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
-    command:
-      - /bin/sh
-      - -c
-      - >-
-        exec python main.py --listen 0.0.0.0 --port 8188
-        --disable-auto-launch --output-directory /opt/ComfyUI/output
-        --input-directory /opt/ComfyUI/input $${COMFYUI_VRAM_FLAG}
     volumes:
       - ${AIGATEWAY_COMFY_DATA_DIR:-./comfyui}/models:/opt/ComfyUI/models
+      - ${AIGATEWAY_COMFY_DATA_DIR:-./comfyui}/custom_nodes:/opt/ComfyUI/custom_nodes
       - ${AIGATEWAY_COMFY_DATA_DIR:-./comfyui}/input:/opt/ComfyUI/input
       - ${AIGATEWAY_COMFY_DATA_DIR:-./comfyui}/output:/opt/ComfyUI/output
+      - ${AIGATEWAY_COMFY_DATA_DIR:-./comfyui}/user:/opt/ComfyUI/user
       - ${AIGATEWAY_COMFY_DATA_DIR:-./comfyui}/workflows:/opt/ComfyUI/user/default/workflows:ro
     restart: unless-stopped
     networks:

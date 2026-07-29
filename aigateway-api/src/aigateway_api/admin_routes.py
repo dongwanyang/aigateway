@@ -20,7 +20,7 @@ import logging
 import re
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
@@ -188,6 +188,181 @@ def _compute_hash_embeddings(texts: list[str]) -> list[list[float]]:
 router = APIRouter()
 
 
+class PresetDependencies(BaseModel):
+    models: list[str] = Field(default_factory=list, max_length=100)
+    nodes: list[str] = Field(default_factory=list, max_length=200)
+
+
+class GenerationPresetImport(BaseModel):
+    id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,127}$")
+    name: str = Field(min_length=1, max_length=128)
+    kind: Literal["image", "video", "upscale"]
+    workflow: dict[str, Any]
+    bindings: dict[str, Any] = Field(default_factory=dict)
+    dependencies: PresetDependencies = Field(default_factory=PresetDependencies)
+    languages: list[Literal["zh", "en"]] = Field(default_factory=lambda: ["en"])
+    enabled: bool = False
+
+
+def _comfy_config(request: Request) -> dict[str, Any]:
+    manager = getattr(request.app.state, "config_manager", None)
+    value = (
+        manager.get("generation_optimization.draft_workflow.comfyui", {})
+        if manager is not None
+        else {}
+    )
+    return value if isinstance(value, dict) else {}
+
+
+def _validate_imported_workflow(body: GenerationPresetImport) -> None:
+    if not body.workflow or len(body.workflow) > 500:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": {"code": "validation_error", "message": "workflow must contain 1-500 nodes"}},
+        )
+    if len(json.dumps(body.workflow, ensure_ascii=False)) > 2_000_000:
+        raise HTTPException(
+            status_code=413,
+            detail={"error": {"code": "validation_error", "message": "workflow exceeds 2 MB"}},
+        )
+    for node_id, node in body.workflow.items():
+        if not isinstance(node_id, str) or not isinstance(node, dict):
+            raise HTTPException(
+                status_code=422,
+                detail={"error": {"code": "validation_error", "message": "invalid API workflow node"}},
+            )
+        if not isinstance(node.get("class_type"), str) or not isinstance(
+            node.get("inputs"), dict
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail={"error": {"code": "validation_error", "message": "workflow must be ComfyUI API format"}},
+            )
+
+
+@router.get("/comfyui/status")
+async def get_comfyui_status(
+    request: Request,
+    _auth: dict[str, Any] = Depends(authenticate_admin),
+):
+    from .local_generation import probe_comfyui
+
+    status = await probe_comfyui(_comfy_config(request))
+    return {"data": status, "message": "success"}
+
+
+@router.get("/generation-presets")
+async def get_generation_presets(
+    request: Request,
+    _auth: dict[str, Any] = Depends(authenticate_admin),
+):
+    from .local_generation import (
+        builtin_presets,
+        dependency_status,
+        load_custom_presets,
+        probe_comfyui,
+    )
+
+    comfy = _comfy_config(request)
+    probe = await probe_comfyui(comfy)
+    available_nodes = set(probe.get("available_nodes", []))
+    presets = builtin_presets(comfy) + await asyncio.to_thread(load_custom_presets)
+    for preset in presets:
+        preset["validation"] = dependency_status(
+            preset,
+            str(comfy.get("models_path", "/comfyui/models")),
+            available_nodes,
+        )
+    return {"data": presets, "message": "success"}
+
+
+@router.post("/generation-presets/import", status_code=201)
+async def import_generation_preset(
+    body: GenerationPresetImport,
+    _auth: dict[str, Any] = Depends(authenticate_admin),
+):
+    from .local_generation import (
+        builtin_presets,
+        load_custom_presets,
+        save_custom_preset,
+    )
+
+    _validate_imported_workflow(body)
+    reserved = {item["id"] for item in builtin_presets({})}
+    existing = {item.get("id") for item in await asyncio.to_thread(load_custom_presets)}
+    if body.id in reserved or body.id in existing:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": {"code": "conflict", "message": "preset id already exists"}},
+        )
+    preset = {**body.model_dump(), "builtin": False}
+    await asyncio.to_thread(save_custom_preset, preset)
+    return {"data": preset, "message": "created"}
+
+
+@router.post("/generation-presets/{preset_id}/validate")
+async def validate_generation_preset(
+    preset_id: str,
+    request: Request,
+    _auth: dict[str, Any] = Depends(authenticate_admin),
+):
+    from .local_generation import (
+        builtin_presets,
+        dependency_status,
+        load_custom_presets,
+        probe_comfyui,
+    )
+
+    comfy = _comfy_config(request)
+    presets = builtin_presets(comfy) + await asyncio.to_thread(load_custom_presets)
+    preset = next((item for item in presets if item.get("id") == preset_id), None)
+    if preset is None:
+        raise HTTPException(status_code=404, detail={"error": {"code": "not_found", "message": "preset not found"}})
+    probe = await probe_comfyui(comfy)
+    validation = dependency_status(
+        preset,
+        str(comfy.get("models_path", "/comfyui/models")),
+        set(probe.get("available_nodes", [])),
+    )
+    validation["valid"] = not validation["missing_models"] and not validation["missing_nodes"]
+    return {"data": validation, "message": "success"}
+
+
+@router.put("/generation-presets/{preset_id}")
+async def update_generation_preset(
+    preset_id: str,
+    body: GenerationPresetImport,
+    _auth: dict[str, Any] = Depends(authenticate_admin),
+):
+    from .local_generation import load_custom_presets, save_custom_preset
+
+    if preset_id != body.id:
+        raise HTTPException(status_code=422, detail={"error": {"code": "validation_error", "message": "preset id cannot change"}})
+    _validate_imported_workflow(body)
+    existing = {item.get("id") for item in await asyncio.to_thread(load_custom_presets)}
+    if preset_id not in existing:
+        raise HTTPException(status_code=404, detail={"error": {"code": "not_found", "message": "custom preset not found"}})
+    preset = {**body.model_dump(), "builtin": False}
+    await asyncio.to_thread(save_custom_preset, preset)
+    return {"data": preset, "message": "updated"}
+
+
+@router.delete("/generation-presets/{preset_id}", status_code=204)
+async def delete_generation_preset(
+    preset_id: str,
+    _auth: dict[str, Any] = Depends(authenticate_admin),
+):
+    from .local_generation import delete_custom_preset
+
+    try:
+        deleted = await asyncio.to_thread(delete_custom_preset, preset_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"error": {"code": "validation_error", "message": str(exc)}}) from exc
+    if not deleted:
+        raise HTTPException(status_code=404, detail={"error": {"code": "not_found", "message": "custom preset not found"}})
+    return Response(status_code=204)
+
+
 @router.get("/capabilities")
 async def get_runtime_capabilities(
     request: Request,
@@ -234,6 +409,13 @@ def _atomic_write_yaml(config_path: str, file_config: dict[str, Any]) -> None:
     import tempfile
 
     import yaml
+
+    # A single-file Docker bind mount must be updated in place.  Some kernels
+    # let os.replace() succeed here but replace only the container-side mount
+    # point inode, silently severing persistence to the host file.
+    if os.path.ismount(config_path):
+        _flocked_inplace_write(config_path, file_config)
+        return
 
     config_dir = os.path.dirname(os.path.abspath(config_path)) or "."
     fd, tmp_path = tempfile.mkstemp(
@@ -2296,7 +2478,6 @@ async def test_provider_connectivity(
 
     发送一个轻量请求（models list 或简单 completion）来验证 API Key 和网络是否可用。
     """
-    import os
     import time as time_mod
 
     from .app_state import get_state
@@ -2306,14 +2487,9 @@ async def test_provider_connectivity(
     if not config_manager:
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "ConfigManager not initialized"}})
 
-    # 从配置文件读取 provider 信息
-    config_path = config_manager.config_path
-    if not config_path or not os.path.isfile(config_path):
-        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Config file not found"}})
-
-    file_config = _read_yaml(config_path)
-
-    providers_cfg = file_config.get("providers", {})
+    # ConfigManager resolves ${ENV_VAR} references during load. Reading raw
+    # YAML here would send the literal placeholder as the bearer credential.
+    providers_cfg = config_manager.get("providers", {})
     if provider not in providers_cfg:
         raise HTTPException(status_code=404, detail={"error": {"code": "not_found", "message": f"Provider '{provider}' not found in config"}})
 
@@ -2408,8 +2584,6 @@ async def get_provider_models(
     _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """从提供商 API 获取可用的模型列表。"""
-    import os
-
     from .app_state import get_state
     s = get_state()
     config_manager = s.config_manager
@@ -2417,13 +2591,7 @@ async def get_provider_models(
     if not config_manager:
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "ConfigManager not initialized"}})
 
-    config_path = config_manager.config_path
-    if not config_path or not os.path.isfile(config_path):
-        raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "Config file not found"}})
-
-    file_config = _read_yaml(config_path)
-
-    providers_cfg = file_config.get("providers", {})
+    providers_cfg = config_manager.get("providers", {})
     if provider not in providers_cfg:
         raise HTTPException(status_code=404, detail={"error": {"code": "not_found", "message": f"Provider '{provider}' not found in config"}})
 
@@ -2823,6 +2991,14 @@ async def get_draft_status(
         raise HTTPException(status_code=404, detail={"error": {"code": "draft_not_found", "message": f"Draft {draft_id} not found or expired"}})
     _assert_draft_owner(draft, _auth, action="view its status")
 
+    sync_runtime = getattr(strategy, "sync_draft_runtime_state", None)
+    if callable(sync_runtime) and draft.status in {"generating", "queued", "running", "refining"}:
+        synced = await sync_runtime(draft_id)
+        if synced is None:
+            raise HTTPException(status_code=404, detail={"error": {"code": "draft_not_found", "message": f"Draft {draft_id} not found or expired"}})
+        _assert_draft_owner(synced, _auth, action="view its status")
+        draft = synced
+
     return {
         "draft_id": draft.draft_id,
         "status": draft.status,
@@ -2837,6 +3013,7 @@ async def get_draft_status(
         "workflow_version": getattr(draft, "workflow_version", ""),
         "comfy_prompt_id": getattr(draft, "comfy_prompt_id", None),
         "gpu_seconds": getattr(draft, "gpu_seconds", 0.0),
+        "progress_source": getattr(draft, "generation_params", {}).get("progress_source", "stage"),
     }
 
 
@@ -2861,6 +3038,14 @@ async def get_draft_preview(
         raise HTTPException(status_code=404, detail={"error": {"code": "draft_not_found", "message": f"Draft {draft_id} not found or expired"}})
     _assert_draft_owner(draft, _auth, action="view its preview")
 
+    sync_runtime = getattr(strategy, "sync_draft_runtime_state", None)
+    if callable(sync_runtime) and draft.status in {"generating", "queued", "running", "refining"}:
+        synced = await sync_runtime(draft_id)
+        if synced is None:
+            raise HTTPException(status_code=404, detail={"error": {"code": "draft_not_found", "message": f"Draft {draft_id} not found or expired"}})
+        _assert_draft_owner(synced, _auth, action="view its preview")
+        draft = synced
+
     # generating：后台生成未完成，返回 202 让前端继续轮询
     if draft.status in {"generating", "queued", "running", "refining"}:
         return Response(
@@ -2869,13 +3054,25 @@ async def get_draft_preview(
                 "status": draft.status,
                 "stage": getattr(draft, "stage", draft.status),
                 "progress": getattr(draft, "progress", 0.0),
+                "progress_source": getattr(draft, "generation_params", {}).get("progress_source", "stage"),
             }),
             status_code=202,
             media_type="application/json",
         )
     # failed：后台生成失败
     if draft.status in {"failed", "cancelled"}:
-        raise HTTPException(status_code=410, detail={"error": {"code": "draft_failed", "message": f"Draft {draft_id} generation failed"}})
+        failure_code = getattr(draft, "error", None) or (
+            "draft_cancelled" if draft.status == "cancelled" else "draft_failed"
+        )
+        raise HTTPException(
+            status_code=410,
+            detail={
+                "error": {
+                    "code": failure_code,
+                    "message": f"Draft {draft_id} generation failed",
+                }
+            },
+        )
 
     if not draft.previews:
         raise HTTPException(status_code=404, detail={"error": {"code": "no_preview", "message": "No preview images available"}})

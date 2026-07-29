@@ -44,6 +44,28 @@ def test_locked_config_update_fails_fast_when_another_writer_holds_lock(
     }
 
 
+def test_atomic_config_write_preserves_single_file_bind_mount(tmp_path) -> None:
+    from aigateway_api import admin_routes as routes
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("hot_reload: false\n", encoding="utf-8")
+
+    with (
+        patch("os.path.ismount", return_value=True),
+        patch("os.replace") as replace,
+    ):
+        routes._atomic_write_yaml(
+            str(config_path),
+            {"hot_reload": True, "debug": {"frontend": True}},
+        )
+
+    replace.assert_not_called()
+    assert yaml.safe_load(config_path.read_text(encoding="utf-8")) == {
+        "hot_reload": True,
+        "debug": {"frontend": True},
+    }
+
+
 def test_detect_media_mime_supports_comfyui_mp4():
     from aigateway_api.admin_routes import _detect_media_mime
 

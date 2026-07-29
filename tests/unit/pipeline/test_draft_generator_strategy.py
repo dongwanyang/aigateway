@@ -27,6 +27,7 @@ from aigateway_core.pipelines.generation._common.config import DraftWorkflowConf
 from aigateway_core.pipelines.generation._common.exceptions import DraftWorkflowError
 from aigateway_core.pipelines.generation._common.models import (
     DRAFT_STATUS_COMPLETED,
+    DRAFT_STATUS_FAILED,
     DRAFT_STATUS_GENERATING,
     DRAFT_STATUS_PENDING,
     DRAFT_STATUS_QUEUED,
@@ -321,6 +322,23 @@ class TestConfirmDraft:
         assert stored.status == DRAFT_STATUS_COMPLETED
 
     @pytest.mark.asyncio
+    async def test_claimed_refining_draft_keeps_persisted_preview(
+        self, strategy, image_request, default_config
+    ):
+        """Confirm claim must not hide the persisted preview from refinement."""
+        draft = await strategy.generate_draft(image_request, default_config)
+        pending = await _await_generating(strategy, draft.draft_id)
+        assert pending.status == DRAFT_STATUS_PENDING
+        assert pending.previews
+
+        claimed, ok = await strategy._claim_draft_confirmation(draft.draft_id)
+
+        assert ok is True
+        assert claimed is not None
+        assert claimed.status == DRAFT_STATUS_REFINING
+        assert claimed.previews == pending.previews
+
+    @pytest.mark.asyncio
     async def test_confirm_nonexistent_raises_error(self, strategy):
         """Confirming a nonexistent draft should raise DraftWorkflowError."""
         with pytest.raises(DraftWorkflowError, match="not found"):
@@ -494,6 +512,7 @@ def test_video_submit_result_dataclass():
 @pytest.mark.asyncio
 async def test_confirm_video_draft_fails_closed_without_comfy_video_workflow(strategy, video_request, default_config):
     """图片阶段不能把视频确认静默回退到 provider。"""
+    strategy._comfyui_config.video_enabled = False
     result = await strategy.generate_draft(video_request, default_config)
     draft = await _await_generating(strategy, result.draft_id)
     assert draft.media_type == "video"
@@ -508,6 +527,7 @@ async def test_confirm_video_draft_fails_closed_without_comfy_video_workflow(str
 @pytest.mark.asyncio
 async def test_confirm_video_draft_never_submits_provider_under_concurrency(strategy, video_request, default_config):
     """并发视频确认也不能调用 provider。"""
+    strategy._comfyui_config.video_enabled = False
     result = await strategy.generate_draft(video_request, default_config)
     draft = await _await_generating(strategy, result.draft_id)
 
@@ -536,6 +556,69 @@ async def test_confirm_image_draft_still_returns_upscale_result(strategy, image_
     assert isinstance(out, UpscaleResult)
     assert not isinstance(out, VideoSubmitResult)
     strategy._litellm_bridge._do_video_generation.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_sync_marks_stale_running_draft_without_prompt_failed(strategy, image_request):
+    """A lost background worker must not leave the browser stuck at 10%."""
+    draft = DraftResult(
+        draft_id="stale-running",
+        previews=[],
+        generation_params={"trace_id": "trace-stale"},
+        created_at=time.time() - 120,
+        expires_at=time.time() + 3600,
+        attempt_number=1,
+        max_attempts=5,
+        status=DRAFT_STATUS_RUNNING,
+        media_type="image",
+        session_id="sess-stale",
+        progress=0.1,
+        stage="running",
+    )
+    await strategy._store_draft(draft, ttl_seconds=3600)
+
+    synced = await strategy.sync_draft_runtime_state(draft.draft_id)
+
+    assert synced is not None
+    assert synced.status == DRAFT_STATUS_FAILED
+    assert synced.error == "draft_worker_lost"
+    assert synced.progress == 0.0
+    reloaded = await strategy.get_draft(draft.draft_id)
+    assert reloaded is not None
+    assert reloaded.status == DRAFT_STATUS_FAILED
+    assert reloaded.error == "draft_worker_lost"
+
+
+@pytest.mark.asyncio
+async def test_sync_keeps_running_draft_when_comfyui_state_check_is_transient(
+    strategy,
+):
+    """Busy ComfyUI status endpoints must not turn preview polling into 500/lost."""
+    draft = DraftResult(
+        draft_id="running-comfyui-busy",
+        previews=[],
+        generation_params={"trace_id": "trace-comfyui-busy"},
+        created_at=time.time() - 120,
+        expires_at=time.time() + 3600,
+        attempt_number=1,
+        max_attempts=5,
+        status=DRAFT_STATUS_RUNNING,
+        media_type="image",
+        session_id="sess-comfyui-busy",
+        progress=0.3125,
+        stage="sampling 3/12",
+        comfy_prompt_id="prompt-busy",
+    )
+    await strategy._store_draft(draft, ttl_seconds=3600)
+    strategy._get_comfy_prompt_state = AsyncMock(side_effect=TimeoutError)
+
+    synced = await strategy.sync_draft_runtime_state(draft.draft_id)
+
+    assert synced is not None
+    assert synced.status == DRAFT_STATUS_RUNNING
+    assert synced.progress == 0.3125
+    assert synced.stage == "sampling 3/12"
+    assert synced.error is None
 
 
 @pytest.mark.asyncio
@@ -616,6 +699,36 @@ async def test_delete_session_rejects_missing_owner_metadata(strategy):
         )
 
     assert await strategy.get_draft("draft-legacy") is not None
+
+
+@pytest.mark.asyncio
+async def test_delete_session_skips_stray_invalid_directory(strategy):
+    draft = DraftResult(
+        draft_id="draft-owned",
+        previews=[b"preview"],
+        generation_params={},
+        created_at=time.time(),
+        expires_at=time.time() + 60,
+        attempt_number=1,
+        max_attempts=3,
+        status=DRAFT_STATUS_PENDING,
+        media_type="image",
+        session_id="session-owned",
+        user_id="alice",
+        group_id="grp-team",
+    )
+    await strategy._store_draft(draft, ttl_seconds=60)
+    stray_dir = os.path.join(strategy._store_dir, "session-owned", ".tmp")
+    os.makedirs(stray_dir)
+
+    deleted = await strategy.delete_session(
+        "session-owned",
+        user_id="alice",
+        group_id="grp-team",
+    )
+
+    assert deleted == 1
+    assert not os.path.exists(os.path.join(strategy._store_dir, "session-owned"))
 
 
 @pytest.mark.asyncio

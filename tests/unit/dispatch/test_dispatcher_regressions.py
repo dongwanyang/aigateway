@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import sys
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -37,6 +38,67 @@ class _FakeCache:
 
     def l1_set(self, key, value):
         self.l1_items.append((key, value))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reason", "expected_status"),
+    [
+        ("local_backend_unavailable", 503),
+        ("invalid_generation_options", 400),
+    ],
+)
+async def test_generation_preflight_error_releases_reserved_quota(
+    reason,
+    expected_status,
+):
+    key_store = MagicMock()
+    key_store.check_quota = AsyncMock(return_value=(True, "", 0))
+    key_store.release_reserved_usage = AsyncMock()
+    dispatcher = RequestDispatcher({"key_store": key_store})
+
+    class Engine:
+        async def execute_ctx(self, ctx):
+            ctx.extra["generation_optimization"] = {
+                "draft_generator": {
+                    "applicable": False,
+                    "reason": reason,
+                    "local_error": "preflight failed",
+                }
+            }
+            return ctx
+
+    request = SimpleNamespace(
+        headers={},
+        state=SimpleNamespace(
+            trace_id="trace-preflight",
+            api_key_data={"group_id": "grp-test"},
+        ),
+    )
+    body = SimpleNamespace(
+        messages=[{"role": "user", "content": "draw a cat"}],
+        model="auto",
+        stream=False,
+        generation_options=SimpleNamespace(
+            model_dump=lambda: {"backend": "local"}
+        ),
+    )
+
+    response = await dispatcher._dispatch_generation(
+        body,
+        request,
+        Engine(),
+        user_id="user-1",
+        key_hash="key-hash",
+        prefix={
+            "plugin_trace": [],
+            "request_start_time": time.time(),
+        },
+    )
+
+    assert response.status_code == expected_status
+    key_store.release_reserved_usage.assert_awaited_once()
+    assert request.state._lua_quota_reserved is False
 
 
 async def _stream_chunks():

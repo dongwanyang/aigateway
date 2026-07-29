@@ -63,7 +63,9 @@ class TestParseIntegrationConfigsDefaults:
         c = result.comfyui
         assert c.server_url == "http://localhost:8188"
         assert c.connect_timeout == 10
-        assert c.execution_timeout == 300
+        assert c.execution_timeout == 1200
+        assert c.qwen_image_draft_steps == 12
+        assert c.qwen_image_max_draft_edge == 768
         assert c.ws_reconnect_attempts == 3
         assert c.required is True
         assert c.workflow_version == "image-v1"
@@ -71,9 +73,9 @@ class TestParseIntegrationConfigsDefaults:
         assert c.allowed_checkpoints == ["sd_xl_base_1.0.safetensors"]
         assert c.max_concurrency == 1
         assert c.min_free_gb == 30.0
-        assert c.model_budget_gb == 30.0
+        assert c.model_budget_gb == 80.0
         assert c.output_budget_gb == 10.0
-        assert c.video_enabled is False
+        assert c.video_enabled is True
         assert c.video_workflow_version == "wan2.2-ti2v-5b-v1"
         assert c.video_width == 512
         assert c.video_height == 288

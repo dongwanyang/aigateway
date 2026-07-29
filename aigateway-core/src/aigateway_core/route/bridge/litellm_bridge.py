@@ -356,11 +356,9 @@ class LiteLLMBridge:
 
         参考: https://docs.litellm.com/docs/proxy/fast_chat
 
-        Per-model base_url override:
-          每个 model_entry dict 可包含可选的 ``base_url`` 字段。
-          若设置（非空字符串），覆盖 provider 级别的 base_url；
-          若未设置或为空字符串，继承 providers.<name>.base_url。
-          Fallback 模型始终使用 provider 级别 base_url。
+        所有模型（含 fallback）均使用 provider 级别的 base_url。
+        Images/Video 直调端点通过 _get_model_endpoint 取 provider 级 base_url
+        再拼接 /images/generations、/videos 后缀，无需 per-model 覆盖。
 
         Args:
             providers_config: 提供商配置。
@@ -384,13 +382,10 @@ class LiteLLMBridge:
                     fallback_models = group.get("fallback_models", [])
                     for model_entry in group.get("models", []):
                         # 支持字符串或字典格式；capabilities 必须为 list
-                        model_base_url: str | None = None
                         if isinstance(model_entry, dict):
                             model_name = model_entry.get("name", "")
                             if not model_name:
                                 continue
-                            # 可选：per-model base_url 覆盖 provider 级别
-                            model_base_url = model_entry.get("base_url") or None
                             raw_caps = model_entry.get("capabilities")
                             raw_modality = model_entry.get("modality")
                             raw_tasks = model_entry.get("tasks", [])
@@ -440,10 +435,7 @@ class LiteLLMBridge:
                             )
                         self._model_fallbacks[model_name] = list(fallback_models)
 
-                        # 生效的 base_url：优先 per-model，回退 provider 级别
-                        effective_base_url = model_base_url or base_url
-
-                        if effective_base_url:
+                        if base_url:
                             # OpenAI 兼容提供商：用 openai/{model_name}，Router 通过 openai 前缀
                             # 选择 OpenAI client，再通过 litellm_params 中的 base_url 路由到具体地址
                             litellm_model = f"openai/{model_name}"
@@ -459,7 +451,7 @@ class LiteLLMBridge:
                             "litellm_params": {
                                 "model": litellm_model,
                                 "api_key": api_key,
-                                "base_url": effective_base_url,
+                                "base_url": base_url,
                                 "num_retries": num_retries,
                                 "retry_after": retry_after,
                                 "timeout": timeout,
@@ -471,7 +463,7 @@ class LiteLLMBridge:
 
                         # 注册定价信息到 LiteLLM cost map，抑制告警
                         # 优先使用 config 中的 pricing，未配置则用 placeholder 0 cost
-                        self._register_model_pricing(group, litellm_model, effective_base_url, provider_name)
+                        self._register_model_pricing(group, litellm_model, base_url, provider_name)
 
                         model_list.append(entry)
 
@@ -1167,7 +1159,7 @@ class LiteLLMBridge:
     async def retrieve_video(self, video_id: str) -> dict[str, Any]:
         """轮询视频任务状态 (GET /videos/{id}), 对应 OpenAI Retrieve a video."""
 
-        # 使用 _get_model_endpoint 找第一个已注册模型的端点（优先 per-model base_url）
+        # 使用 _get_model_endpoint 找第一个已注册模型的端点（provider 级 base_url）
         base_url, api_key = self._get_model_endpoint(
             self.get_registered_models()[0] if self.get_registered_models() else "unknown"
         )
@@ -1379,7 +1371,7 @@ class LiteLLMBridge:
     def _get_model_endpoint(self, model: str) -> tuple[str, str]:
         """返回 (base_url, api_key) 供 Images/Video API 直调.
 
-        per-model base_url 优先于 provider 级别（Agnes 图片/视频端点与 chat 不同）。
+        使用 provider 级别 base_url，再由调用方拼接 /images/generations、/videos 后缀。
         """
         bare = model.split("/")[-1] if "/" in model else model
         providers = self.config.get("providers", {}) if isinstance(self.config, dict) else {}
@@ -1391,8 +1383,7 @@ class LiteLLMBridge:
             for group in provider_cfg.get("model_grouper", []) or []:
                 for m in (group.get("models", []) if isinstance(group, dict) else []):
                     if isinstance(m, dict) and m.get("name") == bare:
-                        # per-model base_url 覆盖 provider 级别
-                        return (m.get("base_url") or provider_base_url), api_key
+                        return provider_base_url, api_key
         # fallback: 第一个有 base_url 的 provider
         for provider_cfg in providers.values():
             if isinstance(provider_cfg, dict) and provider_cfg.get("base_url"):

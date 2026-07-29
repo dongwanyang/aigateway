@@ -76,6 +76,16 @@ export interface ChatCompletionRequest {
   tool_choice?: string | { type: 'function'; function: { name: string } }
   stop?: string | string[]
   user?: string
+  generation_options?: GenerationOptions
+}
+
+export interface GenerationOptions {
+  backend: 'auto' | 'local' | 'cloud'
+  preset_id?: string
+  prompt_mode?: 'raw' | 'auto' | 'enhance'
+  quality?: 'standard' | 'creative_refine' | 'faithful_4k'
+  width?: number
+  height?: number
 }
 
 export interface ChatChoice {
@@ -476,6 +486,7 @@ export interface ChatDraftState {
   mediaType: 'image' | 'video'
   status: 'queued' | 'running' | 'generating' | 'pending' | 'refining' | 'confirming' | 'completed' | 'confirmed' | 'rejecting' | 'rejected' | 'cancelled' | 'expired' | 'error'
   progress?: number
+  progressSource?: string
   stage?: string
   workflowVersion?: string
   /** 渲染时懒加载的预览图 data URL(不持久化) */
