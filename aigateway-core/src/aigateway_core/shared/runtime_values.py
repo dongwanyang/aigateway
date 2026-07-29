@@ -20,6 +20,9 @@ _CACHE_PATH: str | None = None
 _CACHE_MTIME_NS: int | None = None
 _CACHE_DATA: dict[str, Any] = {}
 _SAFE_NAMESPACE = re.compile(r"[^A-Za-z0-9_.-]+")
+_ENV_VALUE = re.compile(
+    r"^\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?::-(?P<default>[^}]*))?\}$"
+)
 
 
 def _config_path() -> Path:
@@ -64,6 +67,34 @@ def get_runtime_value(path: str, *, required: bool = True) -> Any:
     return value
 
 
+def configured_text(path: str) -> str:
+    """Return a non-empty text value with ``${VAR:-default}`` expansion."""
+    raw = get_runtime_value(path)
+    if not isinstance(raw, str):
+        raise RuntimeError(f"runtime_config_invalid:{path}")
+    value = raw.strip()
+    match = _ENV_VALUE.fullmatch(value)
+    if match:
+        env_value = os.environ.get(match.group("name"), "")
+        default = match.group("default")
+        value = env_value if env_value else (default or "")
+    if not value:
+        raise RuntimeError(f"runtime_config_missing:{path}")
+    return value
+
+
+def configured_number(path: str, number_type: type[int] | type[float] = float):
+    """Return a positive int/float stored in config.yaml."""
+    raw = get_runtime_value(path)
+    try:
+        value = number_type(raw)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"runtime_config_invalid:{path}") from exc
+    if value <= 0:
+        raise RuntimeError(f"runtime_config_invalid:{path}")
+    return value
+
+
 def configured_path(path: str) -> str:
     """Resolve a configured filesystem path relative to config.yaml.
 
@@ -71,10 +102,8 @@ def configured_path(path: str) -> str:
     containing the active configuration file rather than the process working
     directory, making container, systemd and test launches deterministic.
     """
-    raw = get_runtime_value(path)
-    if not isinstance(raw, str) or not raw.strip():
-        raise RuntimeError(f"runtime_config_invalid:{path}")
-    value = Path(raw.strip()).expanduser()
+    raw = configured_text(path)
+    value = Path(raw).expanduser()
     if not value.is_absolute():
         value = _config_path().resolve().parent / value
     return str(value.resolve())
@@ -107,10 +136,7 @@ def redis_key_prefix(component: str) -> str:
 
 
 def media_cache_ttl_seconds() -> int:
-    value = int(get_runtime_value("media_optimization.media_cache_ttl"))
-    if value <= 0:
-        raise RuntimeError("runtime_config_invalid:media_optimization.media_cache_ttl")
-    return value
+    return int(configured_number("media_optimization.media_cache_ttl", int))
 
 
 def configured_model_pricing(model: str) -> dict[str, float] | None:
