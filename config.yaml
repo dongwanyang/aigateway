@@ -55,6 +55,7 @@ generation:
   video:
     poll_endpoint: /v1/videos/{id}
 auth:
+  database_path: /app/data/auth.db
   api_keys:
   - key: ${ADMIN_API_KEY:-}
     user_id: admin
@@ -296,10 +297,20 @@ infrastructure:
     connect_timeout: 5
     read_timeout: 10
     write_timeout: 10
+    distance: COSINE
     hnsw_m: 16
     hnsw_ef_construct: 128
 cache:
   pipeline_version: '2'
+  key_buckets:
+    max_tokens:
+    - 256
+    - 512
+    - 1024
+    - 2048
+    - 4096
+    - 8192
+    - 16384
   l1:
     max_entries: 1000
     max_value_bytes: 102400
