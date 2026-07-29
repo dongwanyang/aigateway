@@ -23,17 +23,44 @@ _CORE_IMAGE_NODES = [
 ]
 
 
+def _config_text(config: dict[str, Any], key: str) -> str:
+    """Return a trimmed configured string without deployment-specific fallback."""
+    value = config.get(key)
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _config_number(config: dict[str, Any], key: str) -> float:
+    """Read a required numeric ComfyUI setting."""
+    if key not in config:
+        raise ValueError(f"config_missing:{key}")
+    value = float(config[key])
+    if value <= 0:
+        raise ValueError(f"config_invalid:{key}")
+    return value
+
+
 def builtin_presets(comfy: dict[str, Any]) -> list[dict[str, Any]]:
-    """Return immutable built-ins; custom presets are stored separately."""
-    checkpoint = str(comfy.get("checkpoint_name", "sd_xl_base_1.0.safetensors"))
-    upscale = str(comfy.get("upscale_model", "RealESRGAN_x4plus.pth"))
+    """Return immutable built-ins; custom presets are stored separately.
+
+    Model filenames are deployment configuration. Missing values remain empty so
+    dependency validation reports them instead of silently assuming a model.
+    """
+    checkpoint = _config_text(comfy, "checkpoint_name")
+    upscale = _config_text(comfy, "upscale_model")
+    qwen_diffusion = _config_text(comfy, "qwen_image_diffusion_model")
+    qwen_encoder = _config_text(comfy, "qwen_image_text_encoder")
+    qwen_vae = _config_text(comfy, "qwen_image_vae")
+    video_diffusion = _config_text(comfy, "video_diffusion_model")
+    video_encoder = _config_text(comfy, "video_text_encoder")
+    video_vae = _config_text(comfy, "video_vae")
+
     return [
         {
             "id": "sdxl-draft",
             "name": "SDXL 图片草稿",
             "kind": "image",
             "builtin": True,
-            "enabled": True,
+            "enabled": bool(checkpoint),
             "languages": ["en"],
             "dependencies": {
                 "models": [f"checkpoints/{checkpoint}"],
@@ -45,7 +72,7 @@ def builtin_presets(comfy: dict[str, Any]) -> list[dict[str, Any]]:
             "name": "SDXL 创意精修",
             "kind": "image",
             "builtin": True,
-            "enabled": True,
+            "enabled": bool(checkpoint),
             "languages": ["en"],
             "dependencies": {
                 "models": [f"checkpoints/{checkpoint}"],
@@ -62,13 +89,15 @@ def builtin_presets(comfy: dict[str, Any]) -> list[dict[str, Any]]:
             "name": "Qwen-Image 中文/英文图片",
             "kind": "image",
             "builtin": True,
-            "enabled": bool(comfy.get("qwen_image_enabled", True)),
+            "enabled": bool(comfy.get("qwen_image_enabled", False)) and all(
+                (qwen_diffusion, qwen_encoder, qwen_vae)
+            ),
             "languages": ["zh", "en"],
             "dependencies": {
                 "models": [
-                    f"diffusion_models/{comfy.get('qwen_image_diffusion_model', 'qwen_image_fp8_e4m3fn.safetensors')}",
-                    f"text_encoders/{comfy.get('qwen_image_text_encoder', 'qwen_2.5_vl_7b_fp8_scaled.safetensors')}",
-                    f"vae/{comfy.get('qwen_image_vae', 'qwen_image_vae.safetensors')}",
+                    f"diffusion_models/{qwen_diffusion}",
+                    f"text_encoders/{qwen_encoder}",
+                    f"vae/{qwen_vae}",
                 ],
                 "nodes": [
                     "UNETLoader",
@@ -88,13 +117,15 @@ def builtin_presets(comfy: dict[str, Any]) -> list[dict[str, Any]]:
             "name": "Wan2.2 图片关键帧到视频",
             "kind": "video",
             "builtin": True,
-            "enabled": bool(comfy.get("video_enabled", True)),
+            "enabled": bool(comfy.get("video_enabled", False)) and all(
+                (video_diffusion, video_encoder, video_vae)
+            ),
             "languages": ["en"],
             "dependencies": {
                 "models": [
-                    f"diffusion_models/{comfy.get('video_diffusion_model', '')}",
-                    f"text_encoders/{comfy.get('video_text_encoder', '')}",
-                    f"vae/{comfy.get('video_vae', '')}",
+                    f"diffusion_models/{video_diffusion}",
+                    f"text_encoders/{video_encoder}",
+                    f"vae/{video_vae}",
                 ],
                 "nodes": [
                     "UNETLoader",
@@ -110,7 +141,7 @@ def builtin_presets(comfy: dict[str, Any]) -> list[dict[str, Any]]:
             "name": "RealESRGAN 4K 保真",
             "kind": "upscale",
             "builtin": True,
-            "enabled": bool(comfy.get("upscale_enabled", True)),
+            "enabled": bool(comfy.get("upscale_enabled", False)) and bool(upscale),
             "languages": ["zh", "en"],
             "dependencies": {
                 "models": [f"upscale_models/{upscale}"],
@@ -197,6 +228,8 @@ def dependency_status(
             item
             for item in models
             if not isinstance(item, str)
+            or not item
+            or item.endswith("/")
             or item.startswith(("/", "\\"))
             or ".." in Path(item).parts
             or not (model_root / item).is_file()
@@ -208,22 +241,40 @@ def dependency_status(
 
 
 async def probe_comfyui(comfy: dict[str, Any]) -> dict[str, Any]:
-    """Probe only read-only ComfyUI endpoints with bounded timeouts."""
-    server_url = str(comfy.get("server_url", "http://localhost:8188")).rstrip("/")
+    """Probe read-only ComfyUI endpoints using only configured deployment values."""
+    server_url = _config_text(comfy, "server_url").rstrip("/")
+    public_url = _config_text(comfy, "public_url").rstrip("/")
+    manager_url = _config_text(comfy, "manager_url").rstrip("/") or public_url
+    models_path = _config_text(comfy, "models_path")
+
+    config_errors = [
+        f"config_missing:{key}"
+        for key, value in (
+            ("server_url", server_url),
+            ("public_url", public_url),
+            ("models_path", models_path),
+        )
+        if not value
+    ]
     result: dict[str, Any] = {
         "available": False,
-        "manager_enabled": bool(comfy.get("manager_enabled", True)),
-        "public_url": str(comfy.get("public_url", "http://localhost:8188")),
-        "manager_url": str(comfy.get("public_url", "http://localhost:8188")),
+        "manager_enabled": bool(comfy.get("manager_enabled", False)),
+        "public_url": public_url,
+        "manager_url": manager_url,
         "gpu": None,
         "queue": None,
         "available_nodes": [],
-        "error": None,
+        "disk": None,
+        "configuration_errors": config_errors,
+        "error": config_errors[0] if config_errors else None,
     }
+    if not server_url:
+        return result
+
     try:
         timeout = httpx.Timeout(
-            float(comfy.get("connect_timeout", 10)),
-            read=10.0,
+            _config_number(comfy, "connect_timeout"),
+            read=_config_number(comfy, "read_timeout"),
         )
         async with httpx.AsyncClient(timeout=timeout) as client:
             stats_response, object_response, queue_response = await asyncio.gather(
@@ -247,17 +298,19 @@ async def probe_comfyui(comfy: dict[str, Any]) -> dict[str, Any]:
                     "pending": len(queue.get("queue_pending", [])),
                 },
                 "available_nodes": sorted(objects) if isinstance(objects, dict) else [],
+                "error": config_errors[0] if config_errors else None,
             }
         )
     except (httpx.HTTPError, ValueError, TypeError) as exc:
-        result["error"] = type(exc).__name__
-    models_path = str(comfy.get("models_path", "/comfyui/models"))
-    try:
-        usage = await asyncio.to_thread(shutil.disk_usage, models_path)
-        result["disk"] = {
-            "total_bytes": usage.total,
-            "free_bytes": usage.free,
-        }
-    except OSError:
-        result["disk"] = None
+        result["error"] = str(exc) if isinstance(exc, ValueError) else type(exc).__name__
+
+    if models_path:
+        try:
+            usage = await asyncio.to_thread(shutil.disk_usage, models_path)
+            result["disk"] = {
+                "total_bytes": usage.total,
+                "free_bytes": usage.free,
+            }
+        except OSError:
+            result["disk"] = None
     return result
