@@ -10,12 +10,13 @@ Adjustments from plan (real behavior vs spec):
 - D8: PUT with invalid string "maybe" is accepted (no 4xx). The watcher's bool() coercion
   makes it True. We test that the value IS accepted (no crash), and that it reflects as True.
 """
-import uuid
 import time
-import pytest
-import httpx
+import uuid
 
-from tests.conftest import BASE, ADMIN_KEY
+import httpx
+import pytest
+
+from tests.conftest import ADMIN_KEY, BASE
 
 
 def _tid() -> str:
@@ -152,7 +153,7 @@ def test_d5_plugins_and_per_plugin_gate(all_debug_off):
     """
     # 开 plugins_enabled
     _admin_put("/admin/global-config", {"debug": {"plugins_enabled": True}})
-    state = _get_debug_state()
+    _get_debug_state()
     # 由于 watcher 从 plugins.enabled 读取,flat key 可能不被反映;
     # 但 PUT 端点会回显我们发送的值
     put_resp = _admin_put("/admin/global-config", {"debug": {"plugins_enabled": True}})

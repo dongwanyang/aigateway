@@ -14,7 +14,7 @@ import logging
 import os
 import sys
 from contextlib import asynccontextmanager
-from typing import Any, Dict, Optional
+from typing import Any
 
 # 加载 .env 文件到进程环境变量(必须在任何配置读取前执行)
 # override=False → 不覆盖已存在的环境变量,保证优先级:
@@ -26,7 +26,7 @@ except ImportError:
     # python-dotenv 未安装时静默跳过,回退到纯环境变量/config.yaml
     pass
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 # 确保核心库可导入
@@ -36,15 +36,35 @@ if _core_src not in sys.path:
     sys.path.insert(0, _core_src)
 
 from aigateway_core.prefix.cache.cache_manager import CacheManager
+from aigateway_core.shared.auth.sqlite_store import SQLiteStore
 from aigateway_core.shared.config import ConfigManager
 from aigateway_core.shared.logger import setup_logging
 from aigateway_core.shared.metrics import get_metrics_collector
 from aigateway_core.shared.plugin_registry import PluginRegistry
 from aigateway_core.shared.qdrant_client import QdrantClientManager
 from aigateway_core.shared.redis_client import RedisClientManager
-from aigateway_core.shared.auth.sqlite_store import SQLiteStore
 
 logger = logging.getLogger(__name__)
+
+
+def _configure_cuda_memory_limit() -> None:
+    """Apply the installer-selected CUDA memory fraction before model loading."""
+    raw_fraction = os.getenv("AI_GATEWAY_CUDA_MEMORY_FRACTION", "").strip()
+    if not raw_fraction:
+        return
+    try:
+        fraction = float(raw_fraction)
+    except ValueError as exc:
+        raise RuntimeError("invalid AI_GATEWAY_CUDA_MEMORY_FRACTION") from exc
+    if not 0.0 < fraction <= 1.0:
+        raise RuntimeError("AI_GATEWAY_CUDA_MEMORY_FRACTION must be in (0, 1]")
+
+    import torch
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("gateway_cuda_unavailable")
+    torch.cuda.set_per_process_memory_fraction(fraction, device=0)
+    logger.info("Gateway CUDA memory fraction limited to %.2f", fraction)
 
 
 @asynccontextmanager
@@ -73,8 +93,6 @@ def _register_exception_handlers(app_instance: "FastAPI") -> None:
 
     所有错误响应包含 X-Request-ID 响应头。
     """
-    from fastapi.responses import JSONResponse
-    from fastapi import HTTPException
     import uuid
 
     from aigateway_core.shared.exceptions import (
@@ -82,6 +100,8 @@ def _register_exception_handlers(app_instance: "FastAPI") -> None:
         GatewayError,
         QuotaExceededError,
     )
+    from fastapi import HTTPException
+    from fastapi.responses import JSONResponse
 
     def _get_request_id(request) -> str:
         """获取或生成 request_id。"""
@@ -196,7 +216,7 @@ def _register_exception_handlers(app_instance: "FastAPI") -> None:
 def _create_app() -> "FastAPI":
     """创建 FastAPI 应用实例。"""
     # 从环境变量读取 basePath（子路径部署）
-    base_path = os.environ.get("AI_GATEWAY_BASE_PATH", "")
+    os.environ.get("AI_GATEWAY_BASE_PATH", "")
 
     app_instance = FastAPI(
         title="AI Gateway API",
@@ -264,6 +284,8 @@ async def lifespan(app: "FastAPI"):
     关闭时:
     1. 关闭 Redis 和 Qdrant 连接
     """
+    _configure_cuda_memory_limit()
+
     # 初始化 ConfigManager
     config_path = os.environ.get("AI_GATEWAY_CONFIG_PATH", "./config.yaml")
     config_manager = ConfigManager(config_path=config_path)
@@ -319,7 +341,7 @@ async def lifespan(app: "FastAPI"):
         qdrant_mgr = None  # type: ignore[assignment]
 
     # 初始化 SQLite auth store (API Keys, Groups, Quotas)
-    sqlite_store: Optional[SQLiteStore] = None
+    sqlite_store: SQLiteStore | None = None
     try:
         sqlite_store = SQLiteStore()
         logger.info("SQLiteStore 初始化完成: %s", sqlite_store.db_path)
@@ -363,7 +385,7 @@ async def lifespan(app: "FastAPI"):
 
     # 初始化 CacheManager
     cache_config = config_manager.get("plugins", [])
-    prompt_cache_cfg: Dict[str, Any] = {}
+    prompt_cache_cfg: dict[str, Any] = {}
     for plugin in cache_config:
         if isinstance(plugin, dict) and plugin.get("name") == "prompt_cache":
             prompt_cache_cfg = plugin.get("config", {})
@@ -396,7 +418,9 @@ async def lifespan(app: "FastAPI"):
     l2_bm25_enabled = bool(l2_bm25_cfg.get("enabled", True))
     if l2_bm25_enabled and redis_mgr is not None:
         try:
-            from aigateway_core.prefix.cache.l2_search import ensure_index as l2_ensure_index
+            from aigateway_core.prefix.cache.l2_search import (
+                ensure_index as l2_ensure_index,
+            )
             l2_ready = await l2_ensure_index(redis_mgr.redis)
             if l2_ready:
                 logger.info("L2 BM25 RediSearch 索引就绪")
@@ -490,7 +514,9 @@ async def lifespan(app: "FastAPI"):
     model_router_resolver = None
     try:
         from aigateway_core.pipelines.generation._common.config import ModelRouterConfig
-        from aigateway_core.route.model_resolution.model_router import ModelRouterStrategy
+        from aigateway_core.route.model_resolution.model_router import (
+            ModelRouterStrategy,
+        )
 
         gen_opt_cfg = config_manager.get("generation_optimization", {}) or {}
         mr_cfg_data = gen_opt_cfg.get("model_router", {}) or {}
@@ -514,7 +540,9 @@ async def lifespan(app: "FastAPI"):
     # ---- Prompt Compress Plugin ----
     prompt_compress_plugin = None
     try:
-        from aigateway_core.pipelines.understanding.compression.plugin import PromptCompressPlugin
+        from aigateway_core.pipelines.understanding.compression.plugin import (
+            PromptCompressPlugin,
+        )
 
         pc_cfg = {}
         for pcfg in config_manager.get("plugins", []) or []:
@@ -536,8 +564,12 @@ async def lifespan(app: "FastAPI"):
     # config embedding.device: cpu | cuda | auto（默认 auto——有 CUDA 用 CUDA）。
     # 必须在首次 L3 backfill 前调用；l3_semantic._compute_l3_vector 首次调用才加载模型。
     try:
-        from aigateway_core.prefix.cache.l3_semantic import set_l3_device
+        from aigateway_core.prefix.cache.l3_semantic import (
+            set_l3_device,
+            set_l3_model,
+        )
         l3_dev = config_manager.get("embedding.device", "auto")
+        set_l3_model(config_manager.get("embedding.model", "Qwen/Qwen3-Embedding-0.6B"))
         set_l3_device(l3_dev)
     except Exception as exc:
         logger.warning("L3 device 注入失败（默认 auto）: %s", exc)
@@ -549,10 +581,10 @@ async def lifespan(app: "FastAPI"):
     # 初始化 LiteLLM Bridge
     litellm_bridge = None
     try:
+        from aigateway_core.route.bridge.litellm_bridge import LiteLLMBridge
         from aigateway_core.route.model_resolution.policy_engine import (
             RoutingPolicyConfigError,
         )
-        from aigateway_core.route.bridge.litellm_bridge import LiteLLMBridge
 
         lb = LiteLLMBridge(config_manager.snapshot())
         providers_cfg = config_manager.get("providers", {})
@@ -564,7 +596,7 @@ async def lifespan(app: "FastAPI"):
             lb.set_auto_resolver(model_router_resolver)
         litellm_bridge = lb
         logger.info("LiteLLM Bridge 初始化完成")
-    except RoutingPolicyConfigError:  # noqa: F821
+    except RoutingPolicyConfigError:
         logger.exception("任务路由策略配置无效，拒绝以不确定路由启动")
         raise
     except Exception as exc:
@@ -580,7 +612,9 @@ async def lifespan(app: "FastAPI"):
     if litellm_bridge is not None:
         try:
             from aigateway_core.dispatch.intent_classifier import IntentClassifier
-            from aigateway_core.route.model_resolution.model_selector import ModelSelector
+            from aigateway_core.route.model_resolution.model_selector import (
+                ModelSelector,
+            )
             ic_cfg = config_manager.get("intent_classifier", {}) or {}
             ms_cfg = config_manager.get("model_selector", {}) or {}
             model_selector = ModelSelector(
@@ -636,8 +670,12 @@ async def lifespan(app: "FastAPI"):
     # 初始化 PromptTemplateManager
     prompt_template_manager = None
     try:
-        from aigateway_core.pipelines.generation._common.config import PromptTemplateConfig
-        from aigateway_core.pipelines.generation.token.prompt_template_manager import PromptTemplateManager
+        from aigateway_core.pipelines.generation._common.config import (
+            PromptTemplateConfig,
+        )
+        from aigateway_core.pipelines.generation.token.prompt_template_manager import (
+            PromptTemplateManager,
+        )
 
         pt_cfg_raw = config_manager.get("generation_optimization", {})
         pt_cfg_section = pt_cfg_raw.get("prompt_templates", {}) if isinstance(pt_cfg_raw, dict) else {}
@@ -673,6 +711,11 @@ async def lifespan(app: "FastAPI"):
         if draft_strategy is not None and task_tracker is not None:
             draft_strategy._task_tracker = task_tracker
             logger.info("DraftGeneratorStrategy 已绑定 task_tracker")
+        if draft_strategy is not None and getattr(draft_strategy, "_redis_client", None) is None:
+            draft_redis = getattr(redis_mgr, "redis", None)
+            if draft_redis is not None:
+                draft_strategy._redis_client = draft_redis
+                logger.info("DraftGeneratorStrategy 已绑定 Redis 客户端")
         if draft_strategy is not None:
             from aigateway_core.pipelines.generation.draft.draft_cleaner import (
                 DraftSessionCleaner,
@@ -761,7 +804,7 @@ async def lifespan(app: "FastAPI"):
     # 重建受影响的运行时组件。同步 plugins.enabled 到 registry 并重建两个 Engine。
     # 只有 plugins 段真变化时才重建 engine，避免 update_global_config 之类的 no-op reload
     # 无谓地重跑拓扑排序 / 重建策略实例。
-    _last_plugins_snapshot: Dict[str, Any] = {"data": None}
+    _last_plugins_snapshot: dict[str, Any] = {"data": None}
 
     def _plugins_diff(new_config: dict) -> bool:
         """粗粒度 diff:比较 plugins 段的 (name, enabled) 集合。"""
@@ -832,6 +875,13 @@ async def lifespan(app: "FastAPI"):
             logger.info("DraftSessionCleaner 已停止")
         except Exception as exc:
             logger.warning("停止 DraftSessionCleaner 出错: %s", exc)
+    draft_strategy = getattr(app.state, "draft_strategy", None)
+    if draft_strategy is not None and hasattr(draft_strategy, "shutdown"):
+        try:
+            await draft_strategy.shutdown()
+            logger.info("DraftGeneratorStrategy 后台任务已停止")
+        except Exception as exc:
+            logger.warning("停止 DraftGeneratorStrategy 后台任务出错: %s", exc)
 
     if redis_mgr is not None:
         try:

@@ -2,6 +2,8 @@
 
 Authoritative implementation: ``aigateway_core.pipelines.understanding.compression.plugin``.
 """
-from aigateway_core.pipelines.understanding.compression.plugin import PromptCompressPlugin
+from aigateway_core.pipelines.understanding.compression.plugin import (
+    PromptCompressPlugin,
+)
 
 __all__ = ["PromptCompressPlugin"]

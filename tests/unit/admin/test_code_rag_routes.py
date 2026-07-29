@@ -12,16 +12,15 @@ import shutil
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, List
+from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
-from fastapi import FastAPI
-
 from aigateway_api.auth_middleware import authenticate_admin
 from aigateway_api.code_rag_routes import router as code_rag_router
-
+from fastapi import FastAPI
 
 CODE_RAG_CFG = {
     "enabled": True,
@@ -70,34 +69,34 @@ class _FakeRedis:
     """够用的 async Redis stub。"""
 
     def __init__(self) -> None:
-        self.hashes: Dict[str, Dict[str, str]] = {}
-        self.lists: Dict[str, List[str]] = {}
+        self.hashes: dict[str, dict[str, str]] = {}
+        self.lists: dict[str, list[str]] = {}
 
-    async def hset(self, key: str, mapping: Dict[str, Any]) -> None:
+    async def hset(self, key: str, mapping: dict[str, Any]) -> None:
         h = self.hashes.setdefault(key, {})
         h.update({k: str(v) for k, v in mapping.items()})
 
-    async def hgetall(self, key: str) -> Dict[str, str]:
+    async def hgetall(self, key: str) -> dict[str, str]:
         return dict(self.hashes.get(key, {}))
 
-    async def expire(self, key: str, ttl: int) -> None:  # noqa: ARG002
+    async def expire(self, key: str, ttl: int) -> None:
         return None
 
     async def lpush(self, key: str, value: str) -> None:
         self.lists.setdefault(key, []).insert(0, value)
 
-    async def lrange(self, key: str, start: int, end: int) -> List[str]:
+    async def lrange(self, key: str, start: int, end: int) -> list[str]:
         items = self.lists.get(key, [])
         if end == -1:
             return list(items[start:])
         return list(items[start : end + 1])
 
-    async def lrem(self, key: str, count: int, value: str) -> None:  # noqa: ARG002
+    async def lrem(self, key: str, count: int, value: str) -> None:
         items = self.lists.get(key, [])
         if value in items:
             items.remove(value)
 
-    async def delete(self, *keys: str) -> None:  # noqa: ARG002
+    async def delete(self, *keys: str) -> None:
         for k in keys:
             self.hashes.pop(k, None)
             self.lists.pop(k, None)
@@ -118,7 +117,7 @@ class _FakeQdrantManager:
 
 
 class _FakeConfigManager:
-    def __init__(self, code_rag_cfg: Dict[str, Any]) -> None:
+    def __init__(self, code_rag_cfg: dict[str, Any]) -> None:
         self._cfg = {"code_rag": code_rag_cfg}
 
     def get(self, key: str, default: Any = None) -> Any:
@@ -139,7 +138,7 @@ def _make_client(monkeypatch: pytest.MonkeyPatch) -> tuple[_ASGISyncClient, Fast
     app.state._test_db_dir = db_dir
     app.state.sqlite_store = SQLiteStore(db_path=str(Path(db_dir) / "tasks.db"))
 
-    async def _allow_any() -> Dict[str, Any]:
+    async def _allow_any() -> dict[str, Any]:
         return {"user_id": "admin"}
 
     app.dependency_overrides[authenticate_admin] = _allow_any
@@ -149,7 +148,6 @@ def _make_client(monkeypatch: pytest.MonkeyPatch) -> tuple[_ASGISyncClient, Fast
     def _close_instead_of_spawn(_state, coro, *, task_id):
         assert task_id
         coro.close()
-        return None
 
     monkeypatch.setattr(
         "aigateway_api.code_rag_routes._spawn_import_task",
@@ -159,16 +157,14 @@ def _make_client(monkeypatch: pytest.MonkeyPatch) -> tuple[_ASGISyncClient, Fast
     return _ASGISyncClient(app), app
 
 
-def _read_task(store, task_id: str) -> Dict[str, Any]:
+def _read_task(store, task_id: str) -> dict[str, Any]:
     """从 SQLiteStore 读一行,缺失返回 {}。"""
     row = store.read_code_rag_task(task_id)
     return row or {}
 
 
-def _make_app_state_with_store(tmp_path: Path) -> "SimpleNamespace":
+def _make_app_state_with_store(tmp_path: Path) -> SimpleNamespace:
     """构造一个带 sqlite_store 的 app.state(供 _run_code_import_task 集成测试)。"""
-    from types import SimpleNamespace
-
     from aigateway_core.shared.auth.sqlite_store import SQLiteStore
 
     app_state = SimpleNamespace()
@@ -270,7 +266,8 @@ def test_post_code_import_rejects_unsupported_json_source_type(
 
 
 def test_post_code_import_folder_multipart_accepts_files(monkeypatch: pytest.MonkeyPatch) -> None:
-    import python_multipart  # noqa: F401 -- request.form() required test dependency
+    import python_multipart
+    _ = python_multipart
     client, app = _make_client(monkeypatch)
     # 真实 multipart/form-data: source_type=folder + files + relative_paths
     response = client.post(
@@ -299,7 +296,8 @@ def test_post_code_import_folder_multipart_accepts_files(monkeypatch: pytest.Mon
 def test_post_code_import_folder_multipart_rejects_zero_files(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import python_multipart  # noqa: F401 -- request.form() required test dependency
+    import python_multipart
+    _ = python_multipart
     client, _ = _make_client(monkeypatch)
     # source_type=folder 但没带任何 file → 必须返回 4xx (具体 detail 取决于客户端
     # 是否发了 multipart body: TestClient files=[] 会退回 JSON 分支报 "请求体无效",
@@ -313,9 +311,11 @@ def test_post_code_import_folder_multipart_rejects_zero_files(
 
 
 def test_post_code_import_zip_multipart_accepts_file(monkeypatch: pytest.MonkeyPatch) -> None:
-    import python_multipart  # noqa: F401 -- request.form() required test dependency
     import io
     import zipfile
+
+    import python_multipart
+    _ = python_multipart
 
     client, app = _make_client(monkeypatch)
     # 造一个真实可解压的 zip (含一个 main.py)
@@ -465,7 +465,7 @@ def test_spawn_import_task_tracks_task_in_app_state() -> None:
         await _asyncio.sleep(0)
         finished.set()
 
-    async def _drive() -> tuple[dict, "_asyncio.Task[None]"]:
+    async def _drive() -> tuple[dict, _asyncio.Task[None]]:
         task = _spawn_import_task(app_state, _payload(), task_id="t-abc")
         # spawn 后立刻应该在 active 映射里 (key=task_id, value=Task)
         assert app_state.code_rag_active_tasks.get("t-abc") is task
@@ -805,8 +805,9 @@ def test_code_rag_task_upsert_read_list(tmp_path: Path) -> None:
 
 
 def test_fail_non_terminal_tasks(tmp_path: Path) -> None:
-    from aigateway_core.shared.auth.sqlite_store import SQLiteStore
     import time
+
+    from aigateway_core.shared.auth.sqlite_store import SQLiteStore
 
     store = SQLiteStore(db_path=str(tmp_path / "t.db"))
     now = int(time.time())
@@ -837,8 +838,9 @@ def test_update_code_rag_task_partial_does_not_clobber(tmp_path: Path) -> None:
     场景:progress_cb 写 done/total/current_file,绝不能把另一并发写刚写的 status
     或 created_at 覆盖掉。行为:只写传入的列 + updated_at。
     """
-    from aigateway_core.shared.auth.sqlite_store import SQLiteStore
     import time
+
+    from aigateway_core.shared.auth.sqlite_store import SQLiteStore
 
     store = SQLiteStore(db_path=str(tmp_path / "t.db"))
     now = int(time.time())
@@ -880,9 +882,8 @@ def test_list_code_tasks_reads_sqlite(tmp_path: Path) -> None:
     import time
     import types
 
-    from aigateway_core.shared.auth.sqlite_store import SQLiteStore
-
     from aigateway_api.code_rag_routes import list_code_tasks
+    from aigateway_core.shared.auth.sqlite_store import SQLiteStore
 
     store = SQLiteStore(db_path=str(tmp_path / "t.db"))
     now = int(time.time())
@@ -911,9 +912,8 @@ def test_get_code_task_reads_sqlite(tmp_path: Path) -> None:
     import time
     import types
 
-    from aigateway_core.shared.auth.sqlite_store import SQLiteStore
-
     from aigateway_api.code_rag_routes import get_code_task
+    from aigateway_core.shared.auth.sqlite_store import SQLiteStore
 
     store = SQLiteStore(db_path=str(tmp_path / "t.db"))
     now = int(time.time())
@@ -938,9 +938,8 @@ def test_cancel_code_task_uses_sqlite_cas(tmp_path: Path) -> None:
     import time
     import types
 
-    from aigateway_core.shared.auth.sqlite_store import SQLiteStore
-
     from aigateway_api.code_rag_routes import cancel_code_task
+    from aigateway_core.shared.auth.sqlite_store import SQLiteStore
 
     store = SQLiteStore(db_path=str(tmp_path / "t.db"))
     now = int(time.time())
@@ -1011,13 +1010,11 @@ def test_import_code_repository_writes_sqlite_and_strips_git_prefix(
 
 def test_sweep_orphaned_tasks_marks_non_terminal(tmp_path: Path) -> None:
     """sweep_orphaned_tasks 把非终态任务标 failed,清理孤儿临时目录。"""
-    import glob
     import time
     import types
 
-    from aigateway_core.shared.auth.sqlite_store import SQLiteStore
-
     from aigateway_api.code_rag_routes import sweep_orphaned_tasks
+    from aigateway_core.shared.auth.sqlite_store import SQLiteStore
 
     store = SQLiteStore(db_path=str(tmp_path / "t.db"))
     now = int(time.time())
@@ -1075,10 +1072,9 @@ def test_splitting_progress_written_to_sqlite(
     import time
     import types
 
-    from aigateway_core.shared.auth.sqlite_store import SQLiteStore
-
     import aigateway_api.code_rag_routes as routes
     import aigateway_core.pipelines.understanding.code_rag.splitter as splitter_mod
+    from aigateway_core.shared.auth.sqlite_store import SQLiteStore
 
     store = SQLiteStore(db_path=str(tmp_path / "t.db"))
     now = int(time.time())

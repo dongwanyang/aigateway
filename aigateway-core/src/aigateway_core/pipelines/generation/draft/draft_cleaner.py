@@ -18,7 +18,7 @@ import asyncio
 import logging
 import os
 import time
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ class DraftSessionCleaner:
         self._session_ttl_seconds = max(1, session_ttl_hours) * 3600
         self._strategy = strategy
         self._scan_interval = scan_interval_seconds
-        self._task: Optional[asyncio.Task] = None
+        self._task: asyncio.Task | None = None
 
     def start(self) -> None:
         """启动后台扫描任务(幂等)。"""
@@ -57,7 +57,7 @@ class DraftSessionCleaner:
             await self._task
         except asyncio.CancelledError:
             pass
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("draft_session_cleaner.stop error: %s", exc)
         self._task = None
 
@@ -67,7 +67,7 @@ class DraftSessionCleaner:
         while True:
             try:
                 await self.scan_once()
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.warning("draft_session_cleaner.scan error: %s", exc)
             await asyncio.sleep(self._scan_interval)
 

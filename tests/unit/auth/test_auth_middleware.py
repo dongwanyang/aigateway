@@ -133,8 +133,8 @@ class TestAuthenticateMiddleware:
 
     @pytest.mark.asyncio
     async def test_authenticate_missing_key_raises_401(self):
-        from fastapi import HTTPException
         from aigateway_api.auth_middleware import authenticate
+        from fastapi import HTTPException
 
         key_store = AsyncMock()
         request_mock = MagicMock(app=MagicMock(state=MagicMock(key_store=key_store)))
@@ -149,8 +149,8 @@ class TestAuthenticateMiddleware:
 
     @pytest.mark.asyncio
     async def test_authenticate_invalid_key_raises_401(self):
-        from fastapi import HTTPException
         from aigateway_api.auth_middleware import authenticate
+        from fastapi import HTTPException
 
         key_store = AsyncMock()
         key_store.validate = AsyncMock(return_value=None)
@@ -164,8 +164,8 @@ class TestAuthenticateMiddleware:
 
     @pytest.mark.asyncio
     async def test_authenticate_revoked_key_raises_403(self):
-        from fastapi import HTTPException
         from aigateway_api.auth_middleware import authenticate
+        from fastapi import HTTPException
 
         key_store = AsyncMock()
         key_store.validate = AsyncMock(side_effect=Exception("Key has been REVOKED"))
@@ -179,8 +179,8 @@ class TestAuthenticateMiddleware:
 
     @pytest.mark.asyncio
     async def test_authenticate_suspended_key_raises_403(self):
-        from fastapi import HTTPException
         from aigateway_api.auth_middleware import authenticate
+        from fastapi import HTTPException
 
         key_store = AsyncMock()
         key_store.validate = AsyncMock(side_effect=Exception("Key is SUSPENDED"))
@@ -194,8 +194,8 @@ class TestAuthenticateMiddleware:
 
     @pytest.mark.asyncio
     async def test_authenticate_uninitialized_key_store_raises_500(self):
-        from fastapi import HTTPException
         from aigateway_api.auth_middleware import authenticate
+        from fastapi import HTTPException
 
         request_mock = MagicMock(app=MagicMock(state=MagicMock(key_store=None)))
 
@@ -254,8 +254,8 @@ class TestAuthenticateAdmin:
 
     @pytest.mark.asyncio
     async def test_admin_missing_key_raises_401(self):
-        from fastapi import HTTPException
         from aigateway_api.auth_middleware import authenticate_admin
+        from fastapi import HTTPException
 
         key_store = AsyncMock()
         request_mock = MagicMock()
@@ -272,8 +272,8 @@ class TestAuthenticateAdmin:
 
     @pytest.mark.asyncio
     async def test_admin_revoked_key_raises_403(self):
-        from fastapi import HTTPException
         from aigateway_api.auth_middleware import authenticate_admin
+        from fastapi import HTTPException
 
         key_store = AsyncMock()
         key_store.validate = AsyncMock(side_effect=Exception("Key has been revoked"))

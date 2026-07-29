@@ -26,8 +26,6 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import aiohttp
-
 # Add project root to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -104,43 +102,16 @@ async def run_single_scenario(
 
         judge_callback = _judge_callback
 
-    # Run baseline and optimized separately
-    baseline_samples = await adapter_fn(
+    baseline_stats, optimized_stats, savings = await run_scenario(
+        scenario_name=scenario_name,
+        adapter=adapter_fn,
         base_url=base_url,
         model=model,
         concurrency=scenario_cfg.get("concurrency", 1),
         prices=prices,
         do_judge=do_judge,
         judge_callback=judge_callback,
-        mode="baseline",
     )
-
-    optimized_samples = await adapter_fn(
-        base_url=base_url,
-        model=model,
-        concurrency=scenario_cfg.get("concurrency", 1),
-        prices=prices,
-        do_judge=do_judge,
-        judge_callback=judge_callback,
-        mode="optimized",
-    )
-
-    # Compute stats
-    from benchmarks.engine import compute_stats, fetch_recent_logs, match_cache_hits_by_trace_id
-
-    baseline_stats = compute_stats(baseline_samples, prices)
-    optimized_stats = compute_stats(optimized_samples, prices)
-
-    # Fetch logs and match cache hits
-    async with aiohttp.ClientSession() as session:
-        logs = await fetch_recent_logs(session, base_url)
-        match_cache_hits_by_trace_id(optimized_samples, logs)
-
-    # Recompute with cache hit info
-    optimized_stats = compute_stats(optimized_samples, prices)
-
-    # Compute savings
-    savings = compute_savings(baseline_stats, optimized_stats)
 
     # Generate report
     env_snapshot = {

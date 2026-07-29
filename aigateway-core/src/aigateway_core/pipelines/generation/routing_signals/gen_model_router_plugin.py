@@ -14,10 +14,12 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from aigateway_core.dispatch.context import PipelineContext
-from aigateway_core.pipelines.generation._common.config import GenerationOptimizationConfig
+from aigateway_core.pipelines.generation._common.config import (
+    GenerationOptimizationConfig,
+)
 from aigateway_core.pipelines.generation._common.exceptions import ModelRoutingError
 from aigateway_core.pipelines.generation._common.models import RoutingDecision
 from aigateway_core.route.model_resolution.model_router import (
@@ -53,7 +55,7 @@ class GenModelRouterPlugin:
 
     name: str = "gen_model_router"
     enabled: bool = True
-    depends_on: List[str] = ["draft_generator"]
+    depends_on: list[str] = ["draft_generator"]
 
     def __init__(
         self,
@@ -288,7 +290,7 @@ class GenModelRouterPlugin:
         # 默认为生成模型
         return "generative"
 
-    def _get_routing_hint(self, ctx: PipelineContext) -> Optional[str]:
+    def _get_routing_hint(self, ctx: PipelineContext) -> str | None:
         """从请求中获取路由提示.
 
         Args:
@@ -300,7 +302,7 @@ class GenModelRouterPlugin:
         request = ctx.request
         return request.get("routing_hint") or request.get("route_hint")
 
-    def _get_model_override(self, ctx: PipelineContext) -> Optional[str]:
+    def _get_model_override(self, ctx: PipelineContext) -> str | None:
         """从请求中获取模型覆盖.
 
         Args:
@@ -328,7 +330,7 @@ class GenModelRouterPlugin:
         ctx: PipelineContext,
         decision: RoutingDecision,
         duration_ms: float,
-        error: Optional[str] = None,
+        error: str | None = None,
     ) -> None:
         """将路由决策写入上下文.
 
@@ -343,7 +345,7 @@ class GenModelRouterPlugin:
             error: 错误信息（如果是回退场景）
         """
         gen_opt = ctx.extra.setdefault(NS_GENERATION_OPTIMIZATION, {})
-        router_data: Dict[str, Any] = {
+        router_data: dict[str, Any] = {
             "selected_model": decision.selected_model,
             "selected_provider": decision.selected_provider,
             "reason": decision.reason,

@@ -13,10 +13,12 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, List
+from typing import Any
 
 from aigateway_core.dispatch.context import PipelineContext
-from aigateway_core.pipelines.generation._common.config import GenerationOptimizationConfig
+from aigateway_core.pipelines.generation._common.config import (
+    GenerationOptimizationConfig,
+)
 from aigateway_core.pipelines.generation._common.models import ComplexityEvaluation
 from aigateway_core.pipelines.generation.intent.intent_evaluator import (
     IntentEvaluatorStrategy,
@@ -51,7 +53,7 @@ class IntentEvaluatorPlugin:
 
     name: str = "intent_evaluator"
     enabled: bool = True
-    depends_on: List[str] = ["ai_director"]
+    depends_on: list[str] = ["ai_director"]
 
     def __init__(
         self,
@@ -207,7 +209,7 @@ class IntentEvaluatorPlugin:
 
         return ""
 
-    def _extract_generation_params(self, ctx: PipelineContext) -> Dict[str, Any]:
+    def _extract_generation_params(self, ctx: PipelineContext) -> dict[str, Any]:
         """从请求中提取生成参数.
 
         提取用于复杂度评估的生成参数，如目标分辨率、宽高等。
@@ -218,7 +220,7 @@ class IntentEvaluatorPlugin:
         Returns:
             生成参数字典
         """
-        params: Dict[str, Any] = {}
+        params: dict[str, Any] = {}
 
         # 从请求中提取常用生成参数
         request = ctx.request

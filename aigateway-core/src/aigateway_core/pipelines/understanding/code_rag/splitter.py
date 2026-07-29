@@ -396,8 +396,7 @@ def _build_embed_text(
     无 docstring 时拼上源码前 N 行(注释+签名),避免嵌入文本过短。
     """
     rel = file_path
-    if rel.startswith("src/"):
-        rel = rel[len("src/"):]
+    rel = rel.removeprefix("src/")
     parts = [f"{kind} {name} in {rel}"]
     if signature:
         parts.append(f"signature: {signature}")

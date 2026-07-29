@@ -4,18 +4,18 @@ Covers:
 - _check_in_memory: sliding window counter logic
 - dispatch: path filtering, exemption, 429 response
 """
-import sys
 import os
+import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-api", "src"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 
-import pytest
-from unittest.mock import AsyncMock, MagicMock
-from fastapi import FastAPI, Request
-from httpx import ASGITransport, AsyncClient
+from unittest.mock import MagicMock
 
+import pytest
 from aigateway_api.rate_limiter import RateLimiterMiddleware
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
 
 
 async def _request(app: FastAPI, path: str):
@@ -207,7 +207,7 @@ class TestDispatch:
 
     @pytest.mark.asyncio
     async def test_exempt_health_not_rate_limited(self):
-        app, limiter = self._make_app()
+        app, _limiter = self._make_app()
         app.add_middleware(RateLimiterMiddleware, max_requests=1)
         # Remove the limiter we added and use our own
         app.user_middleware.clear()
@@ -219,7 +219,7 @@ class TestDispatch:
 
     @pytest.mark.asyncio
     async def test_exempt_metrics_not_rate_limited(self):
-        app, limiter = self._make_app()
+        app, _limiter = self._make_app()
         app.user_middleware.clear()
         app.add_middleware(RateLimiterMiddleware, max_requests=1)
         for _ in range(10):
@@ -228,7 +228,7 @@ class TestDispatch:
 
     @pytest.mark.asyncio
     async def test_non_protected_path_not_rate_limited(self):
-        app, limiter = self._make_app()
+        app, _limiter = self._make_app()
         app.user_middleware.clear()
         app.add_middleware(RateLimiterMiddleware, max_requests=1)
         for _ in range(10):
@@ -237,9 +237,9 @@ class TestDispatch:
 
     @pytest.mark.asyncio
     async def test_protected_path_rate_limited_after_threshold(self):
-        app, limiter = self._make_app()
+        app, _limiter = self._make_app()
         app.user_middleware.clear()
-        limiter = RateLimiterMiddleware(app, max_requests=2, window_seconds=60)
+        RateLimiterMiddleware(app, max_requests=2, window_seconds=60)
         app.add_middleware(RateLimiterMiddleware, max_requests=2, window_seconds=60)
         # First two should succeed
         resp1 = await _request(app, "/admin/test")

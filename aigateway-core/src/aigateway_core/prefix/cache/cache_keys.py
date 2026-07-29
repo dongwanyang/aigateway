@@ -7,23 +7,21 @@ cache keys.
 """
 from __future__ import annotations
 
-import hashlib
 import re
 import unicodedata
-from typing import List, Optional
 
 # ------------------------------------------------------------------
 # Cache key v2 constants
 # ------------------------------------------------------------------
 # Parameter bucketing: coarse-grained merge so minor SDK default
 # differences fall into the same bucket.
-_TEMPERATURE_BUCKETS: List[tuple] = [
+_TEMPERATURE_BUCKETS: list[tuple] = [
     (0.05, "exact_zero"),   # <= 0.05 treated as deterministic, own bucket
     (0.3,  "det"),          # 0.05 ~ 0.3 low determinism
     (0.9,  "bal"),          # 0.3 ~ 0.9 balanced
     (float("inf"), "cre"),  # > 0.9 creative
 ]
-_MAX_TOKENS_BUCKETS: List[int] = [256, 512, 1024, 2048, 4096, 8192, 16384]
+_MAX_TOKENS_BUCKETS: list[int] = [256, 512, 1024, 2048, 4096, 8192, 16384]
 
 # model_family: strip trailing date snapshot, e.g. gpt-4o-2024-08-06 → gpt-4o,
 # claude-3-5-sonnet-20241022 → claude-3-5-sonnet.
@@ -34,7 +32,7 @@ _MAX_TOKENS_BUCKETS: List[int] = [256, 512, 1024, 2048, 4096, 8192, 16384]
 _MODEL_SNAPSHOT_RE = re.compile(r"-(?:\d{8}|\d{4}-\d{2}-\d{2}|latest)$")
 
 
-def _bucket_temperature(t: Optional[float]) -> str:
+def _bucket_temperature(t: float | None) -> str:
     """Map temperature to a coarse bucket. None treated as 1.0 (OpenAI default)."""
     if t is None:
         t = 1.0
@@ -44,7 +42,7 @@ def _bucket_temperature(t: Optional[float]) -> str:
     return "cre"
 
 
-def _bucket_max_tokens(mt: Optional[int]) -> str:
+def _bucket_max_tokens(mt: int | None) -> str:
     """Map max_tokens to nearest bucket. None / 0 → any."""
     if not mt or mt <= 0:
         return "any"
@@ -93,11 +91,11 @@ def _normalize_prompt(text: str) -> str:
 
 
 __all__ = [
+    "_MAX_TOKENS_BUCKETS",
     "_MODEL_SNAPSHOT_RE",
     "_TEMPERATURE_BUCKETS",
-    "_MAX_TOKENS_BUCKETS",
-    "_bucket_temperature",
     "_bucket_max_tokens",
+    "_bucket_temperature",
     "_model_family",
     "_normalize_prompt",
 ]

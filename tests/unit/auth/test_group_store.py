@@ -90,7 +90,7 @@ class FakeRedis:
 
     async def scan(self, cursor, match=None, count=None):
         import fnmatch
-        keys = [k for k in self.store.keys() if fnmatch.fnmatch(k, match or "*")]
+        keys = [k for k in self.store if fnmatch.fnmatch(k, match or "*")]
         return 0, keys
 
     # ---- convenience methods mirroring redis_client.RedisClientManager ----
@@ -156,7 +156,6 @@ class FakeRedis:
             def set(self, key, value, ex=None):
                 k = key.decode() if isinstance(key, bytes) else key
                 self._queue(("set", k, value))
-                return None
 
             def sadd(self, key, *members):
                 k = key.decode() if isinstance(key, bytes) else key

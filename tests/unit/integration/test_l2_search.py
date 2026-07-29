@@ -14,18 +14,15 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core
 
 from aigateway_core.prefix.cache.l2_search import (
     L2_DEFAULT_MIN_SCORE,
-    L2_DEFAULT_TOP_K,
-    L2_HASH_PREFIX,
     L2_INDEX_NAME,
-    _extract_plain_text,
     _escape_query_text,
     _escape_tag,
     _escape_tag_query,
+    _extract_plain_text,
     ensure_index,
     search,
     store,
 )
-
 
 # ==================================================================
 # _extract_plain_text Tests

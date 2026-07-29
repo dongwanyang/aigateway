@@ -20,7 +20,7 @@ import asyncio
 import json
 import os
 import sys
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -30,7 +30,6 @@ from aigateway_core.pipelines.generation._common.config import FeatureCacheConfi
 from aigateway_core.pipelines.generation.token.feature_cache import (
     FeatureCacheManager,
 )
-
 
 # ==================================================================
 # Fixtures
@@ -142,7 +141,9 @@ class TestGetFeature:
     @pytest.mark.asyncio
     async def test_cache_hit_extends_ttl_deterministic(self, mock_redis_client, config):
         """Directly call extend_ttl to avoid timing dependency on asyncio.sleep."""
-        from aigateway_core.pipelines.generation.token.feature_cache import FeatureCacheManager
+        from aigateway_core.pipelines.generation.token.feature_cache import (
+            FeatureCacheManager,
+        )
 
         cache = FeatureCacheManager(mock_redis_client, config)
         mock_redis_client.redis.expire = AsyncMock(return_value=True)

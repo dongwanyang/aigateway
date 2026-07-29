@@ -24,7 +24,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-api"
 
 from aigateway_api import openai_compat
 
-
 # ==================================================================
 # _get_app_state 测试
 # ==================================================================
@@ -120,7 +119,7 @@ class TestRecordRequestLog:
             assert call_args[0][0] == "aigateway:logs:requests"
             entry = call_args[0][1]
             assert isinstance(entry, dict)
-            log_data = json.loads(list(entry.keys())[0])
+            log_data = json.loads(next(iter(entry.keys())))
             assert log_data["method"] == "POST"
             assert log_data["model"] == "gpt-4"
             assert log_data["status"] == 200
@@ -531,6 +530,11 @@ class TestCreateEmbeddings:
 
         class FakeCM:
             def get(self, key, default=None):
+                if key == "embedding":
+                    return {
+                        "backend": "sentence_transformers",
+                        "device": "cuda",
+                    }
                 return None
         fs = type('FakeState', (), {
             'config_manager': FakeCM(),
@@ -558,7 +562,39 @@ class TestCreateEmbeddings:
             openai_compat._encode_with_sentence_transformer,
             "all-MiniLM-L6-v2",
             ["Hello world"],
+            "cuda",
         )
+
+    @pytest.mark.asyncio
+    async def test_sentence_transformers_ndarray_response_has_one_item_per_input(self):
+        """SentenceTransformer 的二维 ndarray 不应被包装成单条嵌套向量。"""
+        body = MagicMock()
+        body.input = ["first", "second"]
+        body.model = "local-model"
+        body.user = None
+        req = MagicMock()
+
+        ndarray_like = MagicMock()
+        ndarray_like.tolist.return_value = [[0.1, 0.2], [0.3, 0.4]]
+        run_in_thread = AsyncMock(return_value=ndarray_like)
+        config_manager = MagicMock()
+        config_manager.get.return_value = {
+            "backend": "sentence_transformers",
+            "device": "cuda",
+        }
+
+        with (
+            patch.object(openai_compat, "_get_app_state", return_value={"config_manager": config_manager}),
+            patch.object(openai_compat.asyncio, "to_thread", run_in_thread),
+        ):
+            result = await openai_compat.create_embeddings(body, req)
+
+        content = json.loads(result.body)
+        assert result.status_code == 200
+        assert content["data"]["data"] == [
+            {"object": "embedding", "index": 0, "embedding": [0.1, 0.2]},
+            {"object": "embedding", "index": 1, "embedding": [0.3, 0.4]},
+        ]
 
     def test_sentence_transformer_encoder_loads_once_and_uses_normalization(self):
         mock_emb = MagicMock()
@@ -568,12 +604,16 @@ class TestCreateEmbeddings:
         st_module.SentenceTransformer = MagicMock(return_value=st_instance)
 
         with patch.dict(sys.modules, {"sentence_transformers": st_module}):
-            first = openai_compat._encode_with_sentence_transformer("model", ["one"])
-            second = openai_compat._encode_with_sentence_transformer("model", ["two"])
+            first = openai_compat._encode_with_sentence_transformer(
+                "model", ["one"], "cuda"
+            )
+            second = openai_compat._encode_with_sentence_transformer(
+                "model", ["two"], "cuda"
+            )
 
         assert first is mock_emb
         assert second is mock_emb
-        st_module.SentenceTransformer.assert_called_once_with("model")
+        st_module.SentenceTransformer.assert_called_once_with("model", device="cuda")
         assert st_instance.encode.call_args_list == [
             call(["one"], normalize_embeddings=True),
             call(["two"], normalize_embeddings=True),

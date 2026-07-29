@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any
 
 from .types import MediaContent, MediaType
 
@@ -38,12 +38,12 @@ class MediaCacheManager:
     KEY_PREFIX = "aigateway:media"
     DEFAULT_TTL = 604800  # 7 days
 
-    def __init__(self, redis_client: "RedisClientManager") -> None:
+    def __init__(self, redis_client: RedisClientManager) -> None:
         self._redis = redis_client
 
     async def get(
         self, media_type: MediaType, content_hash: str
-    ) -> Optional[MediaContent]:
+    ) -> MediaContent | None:
         """查询媒体缓存。"""
         if self._redis is None or self._redis.redis is None:
             return None
@@ -63,7 +63,7 @@ class MediaCacheManager:
         media_type: MediaType,
         content_hash: str,
         content: MediaContent,
-        ttl: Optional[int] = None,
+        ttl: int | None = None,
     ) -> None:
         """写入媒体缓存。"""
         if self._redis is None or self._redis.redis is None:
@@ -83,7 +83,7 @@ class MediaCacheManager:
         return hashlib.sha256(data.encode()).hexdigest()[:32]
 
     @staticmethod
-    def compute_config_hash(config: Dict[str, Any]) -> str:
+    def compute_config_hash(config: dict[str, Any]) -> str:
         """计算配置的 hash（用于缓存键）。"""
         config_str = json.dumps(config, sort_keys=True, ensure_ascii=False)
         return hashlib.sha256(config_str.encode()).hexdigest()[:16]

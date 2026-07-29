@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from aigateway_core.prefix.media.types import MediaContent
 
@@ -45,19 +45,23 @@ class GenerationRequest:
     """
 
     prompt: str
-    reference_images: List[MediaContent] = field(default_factory=list)
-    target_model: Optional[str] = None
-    routing_hint: Optional[str] = None
+    source_prompt: str | None = None
+    reference_images: list[MediaContent] = field(default_factory=list)
+    target_model: str | None = None
+    routing_hint: str | None = None
     required_modality: str = "generative"
-    template_name: Optional[str] = None
-    template_variables: Dict[str, str] = field(default_factory=dict)
-    character_id: Optional[str] = None
-    target_resolution: Tuple[int, int] = (1920, 1080)
+    template_name: str | None = None
+    template_variables: dict[str, str] = field(default_factory=dict)
+    character_id: str | None = None
+    target_resolution: tuple[int, int] = (1920, 1080)
     target_fps: int = 60
     media_type: str = "image"  # "image" | "video"
+    quality: str = "standard"  # standard | creative_refine | faithful_4k
+    preset_id: str | None = None
     injection_method: str = "ip-adapter"
     api_key_id: str = ""
     request_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    trace_id: str = ""
 
 
 @dataclass
@@ -73,7 +77,7 @@ class ComplexityEvaluation:
     """
 
     score: int
-    factors: Dict[str, Any] = field(default_factory=dict)
+    factors: dict[str, Any] = field(default_factory=dict)
     recommended_model: str = ""
 
 
@@ -119,8 +123,8 @@ class PromptOptimizationResult:
 
     optimized_prompt: str
     original_prompt: str
-    template_used: Optional[str] = None
-    model_used: Optional[str] = None
+    template_used: str | None = None
+    model_used: str | None = None
     cost_usd: float = 0.0
     duration_ms: float = 0.0
 
@@ -139,7 +143,7 @@ class CompressionResult:
         duration_ms: 压缩耗时（毫秒）
     """
 
-    feature_vector: List[float]
+    feature_vector: list[float]
     original_token_count: int
     compressed_token_count: int
     compression_ratio: float
@@ -174,35 +178,53 @@ class DraftResult:
     """
 
     draft_id: str
-    previews: List[bytes]
-    generation_params: Dict[str, Any]
+    previews: list[bytes]
+    generation_params: dict[str, Any]
     created_at: float
     expires_at: float
     attempt_number: int = 1
     max_attempts: int = 5
     status: str = "pending"
     media_type: str = "image"
-    session_id: Optional[str] = None
-    user_id: Optional[str] = None
-    group_id: Optional[str] = None
+    session_id: str | None = None
+    user_id: str | None = None
+    group_id: str | None = None
     """视频任务提交后 Agnes 返回的 video_id,用于刷新后重新轮询 /v1/videos/{id}。仅 media_type=='video' 确认后有值。"""
-    video_id: Optional[str] = None
+    video_id: str | None = None
+    progress: float = 0.0
+    stage: str = "queued"
+    workflow_version: str = ""
+    comfy_prompt_id: str | None = None
+    gpu_seconds: float = 0.0
+    error: str | None = None
 
 
 # DraftResult 合法状态值
 DRAFT_STATUS_GENERATING = "generating"
+DRAFT_STATUS_QUEUED = "queued"
+DRAFT_STATUS_RUNNING = "running"
 DRAFT_STATUS_PENDING = "pending"
 DRAFT_STATUS_CONFIRMING = "confirming"
+DRAFT_STATUS_REFINING = "refining"
 DRAFT_STATUS_CONFIRMED = "confirmed"
+DRAFT_STATUS_COMPLETED = "completed"
 DRAFT_STATUS_REJECTED = "rejected"
 DRAFT_STATUS_EXPIRED = "expired"
+DRAFT_STATUS_FAILED = "failed"
+DRAFT_STATUS_CANCELLED = "cancelled"
 DRAFT_VALID_STATUSES = (
     DRAFT_STATUS_GENERATING,
+    DRAFT_STATUS_QUEUED,
+    DRAFT_STATUS_RUNNING,
     DRAFT_STATUS_PENDING,
     DRAFT_STATUS_CONFIRMING,
+    DRAFT_STATUS_REFINING,
     DRAFT_STATUS_CONFIRMED,
+    DRAFT_STATUS_COMPLETED,
     DRAFT_STATUS_REJECTED,
     DRAFT_STATUS_EXPIRED,
+    DRAFT_STATUS_FAILED,
+    DRAFT_STATUS_CANCELLED,
 )
 
 
@@ -222,7 +244,7 @@ class UpscaleResult:
 
     draft_id: str
     output_data: bytes
-    target_resolution: Tuple[int, int]
+    target_resolution: tuple[int, int]
     algorithm_used: str
     duration_ms: float = 0.0
 
@@ -268,7 +290,7 @@ class PromptTemplate:
     updated_at: float = 0.0
 
     @property
-    def variables(self) -> List[str]:
+    def variables(self) -> list[str]:
         """提取模板中的占位符变量名.
 
         扫描 content 中所有 {{variable_name}} 格式的占位符，

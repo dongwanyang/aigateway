@@ -22,7 +22,7 @@ try:
 except ImportError:
     pass
 
-from aigateway_cli.__version__ import __version__  # type: ignore  # noqa: E402
+from aigateway_cli.__version__ import __version__  # type: ignore
 
 
 def build_parser() -> argparse.ArgumentParser:

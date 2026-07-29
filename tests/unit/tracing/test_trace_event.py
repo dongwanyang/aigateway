@@ -1,8 +1,33 @@
 """TraceEvent + TraceCollector 单元测试."""
-import sys, os, time
+import json
+import os
+import sys
+import time
+
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 
-from aigateway_core.shared.trace_event import TraceEvent, TraceCollector
+from aigateway_core.shared.trace_event import (
+    TraceCollector,
+    TraceEvent,
+    append_trace_event,
+)
+
+
+class FakeRedis:
+    def __init__(self):
+        self.hashes = {}
+        self.ttls = {}
+
+    async def hget(self, key, field):
+        return self.hashes.get(key, {}).get(field)
+
+    async def hset(self, key, field, value):
+        self.hashes.setdefault(key, {})[field] = value
+
+    async def expire(self, key, ttl):
+        self.ttls[key] = ttl
 
 
 def test_trace_event_fields():
@@ -39,8 +64,8 @@ def test_collector_current_none_when_not_started():
 
 def test_pipeline_context_trace_id_required():
     """trace_id 不再有默认值,必须显式传入."""
-    from aigateway_core.dispatch.context import PipelineContext
     import pytest
+    from aigateway_core.dispatch.context import PipelineContext
     with pytest.raises(TypeError):
         PipelineContext(request={"messages": [], "model": "gpt"})  # 缺 trace_id
 
@@ -49,3 +74,35 @@ def test_pipeline_context_with_trace_id():
     from aigateway_core.dispatch.context import PipelineContext
     ctx = PipelineContext(request={"messages": [], "model": "gpt"}, trace_id="t-fixed")
     assert ctx.trace_id == "t-fixed"
+
+
+@pytest.mark.asyncio
+async def test_flush_merges_background_trace_events():
+    redis = FakeRedis()
+    TraceCollector._current.set(None)
+    collector = TraceCollector.start("trace-async")
+    collector.emit(
+        TraceEvent(
+            trace_id="trace-async",
+            ts=1.0,
+            stage="draft",
+            kind="stage",
+            name="draft.pending_confirmation",
+            duration_ms=1.0,
+            status="ok",
+        )
+    )
+
+    await append_trace_event(
+        redis,
+        trace_id="trace-async",
+        stage="comfyui",
+        name="comfyui.workflow_submitted",
+        payload={"draft_id": "draft-1"},
+    )
+    await collector.flush(redis)
+
+    data = json.loads(redis.hashes["aigateway:trace:trace-async"]["data"])
+    names = [event["name"] for event in data["events"]]
+    assert "draft.pending_confirmation" in names
+    assert "comfyui.workflow_submitted" in names

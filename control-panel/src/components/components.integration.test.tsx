@@ -180,7 +180,7 @@ describe('shared UI components', () => {
       onConfirm={confirm}
       onReject={reject}
     />)
-    await user.click(screen.getByRole('button', { name: /确认放大/ }))
+    await user.click(screen.getByRole('button', { name: /确认生成高清图/ }))
     await user.click(screen.getByRole('button', { name: /重新生成/ }))
     expect(confirm).toHaveBeenCalled()
     expect(reject).toHaveBeenCalled()
@@ -189,6 +189,65 @@ describe('shared UI components', () => {
     expect(screen.getByText(/操作失败.*上游失败/)).toBeInTheDocument()
     rerender(<DraftCard draft={{ ...base, status: 'confirmed', resultLost: true }} onConfirm={confirm} onReject={reject} />)
     expect(screen.getByText(/高清图未缓存/)).toBeInTheDocument()
+  })
+
+  it('renders indeterminate progress for running backend work', () => {
+    render(<DraftCard
+      draft={{
+        draftId: 'd-progress',
+        previewUrl: '/preview',
+        mediaType: 'image',
+        status: 'running',
+        stage: 'comfyui.workflow_submitted',
+        progress: 0.42,
+      }}
+      onConfirm={vi.fn()}
+      onReject={vi.fn()}
+    />)
+
+    expect(screen.getByText(/ComfyUI 正在生成草稿预览.*comfyui.workflow_submitted/)).toBeInTheDocument()
+    expect(screen.queryByText(/42%/)).not.toBeInTheDocument()
+    expect(screen.getByRole('progressbar', { name: /草稿生成进度/ })).not.toHaveAttribute('aria-valuenow')
+  })
+
+  it('renders real ComfyUI sampling progress when provided by backend', () => {
+    render(<DraftCard
+      draft={{
+        draftId: 'd-real-progress',
+        previewUrl: '/preview',
+        mediaType: 'image',
+        status: 'running',
+        stage: 'sampling 6/12',
+        progress: 0.6,
+        progressSource: 'comfyui',
+      }}
+      onConfirm={vi.fn()}
+      onReject={vi.fn()}
+    />)
+
+    expect(screen.getByText(/60%.*sampling 6\/12/)).toBeInTheDocument()
+    expect(screen.getByRole('progressbar', { name: /草稿生成进度/ })).toHaveAttribute('aria-valuenow', '60')
+  })
+
+  it('renders a local ComfyUI video result without an Agnes video id', () => {
+    render(<DraftCard
+      draft={{
+        draftId: 'video-draft',
+        previewUrl: '/preview',
+        mediaType: 'video',
+        status: 'confirmed',
+        resultDataUrl: 'data:video/mp4;base64,AAAA',
+      }}
+      onConfirm={vi.fn()}
+      onReject={vi.fn()}
+    />)
+
+    expect(screen.getByText(/视频已生成/)).toBeInTheDocument()
+    expect(document.querySelector('video')).toHaveAttribute(
+      'src',
+      'data:video/mp4;base64,AAAA',
+    )
+    expect(screen.getByRole('button', { name: /确认生成视频/ })).toBeDisabled()
   })
 
   it('classifies and renders user, streaming, interrupted and draft messages', async () => {
@@ -234,7 +293,7 @@ describe('shared UI components', () => {
       pendingAssistantId={null}
       onConfirmDraft={confirm}
     />)
-    await userEvent.click(screen.getByRole('button', { name: /确认放大/ }))
+    await userEvent.click(screen.getByRole('button', { name: /确认生成高清图/ }))
     expect(confirm).toHaveBeenCalledWith('m1')
   })
 

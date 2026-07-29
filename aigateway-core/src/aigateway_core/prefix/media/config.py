@@ -8,7 +8,7 @@ Media Configuration — 多模态管线配置模型
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 @dataclass
@@ -20,13 +20,13 @@ class ImagePipelineConfig:
     quality: int = 85  # JPEG/WebP 质量 (1-100)
     output_format: str = "webp"  # "webp" | "jpeg" | "png"
     ocr_backend: str = "tesseract"  # "tesseract" | "paddleocr"
-    ocr_languages: List[str] = field(default_factory=lambda: ["chi_sim", "eng"])
+    ocr_languages: list[str] = field(default_factory=lambda: ["chi_sim", "eng"])
     caption_model: str = "agnes-2.0-flash"  # Vision model for captioning
     max_file_size_mb: float = 20.0
     download_timeout: float = 30.0
     caption_max_tokens: int = 150
     caption_temperature: float = 0.3
-    paddleocr: Optional[Dict[str, Any]] = None  # PaddleOCR 嵌套配置
+    paddleocr: dict[str, Any] | None = None  # PaddleOCR 嵌套配置
 
 
 @dataclass
@@ -65,7 +65,7 @@ class AudioPipelineConfig:
 class DocumentPipelineConfig:
     """文档管线配置。"""
 
-    supported_formats: List[str] = field(
+    supported_formats: list[str] = field(
         default_factory=lambda: ["pdf", "docx", "xlsx", "pptx", "md", "csv", "html"]
     )
     ocr_fallback: bool = True
@@ -79,7 +79,7 @@ class DocumentPipelineConfig:
     download_timeout: float = 60.0
     long_doc_threshold_chars: int = 5000
     summary_preview_chars: int = 2000
-    unstructured: Optional[Dict[str, Any]] = None  # Unstructured 嵌套配置
+    unstructured: dict[str, Any] | None = None  # Unstructured 嵌套配置
 
 
 @dataclass

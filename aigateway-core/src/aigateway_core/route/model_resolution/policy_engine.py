@@ -1,8 +1,9 @@
 """Policy constraints between semantic classification and runtime routing."""
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any
 
 from .task_classifier import REQUIREMENTS, TASKS, TaskProfile
 
@@ -20,12 +21,12 @@ class RoutingConstraints:
     """Policy output.  It intentionally does not contain a selected model."""
 
     task_profile: TaskProfile
-    eligible_models: Tuple[str, ...]
-    preferred_models: Tuple[str, ...]
+    eligible_models: tuple[str, ...]
+    preferred_models: tuple[str, ...]
     reason: str
-    unmet_requirements: Tuple[str, ...] = ()
+    unmet_requirements: tuple[str, ...] = ()
 
-    def as_dict(self) -> Dict[str, Any]:
+    def as_dict(self) -> dict[str, Any]:
         return {
             "eligible_models": list(self.eligible_models),
             "preferred_models": list(self.preferred_models),
@@ -39,7 +40,7 @@ class RoutingPolicyEngine:
 
     _SELECTION_MODES = {"strict", "policy", "auto"}
 
-    def __init__(self, config: Optional[Dict[str, Any]] = None) -> None:
+    def __init__(self, config: dict[str, Any] | None = None) -> None:
         config = config or {}
         self.enabled = self._boolean(config.get("enabled", False), "enabled")
         self.version = str(config.get("version", "1")).strip()
@@ -73,7 +74,7 @@ class RoutingPolicyEngine:
             raise RoutingPolicyConfigError(
                 "task_routing.model_preferences must be an object"
             )
-        preferences: Dict[str, Tuple[str, ...]] = {}
+        preferences: dict[str, tuple[str, ...]] = {}
         for task, models in raw_preferences.items():
             task_name = str(task).lower()
             if task_name not in TASKS:
@@ -93,9 +94,9 @@ class RoutingPolicyEngine:
         self,
         profile: TaskProfile,
         candidates: Sequence[str],
-        model_hint: Optional[str],
+        model_hint: str | None,
         model_tasks: Mapping[str, Sequence[str]],
-        model_features: Optional[Mapping[str, Sequence[str]]] = None,
+        model_features: Mapping[str, Sequence[str]] | None = None,
     ) -> RoutingConstraints:
         pool = tuple(dict.fromkeys(candidates))
         if not pool:
@@ -120,7 +121,7 @@ class RoutingPolicyEngine:
             )
 
         feature_eligible = pool
-        unmet: List[str] = []
+        unmet: list[str] = []
         for requirement in profile.requirements:
             if requirement not in REQUIREMENTS:
                 continue

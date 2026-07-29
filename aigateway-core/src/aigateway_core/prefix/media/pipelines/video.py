@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING
 
 from ..base import MediaPipeline, MediaProcessor
 from ..config import VideoPipelineConfig
@@ -43,7 +43,7 @@ class VideoFrameExtractor(MediaProcessor):
         return content.media_type == MediaType.VIDEO
 
     async def process(
-        self, content: MediaContent, ctx: "PipelineContext"
+        self, content: MediaContent, ctx: PipelineContext
     ) -> ProcessorResult:
         """提取视频关键帧。"""
         start = time.monotonic()
@@ -86,19 +86,19 @@ class VideoFrameExtractor(MediaProcessor):
                 error=str(exc),
             )
 
-    def _extract_frames(self, video_data: bytes) -> List[bytes]:
+    def _extract_frames(self, video_data: bytes) -> list[bytes]:
         """同步提取关键帧。"""
-        import tempfile
         import os
+        import tempfile
+
         import cv2
-        import numpy as np
 
         # 写临时文件
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
             f.write(video_data)
             temp_path = f.name
 
-        frames: List[bytes] = []
+        frames: list[bytes] = []
         try:
             cap = cv2.VideoCapture(temp_path)
             fps = cap.get(cv2.CAP_PROP_FPS) or 25
@@ -130,7 +130,7 @@ class VideoPipeline(MediaPipeline):
 
     media_type = MediaType.VIDEO
 
-    def __init__(self, config: Optional[VideoPipelineConfig] = None) -> None:
+    def __init__(self, config: VideoPipelineConfig | None = None) -> None:
         cfg = config or VideoPipelineConfig()
         self.config = cfg
         self.frame_extractor = VideoFrameExtractor(
@@ -140,7 +140,7 @@ class VideoPipeline(MediaPipeline):
         self.processors = [self.frame_extractor]
 
     async def execute(
-        self, content: MediaContent, ctx: "PipelineContext"
+        self, content: MediaContent, ctx: PipelineContext
     ) -> MediaContent:
         """执行视频处理管线。"""
         if content.size_bytes > self.config.max_file_size_mb * 1024 * 1024:
@@ -158,7 +158,7 @@ class VideoPipeline(MediaPipeline):
 
         # 提取关键帧
         frames_result = await self.frame_extractor.process(content, ctx)
-        frames: List[bytes] = frames_result.output or []
+        frames: list[bytes] = frames_result.output or []
 
         if frames:
             # 生成帧描述（简化版：使用帧数量信息）
@@ -173,7 +173,7 @@ class VideoPipeline(MediaPipeline):
 
         return content
 
-    async def _download(self, url: str) -> Optional[bytes]:
+    async def _download(self, url: str) -> bytes | None:
         """下载视频。"""
         try:
             import httpx

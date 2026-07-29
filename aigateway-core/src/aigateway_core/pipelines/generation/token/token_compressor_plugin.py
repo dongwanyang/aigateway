@@ -14,10 +14,12 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from aigateway_core.dispatch.context import PipelineContext
-from aigateway_core.pipelines.generation._common.config import GenerationOptimizationConfig
+from aigateway_core.pipelines.generation._common.config import (
+    GenerationOptimizationConfig,
+)
 from aigateway_core.pipelines.generation._common.models import CompressionResult
 from aigateway_core.pipelines.generation.token.feature_cache import (
     FeatureCacheManager,
@@ -59,7 +61,7 @@ class TokenCompressorPlugin:
 
     name: str = "token_compressor"
     enabled: bool = True
-    depends_on: List[str] = ["intent_evaluator"]
+    depends_on: list[str] = ["intent_evaluator"]
 
     def __init__(
         self,
@@ -146,7 +148,7 @@ class TokenCompressorPlugin:
                 owner_id = ctx.extra.get("group_id") or ""  # type: ignore[union-attr]
 
             # 处理每张参考图
-            per_image_results: List[Dict[str, Any]] = []
+            per_image_results: list[dict[str, Any]] = []
             total_original_tokens = 0
             total_compressed_tokens = 0
             cache_hits = 0
@@ -242,10 +244,10 @@ class TokenCompressorPlugin:
     async def _process_single_image(
         self,
         image: MediaContent,
-        character_id: Optional[str],
+        character_id: str | None,
         owner_id: str,
         model_version: str,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """处理单张参考图: 缓存查找 → 压缩 → 缓存存储.
 
         Args:
@@ -262,7 +264,7 @@ class TokenCompressorPlugin:
             - cache_hit: 是否命中缓存
         """
         cache_hit = False
-        feature_vector: Optional[List[float]] = None
+        feature_vector: list[float] | None = None
 
         # 有 character_id 且缓存启用时，先查询缓存 (需求 5.2)
         if character_id and self._config.feature_cache.enabled:
@@ -343,7 +345,7 @@ class TokenCompressorPlugin:
         owner_id: str,
         character_id: str,
         model_version: str,
-    ) -> Optional[List[float]]:
+    ) -> list[float] | None:
         """尝试从 Feature Cache 查找缓存的特征向量.
 
         缓存查找失败时不抛异常，返回 None 由调用者决定降级策略。
@@ -381,7 +383,7 @@ class TokenCompressorPlugin:
         owner_id: str,
         character_id: str,
         model_version: str,
-        vector: List[float],
+        vector: list[float],
     ) -> None:
         """尝试将特征向量存入 Feature Cache.
 
@@ -411,7 +413,7 @@ class TokenCompressorPlugin:
                 },
             )
 
-    def _extract_reference_images(self, ctx: PipelineContext) -> List[MediaContent]:
+    def _extract_reference_images(self, ctx: PipelineContext) -> list[MediaContent]:
         """从上下文中提取参考图列表.
 
         优先从 media_optimization 命名空间中提取已处理的媒体结果，
@@ -423,7 +425,7 @@ class TokenCompressorPlugin:
         Returns:
             MediaContent 列表
         """
-        reference_images: List[MediaContent] = []
+        reference_images: list[MediaContent] = []
 
         # 尝试从 media_optimization 命名空间获取已检测到的图片
         media_opt = ctx.extra.get("media_optimization", {})
@@ -472,7 +474,7 @@ class TokenCompressorPlugin:
 
         return reference_images
 
-    def _extract_character_id(self, ctx: PipelineContext) -> Optional[str]:
+    def _extract_character_id(self, ctx: PipelineContext) -> str | None:
         """从请求中提取 character_id.
 
         查找顺序:

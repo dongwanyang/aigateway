@@ -2,7 +2,8 @@
 import httpx
 import pytest
 import redis
-from tests.conftest import BASE, REDIS_URL, QDRANT_URL, ADMIN_KEY
+
+from tests.conftest import ADMIN_KEY, AGNES_TEXT_MODEL, BASE, QDRANT_URL, REDIS_URL
 
 
 def test_gateway_health():
@@ -88,7 +89,7 @@ def test_trace_events_roundtrip(admin_client, trace_helpers):
         resp = admin_c.post(
             "/v1/chat/completions",
             json={
-                "model": "agnes-2.0-flash",
+                "model": AGNES_TEXT_MODEL,
                 "messages": [{"role": "user", "content": f"hello e2e smoke {uuid.uuid4().hex}"}],
             },
             headers={"X-Trace-Id": tid},

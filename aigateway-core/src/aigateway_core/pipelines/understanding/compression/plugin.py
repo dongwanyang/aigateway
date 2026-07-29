@@ -8,9 +8,10 @@ passthrough.
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any
 
 from aigateway_core.dispatch.context import PipelineContext
+from aigateway_core.shared.integration_configs import PromptCompressConfig
 
 logger = logging.getLogger(__name__)
 
@@ -30,12 +31,10 @@ class PromptCompressPlugin:
 
     def __init__(
         self,
-        config: Optional["PromptCompressConfig"] = None,
+        config: PromptCompressConfig | None = None,
         *,
         compression_ratio: float = 0.5,
     ) -> None:
-        from aigateway_core.shared.integration_configs import PromptCompressConfig
-
         if config is not None:
             self._config = config
         else:

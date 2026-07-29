@@ -21,11 +21,9 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field, fields
-from typing import Any, Dict, List, Optional, Tuple, Type, TypeVar
+from typing import Any
 
 logger = logging.getLogger(__name__)
-
-T = TypeVar("T")
 
 
 # ==================================================================
@@ -73,8 +71,8 @@ class ModelRouterConfig:
     default_model: str = "agnes-2.0-flash"
     evaluation_timeout_seconds: float = 2.0
     default_capability_score: int = 50
-    model_capabilities: Dict[str, int] = field(default_factory=dict)
-    model_modalities: Dict[str, List[str]] = field(default_factory=dict)
+    model_capabilities: dict[str, int] = field(default_factory=dict)
+    model_modalities: dict[str, list[str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -101,16 +99,16 @@ class DraftWorkflowConfig:
     """
 
     enabled: bool = True
-    draft_resolution: Tuple[int, int] = (1024, 1024)
-    default_target_resolution: Tuple[int, int] = (1920, 1080)
-    max_target_resolution: Tuple[int, int] = (4096, 4096)
+    draft_resolution: tuple[int, int] = (1024, 1024)
+    default_target_resolution: tuple[int, int] = (1920, 1080)
+    max_target_resolution: tuple[int, int] = (4096, 4096)
     max_regeneration_attempts: int = 5
     retention_period_hours: int = 24
     preview_video_duration_seconds: int = 30
     preview_keyframe_interval_seconds: int = 5
     preview_video_fps: int = 8
     target_fps: int = 60
-    target_fps_range: Tuple[int, int] = (24, 120)
+    target_fps_range: tuple[int, int] = (24, 120)
     upscale_algorithm: str = "real-esrgan"
     draft_model: str = "agnes-image-2.1-flash"
     store_dir: str = "/app/data/drafts"
@@ -138,7 +136,7 @@ class TokenCompressorConfig:
     max_compression_ratio: float = 0.9
     max_vector_dimensions: int = 512
     timeout_seconds: float = 30.0
-    supported_formats: List[str] = field(
+    supported_formats: list[str] = field(
         default_factory=lambda: ["image/png", "image/jpeg", "image/webp", "image/bmp"]
     )
     max_images_per_request: int = 10
@@ -204,7 +202,7 @@ class PromptTemplateConfig:
 
 # 每个字段的合法范围定义: {field_name: (min, max)}
 # 适用于数值类型字段
-_VALIDATION_RULES: Dict[str, Dict[str, Tuple[float, float]]] = {
+_VALIDATION_RULES: dict[str, dict[str, tuple[float, float]]] = {
     "ai_director": {
         "timeout_seconds": (1.0, 120.0),
         "max_prompt_length": (100, 50000),
@@ -248,7 +246,7 @@ _VALIDATION_RULES: Dict[str, Dict[str, Tuple[float, float]]] = {
 }
 
 # 子配置名称到 dataclass 类型的映射
-_SUB_CONFIG_CLASSES: Dict[str, Type[Any]] = {
+_SUB_CONFIG_CLASSES: dict[str, type[Any]] = {
     "ai_director": AIDirectorConfig,
     "model_router": ModelRouterConfig,
     "draft_workflow": DraftWorkflowConfig,
@@ -311,16 +309,15 @@ def _resolve_type(type_hint: Any) -> Any:
     Returns:
         解析后的类型信息 (origin, args, raw_type)
     """
-    import typing
 
     # 如果是字符串形式的类型注解，直接判断常见模式
     if isinstance(type_hint, str):
         hint = type_hint.strip()
-        if hint.startswith("Tuple[") or hint.startswith("tuple["):
+        if hint.startswith(("Tuple[", "tuple[")):
             return (tuple, "int", hint)
-        if hint.startswith("List[") or hint.startswith("list["):
+        if hint.startswith(("List[", "list[")):
             return (list, None, hint)
-        if hint.startswith("Dict[") or hint.startswith("dict["):
+        if hint.startswith(("Dict[", "dict[")):
             return (dict, None, hint)
         if hint == "bool":
             return (None, None, bool)
@@ -357,7 +354,7 @@ def _coerce_value(value: Any, target_type: Any, field_name: str) -> Any:
     if value is None:
         raise TypeError(f"值不能为 None: {field_name}")
 
-    origin, args, raw_type = _resolve_type(target_type)
+    origin, _args, raw_type = _resolve_type(target_type)
 
     # Tuple[int, int] — 从列表转换
     if origin is tuple:
@@ -442,11 +439,11 @@ def _validate_range(
     return True
 
 
-def _load_sub_config(
-    cls: Type[T],
-    data: Dict[str, Any],
+def _load_sub_config[T](
+    cls: type[T],
+    data: dict[str, Any],
     section_name: str,
-    previous: Optional[T] = None,
+    previous: T | None = None,
 ) -> T:
     """从字典创建子配置 dataclass 实例，带校验.
 
@@ -467,7 +464,7 @@ def _load_sub_config(
 
     # 创建默认实例获取默认值
     default_instance = cls()
-    kwargs: Dict[str, Any] = {}
+    kwargs: dict[str, Any] = {}
 
     for f in fields(cls):
         if f.name not in data:
@@ -512,7 +509,7 @@ def _load_sub_config(
     return cls(**kwargs)
 
 
-def _get_env_overrides() -> Dict[str, Dict[str, Any]]:
+def _get_env_overrides() -> dict[str, dict[str, Any]]:
     """扫描环境变量，提取 AI_GATEWAY_GENERATION_OPTIMIZATION_* 覆盖.
 
     环境变量命名规则:
@@ -529,7 +526,7 @@ def _get_env_overrides() -> Dict[str, Dict[str, Any]]:
         顶层键直接放在 "_top" 下
     """
     prefix = _ENV_PREFIX + "_"
-    overrides: Dict[str, Dict[str, Any]] = {"_top": {}}
+    overrides: dict[str, dict[str, Any]] = {"_top": {}}
 
     # 已知的 section 名前缀（大写形式，用于匹配）
     known_sections = {
@@ -606,9 +603,9 @@ class GenerationOptimizationConfig:
     @classmethod
     def load_from_dict(
         cls,
-        data: Dict[str, Any],
-        previous: Optional["GenerationOptimizationConfig"] = None,
-    ) -> "GenerationOptimizationConfig":
+        data: dict[str, Any],
+        previous: GenerationOptimizationConfig | None = None,
+    ) -> GenerationOptimizationConfig:
         """从字典创建配置实例（通常从 YAML 解析结果）.
 
         环境变量优先于字典中的值。无效值保留 previous 中的旧值并记录错误日志。
@@ -644,7 +641,7 @@ class GenerationOptimizationConfig:
                 enabled_value = previous.enabled if previous else True
 
         # 构建子配置
-        sub_configs: Dict[str, Any] = {}
+        sub_configs: dict[str, Any] = {}
         for section_name, config_cls in _SUB_CONFIG_CLASSES.items():
             section_data = dict(data.get(section_name, {}) or {})
 
@@ -679,8 +676,8 @@ class GenerationOptimizationConfig:
     def load_from_config_manager(
         cls,
         config_manager: Any,
-        previous: Optional["GenerationOptimizationConfig"] = None,
-    ) -> "GenerationOptimizationConfig":
+        previous: GenerationOptimizationConfig | None = None,
+    ) -> GenerationOptimizationConfig:
         """从 ConfigManager 实例加载配置.
 
         读取 ConfigManager 中 "generation_optimization" 路径的配置字典，
@@ -704,7 +701,7 @@ class GenerationOptimizationConfig:
             data = {}
         return cls.load_from_dict(data, previous=previous)
 
-    def validate(self) -> List[str]:
+    def validate(self) -> list[str]:
         """校验当前配置实例的所有字段值.
 
         对所有子配置进行类型检查和范围检查。
@@ -712,7 +709,7 @@ class GenerationOptimizationConfig:
         Returns:
             错误消息列表。空列表表示配置完全有效。
         """
-        errors: List[str] = []
+        errors: list[str] = []
 
         for section_name in _SUB_CONFIG_CLASSES:
             sub_config = getattr(self, section_name)
@@ -748,8 +745,8 @@ class GenerationOptimizationConfig:
 
 
 def parse_generation_optimization_config(
-    data: Dict[str, Any],
-    previous: Optional[GenerationOptimizationConfig] = None,
+    data: dict[str, Any],
+    previous: GenerationOptimizationConfig | None = None,
 ) -> GenerationOptimizationConfig:
     """解析 generation_optimization 配置字典.
 
@@ -767,7 +764,7 @@ def parse_generation_optimization_config(
 
 def validate_generation_optimization_config(
     config: GenerationOptimizationConfig,
-) -> List[str]:
+) -> list[str]:
     """校验配置实例的所有字段.
 
     便捷函数，等价于 config.validate()。
@@ -799,7 +796,7 @@ class GenerationOptimizationConfigWatcher:
     def __init__(
         self,
         config_manager: Any,
-        initial_config: Optional[GenerationOptimizationConfig] = None,
+        initial_config: GenerationOptimizationConfig | None = None,
     ) -> None:
         """
         Args:
@@ -810,7 +807,7 @@ class GenerationOptimizationConfigWatcher:
 
         self._config_manager = config_manager
         self._lock = threading.RLock()
-        self._callbacks: List[Any] = []
+        self._callbacks: list[Any] = []
 
         # 初始化当前配置
         self._current_config: GenerationOptimizationConfig = (
@@ -870,7 +867,7 @@ class GenerationOptimizationConfigWatcher:
         """
         self._callbacks.append(callback)
 
-    def _on_config_reload(self, new_full_config: Dict[str, Any]) -> None:
+    def _on_config_reload(self, new_full_config: dict[str, Any]) -> None:
         """ConfigManager 热重载回调 — 文件变更时自动调用.
 
         由 ConfigManager 的 Watchdog 在检测到 YAML 文件修改后触发

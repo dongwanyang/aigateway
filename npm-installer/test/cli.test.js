@@ -11,15 +11,10 @@ const cli = join(packageRoot, 'bin', 'aigateway-install.js')
 const cliEnvironment = { ...process.env }
 delete cliEnvironment.NODE_TEST_CONTEXT
 
-test('installer help lists source as default and docker as explicit mode', () => {
-  const result = spawnSync(process.execPath, [cli, '--installer-help'], {
-    encoding: 'utf8',
-    env: cliEnvironment,
-  })
-  assert.equal(result.status, 0)
-  assert.match(result.stdout, /--source\s+源码安装（默认）/)
-  assert.match(result.stdout, /--docker\s+使用 Docker Compose 部署/)
-  assert.match(result.stdout, /runtime\|rag\|vision\|full/)
+test('installer help exposes editions and image/source distributions', () => {
+  const source = readFileSync(cli, 'utf8')
+  assert.match(source, /lite\|knowledge\|studio\|full/)
+  assert.match(source, /image\|source/)
 })
 
 function makeCheckout() {
@@ -27,42 +22,10 @@ function makeCheckout() {
   const scripts = join(root, 'scripts')
   mkdirSync(scripts)
   writeFileSync(join(scripts, 'quickstart.sh'), '#!/usr/bin/env bash\n', 'utf8')
-  writeFileSync(join(scripts, 'install-source.sh'), '#!/usr/bin/env bash\n', 'utf8')
   return root
 }
 
-test('installer defaults to source mode and forwards source arguments', () => {
-  const root = makeCheckout()
-  const sourceInstaller = join(root, 'scripts', 'install-source.sh')
-  const argsFile = join(root, 'received-args.txt')
-  writeFileSync(
-    sourceInstaller,
-    `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${argsFile}"\n`,
-    'utf8',
-  )
-  chmodSync(sourceInstaller, 0o755)
-
-  const result = spawnSync(process.execPath, [
-    cli,
-    '--dir',
-    root,
-    '--profile',
-    'full',
-    '--no-frontend',
-  ], {
-    encoding: 'utf8',
-    env: cliEnvironment,
-  })
-
-  assert.equal(result.status, 0, result.stderr)
-  assert.deepEqual(
-    readFileSync(argsFile, 'utf8').trim().split('\n'),
-    ['--profile', 'full', '--no-frontend'],
-  )
-  assert.match(result.stdout, /安装方式：源码安装/)
-})
-
-test('--docker invokes the Docker quickstart installer', () => {
+test('installer invokes quickstart and forwards the new public interface', () => {
   const root = makeCheckout()
   const quickstart = join(root, 'scripts', 'quickstart.sh')
   const argsFile = join(root, 'received-args.txt')
@@ -77,9 +40,10 @@ test('--docker invokes the Docker quickstart installer', () => {
     cli,
     '--dir',
     root,
-    '--docker',
-    '--profile',
+    '--edition',
     'full',
+    '--distribution',
+    'source',
     '--build',
   ], {
     encoding: 'utf8',
@@ -89,16 +53,14 @@ test('--docker invokes the Docker quickstart installer', () => {
   assert.equal(result.status, 0, result.stderr)
   assert.deepEqual(
     readFileSync(argsFile, 'utf8').trim().split('\n'),
-    ['--profile', 'full', '--build'],
+    ['--edition', 'full', '--distribution', 'source', '--build'],
   )
-  assert.match(result.stdout, /安装方式：Docker Compose 部署/)
 })
 
-test('--source and --docker are mutually exclusive', () => {
-  const result = spawnSync(process.execPath, [cli, '--source', '--docker'], {
+test('legacy source and docker switches are rejected with migration guidance', () => {
+  const result = spawnSync(process.execPath, [cli, '--source'], {
     encoding: 'utf8',
     env: cliEnvironment,
   })
   assert.equal(result.status, 1)
-  assert.match(result.stderr, /--source 与 --docker 不能同时使用/)
 })

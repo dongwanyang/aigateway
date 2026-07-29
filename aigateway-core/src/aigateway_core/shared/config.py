@@ -19,8 +19,9 @@ import json
 import logging
 import os
 import threading
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any
 
 import yaml
 
@@ -42,7 +43,7 @@ logger = logging.getLogger(__name__)
 # ------------------------------------------------------------------
 
 # 各配置节的默认值（作为 schema 参考）
-_DEFAULT_CONFIG: Dict[str, Any] = {
+_DEFAULT_CONFIG: dict[str, Any] = {
     "server": {
         "host": "0.0.0.0",
         "port": 8000,
@@ -94,7 +95,7 @@ class ConfigManager:
         _reload_callbacks: 热重载回调函数列表。
     """
 
-    def __init__(self, config_path: Optional[str] = None) -> None:
+    def __init__(self, config_path: str | None = None) -> None:
         """
         Args:
             config_path: 配置文件路径，默认从 AI_GATEWAY_CONFIG_PATH 读取，
@@ -111,13 +112,13 @@ class ConfigManager:
 
         self.config_path = resolved_path
 
-        self._config: Dict[str, Any] = {}
+        self._config: dict[str, Any] = {}
         self._lock = threading.RLock()
-        self._reload_callbacks: list[Callable[[Dict[str, Any]], None]] = []
+        self._reload_callbacks: list[Callable[[dict[str, Any]], None]] = []
         self._watchdog: Any = None
         self._watch_handle: Any = None
         self._watchdog_active = False
-        self._integration_configs: Optional["IntegrationConfigs"] = None
+        self._integration_configs: IntegrationConfigs | None = None
 
         # 加载配置
         self.load()
@@ -151,7 +152,7 @@ class ConfigManager:
     # 配置加载
     # ------------------------------------------------------------------
 
-    def load(self) -> Dict[str, Any]:
+    def load(self) -> dict[str, Any]:
         """从 YAML 文件加载配置，并应用环境变量覆盖。
 
         Returns:
@@ -186,7 +187,7 @@ class ConfigManager:
 
         return self._config
 
-    def _apply_environment_mode(self, config: Dict[str, Any]) -> Dict[str, Any]:
+    def _apply_environment_mode(self, config: dict[str, Any]) -> dict[str, Any]:
         """根据 AI_GATEWAY_ENV 环境变量应用环境模式覆盖。
 
         - production: 强制关闭 debug_mode，日志级别不低于 INFO
@@ -222,7 +223,7 @@ class ConfigManager:
 
         return config
 
-    def _validate_config(self, config: Dict[str, Any]) -> None:
+    def _validate_config(self, config: dict[str, Any]) -> None:
         """验证配置结构和安全性（宽容模式）。
 
         仅记录 WARNING/ERROR 日志，不阻止配置加载。
@@ -294,7 +295,7 @@ class ConfigManager:
                                 dep,
                             )
 
-    def _load_yaml(self, path: str) -> Dict[str, Any]:
+    def _load_yaml(self, path: str) -> dict[str, Any]:
         """解析 YAML 文件。
 
         Args:
@@ -332,7 +333,7 @@ class ConfigManager:
             logger.error("读取配置文件失败: %s", exc)
             return {}
 
-    def _apply_env_overrides(self, config: Dict[str, Any]) -> Dict[str, Any]:
+    def _apply_env_overrides(self, config: dict[str, Any]) -> dict[str, Any]:
         """将环境变量（AI_GATEWAY_*）覆盖到配置中。
 
         环境变量命名规则:
@@ -370,7 +371,7 @@ class ConfigManager:
 
         return config
 
-    def _resolve_env_vars_in_values(self, config: Dict[str, Any]) -> Dict[str, Any]:
+    def _resolve_env_vars_in_values(self, config: dict[str, Any]) -> dict[str, Any]:
         """递归解析配置值中的 ${ENV_VAR} 引用。
 
         例如: api_key: "${OPENAI_API_KEY}" 会被替换为实际值。
@@ -415,7 +416,7 @@ class ConfigManager:
 
     @staticmethod
     def _set_nested(
-        config: Dict[str, Any], dotted_path: str, value: Any
+        config: dict[str, Any], dotted_path: str, value: Any
     ) -> None:
         """在嵌套字典中按点分隔路径设置值。
 
@@ -504,7 +505,7 @@ class ConfigManager:
 
         return current
 
-    def get_raw(self, path: str, default: Any = None) -> Tuple[Any, bool]:
+    def get_raw(self, path: str, default: Any = None) -> tuple[Any, bool]:
         """读取配置值，区分显式 null 和缺失键。
 
         Returns:
@@ -541,7 +542,7 @@ class ConfigManager:
 
         logger.info("配置已更新: %s = %s", path, value)
 
-    def snapshot(self) -> Dict[str, Any]:
+    def snapshot(self) -> dict[str, Any]:
         """获取当前配置的深拷贝（线程安全）。
 
         Returns:
@@ -551,7 +552,7 @@ class ConfigManager:
             return copy.deepcopy(self._config)
 
     @property
-    def integration_configs(self) -> "IntegrationConfigs":
+    def integration_configs(self) -> IntegrationConfigs:
         """获取当前集成配置实例。
 
         Returns:
@@ -565,7 +566,7 @@ class ConfigManager:
     # 原子交换
     # ------------------------------------------------------------------
 
-    def atomic_swap(self, new_config: Dict[str, Any]) -> bool:
+    def atomic_swap(self, new_config: dict[str, Any]) -> bool:
         """原子交换整个配置。
 
         在锁保护下将新配置深度替换旧配置，确保并发安全。
@@ -641,8 +642,8 @@ class ConfigManager:
             return
 
         try:
-            from watchdog.observers import Observer
             from watchdog.events import FileSystemEventHandler
+            from watchdog.observers import Observer
         except ImportError:
             logger.warning(
                 "watchdog 库未安装，跳过文件监听热重载。"
@@ -661,7 +662,7 @@ class ConfigManager:
         class _ConfigChangeHandler(FileSystemEventHandler):
             """配置文件变化处理器。"""
 
-            def __init__(self, manager: "ConfigManager", target_file: str) -> None:
+            def __init__(self, manager: ConfigManager, target_file: str) -> None:
                 self.manager = manager
                 self.target_file = target_file
 
@@ -673,7 +674,7 @@ class ConfigManager:
                     )
                     try:
                         self.manager.load()
-                    except Exception as exc:  # noqa: BLE001
+                    except Exception as exc:
                         logger.error("配置热重载失败: %s", exc)
 
             def on_created(self, event) -> None:
@@ -715,7 +716,7 @@ class ConfigManager:
     # 热重载回调
     # ------------------------------------------------------------------
 
-    def on_reload(self, callback: Callable[[Dict[str, Any]], None]) -> None:
+    def on_reload(self, callback: Callable[[dict[str, Any]], None]) -> None:
         """注册热重载回调函数。
 
         Args:
@@ -723,7 +724,7 @@ class ConfigManager:
         """
         self._reload_callbacks.append(callback)
 
-    def _notify_reload(self, old_config: Dict[str, Any], new_config: Dict[str, Any]) -> None:
+    def _notify_reload(self, old_config: dict[str, Any], new_config: dict[str, Any]) -> None:
         """通知所有注册的回调函数配置已变更。
 
         Args:
@@ -792,7 +793,7 @@ class ConfigManager:
 
         return True
 
-    def _validate_config_strict(self, config: Dict[str, Any]) -> list:
+    def _validate_config_strict(self, config: dict[str, Any]) -> list:
         """严格验证配置，返回问题列表。
 
         Returns:
@@ -885,12 +886,26 @@ _INTEGRATION_ENV_PREFIXES = {
 }
 
 # 字段值范围约束 — {(ConfigClass, field_name): (min, max)} 或 callable validator
-_FIELD_VALIDATORS: Dict[Tuple[type, str], Any] = {
+_FIELD_VALIDATORS: dict[tuple[type, str], Any] = {
     (PromptCompressConfig, "compression_ratio"): {"min": 0.0, "max": 1.0},
     (CLIPConfig, "batch_size"): {"min": 1},
     (ComfyUIConfig, "connect_timeout"): {"min": 1},
     (ComfyUIConfig, "execution_timeout"): {"min": 1},
     (ComfyUIConfig, "ws_reconnect_attempts"): {"min": 0},
+    (ComfyUIConfig, "max_concurrency"): {"min": 1},
+    (ComfyUIConfig, "min_free_gb"): {"min": 1},
+    (ComfyUIConfig, "model_budget_gb"): {"min": 1},
+    (ComfyUIConfig, "output_budget_gb"): {"min": 1},
+    (ComfyUIConfig, "output_retention_hours"): {"min": 1},
+    (ComfyUIConfig, "max_upscale_long_edge"): {"min": 512, "max": 8192},
+    (ComfyUIConfig, "video_width"): {"min": 16},
+    (ComfyUIConfig, "video_height"): {"min": 16},
+    (ComfyUIConfig, "video_frames"): {"min": 1},
+    (ComfyUIConfig, "video_fps"): {"min": 1},
+    (ComfyUIConfig, "video_steps"): {"min": 1},
+    (ComfyUIConfig, "video_cfg"): {"min": 0},
+    (ComfyUIConfig, "video_shift"): {"min": 0},
+    (ComfyUIConfig, "video_execution_timeout"): {"min": 1},
     (RAGRetrieverConfig, "top_k"): {"min": 1},
     (RAGRetrieverConfig, "similarity_threshold"): {"min": 0.0, "max": 1.0},
     (RAGRetrieverConfig, "chunk_size"): {"min": 1},
@@ -902,7 +917,7 @@ _FIELD_VALIDATORS: Dict[Tuple[type, str], Any] = {
 }
 
 
-def _extract_plugin_config(config_dict: Dict[str, Any], plugin_name: str) -> Dict[str, Any]:
+def _extract_plugin_config(config_dict: dict[str, Any], plugin_name: str) -> dict[str, Any]:
     """从 plugins 列表中提取指定插件的 config 字典。
 
     Args:
@@ -922,7 +937,7 @@ def _extract_plugin_config(config_dict: Dict[str, Any], plugin_name: str) -> Dic
     return {}
 
 
-def _get_nested(config_dict: Dict[str, Any], dotted_path: str) -> Dict[str, Any]:
+def _get_nested(config_dict: dict[str, Any], dotted_path: str) -> dict[str, Any]:
     """按点分隔路径获取嵌套字典。
 
     Args:
@@ -945,8 +960,8 @@ def _get_nested(config_dict: Dict[str, Any], dotted_path: str) -> Dict[str, Any]
 
 
 def _apply_env_overrides_for_config(
-    config_name: str, raw_values: Dict[str, Any]
-) -> Dict[str, Any]:
+    config_name: str, raw_values: dict[str, Any]
+) -> dict[str, Any]:
     """为特定集成配置应用环境变量覆盖。
 
     查找形如 AI_GATEWAY_<CONFIG_NAME>_<FIELD_NAME> 的环境变量。
@@ -972,8 +987,8 @@ def _apply_env_overrides_for_config(
 
 def _validate_and_build(
     config_class: type,
-    values: Dict[str, Any],
-    previous: Optional[Any] = None,
+    values: dict[str, Any],
+    previous: Any | None = None,
 ) -> Any:
     """验证配置值并构建 dataclass 实例。
 
@@ -990,7 +1005,7 @@ def _validate_and_build(
         已验证的 dataclass 实例。
     """
     fields = dataclasses.fields(config_class)
-    valid_kwargs: Dict[str, Any] = {}
+    valid_kwargs: dict[str, Any] = {}
 
     for f in fields:
         if f.name not in values:
@@ -1067,7 +1082,7 @@ def _check_type(value: Any, type_hint: str) -> bool:
     return True  # 未知类型，通过
 
 
-def _check_constraint(value: Any, constraint: Dict[str, Any]) -> bool:
+def _check_constraint(value: Any, constraint: dict[str, Any]) -> bool:
     """检查值是否满足约束条件。
 
     Args:
@@ -1082,10 +1097,7 @@ def _check_constraint(value: Any, constraint: Dict[str, Any]) -> bool:
 
     if "min" in constraint and value < constraint["min"]:
         return False
-    if "max" in constraint and value > constraint["max"]:
-        return False
-
-    return True
+    return not ("max" in constraint and value > constraint["max"])
 
 
 class IntegrationConfigs:
@@ -1111,8 +1123,8 @@ class IntegrationConfigs:
 
 
 def parse_integration_configs(
-    config_dict: Dict[str, Any],
-    previous: Optional[IntegrationConfigs] = None,
+    config_dict: dict[str, Any],
+    previous: IntegrationConfigs | None = None,
 ) -> IntegrationConfigs:
     """从完整配置字典解析所有 7 个集成配置。
 

@@ -26,16 +26,24 @@ def resolve_collection_name(model_name: str) -> str:
 
 
 @lru_cache(maxsize=8)
-def _get_model(model_name: str) -> Any:
+def _get_model(model_name: str, device: str = "auto") -> Any:
     """加载 sentence-transformers 模型(lazy import,避免开发机强依赖)."""
     from sentence_transformers import SentenceTransformer
 
-    return SentenceTransformer(model_name)
+    normalized = (device or "auto").strip().lower()
+    if normalized == "cuda":
+        import torch
+
+        if not torch.cuda.is_available():
+            raise RuntimeError("embedding_cuda_unavailable")
+    if normalized == "auto":
+        return SentenceTransformer(model_name)
+    return SentenceTransformer(model_name, device=normalized)
 
 
-def probe_embedding_dimension(model_name: str) -> int:
+def probe_embedding_dimension(model_name: str, device: str = "auto") -> int:
     """编码一次探测向量,取维度。用于建 Qdrant 集合前确定 vector_size。"""
-    vector = _get_model(model_name).encode(
+    vector = _get_model(model_name, device).encode(
         ["dimension probe"],
         normalize_embeddings=True,
         show_progress_bar=False,
@@ -43,9 +51,13 @@ def probe_embedding_dimension(model_name: str) -> int:
     return len(vector)
 
 
-def encode_texts(model_name: str, texts: list[str]) -> list[list[float]]:
+def encode_texts(
+    model_name: str,
+    texts: list[str],
+    device: str = "auto",
+) -> list[list[float]]:
     """批量编码文本,返回归一化向量列表(list[list[float]])."""
-    vectors = _get_model(model_name).encode(
+    vectors = _get_model(model_name, device).encode(
         texts,
         normalize_embeddings=True,
         show_progress_bar=False,

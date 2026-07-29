@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import pytest
 from pathlib import Path
+
+import pytest
 
 from benchmarks.compare_to_expected import (
     compute_deviation,
-    parse_expected_results,
     parse_current_results,
+    parse_expected_results,
 )
 
 

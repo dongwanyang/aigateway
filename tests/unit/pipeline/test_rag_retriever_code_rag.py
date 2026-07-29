@@ -8,11 +8,10 @@ from __future__ import annotations
 import asyncio
 import os
 from types import SimpleNamespace
-from typing import Any, Dict, List
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 from aigateway_core.dispatch.context import PipelineContext
 from aigateway_core.pipelines.understanding.rag.rag_retriever_plugin import (
     RAGRetrieverPlugin,
@@ -20,7 +19,6 @@ from aigateway_core.pipelines.understanding.rag.rag_retriever_plugin import (
     _expand_code_hit_metadata,
     _filter_code_collections,
 )
-
 
 # ---------------------------------------------------------------------------
 # Pure helpers
@@ -33,7 +31,7 @@ def test_filter_code_collections_only_keeps_rag_code_prefix() -> None:
 
 
 def test_filter_code_collections_ignores_non_strings() -> None:
-    names: List[Any] = [None, 42, "rag_code_x", ""]
+    names: list[Any] = [None, 42, "rag_code_x", ""]
     assert _filter_code_collections(names) == ["rag_code_x"]
 
 
@@ -173,7 +171,7 @@ def test_expand_code_hits_with_graph_invokes_lookup_when_hops_positive() -> None
     plugin._config.code_graph_db_dir = "/tmp/code_graphs_test"
     plugin._config.code_rag_graph_hops = 1
 
-    call_log: Dict[str, Any] = {"lookup": 0, "fetch": 0}
+    call_log: dict[str, Any] = {"lookup": 0, "fetch": 0}
 
     def _fake_lookup(graph_repo_path, file_path, symbol, *, hops):
         call_log["lookup"] += 1

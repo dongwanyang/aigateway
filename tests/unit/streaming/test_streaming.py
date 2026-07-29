@@ -5,15 +5,16 @@ Verifies:
 - SSE headers are set (Cache-Control, Connection, X-Accel-Buffering)
 - SSEGenerator is wrapped correctly
 """
-import sys
 import os
+import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-api", "src"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 
 import asyncio
-import pytest
 from unittest.mock import MagicMock, patch
+
+import pytest
 from fastapi.responses import StreamingResponse
 
 

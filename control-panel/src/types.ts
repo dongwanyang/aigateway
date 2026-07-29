@@ -76,6 +76,16 @@ export interface ChatCompletionRequest {
   tool_choice?: string | { type: 'function'; function: { name: string } }
   stop?: string | string[]
   user?: string
+  generation_options?: GenerationOptions
+}
+
+export interface GenerationOptions {
+  backend: 'auto' | 'local' | 'cloud'
+  preset_id?: string
+  prompt_mode?: 'raw' | 'auto' | 'enhance'
+  quality?: 'standard' | 'creative_refine' | 'faithful_4k'
+  width?: number
+  height?: number
 }
 
 export interface ChatChoice {
@@ -474,10 +484,14 @@ export interface ChatDraftState {
   draftId: string
   previewUrl: string            // "/admin/draft/{id}/preview"
   mediaType: 'image' | 'video'
-  status: 'generating' | 'pending' | 'confirming' | 'confirmed' | 'rejecting' | 'rejected' | 'expired' | 'error'
+  status: 'queued' | 'running' | 'generating' | 'pending' | 'refining' | 'confirming' | 'completed' | 'confirmed' | 'rejecting' | 'rejected' | 'cancelled' | 'expired' | 'error'
+  progress?: number
+  progressSource?: string
+  stage?: string
+  workflowVersion?: string
   /** 渲染时懒加载的预览图 data URL(不持久化) */
   previewDataUrl?: string
-  /** confirm 后的高清图 data URL(不持久化) */
+  /** confirm 后的高清图或 MP4 data URL(不持久化) */
   resultDataUrl?: string
   /** 刷新后 resultDataUrl 丢失且后端无重取接口 → 标记为降级预览,避免"已确认·高清图已生成"误导 */
   resultLost?: boolean

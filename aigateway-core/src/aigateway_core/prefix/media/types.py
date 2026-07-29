@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 class MediaType(Enum):
@@ -35,15 +35,15 @@ class MediaContent:
     """媒体内容的统一抽象。"""
 
     media_type: MediaType
-    source_url: Optional[str] = None
-    raw_data: Optional[bytes] = None
-    mime_type: Optional[str] = None
+    source_url: str | None = None
+    raw_data: bytes | None = None
+    mime_type: str | None = None
     size_bytes: int = 0
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
     # 处理后产出
-    extracted_text: Optional[str] = None
-    optimized_data: Optional[bytes] = None
-    embedding_vector: Optional[List[float]] = None
+    extracted_text: str | None = None
+    optimized_data: bytes | None = None
+    embedding_vector: list[float] | None = None
     token_savings: int = 0
 
 
@@ -54,6 +54,6 @@ class ProcessorResult:
     success: bool
     processor_name: str
     duration_ms: float
-    output: Optional[Any] = None
-    error: Optional[str] = None
+    output: Any | None = None
+    error: str | None = None
     token_savings: int = 0

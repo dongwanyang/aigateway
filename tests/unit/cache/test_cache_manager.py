@@ -13,8 +13,8 @@
 """
 
 import asyncio
-import sys
 import os
+import sys
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -23,18 +23,17 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 
 from aigateway_core.prefix.cache.cache_manager import (
+    L1_MAX_VALUE_BYTES,
+    L2_MAX_VALUE_BYTES,
+    L3_CLEANUP_INTERVAL,
+    L3_DEFAULT_TTL,
+    L3_MIN_TOKEN_COUNT,
     CacheManager,
     L3CleanupScheduler,
     LightweightReranker,
     SemanticCacheWithRerank,
     _emit_cache_debug,
-    L1_MAX_VALUE_BYTES,
-    L2_MAX_VALUE_BYTES,
-    L3_MIN_TOKEN_COUNT,
-    L3_DEFAULT_TTL,
-    L3_CLEANUP_INTERVAL,
 )
-
 
 # ==================================================================
 # 常量测试

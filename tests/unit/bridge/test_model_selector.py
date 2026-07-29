@@ -9,7 +9,7 @@ real class and are intentionally NOT used here.
 import asyncio
 import os
 import sys
-from unittest.mock import MagicMock, AsyncMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -195,10 +195,9 @@ async def test_all_unhealthy_falls_back_to_pool_first():
 async def test_select_timeout_returns_default_model():
     """Timeout in health check should return default_model."""
     bridge = _make_bridge()
-    cooldown = MagicMock()
+    MagicMock()
     # Override _select to hang past the timeout, triggering asyncio.wait_for timeout
     async def slow_select(*a, **k):
-        import asyncio
         await asyncio.sleep(10)
         return "never"
     sel = ModelSelector(bridge=bridge, config={}, default_model="fallback-model", timeout_seconds=0.05)

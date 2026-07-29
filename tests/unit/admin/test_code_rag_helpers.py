@@ -3,15 +3,14 @@
 Locked into repo-root config files so misplaced keys and missing volumes
 fail loudly instead of silently drifting.
 """
+import io
 import os
 import tempfile
-import io
 import tomllib
 from pathlib import Path
 
 import pytest
 import yaml
-
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent  # tests/unit/admin/ → aigateway/ (parent.parent.parent.parent)
 
@@ -118,27 +117,30 @@ def test_dependency_groups_and_docker_targets_stay_split() -> None:
         "gateway-rag",
         "gateway-vision",
         "gateway-full",
-        "gateway-gpu",
+        "gateway-rag-cpu",
+        "gateway-vision-cpu",
+        "gateway-full-cpu",
+        "comfyui",
     ):
         assert f"AS {target}" in dockerfile
-    assert "requirements.txt" not in dockerfile
+    assert "COPY aigateway-api/requirements.txt" not in dockerfile
     assert "pip install --no-cache-dir torch" not in dockerfile
 
     quickstart_script = (REPO_ROOT / "scripts" / "quickstart.sh").read_text(encoding="utf-8")
-    assert "--profile runtime|rag|vision|full" in quickstart_script
+    assert "--edition lite|knowledge|studio|full" in quickstart_script
     assert ".aigateway-install.env" in quickstart_script
-    assert "--add rag|vision|gpu" in quickstart_script
+    assert "--distribution image|source" in quickstart_script
 
 
 # ---------------------------------------------------------------------------
 # Task 2: helper modules
 # ---------------------------------------------------------------------------
 
-from aigateway_core.pipelines.understanding.code_rag.embedding_router import (  # noqa: E402
+from aigateway_core.pipelines.understanding.code_rag.embedding_router import (
     materialize_model_slug,
     resolve_collection_name,
 )
-from aigateway_core.pipelines.understanding.code_rag.splitter import (  # noqa: E402
+from aigateway_core.pipelines.understanding.code_rag.splitter import (
     compute_line_span,
     is_path_allowed,
 )
@@ -339,7 +341,9 @@ def _build_codegraph_db_with_edges(db_path: Path, nodes: list[dict], edges: list
 
 def test_build_symbol_chunks_progress_callback(tmp_path: Path) -> None:
     """build_symbol_chunks 循环前知道 total, 每 200 符号回写 progress_cb。"""
-    from aigateway_core.pipelines.understanding.code_rag.splitter import build_symbol_chunks
+    from aigateway_core.pipelines.understanding.code_rag.splitter import (
+        build_symbol_chunks,
+    )
 
     repo = _build_codegraph_repo(
         tmp_path,
@@ -363,8 +367,11 @@ def test_build_symbol_chunks_progress_callback(tmp_path: Path) -> None:
 
 def test_get_callers_callees_db_direct_matches_cli(tmp_path: Path) -> None:
     """db 直读后 get_callers/get_callees 与旧 CLI 结果一致。"""
-    from aigateway_core.pipelines.understanding.code_rag.graph_query import get_callers, get_callees
     from aigateway_core.pipelines.understanding.code_rag import graph_query
+    from aigateway_core.pipelines.understanding.code_rag.graph_query import (
+        get_callees,
+        get_callers,
+    )
 
     repo = _build_codegraph_repo(
         tmp_path,
@@ -400,7 +407,7 @@ def test_cached_edges_rebuild_on_file_hash_change(tmp_path: Path) -> None:
     # 清理模块级缓存(防其它测试污染)
     graph_query._edges_cache.clear()
 
-    callers1, callees1 = graph_query._get_cached_edges(str(tmp_path / "repo"))
+    _callers1, callees1 = graph_query._get_cached_edges(str(tmp_path / "repo"))
     assert callees1["f:alpha"][0]["name"] == "beta"
 
     # 改 db:加一条 calls 边 + 改 file hash
@@ -411,7 +418,7 @@ def test_cached_edges_rebuild_on_file_hash_change(tmp_path: Path) -> None:
     conn.commit()
     conn.close()
 
-    callers2, callees2 = graph_query._get_cached_edges(str(tmp_path / "repo"))
+    _callers2, callees2 = graph_query._get_cached_edges(str(tmp_path / "repo"))
     assert callees2["f:beta"][0]["name"] == "gamma"  # 重建后看到新边
 
 
@@ -449,6 +456,7 @@ def test_cached_edges_concurrent_access_is_thread_safe(tmp_path: Path) -> None:
     """
     import sqlite3
     import threading
+
     from aigateway_core.pipelines.understanding.code_rag import graph_query
 
     def _seed(repo_dir: Path, idx: int) -> str:
@@ -524,7 +532,9 @@ def test_invalidate_edges_cache_key_matches_seed_under_symlink(tmp_path: Path) -
 
 
 def test_read_call_edges_returns_callers_and_callees(tmp_path: Path) -> None:
-    from aigateway_core.pipelines.understanding.code_rag.graph_query import read_call_edges
+    from aigateway_core.pipelines.understanding.code_rag.graph_query import (
+        read_call_edges,
+    )
 
     db_path = tmp_path / "repo" / ".codegraph" / "codegraph.db"
     # alpha -> beta -> gamma; caller -> alpha
@@ -553,7 +563,9 @@ def test_read_call_edges_returns_callers_and_callees(tmp_path: Path) -> None:
 
 
 def test_read_call_edges_empty_when_no_db(tmp_path: Path) -> None:
-    from aigateway_core.pipelines.understanding.code_rag.graph_query import read_call_edges
+    from aigateway_core.pipelines.understanding.code_rag.graph_query import (
+        read_call_edges,
+    )
 
     callers, callees = read_call_edges(str(tmp_path / "nope"))
     assert callers == {}
@@ -562,7 +574,9 @@ def test_read_call_edges_empty_when_no_db(tmp_path: Path) -> None:
 
 def test_lookup_symbol_metadata_reads_codegraph_sqlite_schema(tmp_path: Path) -> None:
     """lookup_symbol_metadata 走 codegraph CLI(重构后),验证 callers/callees/imports。"""
-    from aigateway_core.pipelines.understanding.code_rag.graph_query import lookup_symbol_metadata
+    from aigateway_core.pipelines.understanding.code_rag.graph_query import (
+        lookup_symbol_metadata,
+    )
 
     repo = _build_codegraph_repo(
         tmp_path,
@@ -593,7 +607,9 @@ def test_lookup_symbol_metadata_matches_graph_path_with_builder_prefix(tmp_path:
     带 src/ 前缀 (src/auth.py), 与调用方传入的相对源根路径 (auth.py) 对不上.
     查询端按后缀归一化匹配, 否则符号 miss → chunk_type 退化成 module。
     """
-    from aigateway_core.pipelines.understanding.code_rag.graph_query import lookup_symbol_metadata
+    from aigateway_core.pipelines.understanding.code_rag.graph_query import (
+        lookup_symbol_metadata,
+    )
 
     repo = _build_codegraph_repo(
         tmp_path,
@@ -611,7 +627,9 @@ def test_lookup_related_symbols_strips_builder_prefix_from_file_path(tmp_path: P
     而 Qdrant 存的是 splitter 路径 (无 src/ 前缀). impact 必须把 graph 节点的
     前缀剥掉, 否则 scroll 永远 miss, 相关符号增强失效。
     """
-    from aigateway_core.pipelines.understanding.code_rag.graph_query import lookup_related_symbols_strict
+    from aigateway_core.pipelines.understanding.code_rag.graph_query import (
+        lookup_related_symbols_strict,
+    )
 
     repo = _build_codegraph_repo(
         tmp_path,
@@ -717,49 +735,63 @@ def test_rag_retriever_source_mentions_real_graph_hops() -> None:
 
 
 def test_extract_top_symbol_finds_python_def() -> None:
-    from aigateway_core.pipelines.understanding.code_rag.splitter import extract_top_symbol
+    from aigateway_core.pipelines.understanding.code_rag.splitter import (
+        extract_top_symbol,
+    )
 
     result = extract_top_symbol("def login(user):\n    return user\n")
     assert result == ("function", "login")
 
 
 def test_extract_top_symbol_finds_python_async_def() -> None:
-    from aigateway_core.pipelines.understanding.code_rag.splitter import extract_top_symbol
+    from aigateway_core.pipelines.understanding.code_rag.splitter import (
+        extract_top_symbol,
+    )
 
     result = extract_top_symbol("async def fetch(url):\n    pass\n")
     assert result == ("function", "fetch")
 
 
 def test_extract_top_symbol_finds_python_class() -> None:
-    from aigateway_core.pipelines.understanding.code_rag.splitter import extract_top_symbol
+    from aigateway_core.pipelines.understanding.code_rag.splitter import (
+        extract_top_symbol,
+    )
 
     result = extract_top_symbol("class UserService:\n    pass\n")
     assert result == ("class", "UserService")
 
 
 def test_extract_top_symbol_finds_js_function() -> None:
-    from aigateway_core.pipelines.understanding.code_rag.splitter import extract_top_symbol
+    from aigateway_core.pipelines.understanding.code_rag.splitter import (
+        extract_top_symbol,
+    )
 
     result = extract_top_symbol("export async function login(user) {\n  return user;\n}\n")
     assert result == ("function", "login")
 
 
 def test_extract_top_symbol_finds_go_func() -> None:
-    from aigateway_core.pipelines.understanding.code_rag.splitter import extract_top_symbol
+    from aigateway_core.pipelines.understanding.code_rag.splitter import (
+        extract_top_symbol,
+    )
 
     result = extract_top_symbol("func (s *Server) Handle(req Request) error {\n  return nil\n}\n")
     assert result == ("function", "Handle")
 
 
 def test_extract_top_symbol_finds_rust_fn() -> None:
-    from aigateway_core.pipelines.understanding.code_rag.splitter import extract_top_symbol
+    from aigateway_core.pipelines.understanding.code_rag.splitter import (
+        extract_top_symbol,
+    )
 
     result = extract_top_symbol("pub async fn login(user: String) -> Result<()> {\n}\n")
     assert result == ("function", "login")
 
 
 def test_extract_top_symbol_returns_none_for_module_scope() -> None:
-    from aigateway_core.pipelines.understanding.code_rag.splitter import extract_top_symbol
+    from aigateway_core.pipelines.understanding.code_rag.splitter import (
+        extract_top_symbol,
+    )
 
     assert extract_top_symbol("# just a comment\nx = 1\n") is None
     assert extract_top_symbol("") is None
@@ -769,7 +801,9 @@ def test_split_code_directory_writes_symbol_names(tmp_path) -> None:
     """回归:切完的 chunk 字典必须携带 function_name/class_name,
     否则 code_rag_routes 侧的 strict-lookup 拿到 symbol=None 直接短路。
     """
-    from aigateway_core.pipelines.understanding.code_rag.splitter import split_code_directory
+    from aigateway_core.pipelines.understanding.code_rag.splitter import (
+        split_code_directory,
+    )
 
     src = tmp_path / "auth.py"
     src.write_text(
@@ -963,7 +997,7 @@ def test_code_rag_is_allowed_top_level() -> None:
 
     from aigateway_core.shared.config import ConfigManager
 
-    stream: "io.StringIO" = io.StringIO()
+    stream: io.StringIO = io.StringIO()
     handler = logging.StreamHandler(stream)
     cfg_logger = logging.getLogger("aigateway_core.shared.config")
     cfg_logger.addHandler(handler)

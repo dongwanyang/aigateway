@@ -1,12 +1,14 @@
 """Admin debug endpoints —— GET /admin/config/debug 返回 5 维度配置."""
-import sys, os
+import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-api", "src"))
 
 import httpx
 import pytest
-from fastapi import FastAPI
 from aigateway_core.shared.debug_config import DebugConfig
+from fastapi import FastAPI
 
 
 @pytest.mark.asyncio

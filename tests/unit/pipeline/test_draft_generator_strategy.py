@@ -4,8 +4,7 @@ Tests for DraftGeneratorStrategy — 渐进式生成工作流核心逻辑
 
 验证:
 - 图片请求生成 512x512 预览
-- 视频请求按时间间隔动态生成关键帧（默认每 5 秒一帧，最少 2 帧）
-- 用户可显式指定关键帧数量覆盖间隔计算
+- 视频请求先生成一张低成本关键帧，确认后再运行图生视频工作流
 - confirm_draft: 触发 Upscaler 放大到目标分辨率
 - reject_draft: 重新生成草图，不缓存被拒绝的草图
 - 重试次数限制，耗尽后返回错误并保留最近草图
@@ -27,9 +26,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core
 from aigateway_core.pipelines.generation._common.config import DraftWorkflowConfig
 from aigateway_core.pipelines.generation._common.exceptions import DraftWorkflowError
 from aigateway_core.pipelines.generation._common.models import (
-    DRAFT_STATUS_CONFIRMED,
+    DRAFT_STATUS_COMPLETED,
+    DRAFT_STATUS_FAILED,
     DRAFT_STATUS_GENERATING,
     DRAFT_STATUS_PENDING,
+    DRAFT_STATUS_QUEUED,
+    DRAFT_STATUS_REFINING,
+    DRAFT_STATUS_RUNNING,
     DraftResult,
     GenerationRequest,
     UpscaleResult,
@@ -65,6 +68,25 @@ def strategy(default_config, monkeypatch):
     """Create a DraftGeneratorStrategy instance with in-memory store + tmp store_dir."""
     instance = DraftGeneratorStrategy(config=default_config, redis_client=None)
     monkeypatch.setattr(instance, "_check_comfyui", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        instance,
+        "_generate_image_preview_with_comfyui",
+        AsyncMock(return_value=b"\x89PNG\r\n\x1a\npreview"),
+    )
+    monkeypatch.setattr(
+        instance,
+        "_generate_video_previews_with_comfyui",
+        AsyncMock(
+            side_effect=lambda _request, _config, **_kwargs: [
+                b"\x89PNG\r\n\x1a\nframe"
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        instance,
+        "_upscale_with_comfyui",
+        AsyncMock(return_value=b"\x89PNG\r\n\x1a\nrefined"),
+    )
     return instance
 
 
@@ -97,7 +119,12 @@ async def _await_generating(strategy, draft_id, timeout=5.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
         d = await strategy.get_draft(draft_id)
-        if d is not None and d.status != DRAFT_STATUS_GENERATING:
+        if d is not None and d.status not in {
+            DRAFT_STATUS_GENERATING,
+            DRAFT_STATUS_QUEUED,
+            DRAFT_STATUS_RUNNING,
+            DRAFT_STATUS_REFINING,
+        }:
             return d
         await asyncio.sleep(0.01)
     pytest.fail(
@@ -119,7 +146,7 @@ class TestGenerateDraftImage:
         """Image request should produce exactly one preview (after async generation)."""
         result = await strategy.generate_draft(image_request, default_config)
         # submit_draft 立即返回 generating，previews 空
-        assert result.status == DRAFT_STATUS_GENERATING
+        assert result.status == DRAFT_STATUS_QUEUED
         assert len(result.previews) == 0
 
         # 后台 task 完成后 status=pending，previews 落盘
@@ -140,7 +167,7 @@ class TestGenerateDraftImage:
     async def test_status_is_pending(self, strategy, image_request, default_config):
         """After async generation completes, draft status should be 'pending'."""
         result = await strategy.generate_draft(image_request, default_config)
-        assert result.status == DRAFT_STATUS_GENERATING  # 提交即 generating
+        assert result.status == DRAFT_STATUS_QUEUED
 
         final = await _await_generating(strategy, result.draft_id)
         assert final.status == DRAFT_STATUS_PENDING
@@ -175,20 +202,19 @@ class TestGenerateDraftImage:
 
 
 class TestGenerateDraftVideo:
-    """Tests for video draft generation with keyframes."""
+    """Tests for low-cost video keyframe draft generation."""
 
     @pytest.mark.asyncio
     async def test_default_keyframe_count(self, strategy, video_request, default_config):
-        """Video: default is ceil(30/5) = 6 keyframes (after async generation)."""
+        """Video draft uses one approved keyframe before expensive generation."""
         result = await strategy.generate_draft(video_request, default_config)
         final = await _await_generating(strategy, result.draft_id)
 
-        # ceil(30 / 5) = 6 keyframes
-        assert len(final.previews) == 6
+        assert len(final.previews) == 1
 
     @pytest.mark.asyncio
     async def test_minimum_two_keyframes(self, strategy, video_request, tmp_path):
-        """Video: at least 2 keyframes even with very long intervals."""
+        """Legacy preview interval no longer multiplies draft GPU work."""
         config = DraftWorkflowConfig(
             preview_video_duration_seconds=3,
             preview_keyframe_interval_seconds=60,  # interval > duration
@@ -197,31 +223,32 @@ class TestGenerateDraftVideo:
         result = await strategy.generate_draft(video_request, config)
         final = await _await_generating(strategy, result.draft_id)
 
-        assert len(final.previews) >= 2
+        assert len(final.previews) == 1
 
     @pytest.mark.asyncio
     async def test_explicit_keyframe_count_override(
         self, strategy, video_request, default_config
     ):
-        """User can explicitly specify keyframe count."""
+        """Legacy keyframe count is recorded but does not multiply previews."""
         result = await strategy.generate_draft(
             video_request, default_config, keyframe_count=10
         )
         final = await _await_generating(strategy, result.draft_id)
 
-        assert len(final.previews) == 10
+        assert len(final.previews) == 1
+        assert final.generation_params["explicit_keyframe_count"] == 10
 
     @pytest.mark.asyncio
     async def test_explicit_keyframe_count_minimum_two(
         self, strategy, video_request, default_config
     ):
-        """Explicit keyframe count is clamped to minimum 2."""
+        """A legacy count of one still produces exactly one approved keyframe."""
         result = await strategy.generate_draft(
             video_request, default_config, keyframe_count=1
         )
         final = await _await_generating(strategy, result.draft_id)
 
-        assert len(final.previews) == 2
+        assert len(final.previews) == 1
 
     @pytest.mark.asyncio
     async def test_generation_params_records_media_type(
@@ -257,14 +284,7 @@ class TestConfirmDraft:
     async def test_confirm_target_resolution(
         self, strategy, image_request, default_config
     ):
-        """Upscale result target_resolution reflects the actual output path.
-
-        - 无 RealESRGAN 依赖（CI/单元测试环境）：_super_resolve 返回 None，
-          走 _simulate_upscale 占位，target_resolution = 配置默认 (1920, 1080)。
-        - 有 RealESRGAN 依赖（Docker 生产镜像）：_super_resolve 等比放大到
-          长边 4096，target_resolution = 实际输出 (4096, 4096)。
-        两种环境下都应返回合理的整数分辨率，且与 result.algorithm_used 一致。
-        """
+        """ComfyUI refinement returns the requested bounded resolution."""
         draft = await strategy.generate_draft(image_request, default_config)
         await _await_generating(strategy, draft.draft_id)
         result = await strategy.confirm_draft(draft.draft_id)
@@ -275,19 +295,18 @@ class TestConfirmDraft:
         w, h = result.target_resolution
         assert isinstance(w, int) and isinstance(h, int)
         assert w > 0 and h > 0
-        # 占位路径返回配置的 (1920, 1080)；真实超分路径返回 (4096, 4096)
-        assert result.target_resolution in ((1920, 1080), (4096, 4096))
+        assert result.target_resolution == (1920, 1080)
 
     @pytest.mark.asyncio
     async def test_confirm_algorithm_from_config(
         self, strategy, image_request, default_config
     ):
-        """Upscale result should use the configured algorithm."""
+        """Result identifies the versioned ComfyUI workflow."""
         draft = await strategy.generate_draft(image_request, default_config)
         await _await_generating(strategy, draft.draft_id)
         result = await strategy.confirm_draft(draft.draft_id)
 
-        assert result.algorithm_used == "real-esrgan"
+        assert result.algorithm_used == "comfyui:image-v1"
 
     @pytest.mark.asyncio
     async def test_confirm_updates_status(
@@ -300,7 +319,24 @@ class TestConfirmDraft:
 
         stored = await strategy.get_draft(draft.draft_id)
         assert stored is not None
-        assert stored.status == DRAFT_STATUS_CONFIRMED
+        assert stored.status == DRAFT_STATUS_COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_claimed_refining_draft_keeps_persisted_preview(
+        self, strategy, image_request, default_config
+    ):
+        """Confirm claim must not hide the persisted preview from refinement."""
+        draft = await strategy.generate_draft(image_request, default_config)
+        pending = await _await_generating(strategy, draft.draft_id)
+        assert pending.status == DRAFT_STATUS_PENDING
+        assert pending.previews
+
+        claimed, ok = await strategy._claim_draft_confirmation(draft.draft_id)
+
+        assert ok is True
+        assert claimed is not None
+        assert claimed.status == DRAFT_STATUS_REFINING
+        assert claimed.previews == pending.previews
 
     @pytest.mark.asyncio
     async def test_confirm_nonexistent_raises_error(self, strategy):
@@ -398,7 +434,9 @@ class TestRejectDraft:
 
         # Reject twice (attempt 1 -> 2, 2 -> 3)
         new_draft = await strategy.reject_draft(draft.draft_id)
+        await _await_generating(strategy, new_draft.draft_id)
         new_draft2 = await strategy.reject_draft(new_draft.draft_id)
+        await _await_generating(strategy, new_draft2.draft_id)
 
         # Third rejection should fail (attempt_number == 3 == max)
         with pytest.raises(DraftWorkflowError, match="Regeneration limit"):
@@ -413,6 +451,7 @@ class TestRejectDraft:
         draft = await strategy.generate_draft(image_request, config)
         await _await_generating(strategy, draft.draft_id)
         new_draft = await strategy.reject_draft(draft.draft_id)
+        await _await_generating(strategy, new_draft.draft_id)
 
         # This rejection should fail
         with pytest.raises(DraftWorkflowError):
@@ -471,68 +510,36 @@ def test_video_submit_result_dataclass():
 
 
 @pytest.mark.asyncio
-async def test_confirm_video_draft_calls_bridge_and_returns_video_id(strategy, video_request, default_config):
-    """视频草稿确认后应调 bridge._do_video_generation,存 video_id,返回 VideoSubmitResult。"""
+async def test_confirm_video_draft_fails_closed_without_comfy_video_workflow(strategy, video_request, default_config):
+    """图片阶段不能把视频确认静默回退到 provider。"""
+    strategy._comfyui_config.video_enabled = False
     result = await strategy.generate_draft(video_request, default_config)
     draft = await _await_generating(strategy, result.draft_id)
     assert draft.media_type == "video"
 
-    # mock bridge: _do_video_generation 返回含 video_id 的结果
     from unittest.mock import AsyncMock
     strategy._litellm_bridge = AsyncMock()
-    strategy._litellm_bridge._do_video_generation = AsyncMock(return_value={
-        "_meta": {"video_id": "vid_test_123"},
-        "usage": {},
-    })
-
-    out = await strategy.confirm_draft(draft.draft_id)
-    assert isinstance(out, VideoSubmitResult)
-    assert out.video_id == "vid_test_123"
-    assert out.status == "generating"
-    # bridge 被调用
-    strategy._litellm_bridge._do_video_generation.assert_awaited_once()
-    # video_id 持久化到 draft
-    reloaded = await strategy._load_draft(draft.draft_id)
-    assert reloaded is not None
-    assert reloaded.video_id == "vid_test_123"
-    assert reloaded.status == DRAFT_STATUS_CONFIRMED
+    with pytest.raises(DraftWorkflowError, match="comfyui_video_not_enabled"):
+        await strategy.confirm_draft(draft.draft_id)
+    strategy._litellm_bridge._do_video_generation.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_confirm_video_draft_is_idempotent_under_concurrency(strategy, video_request, default_config):
-    """Concurrent confirm calls should submit at most one provider video task."""
+async def test_confirm_video_draft_never_submits_provider_under_concurrency(strategy, video_request, default_config):
+    """并发视频确认也不能调用 provider。"""
+    strategy._comfyui_config.video_enabled = False
     result = await strategy.generate_draft(video_request, default_config)
     draft = await _await_generating(strategy, result.draft_id)
 
     from unittest.mock import AsyncMock
-    started = asyncio.Event()
-    release = asyncio.Event()
-
-    async def submit_once(**_kwargs):
-        started.set()
-        await release.wait()
-        return {"_meta": {"video_id": "vid_once"}, "usage": {}}
-
     strategy._litellm_bridge = AsyncMock()
-    strategy._litellm_bridge._do_video_generation = AsyncMock(side_effect=submit_once)
-
-    first_task = asyncio.create_task(strategy.confirm_draft(draft.draft_id))
-    await started.wait()
-    second_task = asyncio.create_task(strategy.confirm_draft(draft.draft_id))
-    await asyncio.sleep(0)
-    release.set()
-
-    first = await first_task
-    assert isinstance(first, VideoSubmitResult)
-    assert first.video_id == "vid_once"
-    with pytest.raises(DraftWorkflowError, match="cannot be confirmed"):
-        await second_task
-    strategy._litellm_bridge._do_video_generation.assert_awaited_once()
-
-    retry = await strategy.confirm_draft(draft.draft_id)
-    assert isinstance(retry, VideoSubmitResult)
-    assert retry.video_id == "vid_once"
-    strategy._litellm_bridge._do_video_generation.assert_awaited_once()
+    results = await asyncio.gather(
+        strategy.confirm_draft(draft.draft_id),
+        strategy.confirm_draft(draft.draft_id),
+        return_exceptions=True,
+    )
+    assert all(isinstance(item, DraftWorkflowError) for item in results)
+    strategy._litellm_bridge._do_video_generation.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -549,3 +556,193 @@ async def test_confirm_image_draft_still_returns_upscale_result(strategy, image_
     assert isinstance(out, UpscaleResult)
     assert not isinstance(out, VideoSubmitResult)
     strategy._litellm_bridge._do_video_generation.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_sync_marks_stale_running_draft_without_prompt_failed(strategy, image_request):
+    """A lost background worker must not leave the browser stuck at 10%."""
+    draft = DraftResult(
+        draft_id="stale-running",
+        previews=[],
+        generation_params={"trace_id": "trace-stale"},
+        created_at=time.time() - 120,
+        expires_at=time.time() + 3600,
+        attempt_number=1,
+        max_attempts=5,
+        status=DRAFT_STATUS_RUNNING,
+        media_type="image",
+        session_id="sess-stale",
+        progress=0.1,
+        stage="running",
+    )
+    await strategy._store_draft(draft, ttl_seconds=3600)
+
+    synced = await strategy.sync_draft_runtime_state(draft.draft_id)
+
+    assert synced is not None
+    assert synced.status == DRAFT_STATUS_FAILED
+    assert synced.error == "draft_worker_lost"
+    assert synced.progress == 0.0
+    reloaded = await strategy.get_draft(draft.draft_id)
+    assert reloaded is not None
+    assert reloaded.status == DRAFT_STATUS_FAILED
+    assert reloaded.error == "draft_worker_lost"
+
+
+@pytest.mark.asyncio
+async def test_sync_keeps_running_draft_when_comfyui_state_check_is_transient(
+    strategy,
+):
+    """Busy ComfyUI status endpoints must not turn preview polling into 500/lost."""
+    draft = DraftResult(
+        draft_id="running-comfyui-busy",
+        previews=[],
+        generation_params={"trace_id": "trace-comfyui-busy"},
+        created_at=time.time() - 120,
+        expires_at=time.time() + 3600,
+        attempt_number=1,
+        max_attempts=5,
+        status=DRAFT_STATUS_RUNNING,
+        media_type="image",
+        session_id="sess-comfyui-busy",
+        progress=0.3125,
+        stage="sampling 3/12",
+        comfy_prompt_id="prompt-busy",
+    )
+    await strategy._store_draft(draft, ttl_seconds=3600)
+    strategy._get_comfy_prompt_state = AsyncMock(side_effect=TimeoutError)
+
+    synced = await strategy.sync_draft_runtime_state(draft.draft_id)
+
+    assert synced is not None
+    assert synced.status == DRAFT_STATUS_RUNNING
+    assert synced.progress == 0.3125
+    assert synced.stage == "sampling 3/12"
+    assert synced.error is None
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancels_and_awaits_owned_background_tasks(strategy):
+    started = asyncio.Event()
+
+    async def never_finishes():
+        started.set()
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(never_finishes())
+    strategy._bg_tasks.add(task)
+    task.add_done_callback(strategy._bg_tasks.discard)
+    await started.wait()
+
+    await strategy.shutdown()
+
+    assert task.cancelled()
+    assert strategy._bg_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_delete_session_rejects_wrong_owner_without_deleting(strategy):
+    draft = DraftResult(
+        draft_id="draft-owned",
+        previews=[b"preview"],
+        generation_params={},
+        created_at=time.time(),
+        expires_at=time.time() + 60,
+        attempt_number=1,
+        max_attempts=3,
+        status=DRAFT_STATUS_PENDING,
+        media_type="image",
+        session_id="session-owned",
+        user_id="alice",
+        group_id="grp-team",
+    )
+    await strategy._store_draft(draft, ttl_seconds=60)
+
+    with pytest.raises(DraftWorkflowError, match="draft_session_forbidden"):
+        await strategy.delete_session(
+            "session-owned",
+            user_id="mallory",
+            group_id="grp-other",
+        )
+
+    assert await strategy.get_draft("draft-owned") is not None
+    deleted = await strategy.delete_session(
+        "session-owned",
+        user_id="alice",
+        group_id="grp-team",
+    )
+    assert deleted == 1
+    assert await strategy.get_draft("draft-owned") is None
+
+
+@pytest.mark.asyncio
+async def test_delete_session_rejects_missing_owner_metadata(strategy):
+    draft = DraftResult(
+        draft_id="draft-legacy",
+        previews=[b"preview"],
+        generation_params={},
+        created_at=time.time(),
+        expires_at=time.time() + 60,
+        attempt_number=1,
+        max_attempts=3,
+        status=DRAFT_STATUS_PENDING,
+        media_type="image",
+        session_id="session-legacy",
+    )
+    await strategy._store_draft(draft, ttl_seconds=60)
+
+    with pytest.raises(DraftWorkflowError, match="draft_session_owner_unknown"):
+        await strategy.delete_session(
+            "session-legacy",
+            user_id="alice",
+            group_id="grp-team",
+        )
+
+    assert await strategy.get_draft("draft-legacy") is not None
+
+
+@pytest.mark.asyncio
+async def test_delete_session_skips_stray_invalid_directory(strategy):
+    draft = DraftResult(
+        draft_id="draft-owned",
+        previews=[b"preview"],
+        generation_params={},
+        created_at=time.time(),
+        expires_at=time.time() + 60,
+        attempt_number=1,
+        max_attempts=3,
+        status=DRAFT_STATUS_PENDING,
+        media_type="image",
+        session_id="session-owned",
+        user_id="alice",
+        group_id="grp-team",
+    )
+    await strategy._store_draft(draft, ttl_seconds=60)
+    stray_dir = os.path.join(strategy._store_dir, "session-owned", ".tmp")
+    os.makedirs(stray_dir)
+
+    deleted = await strategy.delete_session(
+        "session-owned",
+        user_id="alice",
+        group_id="grp-team",
+    )
+
+    assert deleted == 1
+    assert not os.path.exists(os.path.join(strategy._store_dir, "session-owned"))
+
+
+@pytest.mark.asyncio
+async def test_delete_session_rejects_path_traversal(strategy, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    marker = outside / "keep.txt"
+    marker.write_text("keep", encoding="utf-8")
+
+    with pytest.raises(DraftWorkflowError, match="invalid_session_id"):
+        await strategy.delete_session(
+            "../outside",
+            user_id="alice",
+            group_id="grp-team",
+        )
+
+    assert marker.read_text(encoding="utf-8") == "keep"

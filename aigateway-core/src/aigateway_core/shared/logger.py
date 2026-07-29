@@ -14,9 +14,9 @@ from __future__ import annotations
 import contextvars
 import logging
 import os
-import sys
 import time
-from typing import Any, Callable, Dict, Optional
+from collections.abc import Callable
+from typing import Any
 
 import structlog
 
@@ -24,7 +24,7 @@ import structlog
 # 全局配置
 # ------------------------------------------------------------------
 
-_logger_config: Dict[str, Any] = {
+_logger_config: dict[str, Any] = {
     "log_level": os.environ.get("AI_GATEWAY_LOG_LEVEL", "info").upper(),
     "log_format": os.environ.get("AI_GATEWAY_LOG_FORMAT", "json"),
     "service_name": "ai-gateway",
@@ -32,7 +32,7 @@ _logger_config: Dict[str, Any] = {
 }
 
 
-def get_logger_config() -> Dict[str, Any]:
+def get_logger_config() -> dict[str, Any]:
     """获取当前日志配置。
 
     Returns:
@@ -41,7 +41,7 @@ def get_logger_config() -> Dict[str, Any]:
     return dict(_logger_config)
 
 
-def update_logger_config(updates: Dict[str, Any]) -> None:
+def update_logger_config(updates: dict[str, Any]) -> None:
     """更新日志配置。
 
     Args:
@@ -63,14 +63,14 @@ class ContextInjectProcessor:
     """
 
     # 每个请求独立持有的上下文字典。ContextVar 保证并发 async 请求隔离。
-    _context_var: "contextvars.ContextVar[Dict[str, Any]]" = contextvars.ContextVar(
-        "aigateway_log_context", default={}
+    _context_var: contextvars.ContextVar[dict[str, Any] | None] = (
+        contextvars.ContextVar("aigateway_log_context", default=None)
     )
 
     @classmethod
     def set(
-        cls, trace_id: str, request_id: str, user_id: Optional[str] = None
-    ) -> "contextvars.Token[Dict[str, Any]]":
+        cls, trace_id: str, request_id: str, user_id: str | None = None
+    ) -> contextvars.Token[dict[str, Any] | None]:
         """设置当前上下文的追踪字段。
 
         在当前 async 上下文内绑定一份新的上下文字典，不影响其他并发请求。
@@ -84,7 +84,7 @@ class ContextInjectProcessor:
         Returns:
             contextvars.Token，用于 :meth:`clear` 还原。
         """
-        ctx = dict(cls._context_var.get())
+        ctx = dict(cls._context_var.get() or {})
         ctx["trace_id"] = trace_id
         ctx["request_id"] = request_id
         if user_id is not None:
@@ -92,7 +92,10 @@ class ContextInjectProcessor:
         return cls._context_var.set(ctx)
 
     @classmethod
-    def clear(cls, token: "Optional[contextvars.Token[Dict[str, Any]]]" = None) -> None:
+    def clear(
+        cls,
+        token: contextvars.Token[dict[str, Any] | None] | None = None,
+    ) -> None:
         """清除当前上下文。
 
         若传入 :meth:`set` 返回的 token，则精确还原到 set 之前的上下文
@@ -108,8 +111,8 @@ class ContextInjectProcessor:
         cls,
         logger_obj: Any,
         method_name: str,
-        event_dict: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        event_dict: dict[str, Any],
+    ) -> dict[str, Any]:
         """structlog processor 实现：注入上下文字段。
 
         Args:
@@ -121,7 +124,7 @@ class ContextInjectProcessor:
             注入后的事件字典。
         """
         # 合并当前上下文（ContextVar 隔离，并发安全）
-        event_dict.update(cls._context_var.get())
+        event_dict.update(cls._context_var.get() or {})
 
         # 确保必要字段存在
         # 优先从 TraceCollector.current() 取 trace_id（由 TraceMiddleware 注入，
@@ -152,8 +155,7 @@ class ContextInjectProcessor:
         event_dict["level"] = event_dict["level"].lower()
 
         # 重命名空字符串字段
-        if "" in event_dict:
-            del event_dict[""]
+        event_dict.pop("", None)
 
         return event_dict
 
@@ -164,16 +166,16 @@ class ContextInjectProcessor:
 
 
 def setup_logging(
-    log_level: Optional[str] = None,
-    log_format: Optional[str] = None,
+    log_level: str | None = None,
+    log_format: str | None = None,
 ) -> None:
     """别名：调用 setup_structlog。"""
     setup_structlog(log_level=log_level, log_format=log_format)
 
 
 def setup_structlog(
-    log_level: Optional[str] = None,
-    log_format: Optional[str] = None,
+    log_level: str | None = None,
+    log_format: str | None = None,
 ) -> None:
     """初始化 structlog 配置。
 
@@ -315,9 +317,9 @@ def critical(event: str, **kwargs: Any) -> None:
 def log_with_context(
     level: str,
     event: str,
-    trace_id: Optional[str] = None,
-    request_id: Optional[str] = None,
-    user_id: Optional[str] = None,
+    trace_id: str | None = None,
+    request_id: str | None = None,
+    user_id: str | None = None,
     **kwargs: Any,
 ) -> None:
     """带上下文注入的日志记录。

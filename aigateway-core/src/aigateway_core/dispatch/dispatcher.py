@@ -25,7 +25,7 @@ import logging
 import re
 import time
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -67,7 +67,7 @@ def _extract_cacheable_context(messages: list, tail: int = 3) -> list:
     return system_msgs + tail_msgs
 
 
-def _resolve_cache_scope(request: Request, pii_meta: Optional[dict]) -> str:
+def _resolve_cache_scope(request: Request, pii_meta: dict | None) -> str:
     """决定本次请求的 cache_scope。
 
     优先级:
@@ -99,7 +99,7 @@ def _sanitize_exc(exc: BaseException, max_len: int = 200) -> str:
     return s[:max_len]
 
 
-def _resolve_logged_model(body_model: str, bridge_result: Optional[dict]) -> str:
+def _resolve_logged_model(body_model: str, bridge_result: dict | None) -> str:
     """从 bridge 结果中提取真正解析后的模型名,用于日志/账本/缓存回填。
 
     客户端可能传 `auto`,bridge 内部按意图解析为具体模型。日志若记 `auto`
@@ -220,7 +220,7 @@ class RequestDispatcher:
     插件链跑完后统一编排缓存/配额/LiteLLM 出口/回填。
     """
 
-    def __init__(self, state: Dict[str, Any]) -> None:
+    def __init__(self, state: dict[str, Any]) -> None:
         self.state = state
         self.understanding_engine = state.get("understanding_engine")
         self.generation_engine = state.get("generation_engine")
@@ -399,8 +399,8 @@ class RequestDispatcher:
 
     @staticmethod
     def _resolve_identity(request: Request) -> tuple:
-        user_id: Optional[str] = None
-        key_hash: Optional[str] = None
+        user_id: str | None = None
+        key_hash: str | None = None
         if hasattr(request.state, "api_key_data"):
             key_data = request.state.api_key_data
             if key_data:
@@ -418,7 +418,7 @@ class RequestDispatcher:
 
     async def _dispatch_understanding(
         self, body: Any, request: Request, engine: Any,
-        user_id: Optional[str], key_hash: Optional[str], prefix: Dict[str, Any],
+        user_id: str | None, key_hash: str | None, prefix: dict[str, Any],
     ) -> JSONResponse:
         """理解管道：缓存 → 配额 → engine 插件链 → prompt_compress → LiteLLM → 回填。
 
@@ -436,7 +436,7 @@ class RequestDispatcher:
         mol_meta = prefix.get("mol_meta")
         pii_meta = prefix.get("pii_meta")
         # router_meta 由 bridge 在 auto 解析后回填(见 _call_llm_nonstream/stream)
-        router_meta: Optional[Dict[str, Any]] = None
+        router_meta: dict[str, Any] | None = None
 
         # ===== 缓存查找（engine 之前，避免 RAG 等插件浪费 token）=====
         cache_manager = self.cache_manager
@@ -483,7 +483,7 @@ class RequestDispatcher:
         # L2 BM25 慢路径元数据: 精确哈希 miss 后按 BM25 检索相似 prompt.
         # scope_id 按 cache_scope 取 user_id (private) 或 group_id (group/public).
         l2_scope_id = user_id if cache_scope == "private" else group_id
-        cache_kwargs: Dict[str, Any] = {
+        cache_kwargs: dict[str, Any] = {
             "user_id": user_id,
             "l2_search": {
                 "normalized_prompt": normalized_messages,
@@ -661,9 +661,9 @@ class RequestDispatcher:
 
     async def _dispatch_generation(
         self, body: Any, request: Request, engine: Any,
-        user_id: Optional[str], key_hash: Optional[str], prefix: Dict[str, Any],
+        user_id: str | None, key_hash: str | None, prefix: dict[str, Any],
         pipeline_kind: str = "generation:image",
-        intent_hint: Optional[str] = None,
+        intent_hint: str | None = None,
     ) -> JSONResponse:
         """生成管道：engine 插件链 → 配额 → LiteLLM（不查理解缓存）。
 
@@ -674,7 +674,6 @@ class RequestDispatcher:
         """
         from aigateway_api.openai_compat import _record_request_log
 
-        state = self.state
         plugin_trace: list = prefix["plugin_trace"]
         request_start_time: float = prefix["request_start_time"]
         mol_meta = prefix.get("mol_meta")
@@ -738,12 +737,17 @@ class RequestDispatcher:
                     payload={"estimated_tokens": estimated_tokens}, dimension="entry")
 
         # 跑生成管道 engine 插件链（ai_director → ... → cost_tracker）
-        ctx: Optional[PipelineContext] = None
+        ctx: PipelineContext | None = None
         if engine is not None:
             try:
                 ctx = PipelineContext(
                     request={"messages": body.messages, "model": body.model,
-                             "stream": getattr(body, "stream", False)},
+                             "stream": getattr(body, "stream", False),
+                             "generation_options": (
+                                 body.generation_options.model_dump()
+                                 if getattr(body, "generation_options", None)
+                                 else {}
+                             )},
                     trace_id=request.state.trace_id,
                     pipeline_kind=pipeline_kind,
                     user_id=user_id,
@@ -751,6 +755,19 @@ class RequestDispatcher:
                 )
                 ctx.extra["cache_scope"] = resolved_scope
                 ctx.extra["group_id"] = group_id
+                chat_session_id = getattr(body, "chat_session_id", None)
+                if chat_session_id:
+                    ctx.extra["chat_session_id"] = chat_session_id
+                draft_owner = getattr(request.state, "draft_owner", None)
+                if isinstance(draft_owner, dict):
+                    ctx.extra["draft_owner_user_id"] = (
+                        draft_owner.get("user_id") or None
+                    )
+                    # The explicit None is significant: a browser-session
+                    # owner must not inherit the billing key's group.
+                    ctx.extra["draft_owner_group_id"] = (
+                        draft_owner.get("group_id") or None
+                    )
                 ctx.should_stream = getattr(body, "stream", False)
                 ctx = await engine.execute_ctx(ctx)
                 # 插件链可能改写 messages / model，回写
@@ -768,6 +785,37 @@ class RequestDispatcher:
         if ctx is not None:
             gen_opt = getattr(ctx, 'extra', {}) or {}
             draft_info = gen_opt.get("generation_optimization", {}).get("draft_generator", {})
+            draft_reason = draft_info.get("reason")
+            if draft_reason in {
+                "local_backend_unavailable",
+                "invalid_generation_options",
+            }:
+                await self._release_quota_reservation(
+                    request,
+                    key_store,
+                    key_hash,
+                )
+                invalid_options = draft_reason == "invalid_generation_options"
+                return JSONResponse(
+                    status_code=400 if invalid_options else 503,
+                    content={
+                        "error": {
+                            "code": (
+                                "invalid_generation_options"
+                                if invalid_options
+                                else "local_generation_unavailable"
+                            ),
+                            "message": draft_info.get(
+                                "local_error",
+                                (
+                                    "The selected generation options are incompatible."
+                                    if invalid_options
+                                    else "Local ComfyUI is unavailable; choose cloud to continue."
+                                ),
+                            ),
+                        }
+                    },
+                )
             if draft_info.get("applicable") and draft_info.get("draft_id"):
                 draft_id = draft_info["draft_id"]
                 _emit_stage(request.state.trace_id, "draft", "draft_workflow.pending_confirmation", 0, "ok",
@@ -798,7 +846,9 @@ class RequestDispatcher:
                             model=draft_model, provider="draft",
                             pipeline_kind=pipeline_kind,
                             tokens_in=0, tokens_out=0, tokens_total=0,
+                            tokens_saved=0,
                             cost_usd=0.0, cached=False, stream=False,
+                            duration_ms=draft_duration_ms,
                             status="pending_confirmation",
                         )
                     except Exception as exc:
@@ -851,15 +901,16 @@ class RequestDispatcher:
         pii_meta=None, router_meta=None, mol_meta=None, compress_meta=None,
         pipeline_kind: str = "understanding", group_id: str = "",
         cache_scope: str = "group", l2_scope_id: str = "",
-        intent_hint: Optional[str] = None,
+        intent_hint: str | None = None,
     ) -> JSONResponse:
         """非流式调 LiteLLM 出口 + 用量记录 + 缓存回填。
 
         normalized_messages: 用于 L3 语义缓存回填（生成管道传 None,不做 L3 回填）。
         pipeline_kind: 传给 bridge,body.model=='auto' 时按此选候选池模态。
         """
-        from aigateway_core.route.metrics.costing import _estimate_cost
         from aigateway_api.openai_compat import _record_request_log
+
+        from aigateway_core.route.metrics.costing import _estimate_cost
 
         metrics_collector = self.metrics_collector
         cache_manager = self.cache_manager
@@ -872,7 +923,7 @@ class RequestDispatcher:
 
         # Inject trace context for downstream LLM calls
         from aigateway_core.shared.tracing import TracingManager
-        extra_headers: Dict[str, str] = {}
+        extra_headers: dict[str, str] = {}
         TracingManager.inject_trace_context(
             headers=extra_headers,
             trace_id=request.state.trace_id,
@@ -1024,7 +1075,11 @@ class RequestDispatcher:
                     model=logged_model, provider=_provider,
                     pipeline_kind=pipeline_kind,
                     tokens_in=pt, tokens_out=ct, tokens_total=tt,
+                    tokens_saved=0,
                     cost_usd=final_cost if (tt > 0 and final_cost > 0) else 0.0,
+                    duration_ms=round(
+                        (time.time() - request_start_time) * 1000, 1
+                    ),
                     cached=False, stream=False, status="ok",
                 )
             except Exception as exc:
@@ -1054,7 +1109,9 @@ class RequestDispatcher:
                     logger.warning("L2 BM25 回填失败: %s", exc)
                 # L3 异步回填（需要 normalized_messages 计算 embedding；缺则跳过）
                 if normalized_messages:
-                    from aigateway_core.prefix.cache.l3_semantic import _safe_l3_backfill
+                    from aigateway_core.prefix.cache.l3_semantic import (
+                        _safe_l3_backfill,
+                    )
                     _l3_backfill_task = asyncio.create_task(_safe_l3_backfill(
                         cache_manager, cache_key, value_str,
                         normalized_messages, logged_model, user_id or "", tt,
@@ -1107,7 +1164,7 @@ class RequestDispatcher:
         user_id, key_hash, cache_key, normalized_messages,
         pipeline_kind: str = "understanding", group_id: str = "",
         cache_scope: str = "group", l2_scope_id: str = "",
-        intent_hint: Optional[str] = None,
+        intent_hint: str | None = None,
     ) -> JSONResponse:
         """流式调 LiteLLM 出口。
 
@@ -1120,7 +1177,6 @@ class RequestDispatcher:
         normalized_messages: 用于 L3 语义缓存回填（生成管道传 None）。
         pipeline_kind: 传给 bridge,body.model=='auto' 时按此选候选池模态。
         """
-        from aigateway_core.route.metrics.costing import _estimate_cost
         from aigateway_api.streaming import create_sse_response
 
         metrics_collector = self.metrics_collector
@@ -1133,7 +1189,7 @@ class RequestDispatcher:
 
         # Inject trace context for downstream LLM calls
         from aigateway_core.shared.tracing import TracingManager
-        extra_headers: Dict[str, str] = {}
+        extra_headers: dict[str, str] = {}
         TracingManager.inject_trace_context(
             headers=extra_headers,
             trace_id=request.state.trace_id,
@@ -1201,7 +1257,7 @@ class RequestDispatcher:
 
         last_chunk = {}
         # 累积每个 choice 的 content / role / tool_calls，用于组装非流式格式
-        accum: Dict[int, Dict[str, Any]] = {}
+        accum: dict[int, dict[str, Any]] = {}
         client_disconnected = False
         _stream_provider = ""  # 从 image/video 流的首个 _meta chunk 提取
         _stream_bridge_cost = 0.0  # 从末块 _meta.cost 提取(bridge 用 config.yaml 定价算的真实成本)
@@ -1281,13 +1337,14 @@ class RequestDispatcher:
         # 真实模型:优先用从 chunk 提取的 _stream_model,否则回退到传入的 model(可能 auto)。
         # 统一用于 metrics/账本/缓存回填/日志,避免 auto 渗透到前端"模型"列与缓存值。
         logged_model = _stream_model or model
+        stream_duration_ms = round((time.time() - llm_start) * 1000, 1)
 
         # 流式日志:在流结束后写(此时真实模型已知)。原实现是在流开始前写并记 body.model(auto),
         # 改到此处可记录解析后的模型。即使 usage 缺失(提前 return)也补记,保证日志不丢。
         try:
             from aigateway_api.openai_compat import _record_request_log
             await _record_request_log(request=request, method="POST", endpoint="/v1/chat/completions",
-                                      status_code=200, duration_ms=0,
+                                      status_code=200, duration_ms=stream_duration_ms,
                                       model=logged_model, cache_hit=False, cache_tier=None)
         except Exception as exc:
             logger.warning("流式请求日志写入失败: %s", exc)
@@ -1317,7 +1374,9 @@ class RequestDispatcher:
                     model=logged_model, provider=_stream_provider,
                     pipeline_kind=pipeline_kind,
                     tokens_in=pt, tokens_out=ct, tokens_total=tt,
+                    tokens_saved=0,
                     cost_usd=final_cost if (tt > 0 and final_cost > 0) else 0.0,
+                    duration_ms=stream_duration_ms,
                     cached=False, stream=True, status="ok",
                 )
             except Exception as exc:
@@ -1384,7 +1443,9 @@ class RequestDispatcher:
                     logger.warning("流式 L2 BM25 回填失败: %s", exc)
                 # L3 异步回填（与非流式对齐；需要 normalized_messages 计算 embedding）
                 if normalized_messages:
-                    from aigateway_core.prefix.cache.l3_semantic import _safe_l3_backfill
+                    from aigateway_core.prefix.cache.l3_semantic import (
+                        _safe_l3_backfill,
+                    )
                     _l3_backfill_task = asyncio.create_task(_safe_l3_backfill(
                         cache_manager, cache_key, value_str,
                         normalized_messages, logged_model, user_id or "", tt,
@@ -1397,7 +1458,7 @@ class RequestDispatcher:
             except Exception as exc:
                 logger.warning("流式缓存回填失败: %s", exc)
 
-    async def _release_quota_reservation(self, request, key_store, key_hash: Optional[str]) -> None:
+    async def _release_quota_reservation(self, request, key_store, key_hash: str | None) -> None:
         if not key_hash or not key_store:
             return
         if not getattr(request.state, "_lua_quota_reserved", False):
@@ -1425,8 +1486,11 @@ class RequestDispatcher:
     ) -> JSONResponse:
         """缓存命中：非流式直接返回，流式走 simulate_stream_from_cache。"""
         from aigateway_api.openai_compat import _record_request_log
-        from aigateway_core.route.streaming.cache_stream import simulate_stream_from_cache
         from aigateway_api.streaming import create_sse_response
+
+        from aigateway_core.route.streaming.cache_stream import (
+            simulate_stream_from_cache,
+        )
 
         metrics_collector = self.metrics_collector
         cache_duration_ms = round((time.time() - request_start_time) * 1000, 1)
@@ -1458,7 +1522,7 @@ class RequestDispatcher:
                                       model=cached_model, cache_hit=True, cache_tier=hit_tier)
             await self._record_cache_hit_ledger(
                 key_store, request, cached_model, user_id, group_id, saved, stream=True,
-                pipeline_kind=pipeline_kind,
+                pipeline_kind=pipeline_kind, duration_ms=cache_duration_ms,
             )
             return create_sse_response(stream_gen, chat_id=chat_id)
 
@@ -1484,7 +1548,7 @@ class RequestDispatcher:
                                   model=cached_model, cache_hit=True, cache_tier=hit_tier)
         await self._record_cache_hit_ledger(
             key_store, request, cached_model, user_id, group_id, saved, stream=False,
-            pipeline_kind=pipeline_kind,
+            pipeline_kind=pipeline_kind, duration_ms=cache_duration_ms,
         )
 
         meta = {
@@ -1503,13 +1567,12 @@ class RequestDispatcher:
 
     async def _record_cache_hit_ledger(
         self, key_store, request, model, user_id, group_id, _saved_tokens, *, stream: bool,
-        pipeline_kind: str = "understanding",
+        pipeline_kind: str = "understanding", duration_ms: float = 0.0,
     ) -> None:
         """缓存命中也写一笔账本（cost=0），让成本分析能看到缓存命中数。
 
-        tokens_total 记 0(缓存命中不消耗 token);节省的 token 数由 cache_hits 计数体现,
+        tokens_total 记 0(缓存命中不消耗 token)，tokens_saved 单独保存，
         避免与真实用量混入 SUM(tokens_total) 导致前端"tokens"虚高。
-        _saved_tokens 参数保留以兼容调用方,实际不再写入(真实用量为 0)。
         """
         if not key_store or not hasattr(key_store, "record_request_cost"):
             return
@@ -1520,7 +1583,9 @@ class RequestDispatcher:
                 model=model, provider="cache",
                 pipeline_kind=pipeline_kind,
                 tokens_in=0, tokens_out=0, tokens_total=0,
+                tokens_saved=max(0, int(_saved_tokens or 0)),
                 cost_usd=0.0, cached=True, stream=stream, status="ok",
+                duration_ms=duration_ms,
             )
         except Exception as exc:
             logger.warning("缓存命中账本写入失败: %s", exc)

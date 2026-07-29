@@ -1,7 +1,9 @@
 """Group + personal quota check/increment tests."""
+from datetime import UTC
+
 import pytest
-from aigateway_core.shared.auth.key_store import KeyStore
 from aigateway_core.shared.auth.group_store import GroupStore
+from aigateway_core.shared.auth.key_store import KeyStore
 
 
 class FakeRedis:
@@ -84,7 +86,7 @@ class FakeRedis:
 
     async def scan(self, cursor, match=None, count=None):
         import fnmatch
-        keys = [k for k in self.store.keys() if fnmatch.fnmatch(k, match or "*")]
+        keys = [k for k in self.store if fnmatch.fnmatch(k, match or "*")]
         return 0, keys
 
     # convenience methods mirroring redis_client
@@ -209,7 +211,7 @@ def ks_and_gs():
 @pytest.mark.asyncio
 async def test_check_group_quota_rejects_when_over(ks_and_gs):
     """Group monthly cost exceeded → reject with 'Group ' prefix."""
-    ks, gs = ks_and_gs
+    ks, _gs = ks_and_gs
     await ks.redis.set_group("grp-g", {"name": "G", "status": "active",
         "daily_tokens_limit": "1000000", "daily_tokens_used": "0",
         "monthly_cost_limit": "5000", "monthly_cost_used": "4999.0",
@@ -223,7 +225,7 @@ async def test_check_group_quota_rejects_when_over(ks_and_gs):
         "rate_limit_rpm": "60", "rate_limit_tpm": "100000",
         "rpm_window_start": "0", "rpm_window_count": "0",
         "tpm_window_start": "0", "tpm_window_count": "0"})
-    ok, reason, retry = await ks.check_quota("kh1", tokens=10, cost=10.0)
+    ok, reason, _retry = await ks.check_quota("kh1", tokens=10, cost=10.0)
     assert ok is False
     assert reason.startswith("Group ")
     assert "Monthly" in reason
@@ -232,7 +234,7 @@ async def test_check_group_quota_rejects_when_over(ks_and_gs):
 @pytest.mark.asyncio
 async def test_check_personal_quota_when_group_ok(ks_and_gs):
     """Group OK but personal daily tokens exceeded → reject with personal reason."""
-    ks, gs = ks_and_gs
+    ks, _gs = ks_and_gs
     await ks.redis.set_group("grp-g", {"name": "G", "status": "active",
         "daily_tokens_limit": "1000000", "daily_tokens_used": "0",
         "monthly_cost_limit": "5000", "monthly_cost_used": "0.0",
@@ -246,7 +248,7 @@ async def test_check_personal_quota_when_group_ok(ks_and_gs):
         "rate_limit_rpm": "60", "rate_limit_tpm": "100000",
         "rpm_window_start": "0", "rpm_window_count": "0",
         "tpm_window_start": "0", "tpm_window_count": "0"})
-    ok, reason, retry = await ks.check_quota("kh1", tokens=10, cost=0.0)
+    ok, reason, _retry = await ks.check_quota("kh1", tokens=10, cost=0.0)
     assert ok is False
     assert not reason.startswith("Group ")
     assert "Daily" in reason
@@ -255,7 +257,7 @@ async def test_check_personal_quota_when_group_ok(ks_and_gs):
 @pytest.mark.asyncio
 async def test_check_both_pass_when_under_limits(ks_and_gs):
     """Both group and key under limits → pass."""
-    ks, gs = ks_and_gs
+    ks, _gs = ks_and_gs
     await ks.redis.set_group("grp-g", {"name": "G", "status": "active",
         "daily_tokens_limit": "1000000", "daily_tokens_used": "0",
         "monthly_cost_limit": "5000", "monthly_cost_used": "0.0",
@@ -269,14 +271,14 @@ async def test_check_both_pass_when_under_limits(ks_and_gs):
         "rate_limit_rpm": "60", "rate_limit_tpm": "100000",
         "rpm_window_start": "0", "rpm_window_count": "0",
         "tpm_window_start": "0", "tpm_window_count": "0"})
-    ok, reason, retry = await ks.check_quota("kh1", tokens=10, cost=1.0)
+    ok, reason, _retry = await ks.check_quota("kh1", tokens=10, cost=1.0)
     assert ok is True and reason is None
 
 
 @pytest.mark.asyncio
 async def test_increment_syncs_group_and_key(ks_and_gs):
     """increment_usage increments both key and group counters."""
-    ks, gs = ks_and_gs
+    ks, _gs = ks_and_gs
     await ks.redis.set_group("grp-g", {"name": "G", "status": "active",
         "daily_tokens_limit": "5000", "daily_tokens_used": "0",
         "monthly_cost_limit": "5000", "monthly_cost_used": "0.0",
@@ -302,7 +304,7 @@ async def test_increment_syncs_group_and_key(ks_and_gs):
 @pytest.mark.asyncio
 async def test_increment_group_failure_does_not_block(ks_and_gs):
     """Key-level increment still works when group doesn't exist."""
-    ks, gs = ks_and_gs
+    ks, _gs = ks_and_gs
     await ks.redis.set_api_key("kh1", {"key_id": "k1", "user_id": "u1", "status": "active",
         "group_id": "grp-missing", "cache_scope": "group",
         "daily_tokens_limit": "200", "daily_tokens_used": "0",
@@ -318,7 +320,7 @@ async def test_increment_group_failure_does_not_block(ks_and_gs):
 @pytest.mark.asyncio
 async def test_increment_after_lua_check_does_not_double_incr(ks_and_gs):
     """Production path: check_quota (Lua) already bumped counters, increment_usage must not double."""
-    ks, gs = ks_and_gs
+    ks, _gs = ks_and_gs
     await ks.redis.set_group("grp-g", {"name": "G", "status": "active",
         "daily_tokens_limit": "5000", "daily_tokens_used": "0",
         "monthly_cost_limit": "5000", "monthly_cost_used": "0.0",
@@ -369,9 +371,9 @@ async def test_increment_reconciles_estimate_vs_actual(ks_and_gs):
     80 tokens / $3.0. Reconciliation applies +30 tokens and +$1.0 so the
     final counters reflect real usage, not the estimate.
     """
-    from datetime import datetime, timezone
-    now = int(datetime.now(timezone.utc).timestamp())
-    ks, gs = ks_and_gs
+    from datetime import datetime
+    now = int(datetime.now(UTC).timestamp())
+    ks, _gs = ks_and_gs
     await ks.redis.set_group("grp-g", {"name": "G", "status": "active",
         "daily_tokens_limit": "5000", "daily_tokens_used": "50",
         "monthly_cost_limit": "5000", "monthly_cost_used": "2.0",

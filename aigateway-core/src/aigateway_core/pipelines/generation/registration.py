@@ -20,22 +20,22 @@ plugins — PipelineEngine 插件封装
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any
 
-from aigateway_core.pipelines.generation.director.ai_director_plugin import (
-    AIDirectorPlugin,
-)
 from aigateway_core.pipelines.generation.cost.cost_tracker_plugin import (
     CostTrackerPlugin,
+)
+from aigateway_core.pipelines.generation.director.ai_director_plugin import (
+    AIDirectorPlugin,
 )
 from aigateway_core.pipelines.generation.draft.draft_generator_plugin import (
     DraftGeneratorPlugin,
 )
-from aigateway_core.pipelines.generation.routing_signals.gen_model_router_plugin import (
-    GenModelRouterPlugin,
-)
 from aigateway_core.pipelines.generation.intent.intent_evaluator_plugin import (
     IntentEvaluatorPlugin,
+)
+from aigateway_core.pipelines.generation.routing_signals.gen_model_router_plugin import (
+    GenModelRouterPlugin,
 )
 from aigateway_core.pipelines.generation.token.token_compressor_plugin import (
     TokenCompressorPlugin,
@@ -49,7 +49,7 @@ def emit_plugin_event(
     name: str,
     duration_ms: float,
     status: str = "ok",
-    payload: Optional[dict] = None,
+    payload: dict | None = None,
 ) -> None:
     """gen-opt 插件发 TraceEvent 的统一入口.
 
@@ -108,16 +108,15 @@ def register_generation_optimization_plugins(
 
     需求: 6.1, 6.6
     """
+    from aigateway_core.pipelines.generation._common.api_key_groups import (
+        build_api_key_groups,
+    )
     from aigateway_core.pipelines.generation._common.config import (
-        GenerationOptimizationConfig,
         parse_generation_optimization_config,
     )
     from aigateway_core.pipelines.generation._common.metrics import (
         GenerationCostTracker,
         get_prometheus_registry,
-    )
-    from aigateway_core.pipelines.generation._common.api_key_groups import (
-        build_api_key_groups,
     )
     from aigateway_core.pipelines.generation.director.ai_director import (
         AIDirectorStrategy,
@@ -125,23 +124,23 @@ def register_generation_optimization_plugins(
     from aigateway_core.pipelines.generation.draft.draft_generator import (
         DraftGeneratorStrategy,
     )
-    from aigateway_core.pipelines.generation.token.feature_cache import (
-        FeatureCacheManager,
-    )
     from aigateway_core.pipelines.generation.intent.intent_evaluator import (
         IntentEvaluatorStrategy,
     )
-    from aigateway_core.route.model_resolution.model_router import (
-        ModelRouterStrategy,
+    from aigateway_core.pipelines.generation.token.feature_cache import (
+        FeatureCacheManager,
     )
     from aigateway_core.pipelines.generation.token.token_compressor import (
         TokenCompressorStrategy,
     )
+    from aigateway_core.route.model_resolution.model_router import (
+        ModelRouterStrategy,
+    )
 
     # --- 加载配置 ---
-    gen_opt_dict: Dict[str, Any] = {}
-    providers_config: Dict[str, Any] = {}
-    auth_config: Dict[str, Any] = {}
+    gen_opt_dict: dict[str, Any] = {}
+    providers_config: dict[str, Any] = {}
+    auth_config: dict[str, Any] = {}
 
     if config_manager is not None:
         gen_opt_dict = config_manager.get("generation_optimization", {}) or {}
@@ -178,8 +177,135 @@ def register_generation_optimization_plugins(
     comfyui_dict = gen_opt_dict.get("draft_workflow", {}).get("comfyui", {})
     comfyui_config = ComfyUIConfig(
         server_url=comfyui_dict.get("server_url", ComfyUIConfig.server_url),
+        public_url=comfyui_dict.get("public_url", ComfyUIConfig.public_url),
+        manager_enabled=comfyui_dict.get(
+            "manager_enabled", ComfyUIConfig.manager_enabled
+        ),
         connect_timeout=comfyui_dict.get("connect_timeout", ComfyUIConfig.connect_timeout),
         execution_timeout=comfyui_dict.get("execution_timeout", ComfyUIConfig.execution_timeout),
+        ws_reconnect_attempts=comfyui_dict.get(
+            "ws_reconnect_attempts", ComfyUIConfig.ws_reconnect_attempts
+        ),
+        required=comfyui_dict.get("required", ComfyUIConfig.required),
+        workflow_version=comfyui_dict.get(
+            "workflow_version", ComfyUIConfig.workflow_version
+        ),
+        checkpoint_name=comfyui_dict.get(
+            "checkpoint_name", ComfyUIConfig.checkpoint_name
+        ),
+        allowed_checkpoints=list(
+            comfyui_dict.get(
+                "allowed_checkpoints", ComfyUIConfig().allowed_checkpoints
+            )
+        ),
+        max_concurrency=comfyui_dict.get(
+            "max_concurrency", ComfyUIConfig.max_concurrency
+        ),
+        min_free_gb=comfyui_dict.get("min_free_gb", ComfyUIConfig.min_free_gb),
+        model_budget_gb=comfyui_dict.get(
+            "model_budget_gb", ComfyUIConfig.model_budget_gb
+        ),
+        output_budget_gb=comfyui_dict.get(
+            "output_budget_gb", ComfyUIConfig.output_budget_gb
+        ),
+        output_retention_hours=comfyui_dict.get(
+            "output_retention_hours", ComfyUIConfig.output_retention_hours
+        ),
+        models_path=comfyui_dict.get("models_path", ComfyUIConfig.models_path),
+        output_path=comfyui_dict.get("output_path", ComfyUIConfig.output_path),
+        workflow_path=comfyui_dict.get(
+            "workflow_path", ComfyUIConfig.workflow_path
+        ),
+        upscale_enabled=comfyui_dict.get(
+            "upscale_enabled", ComfyUIConfig.upscale_enabled
+        ),
+        upscale_model=comfyui_dict.get(
+            "upscale_model", ComfyUIConfig.upscale_model
+        ),
+        allowed_upscale_models=list(
+            comfyui_dict.get(
+                "allowed_upscale_models", ComfyUIConfig().allowed_upscale_models
+            )
+        ),
+        max_upscale_long_edge=comfyui_dict.get(
+            "max_upscale_long_edge", ComfyUIConfig.max_upscale_long_edge
+        ),
+        qwen_image_enabled=comfyui_dict.get(
+            "qwen_image_enabled", ComfyUIConfig.qwen_image_enabled
+        ),
+        qwen_image_diffusion_model=comfyui_dict.get(
+            "qwen_image_diffusion_model", ComfyUIConfig.qwen_image_diffusion_model
+        ),
+        qwen_image_text_encoder=comfyui_dict.get(
+            "qwen_image_text_encoder", ComfyUIConfig.qwen_image_text_encoder
+        ),
+        qwen_image_vae=comfyui_dict.get(
+            "qwen_image_vae", ComfyUIConfig.qwen_image_vae
+        ),
+        qwen_image_draft_steps=comfyui_dict.get(
+            "qwen_image_draft_steps", ComfyUIConfig.qwen_image_draft_steps
+        ),
+        qwen_image_max_draft_edge=comfyui_dict.get(
+            "qwen_image_max_draft_edge", ComfyUIConfig.qwen_image_max_draft_edge
+        ),
+        allowed_qwen_image_diffusion_models=list(
+            comfyui_dict.get(
+                "allowed_qwen_image_diffusion_models",
+                ComfyUIConfig().allowed_qwen_image_diffusion_models,
+            )
+        ),
+        allowed_qwen_image_text_encoders=list(
+            comfyui_dict.get(
+                "allowed_qwen_image_text_encoders",
+                ComfyUIConfig().allowed_qwen_image_text_encoders,
+            )
+        ),
+        allowed_qwen_image_vaes=list(
+            comfyui_dict.get(
+                "allowed_qwen_image_vaes",
+                ComfyUIConfig().allowed_qwen_image_vaes,
+            )
+        ),
+        video_enabled=comfyui_dict.get(
+            "video_enabled", ComfyUIConfig.video_enabled
+        ),
+        video_workflow_version=comfyui_dict.get(
+            "video_workflow_version", ComfyUIConfig.video_workflow_version
+        ),
+        video_diffusion_model=comfyui_dict.get(
+            "video_diffusion_model", ComfyUIConfig.video_diffusion_model
+        ),
+        video_text_encoder=comfyui_dict.get(
+            "video_text_encoder", ComfyUIConfig.video_text_encoder
+        ),
+        video_vae=comfyui_dict.get("video_vae", ComfyUIConfig.video_vae),
+        allowed_video_diffusion_models=list(
+            comfyui_dict.get(
+                "allowed_video_diffusion_models",
+                ComfyUIConfig().allowed_video_diffusion_models,
+            )
+        ),
+        allowed_video_text_encoders=list(
+            comfyui_dict.get(
+                "allowed_video_text_encoders",
+                ComfyUIConfig().allowed_video_text_encoders,
+            )
+        ),
+        allowed_video_vaes=list(
+            comfyui_dict.get(
+                "allowed_video_vaes", ComfyUIConfig().allowed_video_vaes
+            )
+        ),
+        video_width=comfyui_dict.get("video_width", ComfyUIConfig.video_width),
+        video_height=comfyui_dict.get("video_height", ComfyUIConfig.video_height),
+        video_frames=comfyui_dict.get("video_frames", ComfyUIConfig.video_frames),
+        video_fps=comfyui_dict.get("video_fps", ComfyUIConfig.video_fps),
+        video_steps=comfyui_dict.get("video_steps", ComfyUIConfig.video_steps),
+        video_cfg=comfyui_dict.get("video_cfg", ComfyUIConfig.video_cfg),
+        video_shift=comfyui_dict.get("video_shift", ComfyUIConfig.video_shift),
+        video_execution_timeout=comfyui_dict.get(
+            "video_execution_timeout", ComfyUIConfig.video_execution_timeout
+        ),
     ) if comfyui_dict else ComfyUIConfig()
 
     draft_generator_strategy = DraftGeneratorStrategy(

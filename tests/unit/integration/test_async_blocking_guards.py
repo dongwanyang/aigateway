@@ -5,18 +5,17 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 from aigateway_api import openai_compat
 from aigateway_core.pipelines.generation._common.config import TokenCompressorConfig
 from aigateway_core.pipelines.generation._common.models import CompressionResult
+from aigateway_core.pipelines.generation.token import token_compressor
 from aigateway_core.pipelines.generation.token.token_compressor import (
     TokenCompressorStrategy,
 )
-from aigateway_core.pipelines.generation.token import token_compressor
+from aigateway_core.pipelines.understanding.rag import rag_retriever_plugin
 from aigateway_core.pipelines.understanding.rag.rag_retriever_plugin import (
     RAGRetrieverPlugin,
 )
-from aigateway_core.pipelines.understanding.rag import rag_retriever_plugin
 from aigateway_core.prefix.cache import l3_semantic
 from aigateway_core.prefix.cache import plugin as cache_plugin
 from aigateway_core.prefix.cache.plugin import SemanticCachePlugin
@@ -25,7 +24,7 @@ from aigateway_core.prefix.media.types import MediaContent, MediaType
 
 @pytest.mark.asyncio
 async def test_openai_local_embeddings_are_offloaded():
-    def encode(_model, _inputs):
+    def encode(_model, _inputs, _device):
         return [[0.1, 0.2]]
 
     async def run_sync(func, *args, **_kwargs):

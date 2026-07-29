@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from aigateway_core.pipelines.generation._common.config import ModelRouterConfig
 from aigateway_core.pipelines.generation._common.exceptions import ModelRoutingError
@@ -51,10 +51,10 @@ class ModelConfig:
 
     name: str
     provider: str
-    modality: List[str]  # 元素取值 "llm" | "mllm" | "generative"
+    modality: list[str]  # 元素取值 "llm" | "mllm" | "generative"
     capability_score: int  # 0-100
     price_per_request: float
-    fallback_models: List[str] = field(default_factory=list)
+    fallback_models: list[str] = field(default_factory=list)
     is_available: bool = True
 
 
@@ -77,7 +77,7 @@ class ModelRouterStrategy:
     def __init__(
         self,
         config: ModelRouterConfig,
-        providers_config: Dict[str, Any],
+        providers_config: dict[str, Any],
     ) -> None:
         """初始化模型路由器.
 
@@ -88,15 +88,15 @@ class ModelRouterStrategy:
         """
         self.config = config
         self.providers_config = providers_config
-        self._model_list: List[ModelConfig] = self._build_model_list()
+        self._model_list: list[ModelConfig] = self._build_model_list()
 
     async def route(
         self,
         complexity_score: int,
         required_modality: str,
-        routing_hint: Optional[str] = None,
-        model_override: Optional[str] = None,
-        available_models: Optional[List[ModelConfig]] = None,
+        routing_hint: str | None = None,
+        model_override: str | None = None,
+        available_models: list[ModelConfig] | None = None,
     ) -> RoutingDecision:
         """执行路由决策.
 
@@ -147,7 +147,7 @@ class ModelRouterStrategy:
         self,
         model_override: str,
         complexity_score: int,
-        models: List[ModelConfig],
+        models: list[ModelConfig],
     ) -> RoutingDecision:
         """处理 model_override 模式.
 
@@ -198,8 +198,8 @@ class ModelRouterStrategy:
         routing_hint: str,
         required_modality: str,
         complexity_score: int,
-        models: List[ModelConfig],
-    ) -> Optional[RoutingDecision]:
+        models: list[ModelConfig],
+    ) -> RoutingDecision | None:
         """处理 routing_hint 模式.
 
         支持:
@@ -264,7 +264,7 @@ class ModelRouterStrategy:
         self,
         complexity_score: int,
         required_modality: str,
-        models: List[ModelConfig],
+        models: list[ModelConfig],
     ) -> RoutingDecision:
         """正常路由逻辑.
 
@@ -347,8 +347,8 @@ class ModelRouterStrategy:
     def _try_fallback(
         self,
         model: ModelConfig,
-        all_models: List[ModelConfig],
-    ) -> Optional[ModelConfig]:
+        all_models: list[ModelConfig],
+    ) -> ModelConfig | None:
         """尝试为不可用模型找到可用的降级替代.
 
         降级策略:
@@ -393,8 +393,8 @@ class ModelRouterStrategy:
     # ------------------------------------------------------------------
 
     def _find_model_by_name(
-        self, name: str, models: List[ModelConfig]
-    ) -> Optional[ModelConfig]:
+        self, name: str, models: list[ModelConfig]
+    ) -> ModelConfig | None:
         """按名称查找模型配置."""
         for m in models:
             if m.name == name:
@@ -416,7 +416,7 @@ class ModelRouterStrategy:
             estimated_cost=cost,
         )
 
-    def _build_model_list(self) -> List[ModelConfig]:
+    def _build_model_list(self) -> list[ModelConfig]:
         """从 providers_config 和 ModelRouterConfig 构建统一的模型列表.
 
         合并信息来源:
@@ -429,7 +429,7 @@ class ModelRouterStrategy:
         pricing 中未配置的模型使用 prompt 价格作为 price_per_request，
         如果连 prompt 价格也没有则默认 0.0。
         """
-        model_list: List[ModelConfig] = []
+        model_list: list[ModelConfig] = []
         seen_models: set = set()
 
         for provider_name, provider_data in (self.providers_config or {}).items():
@@ -493,7 +493,7 @@ class ModelRouterStrategy:
 
                     # 获取模态列表（优先级：model_entry > config.model_modalities > ["generative"]）
                     # 只接受 list，其它类型忽略并 log warning。
-                    modality: List[str]
+                    modality: list[str]
                     if entry_modality is None:
                         modality = list(
                             self.config.model_modalities.get(
@@ -549,7 +549,7 @@ class ModelRouterStrategy:
         )
         return model_list
 
-    def get_model_list(self) -> List[ModelConfig]:
+    def get_model_list(self) -> list[ModelConfig]:
         """获取当前构建的模型列表（用于外部检查和测试）."""
         return list(self._model_list)
 

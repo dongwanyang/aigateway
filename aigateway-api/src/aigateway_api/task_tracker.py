@@ -20,8 +20,8 @@ from __future__ import annotations
 import json
 import logging
 import time
+from typing import Any
 from unittest.mock import Mock
-from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -51,16 +51,16 @@ class TaskTracker:
     - 清理已完成/过期的任务
     """
 
-    def __init__(self, redis_client: Optional[Any] = None):
+    def __init__(self, redis_client: Any | None = None):
         """初始化 TaskTracker。
 
         Args:
             redis_client: Redis 客户端实例。若为 None，则使用内存字典模拟（测试用）。
         """
         self._redis_client = redis_client
-        self._memory_store: Dict[str, str] = {}
+        self._memory_store: dict[str, str] = {}
 
-    def _redis_conn(self) -> Optional[Any]:
+    def _redis_conn(self) -> Any | None:
         if self._redis_client is None:
             return None
         conn = getattr(self._redis_client, "redis", None)
@@ -84,7 +84,7 @@ class TaskTracker:
         self,
         task_type: str,
         task_id: str,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: dict[str, Any] | None = None,
         ttl_seconds: int = _DEFAULT_TTL_SECONDS,
     ) -> None:
         """注册新任务。
@@ -132,7 +132,7 @@ class TaskTracker:
             },
         )
 
-    async def get_status(self, task_type: str, task_id: str) -> Optional[Dict[str, Any]]:
+    async def get_status(self, task_type: str, task_id: str) -> dict[str, Any] | None:
         """获取任务状态。
 
         Args:
@@ -169,7 +169,7 @@ class TaskTracker:
         task_type: str,
         task_id: str,
         status: str,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: dict[str, Any] | None = None,
     ) -> bool:
         """更新任务状态。
 
@@ -278,7 +278,7 @@ return 1
 
         return True
 
-    async def list_active(self, task_type: Optional[str] = None) -> list[Dict[str, Any]]:
+    async def list_active(self, task_type: str | None = None) -> list[dict[str, Any]]:
         """列出所有活跃任务。
 
         Args:
@@ -311,7 +311,7 @@ return 1
             # 内存模式：解析 JSON 后按 task_type 字段过滤。
             # 不能用 `task_type in v`(v 是 JSON 字符串)——那是子串匹配,
             # 会把 metadata 里提到 "video" 的 draft 任务误归入 video 过滤结果。
-            result: list[Dict[str, Any]] = []
+            result: list[dict[str, Any]] = []
             for v in self._memory_store.values():
                 try:
                     t = json.loads(v)

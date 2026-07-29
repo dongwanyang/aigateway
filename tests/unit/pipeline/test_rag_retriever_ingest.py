@@ -10,8 +10,6 @@ import os
 import sys
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 
 from aigateway_core.shared.integration_configs import RAGRetrieverConfig
@@ -21,7 +19,9 @@ class TestIngestDocumentsUnavailable:
     """Test ingest_documents when llama_index is not available."""
 
     def test_returns_unavailable_when_not_installed(self):
-        from aigateway_core.pipelines.understanding.rag.rag_retriever_plugin import RAGRetrieverPlugin
+        from aigateway_core.pipelines.understanding.rag.rag_retriever_plugin import (
+            RAGRetrieverPlugin,
+        )
 
         plugin = RAGRetrieverPlugin.__new__(RAGRetrieverPlugin)
         plugin._config = RAGRetrieverConfig()
@@ -38,7 +38,9 @@ class TestIngestDocumentsWithMocks:
 
     def _make_plugin(self, index=None, insert_error=None):
         """Build a plugin instance without calling __init__."""
-        from aigateway_core.pipelines.understanding.rag.rag_retriever_plugin import RAGRetrieverPlugin
+        from aigateway_core.pipelines.understanding.rag.rag_retriever_plugin import (
+            RAGRetrieverPlugin,
+        )
 
         plugin = RAGRetrieverPlugin.__new__(RAGRetrieverPlugin)
         plugin._config = RAGRetrieverConfig(chunk_size=512, chunk_overlap=64)
@@ -51,7 +53,7 @@ class TestIngestDocumentsWithMocks:
 
     def test_ingest_string_documents(self):
         """String documents should be converted to Document objects and ingested."""
-        plugin, mock_index = self._make_plugin()
+        _plugin, mock_index = self._make_plugin()
 
         mock_splitter_cls = MagicMock()
         mock_splitter_instance = MagicMock()
@@ -79,7 +81,7 @@ class TestIngestDocumentsWithMocks:
 
     def test_ingest_returns_error_on_exception(self):
         """When an exception occurs during ingest, should return error status."""
-        plugin, mock_index = self._make_plugin(insert_error=RuntimeError("Qdrant connection failed"))
+        _plugin, mock_index = self._make_plugin(insert_error=RuntimeError("Qdrant connection failed"))
 
         mock_splitter_cls = MagicMock()
         mock_splitter_instance = MagicMock()
@@ -105,7 +107,7 @@ class TestIngestDocumentsWithMocks:
 
     def test_ingest_empty_documents_list(self):
         """Ingesting empty list should return success with zero counts."""
-        plugin, mock_index = self._make_plugin()
+        _plugin, mock_index = self._make_plugin()
 
         mock_splitter_cls = MagicMock()
         mock_splitter_instance = MagicMock()

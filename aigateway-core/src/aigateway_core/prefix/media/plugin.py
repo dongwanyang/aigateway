@@ -9,7 +9,7 @@ MediaOptimizationPlugin — MOL 插件封装
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any
 
 from .config import (
     AudioPipelineConfig,
@@ -24,6 +24,7 @@ from .types import MediaType
 
 if TYPE_CHECKING:
     from aigateway_core.dispatch.context import PipelineContext
+
     from .cache import MediaCacheManager
 
 logger = logging.getLogger(__name__)
@@ -42,18 +43,18 @@ class MediaOptimizationPlugin:
 
     def __init__(
         self,
-        config: Optional[Dict[str, Any]] = None,
-        media_cache: Optional["MediaCacheManager"] = None,
+        config: dict[str, Any] | None = None,
+        media_cache: MediaCacheManager | None = None,
     ) -> None:
         cfg_dict = config or {}
         self._config = self._build_config(cfg_dict)
-        self._mol: Optional[MediaOptimizationLayer] = None
+        self._mol: MediaOptimizationLayer | None = None
         self._media_cache = media_cache
 
         if self._config.enabled:
             self._initialize_mol()
 
-    def _build_config(self, cfg_dict: Dict[str, Any]) -> MediaOptimizationConfig:
+    def _build_config(self, cfg_dict: dict[str, Any]) -> MediaOptimizationConfig:
         """从 dict 构建配置。"""
         image_cfg = ImagePipelineConfig(**cfg_dict.get("image", {}))
         video_cfg = VideoPipelineConfig(**cfg_dict.get("video", {}))
@@ -84,7 +85,7 @@ class MediaOptimizationPlugin:
             max_concurrent=self._config.max_concurrent_processors,
         )
 
-    async def execute(self, ctx: "PipelineContext") -> "PipelineContext":
+    async def execute(self, ctx: PipelineContext) -> PipelineContext:
         """执行 MOL 处理。"""
         if not self._config.enabled or self._mol is None:
             return ctx

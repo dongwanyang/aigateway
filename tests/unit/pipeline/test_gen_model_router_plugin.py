@@ -26,13 +26,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core
 from aigateway_core.dispatch.context import PipelineContext
 from aigateway_core.pipelines.generation._common.config import (
     GenerationOptimizationConfig,
-    ModelRouterConfig,
 )
 from aigateway_core.pipelines.generation._common.exceptions import ModelRoutingError
 from aigateway_core.pipelines.generation._common.models import RoutingDecision
 from aigateway_core.pipelines.generation.routing_signals.gen_model_router_plugin import (
-    GenModelRouterPlugin,
     NS_GENERATION_OPTIMIZATION,
+    GenModelRouterPlugin,
 )
 from aigateway_core.route.model_resolution.model_router import (
     ModelRouterStrategy,
@@ -339,8 +338,8 @@ class TestGenModelRouterPluginTracing:
         self, default_config, mock_strategy, ctx_with_intent_result
     ):
         """Engine emits kind='plugin' (always, no payload); plugin emits kind='debug' (gated by debug switch)."""
-        from aigateway_core.shared.trace_event import TraceCollector
         from aigateway_core.shared.debug_config import DebugConfig
+        from aigateway_core.shared.trace_event import TraceCollector
 
         plugin = GenModelRouterPlugin(strategy=mock_strategy, config=default_config)
 
@@ -383,7 +382,7 @@ class TestGenModelRouterPluginTracing:
 
         plugin = GenModelRouterPlugin(strategy=mock_strategy, config=default_config)
         ctx_with_intent_result.trace_id = "traceXYZ"
-        collector = TraceCollector.start("traceXYZ")
+        TraceCollector.start("traceXYZ")
 
         await plugin.execute(ctx_with_intent_result)
 

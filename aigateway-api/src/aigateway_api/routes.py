@@ -17,12 +17,13 @@ import json
 import logging
 import os
 import time
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.responses import JSONResponse, Response as FastAPIResponse
-from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+from fastapi.responses import JSONResponse
+from fastapi.responses import Response as FastAPIResponse
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from .auth_middleware import authenticate_admin, authenticate_api_key, require_scope
 from .openai_compat import ChatCompletionRequest, _get_app_state
@@ -40,7 +41,11 @@ def _console_chat_api_key() -> str:
     )
 
 
-async def _bind_console_chat_api_key(request: Request) -> Dict[str, Any]:
+async def _bind_console_chat_api_key(
+    request: Request,
+    *,
+    resource_owner: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Bind a real API-key principal before entering RequestDispatcher.
 
     /v1/* remains API-key-only. The browser session proves the operator is logged
@@ -61,6 +66,14 @@ async def _bind_console_chat_api_key(request: Request) -> Dict[str, Any]:
         )
     principal = await authenticate_api_key(request, api_key=key_value)
     require_scope(principal, "chat")
+    if resource_owner is not None:
+        # The server-side key remains the billing/quota principal, but media
+        # drafts created from the console belong to the authenticated browser
+        # operator. Never derive this owner from browser-supplied JSON.
+        request.state.draft_owner = {
+            "user_id": resource_owner.get("user_id") or None,
+            "group_id": resource_owner.get("group_id") or None,
+        }
     return principal
 
 
@@ -73,7 +86,7 @@ async def _bind_console_chat_api_key(request: Request) -> Dict[str, Any]:
 async def post_console_chat_completions(
     body: ChatCompletionRequest,
     request: Request,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ) -> Any:
     """Control-panel chat endpoint authenticated by browser session.
 
@@ -84,7 +97,7 @@ async def post_console_chat_completions(
     """
     from aigateway_api.dispatcher import RequestDispatcher
 
-    await _bind_console_chat_api_key(request)
+    await _bind_console_chat_api_key(request, resource_owner=_auth)
 
     state = _get_app_state(request)
     dispatcher = RequestDispatcher(state)
@@ -95,7 +108,7 @@ async def post_console_chat_completions(
 async def get_console_video_status(
     video_id: str,
     request: Request,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ) -> JSONResponse:
     """Poll video status from the control panel without exposing an API key."""
     await _bind_console_chat_api_key(request)
@@ -108,7 +121,7 @@ async def get_console_video_status(
             status_code=503,
         )
     try:
-        result: Dict[str, Any] = await bridge.retrieve_video(video_id)
+        result: dict[str, Any] = await bridge.retrieve_video(video_id)
         return JSONResponse(content=result)
     except Exception:
         logger.exception("Console video retrieval failed: %s", video_id)
@@ -137,7 +150,7 @@ async def get_metrics(request: Request) -> FastAPIResponse:
     try:
         from .app_state import get_state
         state_obj = get_state(request)
-        metrics_collector = getattr(state_obj, "metrics_collector")
+        metrics_collector = state_obj.metrics_collector
         litellm_bridge = getattr(state_obj, "litellm_bridge", None)
 
         # 更新熔断器状态指标(从 litellm cooldown tracker 读,按 provider 聚合)
@@ -184,10 +197,9 @@ async def get_health(request: Request) -> JSONResponse:
     from .app_state import get_state
     s = get_state(request)
 
-    redis_mgr = getattr(s, "redis_manager")
-    qdrant_mgr = getattr(s, "qdrant_manager")
-    config_manager = getattr(s, "config_manager")
-    plugin_registry = getattr(s, "plugin_registry")
+    redis_mgr = s.redis_manager
+    qdrant_mgr = s.qdrant_manager
+    plugin_registry = s.plugin_registry
     start_time = getattr(s, "_start_time", 0)
 
     # 检查 Redis
@@ -218,7 +230,7 @@ async def get_health(request: Request) -> JSONResponse:
             logger.warning("Qdrant health check failed: %s", exc)
 
     # 构建插件状态
-    plugins_status: Dict[str, Dict[str, Any]] = {}
+    plugins_status: dict[str, dict[str, Any]] = {}
     if plugin_registry:
         all_plugins = plugin_registry.get_all()
         for plugin in all_plugins:
@@ -230,10 +242,9 @@ async def get_health(request: Request) -> JSONResponse:
             }
 
     # 构建熔断器状态(从 litellm bridge tracker 读)
-    cb_status: Dict[str, Dict[str, Any]] = {}
     litellm_bridge_for_cb = getattr(s, "litellm_bridge", None)
     if litellm_bridge_for_cb is not None and hasattr(litellm_bridge_for_cb, "get_cooldown_status"):
-        cb_status = litellm_bridge_for_cb.get_cooldown_status()
+        litellm_bridge_for_cb.get_cooldown_status()
 
     # 确定整体状态
     dependencies = {
@@ -253,7 +264,7 @@ async def get_health(request: Request) -> JSONResponse:
     else:
         overall_status = "healthy"
 
-    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now_iso = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     return JSONResponse(content={
         "data": {

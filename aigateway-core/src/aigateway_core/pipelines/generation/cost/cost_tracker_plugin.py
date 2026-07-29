@@ -13,11 +13,12 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import asdict
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from aigateway_core.dispatch.context import PipelineContext
-from aigateway_core.pipelines.generation._common.config import GenerationOptimizationConfig
+from aigateway_core.pipelines.generation._common.config import (
+    GenerationOptimizationConfig,
+)
 from aigateway_core.pipelines.generation._common.metrics import GenerationCostTracker
 from aigateway_core.pipelines.generation._common.models import CostSavingRecord
 
@@ -56,7 +57,7 @@ class CostTrackerPlugin:
 
     name: str = "cost_tracker"
     enabled: bool = True
-    depends_on: List[str] = ["gen_model_router"]
+    depends_on: list[str] = ["gen_model_router"]
 
     def __init__(
         self,
@@ -200,7 +201,7 @@ class CostTrackerPlugin:
     # ------------------------------------------------------------------
 
     def _calculate_routing_saving(
-        self, gen_opt: Dict[str, Any], request_id: str, api_key_id: str = ""
+        self, gen_opt: dict[str, Any], request_id: str, api_key_id: str = ""
     ) -> float:
         """计算模型路由成本节省.
 
@@ -244,7 +245,7 @@ class CostTrackerPlugin:
             return 0.0
 
     def _calculate_compression_saving(
-        self, gen_opt: Dict[str, Any], request_id: str, api_key_id: str = ""
+        self, gen_opt: dict[str, Any], request_id: str, api_key_id: str = ""
     ) -> float:
         """计算 Token 压缩成本节省.
 
@@ -292,7 +293,7 @@ class CostTrackerPlugin:
             return 0.0
 
     def _calculate_prompt_saving(
-        self, gen_opt: Dict[str, Any], request_id: str, api_key_id: str = ""
+        self, gen_opt: dict[str, Any], request_id: str, api_key_id: str = ""
     ) -> float:
         """计算 Prompt 优化净节省.
 
@@ -346,7 +347,7 @@ class CostTrackerPlugin:
     # 辅助方法
     # ------------------------------------------------------------------
 
-    def _get_premium_price(self, gen_opt: Dict[str, Any]) -> float:
+    def _get_premium_price(self, gen_opt: dict[str, Any]) -> float:
         """获取 premium 模型价格（最高能力模型的价格）.
 
         从 gen_opt 中的 model_router 数据获取 premium_price，
@@ -378,7 +379,7 @@ class CostTrackerPlugin:
         # 兜底: 返回 estimated_cost（此时路由节省为 0）
         return estimated_cost
 
-    def _estimate_per_token_price(self, gen_opt: Dict[str, Any]) -> float:
+    def _estimate_per_token_price(self, gen_opt: dict[str, Any]) -> float:
         """估算每个 token 的价格.
 
         基于模型路由的 estimated_cost 和典型请求 token 数量推算，

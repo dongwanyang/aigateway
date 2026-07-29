@@ -15,5 +15,5 @@ for _src in _sources:
             globals()[_name] = getattr(_src, _name)
             _names.append(_name)
 
-__all__ = _names
+__all__ = tuple(_names)
 del _strategy, _plugin, _sources, _names, _src, _name

@@ -25,11 +25,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core
 from aigateway_core.pipelines.generation._common.config import CostTrackingConfig
 from aigateway_core.pipelines.generation._common.metrics import (
     DEFAULT_API_KEY_GROUP,
-    METRIC_DIRECTOR_COST_USD_TOTAL,
-    METRIC_INVOCATIONS_TOTAL,
-    METRIC_NET_SAVINGS_USD,
-    METRIC_PROMPT_OPTIMIZATIONS_TOTAL,
-    METRIC_SAVINGS_USD_TOTAL,
     STRATEGY_MODEL_ROUTING,
     STRATEGY_PROMPT_OPTIMIZATION,
     STRATEGY_TOKEN_COMPRESSION,

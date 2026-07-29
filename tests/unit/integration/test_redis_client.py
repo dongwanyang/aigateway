@@ -2,15 +2,16 @@
 
 import asyncio
 import json
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 
 class TestRedisClientManagerSingleton:
     """get_redis_manager() lazy init + idempotent."""
 
     def test_returns_same_instance(self):
-        from aigateway_core.shared.redis_client import get_redis_manager, _redis_manager
+        from aigateway_core.shared.redis_client import get_redis_manager
         # First call creates it
         m1 = get_redis_manager()
         # Second call returns same
@@ -115,7 +116,7 @@ class TestPublish:
         mgr.redis = AsyncMock()
         mgr.redis.publish = AsyncMock(return_value=2)
         msg = {"event": "config_reload", "key": "plugins_enabled"}
-        result = await mgr.publish("channel", msg)
+        await mgr.publish("channel", msg)
         expected_json = json.dumps(msg, ensure_ascii=False, default=str)
         mgr.redis.publish.assert_called_once_with("channel", expected_json)
 

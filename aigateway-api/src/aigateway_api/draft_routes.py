@@ -11,7 +11,7 @@ Draft Routes — Draft-to-HiRes 工作流 API 端点
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, field_validator
@@ -59,7 +59,7 @@ class DraftActionResponse(BaseModel):
     draft_id: str
     action: str
     status: str
-    data: Dict[str, Any] = {}
+    data: dict[str, Any] = {}
 
 
 # ==================================================================
@@ -246,7 +246,7 @@ async def draft_action(
 # ==================================================================
 
 
-def _get_draft_strategy(request: Request) -> Optional[Any]:
+def _get_draft_strategy(request: Request) -> Any | None:
     """从 app state 获取 DraftGeneratorStrategy 实例.
 
     Args:

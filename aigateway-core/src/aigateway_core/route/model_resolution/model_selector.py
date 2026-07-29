@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ class ModelSelector:
     def __init__(
         self,
         bridge: Any,
-        config: Optional[Dict[str, Any]] = None,
+        config: dict[str, Any] | None = None,
         default_model: str = "agnes-2.0-flash",
         timeout_seconds: float = 0.5,
     ) -> None:
@@ -53,7 +53,7 @@ class ModelSelector:
         """Return a bare model name. Never raises."""
         try:
             return await asyncio.wait_for(self._select(), timeout=self._timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(
                 "model_selector: timed out after %.2fs, returning default %s",
                 self._timeout,
@@ -70,8 +70,8 @@ class ModelSelector:
 
     async def _select(self) -> str:
         bridge = self._bridge
-        caps: Dict[str, List[str]] = getattr(bridge, "_model_capabilities", {}) or {}
-        registered: List[str] = bridge.get_registered_models() or []
+        caps: dict[str, list[str]] = getattr(bridge, "_model_capabilities", {}) or {}
+        registered: list[str] = bridge.get_registered_models() or []
 
         text_pool = [m for m in registered if "text" in caps.get(m, [])]
         if not text_pool:
@@ -82,7 +82,7 @@ class ModelSelector:
             return self._default_model
 
         cooldown = getattr(bridge, "_cooldown_tracker", None)
-        status: Dict[str, Dict[str, Any]] = {}
+        status: dict[str, dict[str, Any]] = {}
         if cooldown is not None:
             try:
                 raw_status = cooldown.get_all_status() or {}
@@ -93,10 +93,10 @@ class ModelSelector:
                 logger.warning("model_selector: get_all_status failed (%s)", exc)
                 status = {}
 
-        pricing: Dict[str, Dict[str, float]] = getattr(bridge, "_model_pricing", {}) or {}
-        latency: Dict[str, float] = getattr(bridge, "_model_latency_ms", {}) or {}
+        pricing: dict[str, dict[str, float]] = getattr(bridge, "_model_pricing", {}) or {}
+        latency: dict[str, float] = getattr(bridge, "_model_latency_ms", {}) or {}
 
-        best: Optional[str] = None
+        best: str | None = None
         best_score = -1.0
         for m in text_pool:
             # No tracker entry means "not observed yet", not unhealthy.
@@ -136,7 +136,7 @@ class ModelSelector:
 
         return best
 
-    def get_health(self, model: str) -> Dict[str, Any]:
+    def get_health(self, model: str) -> dict[str, Any]:
         """Return ``{healthy, failure_count, state}`` for ``model``.
 
         Falls back to a fully-healthy sentinel when no cooldown tracker exists,

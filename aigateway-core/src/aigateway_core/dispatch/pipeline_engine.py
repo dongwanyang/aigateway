@@ -14,11 +14,12 @@ import asyncio
 import logging
 import re
 import time
-from typing import Any, Dict, List, Protocol
+from typing import Any, Protocol
 
-from .context import PipelineContext, RequestContext
 from aigateway_core.shared.plugin_registry import PluginRegistry
 from aigateway_core.shared.trace_event import TraceCollector, TraceEvent
+
+from .context import PipelineContext, RequestContext
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ class Plugin(Protocol):
 
     name: str
     enabled: bool
-    depends_on: List[str]
+    depends_on: list[str]
     pipeline_kind: str
 
     async def execute(self, ctx: PipelineContext) -> PipelineContext:
@@ -71,7 +72,7 @@ class PipelineEngine:
     def __init__(self, registry: PluginRegistry, pipeline_kind: str = "understanding") -> None:
         self.registry = registry
         self.pipeline_kind = pipeline_kind
-        self._ordered_plugins: List[Plugin] = []
+        self._ordered_plugins: list[Plugin] = []
         self._initialized = False
 
     def initialize(self) -> None:
@@ -89,7 +90,7 @@ class PipelineEngine:
             deps = getattr(plugin, "depends_on", [])
             logger.debug("  [%d] %s (依赖: %s)", index, plugin.name, deps)
 
-    async def execute(self, request: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute(self, request: dict[str, Any]) -> dict[str, Any]:
         if not self._initialized:
             self.initialize()
 
@@ -216,10 +217,10 @@ class PipelineEngine:
             ctx.extra.setdefault("pipeline_error", str(exc))
             return ctx
 
-    def _topological_sort(self, plugins: List[Plugin]) -> List[Plugin]:
-        name_to_plugin: Dict[str, Plugin] = {plugin.name: plugin for plugin in plugins}
-        in_degree: Dict[str, int] = {plugin.name: 0 for plugin in plugins}
-        dependents: Dict[str, List[str]] = {plugin.name: [] for plugin in plugins}
+    def _topological_sort(self, plugins: list[Plugin]) -> list[Plugin]:
+        name_to_plugin: dict[str, Plugin] = {plugin.name: plugin for plugin in plugins}
+        in_degree: dict[str, int] = {plugin.name: 0 for plugin in plugins}
+        dependents: dict[str, list[str]] = {plugin.name: [] for plugin in plugins}
 
         for plugin in plugins:
             deps = getattr(plugin, "depends_on", [])
@@ -234,12 +235,12 @@ class PipelineEngine:
                         dep,
                     )
 
-        queue: List[str] = []
+        queue: list[str] = []
         for name, degree in in_degree.items():
             if degree == 0:
                 queue.append(name)
 
-        ordered_names: List[str] = []
+        ordered_names: list[str] = []
         while queue:
             node = queue.pop(0)
             ordered_names.append(node)
@@ -256,8 +257,8 @@ class PipelineEngine:
 
         return [name_to_plugin[name] for name in ordered_names]
 
-    def _build_response(self, ctx: PipelineContext) -> Dict[str, Any]:
-        response_data: Dict[str, Any] = {}
+    def _build_response(self, ctx: PipelineContext) -> dict[str, Any]:
+        response_data: dict[str, Any] = {}
 
         if ctx.response:
             import json
@@ -280,7 +281,7 @@ class PipelineEngine:
             },
         }
 
-    def _build_error_response(self, message: str) -> Dict[str, Any]:
+    def _build_error_response(self, message: str) -> dict[str, Any]:
         return {
             "error": {
                 "code": "internal_error",

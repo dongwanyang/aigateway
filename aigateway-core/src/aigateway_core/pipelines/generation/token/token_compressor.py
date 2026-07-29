@@ -27,13 +27,13 @@ import io
 import logging
 import threading
 import time
-from typing import Any, List, Optional
+from typing import Any
 
 from aigateway_core.pipelines.generation._common.config import TokenCompressorConfig
 from aigateway_core.pipelines.generation._common.exceptions import TokenCompressionError
 from aigateway_core.pipelines.generation._common.models import CompressionResult
-from aigateway_core.shared.integration_configs import CLIPConfig
 from aigateway_core.prefix.media.types import MediaContent
+from aigateway_core.shared.integration_configs import CLIPConfig
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +61,7 @@ class TokenCompressorStrategy:
     def __init__(
         self,
         config: TokenCompressorConfig,
-        clip_config: Optional[CLIPConfig] = None,
+        clip_config: CLIPConfig | None = None,
     ) -> None:
         """初始化 Token Compressor 策略.
 
@@ -71,8 +71,8 @@ class TokenCompressorStrategy:
         """
         self._config = config
         self._clip_config = clip_config or CLIPConfig()
-        self._clip_model: Optional[Any] = None
-        self._clip_processor: Optional[Any] = None
+        self._clip_model: Any | None = None
+        self._clip_processor: Any | None = None
         self._clip_available: bool = False
         self._clip_loaded: bool = False
         self._device: str = self._clip_config.device
@@ -176,7 +176,7 @@ class TokenCompressorStrategy:
             result.duration_ms = _elapsed_ms(start_time)
             return result
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             elapsed = _elapsed_ms(start_time)
             logger.warning(
                 "generation_optimization.token_compressor.timeout",
@@ -207,9 +207,9 @@ class TokenCompressorStrategy:
 
     async def compress_batch(
         self,
-        images: List[MediaContent],
+        images: list[MediaContent],
         config: TokenCompressorConfig,
-    ) -> List[CompressionResult]:
+    ) -> list[CompressionResult]:
         """批量压缩参考图.
 
         验证每请求最大图片数限制后，逐张独立处理，
@@ -231,7 +231,7 @@ class TokenCompressorStrategy:
                 f"{config.max_images_per_request} per request"
             )
 
-        results: List[CompressionResult] = []
+        results: list[CompressionResult] = []
         for image in images:
             result = await self.compress(image, config)
             results.append(result)
@@ -343,7 +343,7 @@ class TokenCompressorStrategy:
         self,
         image: MediaContent,
         target_dimensions: int,
-    ) -> List[float]:
+    ) -> list[float]:
         """从图像中使用 CLIP 提取语义特征向量（需求 3.1, 3.2, 3.3）.
 
         流程:
@@ -411,7 +411,7 @@ class TokenCompressorStrategy:
             )
             return self._extract_features(image, target_dimensions)
 
-    def _get_image_bytes(self, image: MediaContent) -> Optional[bytes]:
+    def _get_image_bytes(self, image: MediaContent) -> bytes | None:
         """获取图像的字节数据.
 
         优先使用 raw_data，若为 None 则尝试从 source_url 下载。
@@ -448,7 +448,7 @@ class TokenCompressorStrategy:
         self,
         image: MediaContent,
         target_dimensions: int,
-    ) -> List[float]:
+    ) -> list[float]:
         """从图像中提取特征向量（占位实现）.
 
         使用基于图像数据哈希的确定性方法生成 feature vector，
@@ -474,7 +474,7 @@ class TokenCompressorStrategy:
 
         # Generate deterministic feature vector from hash
         # Expand the hash to cover all required dimensions
-        feature_vector: List[float] = []
+        feature_vector: list[float] = []
         for i in range(target_dimensions):
             # Create per-dimension hash by combining base digest with index
             dim_seed = hashlib.md5(digest + i.to_bytes(4, "little")).digest()

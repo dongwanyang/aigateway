@@ -259,13 +259,20 @@ function responseFor(input: RequestInfo | URL, init?: RequestInit): Response {
         tokens_in: 100,
         tokens_out: 50,
         tokens_total: 150,
+        tokens_saved: 75,
         cost_usd: 1.5,
+        avg_latency_ms: 125,
         cache_hits: 4,
       },
       by_model: [{ k: 'gpt-4o', requests: 10, tokens_total: 150, cost_usd: 1.5, cache_hits: 4 }],
       by_user: [{ k: 'alice', requests: 10, tokens_total: 150, cost_usd: 1.5, cache_hits: 4 }],
       by_group: [{ k: 'team', requests: 10, tokens_total: 150, cost_usd: 1.5, cache_hits: 4 }],
       by_day: [{ k: '2026-07-26', requests: 10, tokens_total: 150, cost_usd: 1.5 }],
+      latency_by_hour: [{
+        k: '2026-07-26T10:00:00Z',
+        samples: 10,
+        avg_latency_ms: 125,
+      }],
     })
   }
   if (url.includes('/admin/metrics/query_range')) {

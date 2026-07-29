@@ -16,7 +16,7 @@ through ``model_resolution`` → ``generation_optimization.strategies``
 """
 import importlib
 
-__all__ = ["model_resolution", "bridge", "streaming", "metrics"]
+__all__ = ["bridge", "metrics", "model_resolution", "streaming"]
 
 
 def __getattr__(name):

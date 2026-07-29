@@ -26,10 +26,12 @@ import json
 import logging
 import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from aigateway_core.pipelines.generation._common.config import PromptTemplateConfig
-from aigateway_core.pipelines.generation._common.exceptions import TemplateValidationError
+from aigateway_core.pipelines.generation._common.exceptions import (
+    TemplateValidationError,
+)
 from aigateway_core.pipelines.generation._common.models import PromptTemplate
 
 logger = logging.getLogger(__name__)
@@ -71,8 +73,8 @@ class PromptTemplateManager:
         self._redis_client = redis_client
         self._config = config
         # 内存存储回退（用于测试或 Redis 不可用时）
-        self._memory_store: Dict[str, str] = {}
-        self._memory_index: Dict[str, set] = {}
+        self._memory_store: dict[str, str] = {}
+        self._memory_index: dict[str, set] = {}
 
     def _build_key(self, owner_id: str, name: str) -> str:
         """构建模板数据的 Redis Key.
@@ -236,7 +238,7 @@ class PromptTemplateManager:
         )
         return template
 
-    async def get(self, owner_id: str, name: str) -> Optional[PromptTemplate]:
+    async def get(self, owner_id: str, name: str) -> PromptTemplate | None:
         """获取模板.
 
         Args:
@@ -264,7 +266,7 @@ class PromptTemplateManager:
 
     async def list(
         self, owner_id: str, page: int = 1, page_size: int = 20
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """列出该 owner 的所有模板（分页）.
 
         Args:
@@ -305,7 +307,7 @@ class PromptTemplateManager:
         page_names = names[start:end]
 
         # 批量获取模板数据
-        items: List[PromptTemplate] = []
+        items: list[PromptTemplate] = []
         for name in page_names:
             template = await self.get(owner_id, name)
             if template is not None:
@@ -407,7 +409,7 @@ class PromptTemplateManager:
         )
         return True
 
-    def render(self, template: PromptTemplate, variables: Dict[str, str]) -> str:
+    def render(self, template: PromptTemplate, variables: dict[str, str]) -> str:
         """渲染模板，替换 {{variable_name}} 占位符.
 
         扫描模板内容中的所有 {{variable_name}} 占位符，

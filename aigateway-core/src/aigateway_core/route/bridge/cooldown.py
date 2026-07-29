@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ class ProviderCooldownTracker:
         # {model_name: {"state": "CLOSED"/"OPEN", "failure_count": int,
         #               "last_failure_time": float, "last_success_time": float,
         #               "cooldown_until": float|None}}
-        self._models: Dict[str, Dict[str, Any]] = {}
+        self._models: dict[str, dict[str, Any]] = {}
         self._lock = threading.Lock()
 
     @staticmethod
@@ -48,7 +48,7 @@ class ProviderCooldownTracker:
             return model.split("/", 1)[0]
         return model
 
-    def _get_or_init(self, model: str) -> Dict[str, Any]:
+    def _get_or_init(self, model: str) -> dict[str, Any]:
         if model not in self._models:
             self._models[model] = {
                 "state": "CLOSED",
@@ -96,7 +96,7 @@ class ProviderCooldownTracker:
             entry["failure_count"] = 0
             entry["cooldown_until"] = None
 
-    def get_all_status(self) -> Dict[str, Dict[str, Any]]:
+    def get_all_status(self) -> dict[str, dict[str, Any]]:
         """返回所有 model 状态的浅拷贝(供 /admin/health 读)。"""
         with self._lock:
             return {
@@ -111,13 +111,13 @@ class ProviderCooldownTracker:
                 for m, e in self._models.items()
             }
 
-    def get_provider_states(self) -> Dict[str, int]:
+    def get_provider_states(self) -> dict[str, int]:
         """按 provider 聚合状态,任一 model OPEN → provider OPEN。
 
         供 /metrics 上报 Prometheus circuit_breaker_state gauge。
         """
         with self._lock:
-            provider_state: Dict[str, int] = {}
+            provider_state: dict[str, int] = {}
             for m, e in self._models.items():
                 p = self._extract_provider(m)
                 v = 0 if e["state"] == "CLOSED" else 1

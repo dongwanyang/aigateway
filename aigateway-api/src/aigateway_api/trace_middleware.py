@@ -9,9 +9,8 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from starlette.types import ASGIApp, Receive, Scope, Send
-
 from aigateway_core.shared.trace_event import TraceCollector
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 
 class TraceMiddleware:

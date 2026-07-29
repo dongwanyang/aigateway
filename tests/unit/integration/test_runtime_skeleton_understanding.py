@@ -25,6 +25,8 @@ def test_understanding_conversation_reexports():
 
 def test_understanding_compression_reexports():
     from aigateway_core.pipelines.understanding import compression
-    from aigateway_core.pipelines.understanding.compression.plugin import PromptCompressPlugin
+    from aigateway_core.pipelines.understanding.compression.plugin import (
+        PromptCompressPlugin,
+    )
 
     assert compression.PromptCompressPlugin is PromptCompressPlugin

@@ -11,7 +11,6 @@ import time
 import unittest
 from unittest.mock import MagicMock, patch
 
-
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
@@ -574,9 +573,8 @@ class RequestTrackerTests(unittest.TestCase):
         """dec_active must be called even when an exception occurs."""
         collector = _make_collector()
         tracker = collector.track_request("/v1/chat/completions")
-        with self.assertRaises(RuntimeError):
-            with tracker:
-                raise RuntimeError("fail")
+        with self.assertRaises(RuntimeError), tracker:
+            raise RuntimeError("fail")
 
         collector._active_requests_gauge.dec.assert_called_once()
 
@@ -614,7 +612,10 @@ class SingletonTests(unittest.TestCase):
         self.assertIs(a, b)
 
     def test_reset_clears_singleton(self):
-        from aigateway_core.shared.metrics import get_metrics_collector, reset_metrics_collector
+        from aigateway_core.shared.metrics import (
+            get_metrics_collector,
+            reset_metrics_collector,
+        )
 
         get_metrics_collector()
         reset_metrics_collector()
@@ -624,7 +625,10 @@ class SingletonTests(unittest.TestCase):
         self.assertIsNone(_collector_instance)
 
     def test_reset_then_get_creates_new_instance(self):
-        from aigateway_core.shared.metrics import get_metrics_collector, reset_metrics_collector
+        from aigateway_core.shared.metrics import (
+            get_metrics_collector,
+            reset_metrics_collector,
+        )
 
         a = get_metrics_collector()
         reset_metrics_collector()

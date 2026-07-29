@@ -4,10 +4,10 @@
 新增 e2e 层的全局常量、健康检查、以及测试数据隔离前缀。
 """
 import os
-import sys
 import tempfile
-import pytest
+
 import httpx
+import pytest
 
 # ---- 全局常量(Phase 1 各窗口从这里 import) ----
 BASE = "http://localhost:8000"
@@ -20,7 +20,7 @@ GRAFANA_URL = "http://localhost:3001"
 # worktree 下的 config.yaml 才是被 mount 进 /app/config.yaml 的那份,
 # 不是主 checkout 的 config.yaml（路径随项目目录重命名变化，故相对解析）。
 HOST_CONFIG_YAML = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.yaml")
-AGNES_TEXT_MODEL = "agnes-2.0-flash"
+AGNES_TEXT_MODEL = os.environ.get("AIGATEWAY_TEST_MODEL", "agnes-2.0-flash")
 AGNES_IMAGE_MODEL = "agnes-image-2.1-flash"
 AGNES_VIDEO_MODEL = "agnes-video-v2.0"
 
@@ -32,8 +32,7 @@ def _explicit_e2e_ui(args) -> bool:
     for a in args or []:
         s = str(a).rstrip("/")
         # e2e/ui paths trigger health-check gate
-        if s.endswith("tests/e2e") or s.endswith("tests/ui") or \
-           "tests/e2e/" in str(a) or "tests/ui/" in str(a):
+        if s.endswith(("tests/e2e", "tests/ui")) or "tests/e2e/" in str(a) or "tests/ui/" in str(a):
             return True
     return False
 
@@ -66,7 +65,7 @@ def pytest_configure(config):
     if not ADMIN_KEY:
         pytest.exit(
             "AI_GATEWAY_ADMIN_KEY env var not set. Run: "
-            "export AI_GATEWAY_ADMIN_KEY=gw-rRIop4dpcyJJNUTJbHmHpr9Bj3M11s5o",
+            "export AI_GATEWAY_ADMIN_KEY=<created-by-admin-api-keys>",
             returncode=2,
         )
     # /health 走 dispatcher 的完整前置链,这个环境实测约 7-8s,给 15s 余量

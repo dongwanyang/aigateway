@@ -31,7 +31,7 @@ import pytest
 
 GATEWAY = os.environ.get("AIGATEWAY_URL", "http://localhost:8000")
 # admin key 同时用于切插件和发请求;可用普通 key 替代 USER_KEY 以避开 admin 配额
-ADMIN_KEY = os.environ.get("AIGATEWAY_ADMIN_KEY", "gw-rRIop4dpcyJJNUTJbHmHpr9Bj3M11s5o")
+ADMIN_KEY = os.environ["AI_GATEWAY_ADMIN_KEY"]
 USER_KEY = os.environ.get("AIGATEWAY_USER_KEY", ADMIN_KEY)
 MODEL = os.environ.get("AIGATEWAY_TEST_MODEL", "agnes-2.0-flash")
 
@@ -94,8 +94,9 @@ def _chat(messages) -> dict:
         return {"error": f"HTTP {d['_http_error']}: {d['_body']}", "prompt_tokens": 0}
     if "error" in d:
         return {"error": d["error"], "prompt_tokens": 0}
-    usage = d.get("usage", {})
-    text = d.get("choices", [{}])[0].get("message", {}).get("content", "")
+    payload = d.get("data", d)
+    usage = payload.get("usage", {})
+    text = payload.get("choices", [{}])[0].get("message", {}).get("content", "")
     return {
         "prompt_tokens": usage.get("prompt_tokens", 0),
         "completion_tokens": usage.get("completion_tokens", 0),
@@ -136,8 +137,16 @@ def test_rag_reduces_input_tokens(restore_rag):
                 content = f.read()
         except FileNotFoundError:
             content = f"(文件 {fp} 不存在)"
-        msgs.append({"role": "assistant", "content": f"我读一下 {fp}。"})
-        msgs.append({"role": "user", "content": f"这是 {fp} 的内容:\n```\n{content}\n```\n继续。[trace:{_rand()}]"})
+        # Model tool output as assistant context so generation keywords found
+        # inside source code cannot be mistaken for the user's current intent.
+        msgs.append({
+            "role": "assistant",
+            "content": f"读取 {fp} 的工具输出:\n```\n{content}\n```",
+        })
+        msgs.append({
+            "role": "user",
+            "content": f"请继续分析缓存键。[trace:{_rand()}]",
+        })
         r = _chat(msgs)
         assert "error" not in r, f"A 组轮{i}请求失败: {r.get('error')}"
         rounds.append({"file": fp, "chars": len(content), **r})
@@ -147,7 +156,7 @@ def test_rag_reduces_input_tokens(restore_rag):
     saved = cumulative_prompt - b["prompt_tokens"]
     pct = (saved / cumulative_prompt * 100) if cumulative_prompt else 0
 
-    print(f"\n=== A/B 结果 ===")
+    print("\n=== A/B 结果 ===")
     print(f"A 组(关RAG,多轮read)累计 prompt_tokens: {cumulative_prompt}")
     print(f"B 组(开RAG,单轮注入)      prompt_tokens: {b['prompt_tokens']}")
     print(f"净节省输入 token: {saved}  ({pct:.1f}%)")

@@ -1,14 +1,17 @@
 """Unit tests for QdrantClientManager — all methods mockable with httpx.AsyncClient mocks."""
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 
 class TestQdrantClientManagerSingleton:
     """get_qdrant_manager() lazy init + idempotent."""
 
     def test_returns_same_instance(self):
-        from aigateway_core.shared.qdrant_client import get_qdrant_manager, _qdrant_manager
+        from aigateway_core.shared.qdrant_client import (
+            get_qdrant_manager,
+        )
         m1 = get_qdrant_manager()
         m2 = get_qdrant_manager()
         assert m1 is m2
@@ -226,7 +229,7 @@ class TestStoreEmbedding:
         mock_http.put = AsyncMock(side_effect=[first_put, create_resp, success_resp])
         mgr._http = mock_http
 
-        point_id = await mgr.store_embedding(
+        await mgr.store_embedding(
             "semantic_cache",
             {"prompt_hash": "abc"},
             [0.1, 0.2, 0.3],

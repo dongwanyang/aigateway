@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Save, RefreshCw, AlertTriangle } from 'lucide-react'
+import { Save, RefreshCw, AlertTriangle, ExternalLink } from 'lucide-react'
 import Card from '@/components/Card'
-import { getFullConfig, updateFullConfig } from '@/api/client'
+import { getComfyUIStatus, getFullConfig, getGenerationPresets, updateFullConfig } from '@/api/client'
 import { queryKeys } from '@/query/keys'
 
 export default function Config() {
@@ -14,6 +14,15 @@ export default function Config() {
   const configQuery = useQuery({
     queryKey: queryKeys.config.full,
     queryFn: async () => (await getFullConfig()).data as Record<string, unknown>,
+  })
+  const comfyQuery = useQuery({
+    queryKey: ['comfyui', 'status'],
+    queryFn: async () => (await getComfyUIStatus()).data,
+    refetchInterval: 30_000,
+  })
+  const presetsQuery = useQuery({
+    queryKey: ['generation-presets'],
+    queryFn: async () => (await getGenerationPresets()).data,
   })
   const saveMutation = useMutation({
     mutationFn: updateFullConfig,
@@ -132,6 +141,44 @@ export default function Config() {
           ✅ {success}
         </div>
       )}
+
+      <Card>
+        <div className="flex items-center justify-between mb-3">
+          <div>
+            <h3 className="font-semibold">本地生成</h3>
+            <p className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>
+              Gateway 提供简易入口；节点、模型和高级工作流仍在 ComfyUI Manager 中管理。
+            </p>
+          </div>
+          <span style={{ color: comfyQuery.data?.available ? 'var(--color-success)' : 'var(--color-danger)' }}>
+            {comfyQuery.isLoading ? '检测中' : comfyQuery.data?.available ? 'ComfyUI 可用' : 'ComfyUI 不可用'}
+          </span>
+        </div>
+        <div className="flex flex-wrap gap-2 mb-4">
+          <a className="btn btn-secondary" href={comfyQuery.data?.public_url} target="_blank" rel="noreferrer">
+            <ExternalLink size={14} /> 打开 ComfyUI
+          </a>
+          <a className="btn btn-secondary" href={comfyQuery.data?.manager_url} target="_blank" rel="noreferrer">
+            <ExternalLink size={14} /> 打开 Manager
+          </a>
+          {comfyQuery.data?.queue && (
+            <span className="text-sm">队列：{comfyQuery.data.queue.running} 运行 / {comfyQuery.data.queue.pending} 等待</span>
+          )}
+        </div>
+        <div className="space-y-2">
+          {(Array.isArray(presetsQuery.data) ? presetsQuery.data : []).map(preset => {
+            const missing = [...preset.validation.missing_models, ...preset.validation.missing_nodes]
+            return (
+              <div key={preset.id} className="flex items-start justify-between gap-3 text-sm">
+                <span>{preset.name} <small>({preset.kind})</small></span>
+                <span style={{ color: missing.length ? 'var(--color-warning)' : 'var(--color-success)' }}>
+                  {missing.length ? `缺少：${missing.join('、')}` : '依赖完整'}
+                </span>
+              </div>
+            )
+          })}
+        </div>
+      </Card>
 
       {/* 配置编辑器 */}
       <Card>

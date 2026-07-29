@@ -3,7 +3,6 @@
 from unittest.mock import patch
 
 import pytest
-
 from aigateway_core.dispatch.context import PipelineContext
 from aigateway_core.pipelines.understanding.compression.plugin import (
     PromptCompressPlugin,

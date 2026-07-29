@@ -5,11 +5,9 @@
 - SemanticCachePlugin: 向量计算、命中/未命中、已有缓存命中时跳过
 """
 
-import asyncio
-import json
-import sys
 import os
-from unittest.mock import AsyncMock, MagicMock, patch
+import sys
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -17,9 +15,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-api", "src"))
 
 from aigateway_core.dispatch.context import PipelineContext
-from aigateway_core.prefix.cache.plugin import PromptCachePlugin, SemanticCachePlugin
 from aigateway_core.prefix.cache.cache_manager import CacheManager
-
+from aigateway_core.prefix.cache.plugin import PromptCachePlugin, SemanticCachePlugin
 
 # ==================================================================
 # 辅助函数

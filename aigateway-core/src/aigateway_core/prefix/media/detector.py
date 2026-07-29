@@ -8,7 +8,7 @@ ContentTypeDetector — 内容类型检测器
 from __future__ import annotations
 
 import mimetypes
-from typing import Any, Dict, Optional
+from typing import Any
 from urllib.parse import urlparse
 
 from .types import MediaContent, MediaType
@@ -26,7 +26,7 @@ class ContentTypeDetector:
     6. MIME type 匹配 → 精确分类
     """
 
-    MIME_MAP: Dict[str, MediaType] = {
+    MIME_MAP: dict[str, MediaType] = {
         # Image
         "image/jpeg": MediaType.IMAGE,
         "image/png": MediaType.IMAGE,
@@ -60,7 +60,7 @@ class ContentTypeDetector:
         "text/html": MediaType.DOCUMENT,
     }
 
-    EXT_MAP: Dict[str, MediaType] = {
+    EXT_MAP: dict[str, MediaType] = {
         # Video
         ".mp4": MediaType.VIDEO,
         ".webm": MediaType.VIDEO,
@@ -85,7 +85,7 @@ class ContentTypeDetector:
         ".htm": MediaType.DOCUMENT,
     }
 
-    def detect(self, content_part: Dict[str, Any]) -> MediaContent:
+    def detect(self, content_part: dict[str, Any]) -> MediaContent:
         """从 ContentPart 检测媒体类型并构建 MediaContent。"""
         part_type = content_part.get("type", "text")
 
@@ -168,7 +168,7 @@ class ContentTypeDetector:
 
         return MediaType.IMAGE  # 默认假设为图片
 
-    def _guess_mime(self, url: str) -> Optional[str]:
+    def _guess_mime(self, url: str) -> str | None:
         """从 URL 猜测 MIME type。"""
         if not url:
             return None

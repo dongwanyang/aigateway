@@ -21,16 +21,16 @@ async function rawJson<T>(path: string, options: RequestInit = {}): Promise<T> {
   if (res.status === 204) return undefined as T
   return res.json()
 }
-async function errorText(res: Response, fallback: string): Promise<string> { try { const body = await res.json(); return body?.error?.code || body?.error?.message || body?.detail?.error?.message || body?.detail || `${fallback}: HTTP ${res.status}` } catch { return `${fallback}: HTTP ${res.status}` } }
+async function errorText(res: Response, fallback: string): Promise<string> { try { const body = await res.json(); return body?.error?.code || body?.error?.message || body?.detail?.error?.code || body?.detail?.error?.message || body?.detail || `${fallback}: HTTP ${res.status}` } catch { return `${fallback}: HTTP ${res.status}` } }
 
 export async function createChatCompletion(body: ChatCompletionRequest): Promise<ApiResponse<ChatCompletionData>> { return fetchJson<ChatCompletionData>('/admin/console/chat/completions', { method: 'POST', body: JSON.stringify(body) }) }
-export async function getDraftPreview(draftId: string): Promise<{ previewDataUrl?: string; previewCount?: number; status?: 'generating' }> { const headers = await ensureAuthHeaders(); const res = await fetch(`${API_BASE}/admin/draft/${encodeURIComponent(draftId)}/preview`, { credentials: 'include', headers }); if (res.status === 202) { await res.json().catch(() => ({})); return { status: 'generating' } }; if (!res.ok) throw new Error(await errorText(res, 'preview 加载失败')); const json = await res.json() as { preview_data_url?: string; preview_count?: number }; if (!json.preview_data_url) throw new Error('preview 响应缺少 preview_data_url'); return { previewDataUrl: json.preview_data_url, previewCount: json.preview_count ?? 1 } }
-export async function getDraftResult(draftId: string): Promise<{ resultDataUrl: string }> { const json = await rawJson<{ result_data_url?: string }>(`/admin/draft/${encodeURIComponent(draftId)}/result`); if (!json.result_data_url) throw new Error('result 响应缺少 result_data_url'); return { resultDataUrl: json.result_data_url } }
+export async function getDraftPreview(draftId: string): Promise<{ previewDataUrl?: string; previewCount?: number; status?: string; stage?: string; progress?: number; progressSource?: string }> { const headers = await ensureAuthHeaders(); const res = await fetch(`${API_BASE}/admin/draft/${encodeURIComponent(draftId)}/preview`, { credentials: 'include', headers }); if (res.status === 202) { const json = await res.json().catch(() => ({})) as { status?: string; stage?: string; progress?: number; progress_source?: string }; return { status: json.status ?? 'running', stage: json.stage, progress: json.progress, progressSource: json.progress_source } }; if (!res.ok) throw new Error(await errorText(res, 'preview 加载失败')); const json = await res.json() as { preview_data_url?: string; preview_count?: number }; if (!json.preview_data_url) throw new Error('preview 响应缺少 preview_data_url'); return { previewDataUrl: json.preview_data_url, previewCount: json.preview_count ?? 1, progressSource: 'complete' } }
+export async function getDraftResult(draftId: string): Promise<{ resultDataUrl: string; mediaType: 'image' | 'video' }> { const json = await rawJson<{ result_data_url?: string; media_type?: 'image' | 'video' }>(`/admin/draft/${encodeURIComponent(draftId)}/result`); if (!json.result_data_url) throw new Error('result 响应缺少 result_data_url'); return { resultDataUrl: json.result_data_url, mediaType: json.media_type ?? 'image' } }
 export async function deleteSessionDrafts(sessionId: string): Promise<{ session_id: string; deleted_count: number }> { return rawJson(`/admin/drafts/session/${encodeURIComponent(sessionId)}`, { method: 'DELETE' }) }
-export type ConfirmDraftResult = { videoId: string; status: string; mediaType: 'video' } | { upscaledUrl: string; targetResolution: [number, number]; algorithm: string; mediaType: 'image' }
-export async function confirmDraft(draftId: string): Promise<ConfirmDraftResult> { const json = await rawJson<{ media_type?: string; video_id?: string; status?: string; upscaled_url?: string; target_resolution?: [number, number]; algorithm?: string }>(`/admin/draft/${encodeURIComponent(draftId)}/confirm`, { method: 'POST' }); if (json.media_type === 'video' && json.video_id) return { videoId: json.video_id, status: json.status ?? 'generating', mediaType: 'video' }; if (!json.upscaled_url) throw new Error('confirm 响应缺少 upscaled_url'); return { upscaledUrl: json.upscaled_url, targetResolution: json.target_resolution ?? [0, 0], algorithm: json.algorithm ?? 'upscale', mediaType: 'image' } }
+export type ConfirmDraftResult = { videoId: string; status: string; mediaType: 'video' } | { upscaledUrl: string; targetResolution: [number, number]; algorithm: string; mediaType: 'image' | 'video' }
+export async function confirmDraft(draftId: string): Promise<ConfirmDraftResult> { const json = await rawJson<{ media_type?: 'image' | 'video'; video_id?: string; status?: string; upscaled_url?: string; target_resolution?: [number, number]; algorithm?: string }>(`/admin/draft/${encodeURIComponent(draftId)}/confirm`, { method: 'POST' }); if (json.media_type === 'video' && json.video_id) return { videoId: json.video_id, status: json.status ?? 'generating', mediaType: 'video' }; if (!json.upscaled_url) throw new Error('confirm 响应缺少 upscaled_url'); return { upscaledUrl: json.upscaled_url, targetResolution: json.target_resolution ?? [0, 0], algorithm: json.algorithm ?? 'comfyui', mediaType: json.media_type ?? 'image' } }
 export async function rejectDraft(draftId: string): Promise<{ newDraftId: string; previewUrl: string; attemptNumber: number; maxAttempts: number }> { const json = await rawJson<{ new_draft_id?: string; preview_url?: string; attempt_number?: number; max_attempts?: number }>(`/admin/draft/${encodeURIComponent(draftId)}/reject`, { method: 'POST' }); if (!json.new_draft_id || !json.preview_url) throw new Error('reject 响应缺少 new_draft_id / preview_url'); return { newDraftId: json.new_draft_id, previewUrl: json.preview_url, attemptNumber: json.attempt_number ?? 1, maxAttempts: json.max_attempts ?? 5 } }
-export async function getDraftStatus(draftId: string): Promise<{ status: string; expiresAt: number; attemptNumber: number; maxAttempts: number }> { const json = await rawJson<{ status?: string; expires_at?: number; attempt_number?: number; max_attempts?: number }>(`/admin/draft/${encodeURIComponent(draftId)}`); return { status: json.status ?? 'unknown', expiresAt: json.expires_at ?? 0, attemptNumber: json.attempt_number ?? 1, maxAttempts: json.max_attempts ?? 5 } }
+export async function getDraftStatus(draftId: string): Promise<{ status: string; expiresAt: number; attemptNumber: number; maxAttempts: number; progress: number; stage: string; workflowVersion: string; progressSource?: string }> { const json = await rawJson<{ status?: string; expires_at?: number; attempt_number?: number; max_attempts?: number; progress?: number; stage?: string; workflow_version?: string; progress_source?: string }>(`/admin/draft/${encodeURIComponent(draftId)}`); return { status: json.status ?? 'unknown', expiresAt: json.expires_at ?? 0, attemptNumber: json.attempt_number ?? 1, maxAttempts: json.max_attempts ?? 5, progress: json.progress ?? 0, stage: json.stage ?? json.status ?? 'unknown', workflowVersion: json.workflow_version ?? '', progressSource: json.progress_source } }
 export async function getVideoStatus(videoId: string): Promise<VideoStatusResponse> { return rawJson<VideoStatusResponse>(`/admin/console/videos/${encodeURIComponent(videoId)}`) }
 
 export async function listModels(): Promise<ApiResponse<ModelListData>> { return fetchJson<ModelListData>('/v1/models') }
@@ -56,10 +56,11 @@ export interface MetricsQueryResponse { status: string; data: { resultType: stri
 export async function metricsQuery(params: { query: string; start?: string; end?: string; step?: string }): Promise<MetricsQueryResponse> { const qs = new URLSearchParams({ query: params.query, step: params.step || '3600' }); if (params.start) qs.set('start', params.start); if (params.end) qs.set('end', params.end); const res = await fetch(`${API_BASE}/admin/metrics/query_range?${qs}`, { credentials: 'include' }); if (!res.ok) throw new Error(`Failed to query metrics: ${res.status}`); return res.json() }
 export interface MetricsJsonData { prometheus: Record<string, { labels: Record<string, string>; value: number }>; keys: { total_keys: number; total_daily_tokens_used: number; total_monthly_cost_used: number; total_requests: number }; circuit_breakers: Record<string, unknown>; uptime_seconds: number }
 export async function getMetricsJson(): Promise<ApiResponse<MetricsJsonData>> { return fetchJson<MetricsJsonData>('/admin/metrics-json') }
-export interface LedgerRow { id: number; trace_id: string; ts: string; ts_unix: number; user_id: string; group_id: string; model: string; provider: string; pipeline_kind: string; tokens_in: number; tokens_out: number; tokens_total: number; cost_usd: number; cached: number; stream: number; status: string }
-interface AggregateRow { k: string; requests: number; tokens_in: number; tokens_out: number; tokens_total: number; cost_usd: number; cache_hits: number }
+export interface LedgerRow { id: number; trace_id: string; ts: string; ts_unix: number; user_id: string; group_id: string; model: string; provider: string; pipeline_kind: string; tokens_in: number; tokens_out: number; tokens_total: number; tokens_saved: number; cost_usd: number; duration_ms: number; cached: number; stream: number; status: string }
+interface AggregateRow { k: string; requests: number; tokens_in: number; tokens_out: number; tokens_total: number; tokens_saved: number; cost_usd: number; avg_latency_ms: number; cache_hits: number }
 interface AggregateDayRow { k: string; requests: number; tokens_total: number; cost_usd: number }
-export interface CostSummary { total: Record<string, number>; by_model: AggregateRow[]; by_user: AggregateRow[]; by_group: AggregateRow[]; by_day: AggregateDayRow[] }
+interface LatencyHourRow { k: string; samples: number; avg_latency_ms: number }
+export interface CostSummary { total: Record<string, number>; by_model: AggregateRow[]; by_user: AggregateRow[]; by_group: AggregateRow[]; by_day: AggregateDayRow[]; latency_by_hour: LatencyHourRow[] }
 export async function getCostLedger(params?: { limit?: number; offset?: number; start?: number | null; end?: number | null; user_id?: string | null; group_id?: string | null; model?: string | null }): Promise<LedgerRow[]> { const qs = new URLSearchParams(); if (params?.limit) qs.set('limit', String(params.limit)); if (params?.offset) qs.set('offset', String(params.offset)); if (params?.start !== undefined && params.start !== null) qs.set('start', String(params.start)); if (params?.end !== undefined && params.end !== null) qs.set('end', String(params.end)); if (params?.user_id) qs.set('user_id', params.user_id); if (params?.group_id) qs.set('group_id', params.group_id); if (params?.model) qs.set('model', params.model); const body = await rawJson<{ rows?: LedgerRow[] }>(`/admin/costs/ledger${qs.toString() ? '?' + qs : ''}`); return body.rows ?? [] }
 export async function getCostSummary(days?: number): Promise<CostSummary> { return rawJson<CostSummary>(`/admin/costs/summary${days ? `?days=${days}` : ''}`) }
 
@@ -73,6 +74,27 @@ export async function getGlobalConfig(): Promise<ApiResponse<GlobalConfigData>> 
 export async function updateGlobalConfig(config: { hot_reload: boolean; debug_mode?: boolean }): Promise<ApiResponse<GlobalConfigData>> { return fetchJson<GlobalConfigData>('/admin/global-config', { method: 'PUT', body: JSON.stringify(config) }) }
 export async function getFullConfig(): Promise<ApiResponse<Record<string, unknown>>> { return fetchJson<Record<string, unknown>>('/admin/config') }
 export async function updateFullConfig(config: Record<string, unknown>): Promise<ApiResponse<{ updated: boolean }>> { return fetchJson<{ updated: boolean }>('/admin/config', { method: 'PUT', body: JSON.stringify(config) }) }
+export interface ComfyUIStatus {
+  available: boolean
+  manager_enabled: boolean
+  public_url: string
+  manager_url: string
+  gpu: Record<string, unknown> | null
+  queue: { running: number; pending: number } | null
+  disk: { total_bytes: number; free_bytes: number } | null
+  error: string | null
+}
+export interface GenerationPreset {
+  id: string
+  name: string
+  kind: 'image' | 'video' | 'upscale'
+  builtin: boolean
+  enabled: boolean
+  languages: string[]
+  validation: { missing_models: string[]; missing_nodes: string[] }
+}
+export async function getComfyUIStatus(): Promise<ApiResponse<ComfyUIStatus>> { return fetchJson<ComfyUIStatus>('/admin/comfyui/status') }
+export async function getGenerationPresets(): Promise<ApiResponse<GenerationPreset[]>> { return fetchJson<GenerationPreset[]>('/admin/generation-presets') }
 export async function setPluginDebug(name: string, enabled: boolean): Promise<ApiResponse<{ plugin: string; debug: boolean }>> { return fetchJson<{ plugin: string; debug: boolean }>(`/admin/plugins/${encodeURIComponent(name)}/debug`, { method: 'POST', body: JSON.stringify({ enabled }) }) }
 export async function getDebugConfig(): Promise<DebugConfig> { return (await fetchJson<DebugConfig>('/admin/config/debug')).data }
 export async function updateDebugSection(config: Partial<DebugConfig>): Promise<ApiResponse<GlobalConfigData>> {
@@ -97,7 +119,7 @@ export async function updateDebugSection(config: Partial<DebugConfig>): Promise<
 }
 export interface ProviderConnectivityResult { success: boolean; latency_ms: number; error?: string | null }
 export async function testProviderConnectivity(provider: string, config?: Record<string, unknown>): Promise<ApiResponse<ProviderConnectivityResult>> { return fetchJson<ProviderConnectivityResult>(`/admin/providers/${encodeURIComponent(provider)}/test`, { method: 'POST', body: JSON.stringify(config ?? {}) }) }
-export async function fetchProviderModels(provider: string, config?: Record<string, unknown>): Promise<ApiResponse<{ models: string[] }>> { return fetchJson<{ models: string[] }>(`/admin/providers/${encodeURIComponent(provider)}/models`, { method: 'POST', body: JSON.stringify(config ?? {}) }) }
+export async function fetchProviderModels(provider: string): Promise<ApiResponse<{ models: string[] }>> { return fetchJson<{ models: string[] }>(`/admin/providers/${encodeURIComponent(provider)}/models`) }
 
 export interface PluginTraceStep { plugin_name: string; duration_ms: number; status: 'success' | 'skipped' | 'failed' }
 export interface LogEntry { request_id: string; trace_id: string; user_id: string; timestamp: number; method: string; endpoint: string; model: string; status: number; duration_ms: number; cache_hit: boolean; tier: string | null; plugin_trace?: PluginTraceStep[] }

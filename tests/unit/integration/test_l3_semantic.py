@@ -8,8 +8,8 @@
 """
 
 import asyncio
-import sys
 import os
+import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -17,7 +17,6 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 
 from aigateway_core.prefix.cache import l3_semantic
-
 
 # ==================================================================
 # set_l3_device 测试

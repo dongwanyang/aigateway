@@ -14,7 +14,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,7 @@ class RequestContext:
     deadline: float
 
     @classmethod
-    def with_timeout(cls, timeout_seconds: float) -> "RequestContext":
+    def with_timeout(cls, timeout_seconds: float) -> RequestContext:
         timeout = max(0.001, float(timeout_seconds))
         return cls(deadline=time.monotonic() + timeout)
 
@@ -77,27 +77,27 @@ class PipelineContext:
         copies.  Create a new instance via the constructor instead.
     """
 
-    request: Dict[str, Any]
+    request: dict[str, Any]
     trace_id: str
-    response: Optional[str] = None
+    response: str | None = None
     should_stop: bool = False
     should_stream: bool = False
     request_id: str = field(default_factory=lambda: uuid.uuid4().hex)
-    user_id: Optional[str] = None
-    extra: Dict[str, Any] = field(default_factory=dict)
+    user_id: str | None = None
+    extra: dict[str, Any] = field(default_factory=dict)
     pipeline_kind: str = "understanding"
     is_multimodal: bool = False
     total_token_savings: int = 0
-    request_context: Optional[RequestContext] = None
+    request_context: RequestContext | None = None
 
     @property
-    def prompt_compress(self) -> Dict[str, Any]:
+    def prompt_compress(self) -> dict[str, Any]:
         if NS_PROMPT_COMPRESS not in self.extra:
             self.extra[NS_PROMPT_COMPRESS] = {}
         return self.extra[NS_PROMPT_COMPRESS]  # type: ignore[no-any-return]
 
     @prompt_compress.setter
-    def prompt_compress(self, value: Dict[str, Any]) -> None:
+    def prompt_compress(self, value: dict[str, Any]) -> None:
         self.extra[NS_PROMPT_COMPRESS] = value
 
     @property
@@ -125,13 +125,13 @@ class PipelineContext:
         self.prompt_compress["compression_ratio"] = value
 
     @property
-    def prompt_cache(self) -> Dict[str, Any]:
+    def prompt_cache(self) -> dict[str, Any]:
         if NS_PROMPT_CACHE not in self.extra:
             self.extra[NS_PROMPT_CACHE] = {}
         return self.extra[NS_PROMPT_CACHE]  # type: ignore[no-any-return]
 
     @prompt_cache.setter
-    def prompt_cache(self, value: Dict[str, Any]) -> None:
+    def prompt_cache(self, value: dict[str, Any]) -> None:
         self.extra[NS_PROMPT_CACHE] = value
 
     @property
@@ -151,13 +151,13 @@ class PipelineContext:
         self.prompt_cache["cache_hit"] = value
 
     @property
-    def semantic_cache(self) -> Dict[str, Any]:
+    def semantic_cache(self) -> dict[str, Any]:
         if NS_SEMANTIC_CACHE not in self.extra:
             self.extra[NS_SEMANTIC_CACHE] = {}
         return self.extra[NS_SEMANTIC_CACHE]  # type: ignore[no-any-return]
 
     @semantic_cache.setter
-    def semantic_cache(self, value: Dict[str, Any]) -> None:
+    def semantic_cache(self, value: dict[str, Any]) -> None:
         self.extra[NS_SEMANTIC_CACHE] = value
 
     @property
@@ -185,13 +185,13 @@ class PipelineContext:
         self.semantic_cache["collection"] = value
 
     @property
-    def pii_detector(self) -> Dict[str, Any]:
+    def pii_detector(self) -> dict[str, Any]:
         if NS_PII_DETECTOR not in self.extra:
             self.extra[NS_PII_DETECTOR] = {}
         return self.extra[NS_PII_DETECTOR]  # type: ignore[no-any-return]
 
     @pii_detector.setter
-    def pii_detector(self, value: Dict[str, Any]) -> None:
+    def pii_detector(self, value: dict[str, Any]) -> None:
         self.extra[NS_PII_DETECTOR] = value
 
     @property
@@ -211,13 +211,13 @@ class PipelineContext:
         self.pii_detector["sanitized_prompt"] = value
 
     @property
-    def model_router(self) -> Dict[str, Any]:
+    def model_router(self) -> dict[str, Any]:
         if NS_MODEL_ROUTER not in self.extra:
             self.extra[NS_MODEL_ROUTER] = {}
         return self.extra[NS_MODEL_ROUTER]  # type: ignore[no-any-return]
 
     @model_router.setter
-    def model_router(self, value: Dict[str, Any]) -> None:
+    def model_router(self, value: dict[str, Any]) -> None:
         self.extra[NS_MODEL_ROUTER] = value
 
     @property
@@ -253,7 +253,7 @@ class PipelineContext:
         self.model_router["circuit_breaker_state"] = value
 
     @property
-    def media_optimization(self) -> Dict[str, Any]:
+    def media_optimization(self) -> dict[str, Any]:
         if NS_MEDIA_OPTIMIZATION not in self.extra:
             self.extra[NS_MEDIA_OPTIMIZATION] = {
                 "detected_types": [],
@@ -264,11 +264,11 @@ class PipelineContext:
         return self.extra[NS_MEDIA_OPTIMIZATION]
 
     @media_optimization.setter
-    def media_optimization(self, value: Dict[str, Any]) -> None:
+    def media_optimization(self, value: dict[str, Any]) -> None:
         self.extra[NS_MEDIA_OPTIMIZATION] = value
 
     @property
-    def generation_pipeline(self) -> Dict[str, Any]:
+    def generation_pipeline(self) -> dict[str, Any]:
         if NS_GENERATION_PIPELINE not in self.extra:
             self.extra[NS_GENERATION_PIPELINE] = {
                 "prompt_enhanced": False,
@@ -280,7 +280,7 @@ class PipelineContext:
         return self.extra[NS_GENERATION_PIPELINE]
 
     @generation_pipeline.setter
-    def generation_pipeline(self, value: Dict[str, Any]) -> None:
+    def generation_pipeline(self, value: dict[str, Any]) -> None:
         self.extra[NS_GENERATION_PIPELINE] = value
 
     @property
@@ -337,7 +337,7 @@ class PipelineContext:
                 payload=payload,
             )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "request_id": self.request_id,
             "trace_id": self.trace_id,

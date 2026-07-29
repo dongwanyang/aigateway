@@ -2,9 +2,9 @@
 Media Pipelines — 各媒体类型的处理管线
 """
 
-from .image import ImagePipeline
 from .audio import AudioPipeline
-from .video import VideoPipeline
 from .document import DocumentPipeline
+from .image import ImagePipeline
+from .video import VideoPipeline
 
-__all__ = ["ImagePipeline", "AudioPipeline", "VideoPipeline", "DocumentPipeline"]
+__all__ = ["AudioPipeline", "DocumentPipeline", "ImagePipeline", "VideoPipeline"]

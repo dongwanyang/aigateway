@@ -10,9 +10,10 @@ import asyncio
 import json
 import logging
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from aigateway_core.dispatch.context import PipelineContext
+from aigateway_core.prefix.cache.cache_manager import CacheManager
 
 logger = logging.getLogger(__name__)
 _semantic_embedding_lock = threading.Lock()
@@ -33,7 +34,7 @@ class PromptCachePlugin:
     # on every topological sort.
     depends_on: list = []
 
-    def __init__(self, cache_manager: Optional["CacheManager"] = None) -> None:
+    def __init__(self, cache_manager: CacheManager | None = None) -> None:
         self.cache_manager = cache_manager
 
     async def execute(self, ctx: PipelineContext) -> PipelineContext:
@@ -109,7 +110,7 @@ class SemanticCachePlugin:
 
     def __init__(
         self,
-        cache_manager: Optional["CacheManager"] = None,
+        cache_manager: CacheManager | None = None,
         embedding_model: str = "Qwen/Qwen3-Embedding-0.6B",
         **kwargs: Any,
     ) -> None:
@@ -166,7 +167,7 @@ class SemanticCachePlugin:
 
         return ctx
 
-    async def _compute_embedding(self, text: str) -> Optional[List[float]]:
+    async def _compute_embedding(self, text: str) -> list[float] | None:
         """使用 sentence-transformers 计算文本嵌入向量。"""
         try:
             return await asyncio.to_thread(self._compute_embedding_sync, text)
@@ -179,7 +180,7 @@ class SemanticCachePlugin:
             logger.error("嵌入计算失败: %s", exc)
             return None
 
-    def _compute_embedding_sync(self, text: str) -> List[float]:
+    def _compute_embedding_sync(self, text: str) -> list[float]:
         """在线程中加载并执行同步 sentence-transformers 模型。"""
         from sentence_transformers import SentenceTransformer
 

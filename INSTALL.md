@@ -1,220 +1,133 @@
-# 安装指南
+# AI Gateway 部署
 
-AI Gateway 的两种安装方式。**新手推荐 Docker Compose**，一条命令起全套服务。
+客户部署统一使用 Docker Compose。源码分发只改变镜像来源，不改变配置、
+服务拓扑、入口、健康检查或数据卷。
 
----
+## 套餐
 
-## 前置要求
+| Edition | 服务 | 加速 |
+|---|---|---|
+| Lite | Gateway、控制台、Redis | CPU |
+| Knowledge | Lite + Qdrant + RAG | NVIDIA CUDA 或 Apple MPS |
+| Studio | Lite + ComfyUI | NVIDIA CUDA 或 Apple MPS |
+| Full | Knowledge + Studio | NVIDIA CUDA 或 Apple MPS |
 
-| 组件 | 版本 | 用途 |
-|------|------|------|
-| Docker | 20.10+ | 容器运行时 |
-| Docker Compose | v2+ | 多服务编排 |
-| Git | 任意 | 克隆仓库 |
+Qdrant 始终在 CPU/内存上维护向量索引；GPU 用于文档/查询 Embedding、
+可选 Reranker 和媒体生成。
 
-> 本地开发（方式二）还需要 **Python 3.12**（不要用 3.13/3.14，paddlepaddle 无对应 wheel）和 **Node.js 20+**。
-
----
-
-## 方式一：Docker Compose（推荐）
-
-### 1. 克隆仓库
+## 安装
 
 ```bash
-git clone <repo-url> gateway2
-cd gateway2
-```
+# GHCR 预构建镜像（默认）
+bash scripts/quickstart.sh --edition lite
+bash scripts/quickstart.sh --edition knowledge --install-models
+bash scripts/quickstart.sh --edition studio --install-models
+bash scripts/quickstart.sh --edition full --monitoring --install-models
 
-### 2. 配置环境变量
-
-```bash
-cp .env.example .env
-nano .env   # 或用你喜欢的编辑器
-```
-
-至少填入**一个** LLM 提供商的 API Key：
-
-| 变量 | 注册地址 | 说明 |
-|------|---------|------|
-| `AGNES_API_KEY` | https://agnes-ai.com | 多模态理解 + 图片/视频生成 |
-| `DEEPSEEK_API_KEY` | https://platform.deepseek.com | 纯文本 LLM（注册送额度） |
-
-> 💡 **不填也能启动**：Gateway 用 `${VAR:-}` 优雅降级，空 Key 不影响启动，只是调用对应 LLM 会鉴权失败。填好后 `docker compose restart gateway` 即可。
-
-### 3. 启动
-
-**交互安装向导（推荐首次使用）**：
-
-```bash
-bash scripts/quickstart.sh --build
-```
-
-向导会逐步选择镜像能力、GPU 和监控，生成 `.aigateway-install.env`，创建 `.env`，启动 Compose 并执行健康检查。它可以重复运行，不会自动删除数据卷。
-
-可用 profile：
-
-| Profile | 内容 | 适用场景 |
-|---------|------|----------|
-| `runtime` | 基础网关、控制台、Redis | 纯代理、远程模型 |
-| `rag` | Runtime + 知识库、Code RAG、本地 Embedding | 文档和代码检索 |
-| `vision` | Runtime + OCR、音视频处理、RealESRGAN | 本地媒体处理 |
-| `full` | RAG + Vision | 完整单机体验、评估、离线部署 |
-
-自动化和后续升级：
-
-```bash
-bash scripts/quickstart.sh --non-interactive --profile runtime --build
-bash scripts/quickstart.sh --non-interactive --profile full --accelerator cuda --monitoring --build
-bash scripts/quickstart.sh --add rag --build
-bash scripts/quickstart.sh --remove vision --build
-bash scripts/quickstart.sh --show-plan
-bash scripts/quickstart.sh --down
-```
-
-`--remove` 只更换运行镜像，不删除 Redis、Qdrant 或 CodeGraph 数据卷。
-
-### 通过 npm 安装
-
-npm 安装器适用于 macOS、Linux 和 Windows WSL2，需要 Node.js 18+、Git、Bash、Docker 与 Docker Compose v2。
-
-```bash
-npm install -g aigateway-installer
-aigateway-install
-```
-
-或者直接运行：
-
-```bash
-npx aigateway-installer
-```
-
-如果当前目录不是 AI Gateway 仓库，安装器默认下载到 `~/.aigateway/runtime`，随后展示与 `quickstart.sh` 完全相同的能力选择界面。自动化参数会原样透传：
-
-```bash
-aigateway-install \
-  --non-interactive \
-  --profile full \
-  --accelerator cuda \
+# 从当前 checkout 构建相同 targets
+bash scripts/quickstart.sh \
+  --edition full \
+  --distribution source \
   --monitoring \
+  --install-models \
   --build
-
-aigateway-install --add rag --build
-aigateway-install --show-plan
 ```
 
-可用 `--dir`、`--repo` 和 `--ref` 指定安装目录、源码仓库与发布版本。
+安装器原子写入 `.aigateway/runtime/config.yaml`，不修改仓库基础
+`config.yaml`。切换套餐会复用并保留 Redis、Qdrant、模型、监控及业务数据卷。
 
-### 4. 验证
+公开参数：
+
+```text
+--edition lite|knowledge|studio|full
+--distribution image|source
+--comfyui container|native|remote
+--embedding container|native|remote
+--comfyui-url URL
+--embedding-url URL
+--monitoring
+--production
+--install-models
+--build
+--no-start
+--show-plan
+--down
+```
+
+旧 `runtime/rag/vision/full profile`、`--accelerator` 和 `--add/--remove`
+接口不再接受；检测到旧状态时安装器停止并显示迁移命令。
+
+## 平台行为
+
+### Linux / Windows NVIDIA
+
+Windows 只支持 Docker Desktop WSL2 NVIDIA GPU 模式。安装器必须同时通过：
 
 ```bash
-curl http://localhost:8000/health   # 应返回 {"data":{"status":"healthy",...}}
+nvidia-smi
+docker run --rm --gpus all \
+  nvidia/cuda:13.0.1-base-ubuntu24.04 nvidia-smi
 ```
 
-访问地址：
+Knowledge/Full 的本地 Embedding 明确使用 CUDA。Studio/Full 运行独立
+ComfyUI 容器。多 GPU 时 Gateway 使用 GPU 0、ComfyUI 使用 GPU 1；单 GPU
+时二者可直接并发，Gateway 进程显存比例受限。安装器不设置最低显存，只在
+低显存时启用 ComfyUI `--lowvram` 并提示 OOM 风险。
 
-| 服务 | 地址 |
-|------|------|
-| API Gateway | http://localhost:8000 |
-| 控制面板 | http://localhost:3000 |
-| Prometheus | http://localhost:9090（启用 monitoring 时） |
-| Grafana | http://localhost:3001（启用 monitoring 时） |
+### Apple Silicon
 
-更完整的测试命令选择见 [`docs/TESTING.md`](docs/TESTING.md)。认证、控制台登录、Session Cookie 和 API Key 的 QA 流程见 [`docs/QA_AUTH_TESTING.md`](docs/QA_AUTH_TESTING.md)。
+Gateway、控制台、Redis、Qdrant 和监控仍由 Docker 运行。安装器在
+`~/.aigateway/` 创建固定版本的共享 Python 环境、模型、日志与 LaunchAgent：
 
-生产环境必须使用 TLS 覆盖配置（80 端口仅返回 308 跳转）：
+- ComfyUI：`127.0.0.1:8188`，MPS
+- OpenAI 兼容 Embedding：`127.0.0.1:8189`，MPS
+
+容器通过 `host.docker.internal` 连接。服务不需要 `sudo`，也不监听局域网。
 
 ```bash
-export TLS_CERT_PATH=/absolute/path/fullchain.pem
-export TLS_KEY_PATH=/absolute/path/privkey.pem
-export GRAFANA_ADMIN_PASSWORD='use-a-secret-manager'
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+scripts/native-macos-services.sh status
+scripts/native-macos-services.sh stop
 ```
 
----
+## 模型和空间
 
-## 方式二：本地开发
+模型不进入镜像。`--install-models` 会逐一展示许可证，只有确认后才下载；
+下载前要求至少 80GB 可用空间，下载到临时路径，校验固定版本及 SHA256 后
+原子移动：
 
-适用于二次开发场景。详见 [README.md](README.md) 的“方式二：本地开发”章节，核心步骤：
+- Qwen3-Embedding-0.6B（Apache-2.0）
+- SDXL Base 1.0（CreativeML Open RAIL++-M）
+- Wan2.2 TI2V 5B（Apache-2.0，ComfyUI 原生图片条件视频）
+
+运行时 ComfyUI 在可用空间低于 30GB 时拒绝新任务。GPU OOM 会终止当前
+任务、清理设备缓存并返回可重试错误，不会切到 CPU 或外部媒体 API。
+
+## Compose 文件
+
+- `docker-compose.yml`：核心服务及 `knowledge`、`comfy-container`、
+  `monitoring` profiles
+- `docker-compose.cuda.yml`：NVIDIA 设备分配
+- `docker-compose.prod.yml`：TLS 与单一公网入口
+
+生产模式只公开控制台反向代理的 80/443：
 
 ```bash
-# 1. 准备 Python 3.12（用 uv 拉独立解释器，不污染系统）
-curl -LsSf https://astral.sh/uv/install.sh | sh
-uv python install 3.12
-
-# 2. 创建虚拟环境
-uv venv --python 3.12 --seed .venv
-source .venv/bin/activate
-
-# 3. 安装（顺序：core → api → cli）
-cd aigateway-core && pip install -e . && cd ..
-cd aigateway-api  && pip install -e ".[dev]" && cd ..
-cd aigateway-cli  && pip install -e . && cd ..
-
-# 4. 安装可选能力（按需，从仓库根目录执行）
-pip install -e "aigateway-api[rag]"
-pip install -e "aigateway-api[vision,gpu]"
-
-# 5. 配置 .env
-cp .env.example .env && nano .env
-
-# 6. 启动 Redis + Qdrant（可用 docker compose 只起依赖）
-docker compose up -d redis qdrant
-
-# 7. 启动 API
-cd aigateway-api
-uvicorn src.aigateway_api.main:create_app --factory --host 0.0.0.0 --port 8000 --reload
-
-# 8. 启动前端（另一终端）
-cd control-panel
-npm install && npm run dev   # http://localhost:5173
+TLS_CERT_PATH=/path/fullchain.pem \
+TLS_KEY_PATH=/path/privkey.pem \
+bash scripts/quickstart.sh --edition full --production
 ```
 
----
+Gateway、ComfyUI、Embedding、Redis、Qdrant 与 Prometheus 保持内部或仅
+本机可访问。
 
-## 配置说明
-
-### 配置优先级（高 → 低）
-
-1. **进程环境变量** — docker-compose `environment:` 段 / shell `export`
-2. **`.env` 文件** — `python-dotenv` 加载（`override=False`，不覆盖已存在的环境变量）
-3. **`config.yaml` 明文值** — 主配置文件
-4. **代码内默认值** — `_DEFAULT_CONFIG`
-
-### 配置文件
-
-| 文件 | 说明 |
-|------|------|
-| `config.yaml` | 主配置（server/auth/plugins/providers/embedding/observability 等） |
-| `config.yaml.template` | 完整参数文档（带注释） |
-| `.env` | 环境变量（含密钥，**不入库**） |
-| `.env.example` | 环境变量模板（入库） |
-
-### 常用环境变量
-
-| 变量 | 默认 | 说明 |
-|------|------|------|
-| `AI_GATEWAY_ENV` | development | `production` 强制关闭 debug |
-| `AI_GATEWAY_REDIS_URL` | redis://localhost:6379/0 | Redis 连接 |
-| `AI_GATEWAY_QDRANT_URL` | http://localhost:6333 | Qdrant 连接 |
-| `AI_GATEWAY_SERVER_PORT` | 8000 | 服务端口 |
-| `AI_GATEWAY_OBSERVABILITY_LOG_LEVEL` | info | 日志级别 |
-| `AGNES_API_KEY` | — | Agnes provider 密钥 |
-| `DEEPSEEK_API_KEY` | — | DeepSeek provider 密钥 |
-
-> 所有 `AI_GATEWAY_*` 变量会自动覆盖 `config.yaml` 对应路径（如 `AI_GATEWAY_SERVER_PORT` → `config.server.port`）。
-
----
-
-## 常见问题排查
-
-### Gateway 启动后调 LLM 报 401/403
-
-→ `.env` 里的 Provider Key 没填或填错。检查 `AGNES_API_KEY` / `DEEPSEEK_API_KEY`，改完 `docker compose restart gateway`。
-
-### Gateway 一直不就绪（健康检查超时）
-
-首次启动需加载 Qwen3-Embedding 模型（约 600MB），可能 30-60 秒。查日志：
+## 故障排查
 
 ```bash
-docker compose logs -f gateway
+docker compose --env-file .aigateway-install.env config
+docker compose --env-file .aigateway-install.env ps
+docker compose logs --tail=200 gateway
+docker system df -v
 ```
+
+若宿主机 `nvidia-smi` 报内核模块与用户态库版本不一致，先重启以加载已安装
+驱动；仍不一致时再重装匹配驱动。GPU smoke test 通过前不要下载生成模型。

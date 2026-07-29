@@ -113,9 +113,18 @@ plugins:
       top_k: 5              # 检索返回 top-K 文档块
       similarity_threshold: 0.7  # 相似度阈值
       rerank_enabled: false  # 是否启用重排序
+      rerank_device: auto    # 启用时由套餐固定为 cuda / mps，不静默回 CPU
+      rerank_backend: local  # local | remote（Apple 原生服务使用 remote）
+      rerank_api_base:
+      rerank_api_key:
       chunk_size: 512        # 文档分块大小（token）
       chunk_overlap: 64      # 分块重叠
       collection_name: rag_documents  # Qdrant 集合名称
+      embedding_backend: local  # local | openai（Apple/remote 由安装器生成）
+      embedding_model: Qwen/Qwen3-Embedding-0.6B
+      embedding_device: auto    # 套餐配置固定为 cuda / mps / remote，不静默回 CPU
+      embedding_api_base:
+      embedding_api_key:
       # Code RAG 检索增强（配合下方 code_rag 顶级块使用）
       code_rag_enabled: true       # 是否在检索时并行查询 rag_code_* 代码集合
       code_rag_graph_hops: 2       # CodeGraph 调用图跳数（callers/callees 展开深度）
@@ -148,10 +157,8 @@ providers:
           #                 一个模型可同时属于多个能力，如 [text, image, video]
           #   tasks: 文本任务能力，可选值 coding | reasoning | summary | vision | general
           #   features: 运行时能力，可选值 vision | tool_calling | structured_output | long_context
-          #   base_url:    API 基地址（可选）。若设置，覆盖 providers.<name>.base_url。
-          #                留空或省略时，继承 providers.<name>.base_url。
           - name: agnes-2.0-flash
-            capabilities: [text, image, video]   # 多模态理解 + 生成，继承提供商 base_url
+            capabilities: [text, image, video]   # 多模态理解 + 生成，使用提供商 base_url
             tasks: [general, summary, vision]
             features: [vision, tool_calling, structured_output, long_context]
           - name: agnes-image-2.1-flash
@@ -426,9 +433,53 @@ generation_optimization:
       batch_size: 1          # 批量处理大小
   draft_workflow:             # Draft-to-HiRes 草图工作流
     comfyui:
-      server_url: "http://localhost:8188"  # ComfyUI API 地址
+      server_url: "http://comfyui:8188"  # Compose 内网地址；不直接暴露公网
+      public_url: "http://localhost:8188" # 浏览器打开 ComfyUI/Manager 的地址
+      manager_enabled: true
       connect_timeout: 10    # 连接超时（秒）
-      execution_timeout: 300 # 工作流执行超时（秒）
+      execution_timeout: 1200 # T4 上的大模型工作流可达数分钟；超时会主动取消 ComfyUI 任务
+      required: true         # 不可用时 fail-closed，不静默改走外部媒体 API
+      workflow_version: "image-v1"
+      checkpoint_name: "sd_xl_base_1.0.safetensors"
+      allowed_checkpoints: ["sd_xl_base_1.0.safetensors"]
+      max_concurrency: 1
+      min_free_gb: 30
+      model_budget_gb: 80
+      output_budget_gb: 10
+      output_retention_hours: 24
+      models_path: "/comfyui/models"
+      output_path: "/comfyui/output"
+      workflow_path: "/comfyui/workflows"
+      upscale_enabled: true
+      upscale_model: "RealESRGAN_x4plus.pth"
+      allowed_upscale_models: ["RealESRGAN_x4plus.pth"]
+      max_upscale_long_edge: 4096
+      qwen_image_enabled: true
+      qwen_image_diffusion_model: "qwen_image_fp8_e4m3fn.safetensors"
+      qwen_image_text_encoder: "qwen_2.5_vl_7b_fp8_scaled.safetensors"
+      qwen_image_vae: "qwen_image_vae.safetensors"
+      qwen_image_draft_steps: 12       # 草稿优先速度；确认后再做高清处理
+      qwen_image_max_draft_edge: 768   # T4 15GB 安全上限，保持宽高比并对齐 16
+      allowed_qwen_image_diffusion_models: ["qwen_image_fp8_e4m3fn.safetensors"]
+      allowed_qwen_image_text_encoders: ["qwen_2.5_vl_7b_fp8_scaled.safetensors"]
+      allowed_qwen_image_vaes: ["qwen_image_vae.safetensors"]
+      # 视频确认使用已批准的图片草稿作为首帧，原生 Wan2.2 TI2V 输出 MP4。
+      video_enabled: true
+      video_workflow_version: "wan2.2-ti2v-5b-v1"
+      video_diffusion_model: "wan2.2_ti2v_5B_fp16.safetensors"
+      video_text_encoder: "umt5_xxl_fp8_e4m3fn_scaled.safetensors"
+      video_vae: "wan2.2_vae.safetensors"
+      allowed_video_diffusion_models: ["wan2.2_ti2v_5B_fp16.safetensors"]
+      allowed_video_text_encoders: ["umt5_xxl_fp8_e4m3fn_scaled.safetensors"]
+      allowed_video_vaes: ["wan2.2_vae.safetensors"]
+      video_width: 512       # T4 低显存安全默认值；必须是 16 的倍数
+      video_height: 288
+      video_frames: 17       # 约 2 秒草稿视频（8 fps）
+      video_fps: 8
+      video_steps: 20
+      video_cfg: 5
+      video_shift: 8
+      video_execution_timeout: 1200
 
 # ==========================
 # 意图驱动路由（intent-driven routing）

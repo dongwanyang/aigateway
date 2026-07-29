@@ -5,8 +5,9 @@ from __future__ import annotations
 import importlib.util
 import os
 import shutil
+from collections.abc import Callable
 from functools import lru_cache
-from typing import Any, Callable
+from typing import Any
 
 
 def _package_installed(module_name: str) -> bool:
@@ -114,7 +115,7 @@ def detect_runtime_capabilities(
                 "installed": rag_installed,
                 "configured": qdrant_ready,
                 "available": rag_available,
-                "install_command": "bash scripts/quickstart.sh --add rag --build",
+                "install_command": "bash scripts/quickstart.sh --edition knowledge",
                 "reason": (
                     None
                     if rag_available
@@ -127,7 +128,7 @@ def detect_runtime_capabilities(
                 "installed": code_rag_installed,
                 "configured": qdrant_ready and code_rag_enabled,
                 "available": code_rag_available,
-                "install_command": "bash scripts/quickstart.sh --add rag --build",
+                "install_command": "bash scripts/quickstart.sh --edition knowledge",
                 "reason": (
                     None
                     if code_rag_available
@@ -140,7 +141,7 @@ def detect_runtime_capabilities(
                 "installed": vision_installed,
                 "configured": True,
                 "available": vision_available,
-                "install_command": "bash scripts/quickstart.sh --add vision --build",
+                "install_command": "bash scripts/quickstart.sh --edition studio",
                 "reason": (
                     None
                     if vision_available
@@ -153,7 +154,7 @@ def detect_runtime_capabilities(
                 "installed": upscaling_installed,
                 "configured": weights_available,
                 "available": upscaling_available,
-                "install_command": "bash scripts/quickstart.sh --add vision --build",
+                "install_command": "bash scripts/quickstart.sh --edition studio",
                 "reason": (
                     None
                     if upscaling_available
@@ -166,7 +167,7 @@ def detect_runtime_capabilities(
                 "installed": torch_installed,
                 "configured": profile in {"gpu", "rag", "vision", "full"},
                 "available": cuda_available,
-                "install_command": "bash scripts/quickstart.sh --add gpu --build",
+                "install_command": "bash scripts/quickstart.sh --edition full",
                 "reason": (
                     None
                     if cuda_available

@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""Render an edition-specific runtime config without mutating config.yaml."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import tempfile
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+EDITIONS = {"lite", "knowledge", "studio", "full"}
+
+
+def _plugin(config: dict[str, Any], name: str) -> dict[str, Any]:
+    for item in config.get("plugins", []):
+        if item.get("name") == name:
+            return item
+    raise ValueError(f"base config is missing plugin {name!r}")
+
+
+def render(
+    source: Path,
+    *,
+    edition: str,
+    accelerator: str,
+    embedding_mode: str,
+    comfyui_url: str,
+    embedding_url: str,
+    monitoring: bool,
+) -> dict[str, Any]:
+    if edition not in EDITIONS:
+        raise ValueError(f"unsupported edition: {edition}")
+    with source.open("r", encoding="utf-8") as handle:
+        config = yaml.safe_load(handle) or {}
+
+    knowledge = edition in {"knowledge", "full"}
+    studio = edition in {"studio", "full"}
+    external_embedding = knowledge and embedding_mode in {"native", "remote"}
+
+    for name in ("rag_retriever", "prompt_compress", "conv_compressor"):
+        _plugin(config, name)["enabled"] = knowledge
+    _plugin(config, "semantic_cache")["enabled"] = knowledge and not external_embedding
+
+    rag_config = _plugin(config, "rag_retriever").setdefault("config", {})
+    rag_config["code_rag_enabled"] = knowledge
+    rag_config["rerank_device"] = (
+        "remote"
+        if knowledge and external_embedding
+        else "mps"
+        if knowledge and accelerator == "mps"
+        else "cuda"
+        if knowledge and accelerator == "cuda"
+        else "cpu"
+    )
+    rag_config["rerank_backend"] = "remote" if external_embedding else "local"
+    rag_config["rerank_api_base"] = (
+        embedding_url.rstrip("/") if external_embedding else None
+    )
+    rag_config["rerank_api_key"] = (
+        "${EMBEDDING_API_KEY:-local-mps}" if external_embedding else None
+    )
+    if external_embedding:
+        rag_config.update(
+            {
+                "embedding_backend": "openai",
+                "embedding_api_base": embedding_url.rstrip("/"),
+                "embedding_api_key": "${EMBEDDING_API_KEY:-local-mps}",
+                "embedding_device": "mps" if accelerator == "mps" else "remote",
+            }
+        )
+    else:
+        rag_config.update(
+            {
+                "embedding_backend": "local",
+                "embedding_model": "/models/qwen3-embedding-0.6b",
+                "embedding_api_base": None,
+                "embedding_api_key": None,
+                "embedding_device": "cuda" if knowledge else "cpu",
+            }
+        )
+
+    embedding_config = config.setdefault("embedding", {})
+    embedding_config["model"] = "/models/qwen3-embedding-0.6b"
+    embedding_config["device"] = (
+        "cuda"
+        if knowledge and accelerator == "cuda" and not external_embedding
+        else "cpu"
+    )
+    prompt_config = _plugin(config, "prompt_compress").setdefault("config", {})
+    prompt_config["device"] = "cuda" if accelerator == "cuda" else "cpu"
+    config.setdefault("code_rag", {})["enabled"] = knowledge
+    config.setdefault("media_optimization", {})["enabled"] = studio
+    config.setdefault("observability", {})["prometheus_enabled"] = monitoring
+
+    generation = config.setdefault("generation_optimization", {})
+    generation["enabled"] = True
+    draft = generation.setdefault("draft_workflow", {})
+    draft["enabled"] = studio
+    comfy = draft.setdefault("comfyui", {})
+    comfy["server_url"] = comfyui_url.rstrip("/")
+    comfy["required"] = True
+    token = generation.setdefault("token_compressor", {})
+    token.setdefault("clip", {})["device"] = (
+        "cuda" if studio and accelerator == "cuda" else "cpu"
+    )
+
+    config["deployment"] = {
+        "edition": edition,
+        "accelerator": accelerator,
+        "embedding_mode": embedding_mode,
+        "comfyui_enabled": studio,
+        "rag_enabled": knowledge,
+    }
+    return config
+
+
+def _atomic_dump(output: Path, config: dict[str, Any]) -> None:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temp_name = tempfile.mkstemp(
+        prefix=f".{output.name}.",
+        dir=output.parent,
+        text=True,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            yaml.safe_dump(config, handle, sort_keys=False, allow_unicode=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, output)
+    except BaseException:
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--source", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--edition", choices=sorted(EDITIONS), required=True)
+    parser.add_argument("--accelerator", choices=("cpu", "cuda", "mps"), required=True)
+    parser.add_argument(
+        "--embedding-mode",
+        choices=("container", "native", "remote"),
+        required=True,
+    )
+    parser.add_argument("--comfyui-url", required=True)
+    parser.add_argument("--embedding-url", default="")
+    parser.add_argument("--monitoring", action="store_true")
+    args = parser.parse_args()
+    config = render(
+        args.source,
+        edition=args.edition,
+        accelerator=args.accelerator,
+        embedding_mode=args.embedding_mode,
+        comfyui_url=args.comfyui_url,
+        embedding_url=args.embedding_url,
+        monitoring=args.monitoring,
+    )
+    _atomic_dump(args.output, config)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

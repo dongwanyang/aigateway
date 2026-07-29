@@ -1,6 +1,5 @@
 """Tests for retrieve_video 'processing' status handling."""
 
-import asyncio
 import os
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch

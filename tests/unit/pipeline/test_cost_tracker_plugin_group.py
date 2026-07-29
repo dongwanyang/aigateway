@@ -25,9 +25,7 @@ from aigateway_core.pipelines.generation._common.config import (
 from aigateway_core.pipelines.generation._common.metrics import (
     DEFAULT_API_KEY_GROUP,
     GenerationCostTracker,
-    _get_api_key_group,
 )
-from aigateway_core.pipelines.generation._common.models import CostSavingRecord
 from aigateway_core.pipelines.generation.cost.cost_tracker_plugin import (
     CostTrackerPlugin,
 )
@@ -262,7 +260,9 @@ class TestGroupFieldDoesNotAffectIsolation:
 
     def test_same_group_keys_have_different_user_ids(self):
         """Two keys in same group maintain separate identities."""
-        from aigateway_core.pipelines.generation._common.api_key_groups import build_api_key_groups
+        from aigateway_core.pipelines.generation._common.api_key_groups import (
+            build_api_key_groups,
+        )
 
         auth_config = {
             "api_keys": [

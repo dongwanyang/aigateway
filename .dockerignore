@@ -76,6 +76,10 @@ weights/
 docs/
 *.md
 scripts/
+!scripts/
+scripts/*
+!scripts/comfyui-entrypoint.sh
+!scripts/comfyui-manager-config.ini
 project-tasks/
 src/
 

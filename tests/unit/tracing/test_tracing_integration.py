@@ -13,13 +13,13 @@ Verifies (post Task 7 — gen-opt 插件删 create_plugin_span,改 emit_plugin_e
 from __future__ import annotations
 
 import asyncio
+import sys
 import uuid
-from typing import Any, Dict, List, Optional
-from unittest.mock import AsyncMock, MagicMock, patch
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-import sys
 sys.path.insert(0, "aigateway-core/src")
 
 from aigateway_core.dispatch.context import PipelineContext
@@ -27,26 +27,19 @@ from aigateway_core.pipelines.generation._common.config import (
     AIDirectorConfig,
     GenerationOptimizationConfig,
 )
+from aigateway_core.pipelines.generation.cost.cost_tracker_plugin import (
+    CostTrackerPlugin,
+)
 from aigateway_core.pipelines.generation.director.ai_director_plugin import (
     AIDirectorPlugin,
 )
 from aigateway_core.pipelines.generation.intent.intent_evaluator_plugin import (
     IntentEvaluatorPlugin,
 )
-from aigateway_core.pipelines.generation.token.token_compressor_plugin import (
-    TokenCompressorPlugin,
-)
-from aigateway_core.pipelines.generation.draft.draft_generator_plugin import (
-    DraftGeneratorPlugin,
-)
 from aigateway_core.pipelines.generation.routing_signals.gen_model_router_plugin import (
     GenModelRouterPlugin,
 )
-from aigateway_core.pipelines.generation.cost.cost_tracker_plugin import (
-    CostTrackerPlugin,
-)
 from aigateway_core.shared.trace_event import TraceCollector
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -68,12 +61,12 @@ def make_config(**kwargs) -> GenerationOptimizationConfig:
     return GenerationOptimizationConfig(**kwargs)
 
 
-def plugin_events(collector: TraceCollector, name: str) -> List:
+def plugin_events(collector: TraceCollector, name: str) -> list:
     """Filter collector.events for kind=='plugin' and stage==name."""
     return [e for e in collector.events if e.kind == "plugin" and e.stage == name]
 
 
-def _run_via_engine(plugin: Any, ctx: PipelineContext) -> "asyncio.Future":
+def _run_via_engine(plugin: Any, ctx: PipelineContext) -> asyncio.Future:
     """Run a single plugin through a PipelineEngine so the engine's auto-
     instrumentation emits the kind='plugin' TraceEvent (success/error).
 
@@ -211,7 +204,7 @@ class TestPluginErrorEmit:
         strategy.optimize_prompt = AsyncMock(side_effect=RuntimeError("LLM call failed"))
 
         plugin = AIDirectorPlugin(strategy=strategy, config=config)
-        collector = TraceCollector.start(ctx.trace_id)
+        TraceCollector.start(ctx.trace_id)
 
         # Plugin degrades gracefully (no re-raise) — execute returns ctx
         result = await plugin.execute(ctx)
@@ -232,7 +225,7 @@ class TestPluginErrorEmit:
         strategy.evaluate.side_effect = ValueError("Evaluation failed")
 
         plugin = IntentEvaluatorPlugin(strategy=strategy, config=config)
-        collector = TraceCollector.start(ctx.trace_id)
+        TraceCollector.start(ctx.trace_id)
 
         await plugin.execute(ctx)
 
@@ -255,7 +248,7 @@ class TestPluginErrorEmit:
         strategy.route = AsyncMock(side_effect=RuntimeError("Router failure"))
 
         plugin = GenModelRouterPlugin(strategy=strategy, config=config)
-        collector = TraceCollector.start(ctx.trace_id)
+        TraceCollector.start(ctx.trace_id)
 
         await plugin.execute(ctx)
 
@@ -273,7 +266,7 @@ class TestPluginErrorEmit:
         tracker.record_total_saving.side_effect = ZeroDivisionError("division error")
 
         plugin = CostTrackerPlugin(tracker=tracker, config=config)
-        collector = TraceCollector.start(ctx.trace_id)
+        TraceCollector.start(ctx.trace_id)
 
         await plugin.execute(ctx)
 
@@ -339,7 +332,7 @@ class TestInjectTraceContext:
         """inject_trace_context produces correct W3C traceparent format."""
         from aigateway_core.shared.tracing import TracingManager
 
-        headers: Dict[str, str] = {}
+        headers: dict[str, str] = {}
         TracingManager.inject_trace_context(
             headers=headers,
             trace_id="abc123",

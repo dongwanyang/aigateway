@@ -13,10 +13,11 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, List
 
 from aigateway_core.dispatch.context import PipelineContext
-from aigateway_core.pipelines.generation._common.config import GenerationOptimizationConfig
+from aigateway_core.pipelines.generation._common.config import (
+    GenerationOptimizationConfig,
+)
 from aigateway_core.pipelines.generation.director.ai_director import (
     AIDirectorStrategy,
 )
@@ -50,7 +51,7 @@ class AIDirectorPlugin:
 
     name: str = "ai_director"
     enabled: bool = True
-    depends_on: List[str] = ["prompt_cache"]
+    depends_on: list[str] = ["prompt_cache"]
 
     def __init__(
         self,
@@ -92,6 +93,19 @@ class AIDirectorPlugin:
                     "trace_id": ctx.trace_id,
                 },
             )
+            return ctx
+
+        generation_options = ctx.request.get("generation_options", {})
+        if (
+            isinstance(generation_options, dict)
+            and generation_options.get("prompt_mode") == "raw"
+        ):
+            gen_opt = ctx.extra.setdefault(NS_GENERATION_OPTIMIZATION, {})
+            gen_opt["ai_director"] = {
+                "applicable": False,
+                "reason": "raw_prompt_requested",
+                "duration_ms": 0.0,
+            }
             return ctx
 
         start_time = time.monotonic()
@@ -216,7 +230,7 @@ class AIDirectorPlugin:
 
         return ""
 
-    def _extract_reference_images(self, ctx: PipelineContext) -> List[MediaContent]:
+    def _extract_reference_images(self, ctx: PipelineContext) -> list[MediaContent]:
         """从上下文中提取参考图列表.
 
         优先从 media_optimization 命名空间中提取已处理的媒体结果，
@@ -228,7 +242,7 @@ class AIDirectorPlugin:
         Returns:
             MediaContent 列表
         """
-        reference_images: List[MediaContent] = []
+        reference_images: list[MediaContent] = []
 
         # 尝试从 media_optimization 命名空间获取已检测到的图片
         media_opt = ctx.extra.get("media_optimization", {})

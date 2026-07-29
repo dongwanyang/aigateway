@@ -8,7 +8,7 @@ Media Base Classes — 媒体处理器和管线基类
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING
 
 from .types import MediaContent, MediaType, ProcessorPhase, ProcessorResult
 
@@ -21,11 +21,11 @@ class MediaProcessor(ABC):
 
     name: str
     phase: ProcessorPhase
-    supported_types: List[MediaType]
+    supported_types: list[MediaType]
 
     @abstractmethod
     async def process(
-        self, content: MediaContent, ctx: "PipelineContext"
+        self, content: MediaContent, ctx: PipelineContext
     ) -> ProcessorResult:
         """处理媒体内容。
 
@@ -48,11 +48,11 @@ class MediaPipeline(ABC):
     """媒体处理管线基类 — 每种媒体类型有一个 Pipeline。"""
 
     media_type: MediaType
-    processors: List[MediaProcessor]
+    processors: list[MediaProcessor]
 
     @abstractmethod
     async def execute(
-        self, content: MediaContent, ctx: "PipelineContext"
+        self, content: MediaContent, ctx: PipelineContext
     ) -> MediaContent:
         """执行该媒体类型的完整处理流程。
 

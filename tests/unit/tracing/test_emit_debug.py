@@ -1,10 +1,11 @@
 """TraceCollector.emit_debug 按 5 维度开关控制 kind=debug 事件 + payload."""
-import sys, os
+import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 
-import time
 import aigateway_core.shared.debug_config as dc
-from aigateway_core.shared.trace_event import TraceCollector, TraceEvent
+from aigateway_core.shared.trace_event import TraceCollector
 
 
 class _FakeWatcher:

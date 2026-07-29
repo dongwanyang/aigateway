@@ -173,7 +173,6 @@ const CAPABILITY_LABEL: Record<Capability, string> = {
 interface ModelEntry {
   name: string
   capabilities: string[]
-  base_url?: string            // 可选：per-model base_url 覆盖，留空继承提供商级别
   [key: string]: unknown
 }
 
@@ -237,9 +236,10 @@ function normalizeModelEntry(raw: any): ModelEntry | null {
       else capabilities = [raw.modality]
     }
     capabilities = [...new Set(capabilities)]
-    const baseUrlRaw = typeof raw.base_url === 'string' ? raw.base_url.trim() : ''
-    const normalized = { ...raw, name, capabilities, base_url: baseUrlRaw || undefined }
+    const normalized = { ...raw, name, capabilities }
     delete normalized.modality
+    // per-model base_url 已移除：清理旧配置里残留的值，避免写回死配置（后端已忽略）
+    delete normalized.base_url
     return normalized
   }
   return null
@@ -281,7 +281,6 @@ export default function Models() {
     capabilities: string[]
     promptPrice: string
     completionPrice: string
-    baseUrl: string
   } | null>(null)
 
   useEffect(() => {
@@ -456,7 +455,6 @@ export default function Models() {
         ...prevEntry,
         name: patch.name !== undefined ? patch.name : prevEntry.name,
         capabilities: patch.capabilities !== undefined ? patch.capabilities : prevEntry.capabilities,
-        base_url: patch.base_url !== undefined ? patch.base_url : prevEntry.base_url,
       }
       // 如果 name 发生变化，同步迁移 pricing key
       if (patch.name !== undefined && patch.name !== prevEntry.name) {
@@ -484,9 +482,7 @@ export default function Models() {
       const p = { ...prev[providerName] }
       const groups = [...p.model_grouper]
       const group = { ...groups[groupIdx] }
-      // 过滤掉值为 undefined 的可选字段，保持 config 干净
-      const cleanEntry: ModelEntry = { ...entry, name: entry.name, capabilities: entry.capabilities }
-      if (entry.base_url) cleanEntry.base_url = entry.base_url
+      const cleanEntry: ModelEntry = { name: entry.name, capabilities: entry.capabilities }
       group.models = [...group.models, cleanEntry]
       groups[groupIdx] = group
       p.model_grouper = groups
@@ -523,7 +519,6 @@ export default function Models() {
       capabilities: initialName ? ['text'] : [],
       promptPrice: '',
       completionPrice: '',
-      baseUrl: '',
     })
   }
 
@@ -541,7 +536,6 @@ export default function Models() {
       capabilities: [...entry.capabilities],
       promptPrice: pricing ? formatPrice(pricing.prompt) : '',
       completionPrice: pricing ? formatPrice(pricing.completion) : '',
-      baseUrl: entry.base_url ?? '',
     })
   }
 
@@ -601,13 +595,11 @@ export default function Models() {
       addModelToGroup(providerName, groupIdx, {
         name: trimmedName,
         capabilities: [...modelDialog.capabilities],
-        base_url: modelDialog.baseUrl.trim() || undefined,
       })
     } else {
       updateModelInGroup(providerName, groupIdx, modelIdx, {
         name: trimmedName,
         capabilities: [...modelDialog.capabilities],
-        base_url: modelDialog.baseUrl.trim() || undefined,
       })
     }
 
@@ -1207,19 +1199,6 @@ export default function Models() {
                                         {capability}
                                       </span>
                                     ))}
-                                    {model.base_url ? (
-                                      <span
-                                        className="text-xs px-1.5 py-0.5 rounded"
-                                        title={model.base_url}
-                                        style={{
-                                          backgroundColor: 'rgba(245, 158, 11, 0.1)',
-                                          color: '#d97706',
-                                          border: '1px solid rgba(245, 158, 11, 0.3)',
-                                        }}
-                                      >
-                                        自定义URL
-                                      </span>
-                                    ) : null}
                                     {pricing && (pricing.prompt || pricing.completion) ? (
                                       <span className="text-xs ml-2" style={{ color: 'var(--color-text-quaternary)' }}>
                                         ${formatPrice(pricing.prompt) || 0} / ${formatPrice(pricing.completion) || 0} 每 token
@@ -1451,22 +1430,6 @@ export default function Models() {
                   }}
                 />
               </div>
-            </div>
-
-            <div>
-              <label className="block text-xs mb-1 font-medium" style={{ color: 'var(--color-text-tertiary)' }}>
-                Base URL
-                <span className="ml-2" style={{ color: 'var(--color-text-quaternary)' }}>
-                  可选覆盖，留空则使用提供商级别 URL
-                </span>
-              </label>
-              <input
-                className="input w-full"
-                type="text"
-                placeholder="https://api.example.com/v1 （留空=继承提供商）"
-                value={modelDialog.baseUrl}
-                onChange={e => setModelDialog(prev => prev ? { ...prev, baseUrl: e.target.value } : prev)}
-              />
             </div>
 
             <div className="flex justify-end gap-2 pt-2">

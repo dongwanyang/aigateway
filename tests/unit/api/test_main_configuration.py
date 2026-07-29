@@ -8,14 +8,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
-from fastapi import FastAPI, HTTPException, Request
-
 from aigateway_api import main
 from aigateway_core.shared.exceptions import (
     AuthError,
     GatewayError,
     QuotaExceededError,
 )
+from fastapi import FastAPI, HTTPException, Request
 
 
 @pytest.mark.asyncio
@@ -234,11 +233,13 @@ async def test_lifespan_wires_runtime_services_reload_and_shutdown(monkeypatch):
     scheduler.stop = AsyncMock()
 
     ai_strategy = SimpleNamespace(_litellm_bridge=None, _model_selector=None)
+    draft_shutdown = AsyncMock()
     draft_strategy = SimpleNamespace(
         _litellm_bridge=None,
         _task_tracker=None,
         _store_dir="/tmp/drafts",
         _config=SimpleNamespace(retention_period_hours=12),
+        shutdown=draft_shutdown,
     )
     registrations = {
         "ai_director": SimpleNamespace(
@@ -448,6 +449,7 @@ async def test_lifespan_wires_runtime_services_reload_and_shutdown(monkeypatch):
     assert ai_strategy._model_selector is selector
     assert draft_strategy._litellm_bridge is bridge
     assert draft_strategy._task_tracker is tracker
+    assert draft_strategy._redis_client is redis.redis
     cleaner_factory.assert_called_once_with(
         store_dir="/tmp/drafts",
         session_ttl_hours=12,
@@ -455,6 +457,7 @@ async def test_lifespan_wires_runtime_services_reload_and_shutdown(monkeypatch):
     )
     cleaner.start.assert_called_once()
     cleaner.stop.assert_awaited_once()
+    draft_shutdown.assert_awaited_once()
     sweep.assert_called_once_with(app.state)
     set_device.assert_called_once_with("cpu")
     register_handlers.assert_called_once_with(app)

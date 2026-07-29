@@ -8,15 +8,15 @@
 - _get_draft_strategy 辅助函数: app.state 两级查找
 """
 
-import json
-import sys
 import os
+import sys
+from unittest.mock import AsyncMock
+
 import pytest
+from fastapi import HTTPException
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-api", "src"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
-
-from pydantic import ValidationError
 
 from aigateway_api.draft_routes import (
     DraftActionRequest,
@@ -24,7 +24,7 @@ from aigateway_api.draft_routes import (
     _get_draft_strategy,
     router,
 )
-
+from pydantic import ValidationError
 
 # ==================================================================
 # DraftActionRequest 校验测试
@@ -404,9 +404,10 @@ def draft_strategy_with_video_draft(monkeypatch):
     `aigateway_api.admin_routes._get_draft_strategy` 返回 mock strategy,
     与 TestDraftActionEndpoint 用 FakeRequest 注入 strategy 同义。
     """
-    from aigateway_core.pipelines.generation._common.models import VideoSubmitResult
     from unittest.mock import AsyncMock
+
     from aigateway_api import admin_routes, openai_compat
+    from aigateway_core.pipelines.generation._common.models import VideoSubmitResult
 
     class _FakeDraft:
         user_id = None
@@ -440,3 +441,38 @@ async def test_confirm_draft_video_returns_video_id(draft_strategy_with_video_dr
     assert body["status"] == "generating"
     assert "upscaled_url" not in body
     record_log.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_preview_syncs_lost_running_draft_before_returning_progress(monkeypatch):
+    """Preview polling must not keep returning 202 for a lost 10% draft."""
+    from aigateway_api import admin_routes
+
+    class _Draft:
+        user_id = None
+        group_id = None
+        previews: list[bytes] = []
+
+        def __init__(self, status: str, error: str | None = None):
+            self.draft_id = "lost-draft"
+            self.status = status
+            self.stage = status
+            self.progress = 0.1
+            self.error = error
+
+    strategy = type("Strategy", (), {})()
+    strategy.get_draft = AsyncMock(return_value=_Draft("running"))
+    strategy.sync_draft_runtime_state = AsyncMock(
+        return_value=_Draft("failed", "draft_worker_lost")
+    )
+    monkeypatch.setattr(admin_routes, "_get_draft_strategy", lambda: strategy)
+
+    with pytest.raises(HTTPException) as exc:
+        await admin_routes.get_draft_preview(
+            "lost-draft",
+            {"user_id": "", "group_id": ""},
+        )
+
+    assert exc.value.status_code == 410
+    assert exc.value.detail["error"]["code"] == "draft_worker_lost"
+    strategy.sync_draft_runtime_state.assert_awaited_once_with("lost-draft")

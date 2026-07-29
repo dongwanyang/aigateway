@@ -1,7 +1,6 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
 from aigateway_core.dispatch.classifier import classify_request
 from aigateway_core.dispatch.context import PipelineContext
 from aigateway_core.dispatch.pipeline_engine import PipelineEngine
@@ -45,8 +44,10 @@ async def test_classify_request_prefers_generation_modalities():
     assert hint is None
 
 
-from aigateway_core.dispatch.dispatcher import RequestDispatcher as CoreRequestDispatcher
 from aigateway_api.dispatcher import RequestDispatcher as ApiRequestDispatcher
+from aigateway_core.dispatch.dispatcher import (
+    RequestDispatcher as CoreRequestDispatcher,
+)
 
 
 def test_api_dispatcher_aliases_core_dispatcher():

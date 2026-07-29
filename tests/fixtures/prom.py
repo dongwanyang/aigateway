@@ -6,9 +6,9 @@ Parses lines like:
 into {metric_name: [({label_dict}, value), ...]}.
 """
 import re
-import pytest
+
 import httpx
-from typing import Optional
+import pytest
 
 from tests.conftest import BASE
 

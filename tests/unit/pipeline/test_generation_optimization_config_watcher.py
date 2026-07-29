@@ -14,20 +14,18 @@ Tests for GenerationOptimizationConfigWatcher — 配置热重载监视器
 需求: 6.4, 6.5
 """
 
-import logging
 import os
+
+# Ensure correct import path
+import sys
 import tempfile
 import threading
-import time
 
 import pytest
 import yaml
 
-# Ensure correct import path
-import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 
-from aigateway_core.shared.config import ConfigManager
 from aigateway_core.pipelines.generation._common.config import (
     GenerationOptimizationConfig,
     GenerationOptimizationConfigWatcher,
@@ -42,6 +40,7 @@ from aigateway_core.pipelines.generation._common.exceptions import (
     TemplateValidationError,
     TokenCompressionError,
 )
+from aigateway_core.shared.config import ConfigManager
 
 
 @pytest.fixture
@@ -110,7 +109,7 @@ class TestWatcherInitialization:
     def test_registers_with_config_manager(self, config_manager):
         """Watcher should register its callback with ConfigManager.on_reload()."""
         initial_callbacks = len(config_manager._reload_callbacks)
-        watcher = GenerationOptimizationConfigWatcher(config_manager)
+        GenerationOptimizationConfigWatcher(config_manager)
         assert len(config_manager._reload_callbacks) == initial_callbacks + 1
 
     def test_loads_initial_config(self, watcher):

@@ -18,7 +18,7 @@ import logging
 import os
 import time
 from collections import defaultdict
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from aigateway_core.dispatch.context import NS_RAG_RETRIEVER, PipelineContext
 from aigateway_core.shared.integration_configs import RAGRetrieverConfig
@@ -26,19 +26,30 @@ from aigateway_core.shared.integration_configs import RAGRetrieverConfig
 logger = logging.getLogger(__name__)
 
 
+class RAGAccelerationError(RuntimeError):
+    """Raised when an explicitly accelerated RAG operation cannot continue."""
+
+
+def _is_gpu_oom(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return "out of memory" in message and (
+        "cuda" in message or "mps" in message or "gpu" in message
+    )
+
+
 # ---------------------------------------------------------------------------
 # Code RAG helpers (module-level, unit-tested)
 # ---------------------------------------------------------------------------
 
 
-def _filter_code_collections(names: List[str]) -> List[str]:
+def _filter_code_collections(names: list[str]) -> list[str]:
     """从 Qdrant 集合列表挑出 rag_code_* 代码集合。"""
     return [name for name in names if isinstance(name, str) and name.startswith("rag_code_")]
 
 
 def _select_code_collections_for_model(
-    names: List[str], embedding_model: str
-) -> List[str]:
+    names: list[str], embedding_model: str
+) -> list[str]:
     """从 rag_code_* 集合列表里挑出与当前 embedding_model 匹配的那一份。
 
     Code RAG 按 embedding_model 分独立集合(维度不同)——检索时若把同一个查询
@@ -50,7 +61,9 @@ def _select_code_collections_for_model(
     - 找不到任何匹配 → 返回空列表(比全部盲扫更安全)
     """
     # lazy 引用,避免 aigateway_core 顶层 import 时强制拉 sentence-transformers
-    from aigateway_core.pipelines.understanding.code_rag.embedding_router import resolve_collection_name
+    from aigateway_core.pipelines.understanding.code_rag.embedding_router import (
+        resolve_collection_name,
+    )
 
     code_collections = _filter_code_collections(names)
     if not embedding_model:
@@ -59,10 +72,10 @@ def _select_code_collections_for_model(
     return [name for name in code_collections if name == target]
 
 
-def _dedupe_hits_by_identity(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _dedupe_hits_by_identity(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """按 (document_id, file_path/filename, chunk_index) 去重,保留首次出现。"""
     seen: set[tuple[str, str, int]] = set()
-    result: List[Dict[str, Any]] = []
+    result: list[dict[str, Any]] = []
     for item in items:
         try:
             chunk_index = int(item.get("chunk_index", 0) or 0)
@@ -81,8 +94,8 @@ def _dedupe_hits_by_identity(items: List[Dict[str, Any]]) -> List[Dict[str, Any]
 
 
 def _expand_code_hit_metadata(
-    hit: Dict[str, Any], graph_metadata: Dict[str, Any]
-) -> Dict[str, Any]:
+    hit: dict[str, Any], graph_metadata: dict[str, Any]
+) -> dict[str, Any]:
     """把图谱查回的 callers/callees/imports 并入 hit payload."""
     merged = dict(hit)
     merged["callers"] = list(graph_metadata.get("callers", []) or [])
@@ -91,7 +104,7 @@ def _expand_code_hit_metadata(
     return merged
 
 
-def _code_hit_identity(hit: Dict[str, Any]) -> tuple[str, str, int]:
+def _code_hit_identity(hit: dict[str, Any]) -> tuple[str, str, int]:
     try:
         chunk_index = int(hit.get("chunk_index", 0) or 0)
     except (TypeError, ValueError):
@@ -119,7 +132,7 @@ class RAGRetrieverPlugin:
     enabled: bool = True
     depends_on: list = ["semantic_cache"]
 
-    def __init__(self, config: Optional[RAGRetrieverConfig] = None) -> None:
+    def __init__(self, config: RAGRetrieverConfig | None = None) -> None:
         """初始化 RAG 检索插件。
 
         Args:
@@ -155,10 +168,10 @@ class RAGRetrieverPlugin:
         若 ImportError 或初始化异常，标记为不可用并以 passthrough 模式运行。
         """
         try:
+            import os
+
             from llama_index.core import VectorStoreIndex
             from llama_index.vector_stores.qdrant import QdrantVectorStore
-
-            import os
 
             # 项目主流使用 AI_GATEWAY_QDRANT_URL 变量，向后兼容裸 QDRANT_URL
             qdrant_url = (
@@ -222,9 +235,8 @@ class RAGRetrieverPlugin:
         embedding_backend == "local": 用 HuggingFace 本地模型（默认 Qwen3-Embedding-0.6B，
         与 L3 语义缓存一致），无需外部 API Key。
         embedding_backend == "openai": 用 OpenAI 兼容端点，读取 embedding_api_base / embedding_api_key。
-        其他值：返回 None，走 LlamaIndex 默认（会强依赖 OPENAI_API_KEY）。
-
-        任一后端初始化失败时返回 None 并记录 warning。
+        其他值视为配置错误。已显式选择的后端初始化失败时直接报错，避免
+        LlamaIndex 静默改用默认 OpenAI embedding 或 CPU。
         """
         backend = getattr(self._config, "embedding_backend", "local")
         model_name = getattr(self._config, "embedding_model", "Qwen/Qwen3-Embedding-0.6B")
@@ -232,20 +244,22 @@ class RAGRetrieverPlugin:
         if backend == "local":
             try:
                 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-                return HuggingFaceEmbedding(
-                    model_name=model_name,
-                    trust_remote_code=True,
+                kwargs: dict = {
+                    "model_name": model_name,
+                    "trust_remote_code": True,
+                }
+                embedding_device = getattr(
+                    self._config, "embedding_device", "auto"
                 )
+                if embedding_device != "auto":
+                    kwargs["device"] = embedding_device
+                return HuggingFaceEmbedding(**kwargs)
             except ImportError:
-                logger.warning(
-                    "llama-index-embeddings-huggingface 未安装，"
-                    "RAG 将回退到 LlamaIndex 默认 embedding（需 OPENAI_API_KEY）。"
-                    "安装: pip install llama-index-embeddings-huggingface"
-                )
-                return None
+                raise RuntimeError(
+                    "local_embedding_dependency_unavailable"
+                ) from None
             except Exception as exc:
-                logger.warning("本地 HuggingFace embedding 加载失败: %s", exc)
-                return None
+                raise RuntimeError("local_embedding_initialization_failed") from exc
 
         if backend == "openai":
             api_base = getattr(self._config, "embedding_api_base", None)
@@ -259,15 +273,13 @@ class RAGRetrieverPlugin:
                     kwargs["api_key"] = api_key
                 return OpenAIEmbedding(**kwargs)
             except ImportError:
-                logger.warning(
-                    "llama-index-embeddings-openai 未安装，"
-                    "RAG 将回退到 LlamaIndex 默认 embedding。"
-                    "安装: pip install llama-index-embeddings-openai"
-                )
-                return None
+                raise RuntimeError(
+                    "openai_embedding_dependency_unavailable"
+                ) from None
             except Exception as exc:
-                logger.warning("OpenAI 兼容 embedding 初始化失败: %s", exc)
-                return None
+                raise RuntimeError("openai_embedding_initialization_failed") from exc
+
+        raise RuntimeError(f"unsupported_embedding_backend:{backend}")
 
         logger.warning(
             "RAGRetrieverConfig.embedding_backend=%r 未识别，回退到 LlamaIndex 默认",
@@ -303,9 +315,9 @@ class RAGRetrieverPlugin:
             return ctx
 
         # 初始化(异常路径下 trace 仍可安全使用)
-        retrieved_chunks: List[str] = []
-        code_hits: List[Dict[str, Any]] = []
-        merged_chunks: List[str] = []
+        retrieved_chunks: list[str] = []
+        code_hits: list[dict[str, Any]] = []
+        merged_chunks: list[str] = []
         start_time = time.monotonic()
 
         try:
@@ -378,6 +390,24 @@ class RAGRetrieverPlugin:
                 )
 
         except Exception as exc:
+            if isinstance(exc, RAGAccelerationError):
+                raise
+            if (
+                _is_gpu_oom(exc)
+                and self._config.embedding_device in {"cuda", "mps"}
+            ):
+                try:
+                    import torch
+
+                    if self._config.embedding_device == "cuda":
+                        torch.cuda.empty_cache()
+                    elif self._config.embedding_device == "mps":
+                        torch.mps.empty_cache()
+                except (ImportError, RuntimeError):
+                    pass
+                raise RAGAccelerationError(
+                    f"rag_{self._config.embedding_device}_out_of_memory"
+                ) from exc
             logger.warning(
                 "RAGRetrieverPlugin 检索异常，降级为 passthrough: %s, request_id=%s",
                 exc,
@@ -412,7 +442,7 @@ class RAGRetrieverPlugin:
             or "http://localhost:6333"
         )
 
-    async def _list_code_collections(self) -> List[str]:
+    async def _list_code_collections(self) -> list[str]:
         """从 Qdrant 拉集合列表并挑 rag_code_* 前缀."""
         try:
             import httpx  # aigateway-core 的基础依赖
@@ -439,27 +469,56 @@ class RAGRetrieverPlugin:
         embedding_model = getattr(self._config, "embedding_model", "") or ""
         return _select_code_collections_for_model(names, embedding_model)
 
-    def _encode_query(self, query: str) -> Optional[List[float]]:
+    def _encode_query(self, query: str) -> list[float] | None:
         """按插件配置的 embedding_backend 编码一次查询向量.
 
-        当前仅实现 local 分支(sentence-transformers),这是仓库主用路径。
-        其他 backend 未实现时返回 None,导致代码检索被跳过(tolerant)。
+        local 使用 sentence-transformers；openai 使用配置的兼容端点。
         """
         backend = getattr(self._config, "embedding_backend", "local")
         model_name = getattr(self._config, "embedding_model", "Qwen/Qwen3-Embedding-0.6B")
-        if backend != "local":
-            logger.debug("code_rag: embedding_backend=%s 未实现查询编码,跳过", backend)
-            return None
         try:
-            from aigateway_core.pipelines.understanding.code_rag.embedding_router import encode_texts
+            if backend == "openai":
+                import httpx
 
-            vectors = encode_texts(model_name, [query])
+                api_base = str(
+                    getattr(self._config, "embedding_api_base", "") or ""
+                ).rstrip("/")
+                if not api_base:
+                    raise RuntimeError("embedding_api_base is required")
+                headers = {}
+                api_key = getattr(self._config, "embedding_api_key", None)
+                if api_key:
+                    headers["Authorization"] = f"Bearer {api_key}"
+                response = httpx.post(
+                    f"{api_base}/embeddings",
+                    headers=headers,
+                    json={"model": model_name, "input": [query]},
+                    timeout=30.0,
+                )
+                response.raise_for_status()
+                data = response.json().get("data", [])
+                return list(data[0]["embedding"]) if data else None
+            if backend != "local":
+                logger.debug(
+                    "code_rag: embedding_backend=%s 未实现查询编码,跳过",
+                    backend,
+                )
+                return None
+            from aigateway_core.pipelines.understanding.code_rag.embedding_router import (
+                encode_texts,
+            )
+
+            vectors = encode_texts(
+                model_name,
+                [query],
+                device=getattr(self._config, "embedding_device", "auto"),
+            )
             return list(vectors[0]) if vectors else None
         except Exception as exc:
             logger.warning("code_rag: 查询编码失败,跳过: %s", exc)
             return None
 
-    async def _retrieve_code_hits(self, query: str) -> List[Dict[str, Any]]:
+    async def _retrieve_code_hits(self, query: str) -> list[dict[str, Any]]:
         """并行查询所有 rag_code_* 集合并归并成 payload dict 列表."""
         collections = await self._list_code_collections()
         if not collections:
@@ -474,7 +533,7 @@ class RAGRetrieverPlugin:
         top_k = int(getattr(self._config, "code_rag_top_k", 5) or 5)
         threshold = float(getattr(self._config, "similarity_threshold", 0.7) or 0.7)
 
-        async def _search_one(coll: str) -> List[Dict[str, Any]]:
+        async def _search_one(coll: str) -> list[dict[str, Any]]:
             try:
                 import httpx
 
@@ -496,7 +555,7 @@ class RAGRetrieverPlugin:
                 logger.warning("code_rag: 查询集合 %s 失败,跳过: %s", coll, exc)
                 return []
 
-            out: List[Dict[str, Any]] = []
+            out: list[dict[str, Any]] = []
             for item in payload.get("result", []) or []:
                 p = item.get("payload") or {}
                 if p:
@@ -506,7 +565,7 @@ class RAGRetrieverPlugin:
             return out
 
         results = await asyncio.gather(*(_search_one(c) for c in collections))
-        flat: List[Dict[str, Any]] = []
+        flat: list[dict[str, Any]] = []
         for lst in results:
             flat.extend(lst)
         # 每个集合 top_k → 全局按 score 截 code_rag_top_k
@@ -516,9 +575,9 @@ class RAGRetrieverPlugin:
     async def _fetch_related_code_chunks(
         self,
         collection_name: str,
-        related_symbols: List[Dict[str, Any]],
-        base_hit: Dict[str, Any],
-    ) -> List[Dict[str, Any]]:
+        related_symbols: list[dict[str, Any]],
+        base_hit: dict[str, Any],
+    ) -> list[dict[str, Any]]:
         if not related_symbols:
             return []
 
@@ -527,7 +586,7 @@ class RAGRetrieverPlugin:
         except Exception:
             return []
 
-        file_to_symbols: Dict[str, set[str]] = defaultdict(set)
+        file_to_symbols: dict[str, set[str]] = defaultdict(set)
         for item in related_symbols:
             file_path = str(item.get("file_path", "") or "")
             symbol_name = str(item.get("symbol_name", "") or "")
@@ -546,7 +605,7 @@ class RAGRetrieverPlugin:
             ]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        out: List[Dict[str, Any]] = []
+        out: list[dict[str, Any]] = []
         for res in results:
             if isinstance(res, Exception):
                 logger.warning(
@@ -563,8 +622,8 @@ class RAGRetrieverPlugin:
         collection_name: str,
         file_path: str,
         symbols: set[str],
-        base_hit: Dict[str, Any],
-    ) -> List[Dict[str, Any]]:
+        base_hit: dict[str, Any],
+    ) -> list[dict[str, Any]]:
         """单个文件一次 scroll,返回该文件里属于 symbols 集合的 chunk。"""
         try:
             resp = await client.post(
@@ -594,7 +653,7 @@ class RAGRetrieverPlugin:
             )
             return []
 
-        out: List[Dict[str, Any]] = []
+        out: list[dict[str, Any]] = []
         for item in payload.get("result", {}).get("points", []) or []:
             chunk = dict(item.get("payload") or {})
             symbol = chunk.get("function_name") or chunk.get("class_name")
@@ -607,8 +666,8 @@ class RAGRetrieverPlugin:
         return out
 
     async def _expand_code_hits_with_graph(
-        self, hits: List[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
+        self, hits: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
         """按 code_rag_graph_hops 抓取 related symbol chunks.
 
         重构后:callers/callees/imports 已在导入时(build_symbol_chunks)存进 payload,
@@ -633,7 +692,7 @@ class RAGRetrieverPlugin:
             logger.warning("code_rag: 无法加载 graph_query,跳过图谱展开: %s", exc)
             return hits
 
-        expanded: List[Dict[str, Any]] = []
+        expanded: list[dict[str, Any]] = []
         seen = {_code_hit_identity(hit) for hit in hits}
         for hit in hits:
             # hit payload 已带 callers/callees/imports(导入时存),直接用
@@ -668,7 +727,7 @@ class RAGRetrieverPlugin:
                 )
         return expanded
 
-    def _format_code_hit(self, hit: Dict[str, Any]) -> str:
+    def _format_code_hit(self, hit: dict[str, Any]) -> str:
         """把代码 hit 组装成一段可读的检索上下文."""
         file_path = hit.get("file_path") or hit.get("filename") or "<unknown>"
         start = hit.get("start_line")
@@ -679,7 +738,7 @@ class RAGRetrieverPlugin:
         symbol = hit.get("function_name") or hit.get("class_name")
         if symbol:
             header += f" :: {symbol}"
-        neighbors: List[str] = []
+        neighbors: list[str] = []
         if hit.get("callers"):
             neighbors.append("callers=" + ", ".join(hit["callers"][:5]))
         if hit.get("callees"):
@@ -700,11 +759,11 @@ class RAGRetrieverPlugin:
         lines.append(body)
         return "\n".join(lines)
 
-    async def _rerank(self, query: str, nodes: List[Any]) -> List[Any]:
+    async def _rerank(self, query: str, nodes: list[Any]) -> list[Any]:
         """对检索结果进行重排序以提高精度。
 
-        当前为基础实现 — 尝试使用 cross-encoder 模型进行重排序。
-        若 rerank 模型不可用，则返回原始顺序。
+        使用 cross-encoder 模型进行重排序。显式选择 CUDA/MPS 时失败关闭，
+        不允许静默改走 CPU 或返回未重排结果。
 
         Args:
             query: 用户查询文本。
@@ -715,14 +774,21 @@ class RAGRetrieverPlugin:
         """
         return await asyncio.to_thread(self._rerank_sync, query, nodes)
 
-    def _rerank_sync(self, query: str, nodes: List[Any]) -> List[Any]:
+    def _rerank_sync(self, query: str, nodes: list[Any]) -> list[Any]:
         """在线程中加载并运行同步 cross-encoder reranker。"""
         try:
+            if self._config.rerank_backend == "remote":
+                return self._rerank_remote_sync(query, nodes)
             from llama_index.core.postprocessor import SentenceTransformerRerank
 
             reranker = SentenceTransformerRerank(
                 model=self._config.rerank_model,
                 top_n=len(nodes),
+                device=(
+                    None
+                    if self._config.rerank_device == "auto"
+                    else self._config.rerank_device
+                ),
             )
             # SentenceTransformerRerank 需要 QueryBundle
             from llama_index.core.schema import QueryBundle
@@ -730,18 +796,60 @@ class RAGRetrieverPlugin:
             query_bundle = QueryBundle(query_str=query)
             reranked = reranker.postprocess_nodes(nodes, query_bundle=query_bundle)
             return reranked
-        except ImportError:
-            logger.warning(
-                "Rerank 依赖未安装（需要 sentence-transformers），跳过重排序步骤。"
-            )
+        except ImportError as exc:
+            if self._config.rerank_device in {"cuda", "mps", "remote"}:
+                raise RAGAccelerationError(
+                    "rag_reranker_dependency_unavailable"
+                ) from exc
+            logger.warning("Rerank 依赖未安装，跳过重排序步骤。")
             return nodes
         except Exception as exc:
-            logger.warning(
-                "Rerank 执行失败，返回原始排序: %s", exc
-            )
+            if self._config.rerank_device in {"cuda", "mps", "remote"}:
+                if _is_gpu_oom(exc):
+                    raise RAGAccelerationError(
+                        f"rag_reranker_{self._config.rerank_device}_out_of_memory"
+                    ) from exc
+                raise RAGAccelerationError(
+                    f"rag_reranker_{self._config.rerank_device}_failed"
+                ) from exc
+            logger.warning("Rerank 执行失败，返回原始排序: %s", exc)
             return nodes
 
-    def _inject_system_message(self, ctx: PipelineContext, chunks: List[str]) -> None:
+    def _rerank_remote_sync(self, query: str, nodes: list[Any]) -> list[Any]:
+        """Call the native/remote reranker without exposing it publicly."""
+        import httpx
+
+        api_base = (self._config.rerank_api_base or "").rstrip("/")
+        if not api_base:
+            raise RAGAccelerationError("rag_remote_reranker_url_missing")
+        documents = [
+            node.get_content() if hasattr(node, "get_content") else str(node)
+            for node in nodes
+        ]
+        headers = {}
+        if self._config.rerank_api_key:
+            headers["Authorization"] = f"Bearer {self._config.rerank_api_key}"
+        response = httpx.post(
+            f"{api_base}/rerank",
+            json={
+                "query": query,
+                "documents": documents,
+                "model": self._config.rerank_model,
+                "top_n": len(nodes),
+            },
+            headers=headers,
+            timeout=60.0,
+        )
+        response.raise_for_status()
+        indices = [
+            int(item["index"])
+            for item in response.json().get("results", [])
+        ]
+        if len(indices) != len(nodes) or set(indices) != set(range(len(nodes))):
+            raise RAGAccelerationError("rag_remote_reranker_invalid_response")
+        return [nodes[index] for index in indices]
+
+    def _inject_system_message(self, ctx: PipelineContext, chunks: list[str]) -> None:
         """将检索到的文档块注入为 system message 前缀。
 
         在 messages 列表开头插入或更新一条 system 消息，
@@ -813,7 +921,7 @@ class RAGRetrieverPlugin:
             logger.warning("文档 Ingest 失败: %s", exc)
             return {"status": "error", "reason": str(exc)}
 
-    def _extract_user_query(self, messages: List[Dict[str, Any]]) -> str:
+    def _extract_user_query(self, messages: list[dict[str, Any]]) -> str:
         """从消息列表中提取最后一条用户消息内容作为查询。
 
         Args:

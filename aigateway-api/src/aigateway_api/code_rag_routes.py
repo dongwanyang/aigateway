@@ -26,9 +26,9 @@ import tempfile
 import time
 import uuid
 import zipfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from fastapi import (
     APIRouter,
@@ -63,9 +63,9 @@ class _CodeImportJsonBody(BaseModel):
     """JSON 请求体(server_path / git 两种源)."""
 
     source_type: str = Field(..., description="folder | server_path | git | zip")
-    server_path: Optional[str] = None
-    git_url: Optional[str] = None
-    git_branch: Optional[str] = None
+    server_path: str | None = None
+    git_url: str | None = None
+    git_branch: str | None = None
     embedding_model: str = Field(default="Qwen/Qwen3-Embedding-0.6B")
 
 
@@ -77,7 +77,7 @@ class _CodeImportJsonBody(BaseModel):
 async def _write_task_state(
     app_state: Any,
     task_id: str,
-    fields: Dict[str, Any],
+    fields: dict[str, Any],
 ) -> None:
     """把任务状态字段写入 SQLite code_rag_tasks 表(增量更新,原子)。
 
@@ -115,10 +115,10 @@ async def _write_task_state(
 
 async def _delete_task_key(app_state: Any, task_id: str) -> None:
     """终态留表当历史(不再删 SQLite 行)。保留签名避免改调用点。"""
-    return None
+    return
 
 
-async def _read_task_state(app_state: Any, task_id: str) -> Optional[Dict[str, Any]]:
+async def _read_task_state(app_state: Any, task_id: str) -> dict[str, Any] | None:
     sqlite_store = getattr(app_state, "sqlite_store", None)
     if sqlite_store is None:
         return None
@@ -158,7 +158,7 @@ def sweep_orphaned_tasks(app_state: Any) -> int:
     return marked
 
 
-def _shape_task_response(task_id: str, state: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def _shape_task_response(task_id: str, state: dict[str, Any] | None) -> dict[str, Any]:
     """把 store 里的字段规范化为 API 输出结构.
 
     created_at 缺失时返回 0 (非 null)，保证 list 端按时间倒序时老任务排末尾.
@@ -215,7 +215,7 @@ def _spawn_import_task(app_state: Any, coro: Any, *, task_id: str) -> Any:
       走 Redis 是主路径,这里只做兜底日志)
     - dict 的键是 task_id,方便取消时查找
     """
-    active: Dict[str, asyncio.Task] = getattr(app_state, "code_rag_active_tasks", None)  # type: ignore[assignment]
+    active: dict[str, asyncio.Task] = getattr(app_state, "code_rag_active_tasks", None)  # type: ignore[assignment]
     if active is None:
         active = {}
         app_state.code_rag_active_tasks = active
@@ -241,17 +241,17 @@ def _spawn_import_task(app_state: Any, coro: Any, *, task_id: str) -> Any:
     return task
 
 
-async def _append_repository(redis_mgr: Any, repo_meta: Dict[str, Any]) -> None:
+async def _append_repository(redis_mgr: Any, repo_meta: dict[str, Any]) -> None:
     if redis_mgr is None or redis_mgr.redis is None:
         return
     await redis_mgr.redis.lpush(_REPO_LIST_KEY, json.dumps(repo_meta, ensure_ascii=False))
 
 
-async def _list_repositories(redis_mgr: Any) -> List[Dict[str, Any]]:
+async def _list_repositories(redis_mgr: Any) -> list[dict[str, Any]]:
     if redis_mgr is None or redis_mgr.redis is None:
         return []
     raw = await redis_mgr.redis.lrange(_REPO_LIST_KEY, 0, -1)
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     for item in raw:
         try:
             out.append(json.loads(item.decode() if isinstance(item, bytes) else item))
@@ -282,7 +282,7 @@ async def _remove_repository(redis_mgr: Any, document_id: str) -> None:
 _ZIP_SIZE_HARD_CAP_MB = 200
 
 
-def _is_server_path_allowed(candidate: str, allowed_roots: List[str]) -> bool:
+def _is_server_path_allowed(candidate: str, allowed_roots: list[str]) -> bool:
     """走 realpath 展开的白名单检查,拒绝符号链接逃逸."""
     # lazy import 避免 admin 路由启动阶段拉整个 code_rag 包
     from aigateway_core.pipelines.understanding.code_rag.splitter import is_path_allowed
@@ -290,7 +290,7 @@ def _is_server_path_allowed(candidate: str, allowed_roots: List[str]) -> bool:
     return is_path_allowed(candidate, allowed_roots)
 
 
-def _validate_server_path(candidate: str, allowed_roots: List[str]) -> Path:
+def _validate_server_path(candidate: str, allowed_roots: list[str]) -> Path:
     if not candidate:
         raise HTTPException(status_code=400, detail="server_path 不能为空")
     if not _is_server_path_allowed(candidate, allowed_roots):
@@ -312,10 +312,10 @@ def _validate_git_url(git_url: str) -> str:
 
 def _materialize_git_repo(
     git_url: str,
-    git_branch: Optional[str],
+    git_branch: str | None,
     *,
     timeout: float = 300.0,
-    dest_dir: Optional[str] = None,
+    dest_dir: str | None = None,
 ) -> str:
     """浅克隆到目录,返回该目录路径。
 
@@ -333,7 +333,7 @@ def _materialize_git_repo(
     else:
         target_dir = tempfile.mkdtemp(prefix="code_rag_git_")
     try:
-        clone_kwargs: Dict[str, Any] = {
+        clone_kwargs: dict[str, Any] = {
             "depth": 1,
             "env": {
                 # 60s 内低于 1KB/s 判为超慢连接,直接中止
@@ -351,12 +351,12 @@ def _materialize_git_repo(
 
         import threading
 
-        error: List[BaseException] = []
+        error: list[BaseException] = []
 
         def _target() -> None:
             try:
                 _clone()
-            except BaseException as exc:  # noqa: BLE001
+            except BaseException as exc:
                 error.append(exc)
 
         thread = threading.Thread(target=_target, daemon=True)
@@ -470,7 +470,7 @@ def _sanitize_relative_path(raw: str) -> str:
     return "/".join(parts)
 
 
-def _folder_source_label(files: List[UploadFile], relative_paths: List[str]) -> str:
+def _folder_source_label(files: list[UploadFile], relative_paths: list[str]) -> str:
     """优先使用上传目录根名作为 folder source_label,避免退化成首个文件名."""
     for raw in relative_paths:
         rel = _sanitize_relative_path(raw)
@@ -486,8 +486,8 @@ def _folder_source_label(files: List[UploadFile], relative_paths: List[str]) -> 
 
 
 async def _materialize_folder_upload(
-    files: List[UploadFile],
-    relative_paths: List[str],
+    files: list[UploadFile],
+    relative_paths: list[str],
     max_file_size_mb: int,
     max_total_size_mb: int,
     max_file_count: int,
@@ -548,7 +548,7 @@ async def _run_code_import_task_with_deadline(
             ),
             timeout=max(60, int(deadline_seconds)),
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.error(
             "code rag import task %s exceeded wall-clock deadline (%ss)",
             task_id,
@@ -576,11 +576,11 @@ async def _run_code_import_task(
     source_type: str,
     source_label: str,
     embedding_model: str,
-    ignore_patterns: List[str],
+    ignore_patterns: list[str],
     graph_repo_path: str,
-    workspace_path: Optional[str],
-    cleanup_dirs: List[str],
-    git_branch: Optional[str] = None,
+    workspace_path: str | None,
+    cleanup_dirs: list[str],
+    git_branch: str | None = None,
 ) -> None:
     """异步导入任务主体(见 spec: Async task flow).
 
@@ -593,8 +593,12 @@ async def _run_code_import_task(
         probe_embedding_dimension,
         resolve_collection_name,
     )
-    from aigateway_core.pipelines.understanding.code_rag.graph_builder import build_code_graph
-    from aigateway_core.pipelines.understanding.code_rag.splitter import build_symbol_chunks
+    from aigateway_core.pipelines.understanding.code_rag.graph_builder import (
+        build_code_graph,
+    )
+    from aigateway_core.pipelines.understanding.code_rag.splitter import (
+        build_symbol_chunks,
+    )
 
     redis_mgr = getattr(app_state, "redis_manager", None)
     qdrant_mgr = getattr(app_state, "qdrant_manager", None)
@@ -625,12 +629,12 @@ async def _run_code_import_task(
                 _mark(done=done, total=total, current_file=current_file),
                 loop,
             )
-            def _on_done(f: "asyncio.Future[Any]") -> None:
+            def _on_done(f: asyncio.Future[Any]) -> None:
                 exc = f.exception()
                 if exc is not None:
                     logger.warning("code rag 进度回写失败(task=%s): %r", task_id, exc)
             fut.add_done_callback(_on_done)
-        chunks: List[Dict[str, Any]] = await loop.run_in_executor(
+        chunks: list[dict[str, Any]] = await loop.run_in_executor(
             None, lambda: build_symbol_chunks(
                 source_dir, graph_repo_path, ignore_patterns, progress_cb=_split_progress
             )
@@ -661,17 +665,18 @@ async def _run_code_import_task(
         # 而非 chunk_text(源码)。源码存 payload chunk_text,检索命中直接返回,
         # 源码改动不重算向量(增量友好)。
         batch_size = 64
-        payloads: List[Dict[str, Any]] = []
+        payloads: list[dict[str, Any]] = []
         processed = 0
 
         for batch_start in range(0, len(chunks), batch_size):
             batch_chunks = chunks[batch_start : batch_start + batch_size]
             batch_texts = [c["embed_text"] for c in batch_chunks]
             batch_vectors = await loop.run_in_executor(
-                None, lambda: encode_texts(embedding_model, batch_texts)
+                None,
+                lambda texts=batch_texts: encode_texts(embedding_model, texts),
             )
 
-            batch_points: List[Dict[str, Any]] = []
+            batch_points: list[dict[str, Any]] = []
             for offset, chunk in enumerate(batch_chunks):
                 global_idx = batch_start + offset
                 chunk_type = (
@@ -745,7 +750,7 @@ async def _run_code_import_task(
             "function_count": sum(1 for p in payloads if p["chunk_type"] == "function"),
             "class_count": sum(1 for p in payloads if p["chunk_type"] == "class"),
             "chunk_count": len(payloads),
-            "import_time": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "import_time": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         }
         await _append_repository(redis_mgr, repo_meta)
 
@@ -786,7 +791,7 @@ async def _run_code_import_task(
 # ----------------------------------------------------------------------
 
 
-def _load_code_rag_config(app_state: Any) -> Dict[str, Any]:
+def _load_code_rag_config(app_state: Any) -> dict[str, Any]:
     config_manager = getattr(app_state, "config_manager", None)
     if config_manager is None:
         return {}
@@ -797,8 +802,8 @@ def _load_code_rag_config(app_state: Any) -> Dict[str, Any]:
 @router.post("/rag/code/import")
 async def import_code_repository(
     request: Request,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
-) -> Dict[str, Any]:
+    _auth: dict[str, Any] = Depends(authenticate_admin),
+) -> dict[str, Any]:
     """创建异步导入任务并立即返回 task_id.
 
     请求体两种形态:
@@ -820,18 +825,18 @@ async def import_code_repository(
     content_type = (request.headers.get("content-type") or "").lower()
     task_id = str(uuid.uuid4())
     document_id = f"code_{uuid.uuid4().hex[:12]}"
-    cleanup_dirs: List[str] = []
+    cleanup_dirs: list[str] = []
     # graph_repo_path: 持久化目录 {graph_db_dir}/{document_id}/,存放 .codegraph/
     # 与 managed 源(git clone / server_path symlink)。folder/zip 不在此持久化源码。
     graph_repo_path = str(Path(graph_db_dir) / document_id)
-    workspace_path: Optional[str] = None  # managed 源持久化路径(供 sync 判断)
+    workspace_path: str | None = None  # managed 源持久化路径(供 sync 判断)
 
     if "multipart/form-data" in content_type:
         form = await request.form()
         source_type = str(form.get("source_type") or "")
         embedding_model = str(form.get("embedding_model") or "Qwen/Qwen3-Embedding-0.6B")
         if source_type == "folder":
-            uploads = form.getlist("files") if hasattr(form, "getlist") else form.getlist("files")  # type: ignore[attr-defined]
+            uploads = form.getlist("files")
             relative_paths = [
                 str(p) for p in (form.getlist("relative_paths") if hasattr(form, "getlist") else [])
             ]
@@ -839,7 +844,7 @@ async def import_code_repository(
             # UploadFile 是两个不同的类, request.form() 返回 starlette 版本,
             # isinstance(u, fastapi.UploadFile) 会全部 False → folder 源恒报
             # "必须至少上传一个文件". 用 duck-typing (有 read 协程 + filename) 兼容两者.
-            files: List[UploadFile] = [
+            files: list[UploadFile] = [
                 u for u in uploads
                 if hasattr(u, "read") and hasattr(u, "filename")
             ]
@@ -946,8 +951,8 @@ async def import_code_repository(
 async def cancel_code_task(
     task_id: str,
     request: Request,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
-) -> Dict[str, Any]:
+    _auth: dict[str, Any] = Depends(authenticate_admin),
+) -> dict[str, Any]:
     """取消一个正在运行的导入任务。
 
     流程:
@@ -1010,8 +1015,8 @@ async def list_code_tasks(
     request: Request,
     limit: int = 50,
     offset: int = 0,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
-) -> List[Dict[str, Any]]:
+    _auth: dict[str, Any] = Depends(authenticate_admin),
+) -> list[dict[str, Any]]:
     """列出最近的任务(按 created_at 倒序,默认 50 条)。
 
     任务终态留表当历史,故 list 端能返回已完成/失败/取消的任务供前端恢复。
@@ -1027,8 +1032,8 @@ async def list_code_tasks(
 async def get_code_task(
     task_id: str,
     request: Request,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
-) -> Dict[str, Any]:
+    _auth: dict[str, Any] = Depends(authenticate_admin),
+) -> dict[str, Any]:
     state = await _read_task_state(request.app.state, task_id)
     if not state:
         raise HTTPException(
@@ -1041,8 +1046,8 @@ async def get_code_task(
 @router.get("/rag/code/repositories")
 async def list_code_repositories(
     request: Request,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
-) -> List[Dict[str, Any]]:
+    _auth: dict[str, Any] = Depends(authenticate_admin),
+) -> list[dict[str, Any]]:
     redis_mgr = getattr(request.app.state, "redis_manager", None)
     return await _list_repositories(redis_mgr)
 
@@ -1051,7 +1056,7 @@ async def list_code_repositories(
 async def delete_code_repository(
     document_id: str,
     request: Request,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
+    _auth: dict[str, Any] = Depends(authenticate_admin),
 ) -> None:
     app_state = request.app.state
     code_cfg = _load_code_rag_config(app_state)
@@ -1128,7 +1133,7 @@ async def delete_code_repository(
 # ----------------------------------------------------------------------
 
 
-def _find_repo_meta(repos: List[Dict[str, Any]], document_id: str) -> Optional[Dict[str, Any]]:
+def _find_repo_meta(repos: list[dict[str, Any]], document_id: str) -> dict[str, Any] | None:
     for repo in repos:
         if repo.get("document_id") == document_id:
             return repo
@@ -1136,7 +1141,7 @@ def _find_repo_meta(repos: List[Dict[str, Any]], document_id: str) -> Optional[D
 
 
 def _git_fetch_reset(
-    workspace_path: str, *, git_branch: Optional[str] = None, timeout: float = 300.0
+    workspace_path: str, *, git_branch: str | None = None, timeout: float = 300.0
 ) -> None:
     """在持久化的 git 工作目录里 git fetch + reset --hard(不重新 clone)。
 
@@ -1154,7 +1159,7 @@ def _git_fetch_reset(
     try:
         import threading
 
-        error: List[BaseException] = []
+        error: list[BaseException] = []
 
         def _target() -> None:
             try:
@@ -1164,12 +1169,12 @@ def _git_fetch_reset(
                 ref = f"origin/{git_branch}" if git_branch else "origin/HEAD"
                 try:
                     repo.git.reset("--hard", ref)
-                except BaseException:  # noqa: BLE001
+                except BaseException:
                     if not git_branch or ref == "origin/HEAD":
                         raise
                     # 指定分支的远端引用不存在(可能被删/改名)→ 退回默认分支
                     repo.git.reset("--hard", "origin/HEAD")
-            except BaseException as exc:  # noqa: BLE001
+            except BaseException as exc:
                 error.append(exc)
 
         thread = threading.Thread(target=_target, daemon=True)
@@ -1187,8 +1192,8 @@ def _git_fetch_reset(
 async def sync_code_repository(
     document_id: str,
     request: Request,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
-) -> Dict[str, Any]:
+    _auth: dict[str, Any] = Depends(authenticate_admin),
+) -> dict[str, Any]:
     """增量同步代码仓库(git/server_path managed 源)。
 
     流程(plan 步骤 6):
@@ -1244,7 +1249,9 @@ async def sync_code_repository(
         read_file_hashes,
         run_codegraph_sync,
     )
-    from aigateway_core.pipelines.understanding.code_rag.splitter import build_symbol_chunks
+    from aigateway_core.pipelines.understanding.code_rag.splitter import (
+        build_symbol_chunks,
+    )
 
     try:
         # 1) 刷新源码(managed 源才有)
@@ -1273,7 +1280,7 @@ async def sync_code_repository(
         after = await asyncio.get_running_loop().run_in_executor(
             None, lambda: read_file_hashes(graph_repo_path)
         )
-        changed_db_paths: List[str] = []
+        changed_db_paths: list[str] = []
         for path, h in after.items():
             if before.get(path) != h:
                 changed_db_paths.append(path)
@@ -1293,8 +1300,7 @@ async def sync_code_repository(
         for db_path in changed_db_paths:
             # db path 带 src/ 前缀,剥成相对源根(与 Qdrant payload file_path 对齐)
             rel = db_path
-            if rel.startswith("src/"):
-                rel = rel[len("src/"):]
+            rel = rel.removeprefix("src/")
 
             # 重切该文件的符号(source_dir = workspace_path 的真实源码)
             source_dir = workspace_path
@@ -1304,8 +1310,8 @@ async def sync_code_repository(
                 source_dir = str(src_link.resolve()) if src_link.is_symlink() else workspace_path
             chunks = await asyncio.get_running_loop().run_in_executor(
                 None,
-                lambda dp=db_path: build_symbol_chunks(
-                    source_dir, graph_repo_path, ignore_patterns, only_files=[dp]
+                lambda dp=db_path, source_root=source_dir: build_symbol_chunks(
+                    source_root, graph_repo_path, ignore_patterns, only_files=[dp]
                 ),
             )
             if not chunks:
@@ -1323,9 +1329,10 @@ async def sync_code_repository(
                 continue
             batch_texts = [c["embed_text"] for c in chunks]
             vectors = await asyncio.get_running_loop().run_in_executor(
-                None, lambda: encode_texts(embedding_model, batch_texts)
+                None,
+                lambda texts=batch_texts: encode_texts(embedding_model, texts),
             )
-            points: List[Dict[str, Any]] = []
+            points: list[dict[str, Any]] = []
             for offset, chunk in enumerate(chunks):
                 payload = {
                     "document_id": document_id,
@@ -1384,8 +1391,7 @@ async def sync_code_repository(
         # 删除的文件:清掉 Qdrant 里该文件的旧 chunk
         for db_path in deleted_db_paths:
             rel = db_path
-            if rel.startswith("src/"):
-                rel = rel[len("src/"):]
+            rel = rel.removeprefix("src/")
             try:
                 await qdrant_mgr.delete_by_filter(
                     collection_name,
@@ -1435,12 +1441,14 @@ async def query_code_symbols(
     document_id: str,
     request: Request,
     symbol: str,
-    kind: Optional[str] = None,
+    kind: str | None = None,
     limit: int = 10,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
-) -> List[Dict[str, Any]]:
+    _auth: dict[str, Any] = Depends(authenticate_admin),
+) -> list[dict[str, Any]]:
     """符号搜索(走 codegraph query --json)。"""
-    from aigateway_core.pipelines.understanding.code_rag.graph_query import query_symbols
+    from aigateway_core.pipelines.understanding.code_rag.graph_query import (
+        query_symbols,
+    )
 
     graph_repo_path = _resolve_graph_repo_path(request, document_id)
     loop = asyncio.get_running_loop()
@@ -1459,8 +1467,8 @@ async def get_code_callers(
     document_id: str,
     request: Request,
     symbol: str,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
-) -> Dict[str, Any]:
+    _auth: dict[str, Any] = Depends(authenticate_admin),
+) -> dict[str, Any]:
     from aigateway_core.pipelines.understanding.code_rag.graph_query import get_callers
 
     graph_repo_path = _resolve_graph_repo_path(request, document_id)
@@ -1480,8 +1488,8 @@ async def get_code_callees(
     document_id: str,
     request: Request,
     symbol: str,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
-) -> Dict[str, Any]:
+    _auth: dict[str, Any] = Depends(authenticate_admin),
+) -> dict[str, Any]:
     from aigateway_core.pipelines.understanding.code_rag.graph_query import get_callees
 
     graph_repo_path = _resolve_graph_repo_path(request, document_id)
@@ -1502,8 +1510,8 @@ async def get_code_impact(
     request: Request,
     symbol: str,
     depth: int = 2,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
-) -> Dict[str, Any]:
+    _auth: dict[str, Any] = Depends(authenticate_admin),
+) -> dict[str, Any]:
     from aigateway_core.pipelines.understanding.code_rag.graph_query import get_impact
 
     graph_repo_path = _resolve_graph_repo_path(request, document_id)
@@ -1522,8 +1530,8 @@ async def get_code_node(
     document_id: str,
     request: Request,
     symbol: str,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
-) -> Dict[str, Any]:
+    _auth: dict[str, Any] = Depends(authenticate_admin),
+) -> dict[str, Any]:
     from aigateway_core.pipelines.understanding.code_rag.graph_query import get_node
 
     graph_repo_path = _resolve_graph_repo_path(request, document_id)
@@ -1541,8 +1549,8 @@ async def get_code_node(
 async def list_code_files(
     document_id: str,
     request: Request,
-    _auth: Dict[str, Any] = Depends(authenticate_admin),
-) -> List[Dict[str, Any]]:
+    _auth: dict[str, Any] = Depends(authenticate_admin),
+) -> list[dict[str, Any]]:
     from aigateway_core.pipelines.understanding.code_rag.graph_query import list_files
 
     graph_repo_path = _resolve_graph_repo_path(request, document_id)

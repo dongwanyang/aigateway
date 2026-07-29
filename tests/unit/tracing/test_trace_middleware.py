@@ -1,16 +1,16 @@
 """TraceMiddleware 测试 —— 生成 trace_id、写 request.state、回写响应头."""
-import sys, os
+import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-api", "src"))
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
+from aigateway_api.trace_middleware import TraceMiddleware
 from fastapi import FastAPI, Request
 from httpx import ASGITransport, AsyncClient
-
-from aigateway_api.trace_middleware import TraceMiddleware
 
 
 def _make_app(redis_mock=None):

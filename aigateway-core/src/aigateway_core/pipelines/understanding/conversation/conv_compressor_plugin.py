@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, List, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -43,9 +43,9 @@ class ConvCompressorPlugin:
 
     name: str = "conv_compressor"
     enabled: bool = True
-    depends_on: List[str] = ["semantic_cache"]
+    depends_on: list[str] = ["semantic_cache"]
 
-    def __init__(self, config: Optional[Any] = None) -> None:
+    def __init__(self, config: Any | None = None) -> None:
         """初始化 ConvCompressorPlugin。
 
         Args:
@@ -59,8 +59,8 @@ class ConvCompressorPlugin:
             self._config = ConvCompressorConfig()
 
         self._is_available: bool = False
-        self._memory: Optional[Any] = None
-        self._llm: Optional[Any] = None
+        self._memory: Any | None = None
+        self._llm: Any | None = None
         self._initialize_memory()
 
     def _initialize_memory(self) -> None:
@@ -194,8 +194,8 @@ class ConvCompressorPlugin:
         return ctx
 
     async def _compress_messages(
-        self, messages: List[dict], max_history: int
-    ) -> tuple[List[dict], str]:
+        self, messages: list[dict], max_history: int
+    ) -> tuple[list[dict], str]:
         """执行消息压缩逻辑。
 
         将旧消息通过 LangChain 摘要后，重建为:
@@ -209,8 +209,8 @@ class ConvCompressorPlugin:
             元组: (压缩后的消息列表, 原始摘要文本)。
         """
         # 分离 system 消息和其余消息
-        system_msg: Optional[dict] = None
-        non_system_messages: List[dict] = []
+        system_msg: dict | None = None
+        non_system_messages: list[dict] = []
 
         for msg in messages:
             if msg.get("role") == "system" and system_msg is None:
@@ -230,7 +230,7 @@ class ConvCompressorPlugin:
         summary_text = await self._summarize_messages(older_messages)
 
         # 重建消息列表
-        result: List[dict] = []
+        result: list[dict] = []
 
         # 1. 添加 system 消息（如有）
         if system_msg is not None:
@@ -249,7 +249,7 @@ class ConvCompressorPlugin:
 
         return result, summary_text
 
-    async def _summarize_messages(self, messages: List[dict]) -> str:
+    async def _summarize_messages(self, messages: list[dict]) -> str:
         """使用 LangChain ConversationSummaryBufferMemory 对消息列表生成摘要。
 
         Args:

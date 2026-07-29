@@ -13,7 +13,7 @@ for _name in dir(_wrapped):
         globals()[_name] = getattr(_wrapped, _name)
         _names.append(_name)
 
-__all__ = _names
+__all__ = tuple(_names)
 del _wrapped, _names, _name
 from .policy_engine import (
     NoModelSatisfiesPolicy,
@@ -25,13 +25,13 @@ from .runtime_router import RuntimeModelRouter, RuntimeRouteDecision
 from .task_classifier import TASKS, TaskClassification, TaskClassifier, TaskProfile
 
 __all__ = [
-    "RoutingConstraints",
+    "TASKS",
     "NoModelSatisfiesPolicy",
+    "RoutingConstraints",
     "RoutingPolicyConfigError",
     "RoutingPolicyEngine",
     "RuntimeModelRouter",
     "RuntimeRouteDecision",
-    "TASKS",
     "TaskClassification",
     "TaskClassifier",
     "TaskProfile",

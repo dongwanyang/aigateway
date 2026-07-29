@@ -23,8 +23,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
-from typing import Any, Dict, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -33,13 +34,14 @@ logger = logging.getLogger(__name__)
 # ------------------------------------------------------------------
 
 # 模块级模型缓存（避免每次请求加载 ~600MB 模型）
-_l3_model_cache: Dict[str, Any] = {}
+_l3_model_cache: dict[str, Any] = {}
 _l3_model_lock = threading.Lock()
 
 # L3 向量计算设备：cpu | cuda | auto（默认 auto——有 CUDA 用 CUDA，否则 CPU）。
 # late-bind：由 main.py 启动时按 config embedding.device 调用 set_l3_device() 注入，
 # 避免在本 core 层反向依赖 shared.config（参照 LiteLLMBridge.set_auto_resolver 模式）。
 _l3_device: str = "auto"
+_l3_model_name: str = "Qwen/Qwen3-Embedding-0.6B"
 
 
 def set_l3_device(device: str) -> None:
@@ -57,7 +59,15 @@ def set_l3_device(device: str) -> None:
     logger.info("L3 embedding device 设为: %s", dev)
 
 
-async def _compute_l3_vector(text: str, *, load_if_missing: bool = True) -> Optional[list]:
+def set_l3_model(model_name: str) -> None:
+    """Set the configured L3 model path before the first model load."""
+    global _l3_model_name
+    if _l3_model_cache:
+        raise RuntimeError("L3 embedding model is already loaded")
+    _l3_model_name = model_name.strip() or "Qwen/Qwen3-Embedding-0.6B"
+
+
+async def _compute_l3_vector(text: str, *, load_if_missing: bool = True) -> list | None:
     """使用 Qwen/Qwen3-Embedding-0.6B 计算 1024 维 embedding 向量。
 
     使用 transformers + torch 直接加载（无需 sentence_transformers）。
@@ -83,13 +93,14 @@ async def _compute_l3_vector(text: str, *, load_if_missing: bool = True) -> Opti
 def _compute_l3_vector_sync(
     text: str,
     load_if_missing: bool = True,
-) -> Optional[list]:
+) -> list | None:
     """在线程中加载并执行同步 transformers 模型。"""
     try:
         import torch
         from transformers import AutoModel, AutoTokenizer
 
-        model_name = "Qwen/Qwen3-Embedding-0.6B"
+        model_name = _l3_model_name
+        local_only = os.path.isabs(model_name)
 
         # 模型对象跨请求共享；串行化加载与推理，避免重复冷加载和并发访问。
         with _l3_model_lock:
@@ -98,17 +109,20 @@ def _compute_l3_vector_sync(
                     return None
                 logger.info("Loading L3 embedding model: %s", model_name)
                 _l3_model_cache["tokenizer"] = AutoTokenizer.from_pretrained(
-                    model_name, trust_remote_code=True
+                    model_name,
+                    trust_remote_code=True,
+                    local_files_only=local_only,
                 )
                 device = _l3_device
                 if device == "cuda" and not torch.cuda.is_available():
-                    logger.warning("L3 device=cuda 但 CUDA 不可用，回落 cpu")
-                    device = "cpu"
+                    raise RuntimeError("semantic_cache_cuda_unavailable")
                 if device == "auto":
                     device = "cuda" if torch.cuda.is_available() else "cpu"
                 _l3_model_cache["device"] = device
                 _l3_model_cache["model"] = AutoModel.from_pretrained(
-                    model_name, trust_remote_code=True
+                    model_name,
+                    trust_remote_code=True,
+                    local_files_only=local_only,
                 ).to(device).eval()
                 logger.info("L3 embedding model loaded on device=%s", device)
 

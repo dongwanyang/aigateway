@@ -1,4 +1,7 @@
 services:
+  gateway:
+    ports: !override []
+
   control-panel:
     ports: !override
       - "80:80"

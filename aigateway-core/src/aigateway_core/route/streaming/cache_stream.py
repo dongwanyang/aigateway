@@ -8,9 +8,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 import uuid
-from typing import Any, AsyncIterator, Dict
+from collections.abc import AsyncIterator
+from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 async def simulate_stream_from_cache(
@@ -18,7 +22,7 @@ async def simulate_stream_from_cache(
     chunk_delay_ms: int = 20,
     chunk_count: int = 20,
     hit_tier: str = "L1",
-) -> AsyncIterator[Dict[str, Any]]:
+) -> AsyncIterator[dict[str, Any]]:
     """将缓存的完整响应按 chunk 分块，模拟流式生成。
 
     API_CONTRACT.md 缓存命中流式响应特殊行为:
@@ -64,7 +68,7 @@ async def simulate_stream_from_cache(
     for i, chunk_text in enumerate(chunks):
         is_last = (i == len(chunks) - 1)
 
-        chunk_data: Dict[str, Any] = {
+        chunk_data: dict[str, Any] = {
             "id": consistent_id,
             "object": "chat.completion.chunk",
             "created": created,

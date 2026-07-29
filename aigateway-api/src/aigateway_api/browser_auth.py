@@ -10,12 +10,12 @@ import hmac
 import os
 import secrets
 import sqlite3
-from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from datetime import UTC, datetime
+from typing import Any
 
 
 def _now_unix() -> int:
-    return int(datetime.now(timezone.utc).timestamp())
+    return int(datetime.now(UTC).timestamp())
 
 
 def _token_hash(value: str) -> str:
@@ -91,7 +91,7 @@ class BrowserAuthStore:
                 """
             )
 
-    def get_user(self, username: str) -> Optional[Dict[str, Any]]:
+    def get_user(self, username: str) -> dict[str, Any] | None:
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT * FROM admin_users WHERE username=?", (username,)
@@ -103,7 +103,7 @@ class BrowserAuthStore:
             row = conn.execute("SELECT 1 FROM admin_users LIMIT 1").fetchone()
         return row is not None
 
-    def provision_admin(self, username: str, temporary_password: str) -> Optional[Dict[str, Any]]:
+    def provision_admin(self, username: str, temporary_password: str) -> dict[str, Any] | None:
         """Create the initial admin account exactly once.
 
         First-login requests can race when two browser tabs submit the installer
@@ -125,7 +125,7 @@ class BrowserAuthStore:
             return None
         return self.get_user(username)
 
-    def verify_credentials(self, username: str, password: str) -> Optional[Dict[str, Any]]:
+    def verify_credentials(self, username: str, password: str) -> dict[str, Any] | None:
         user = self.get_user(username)
         if not user or user.get("status") != "active":
             # Keep a comparable slow-hash cost for unknown users.
@@ -159,7 +159,7 @@ class BrowserAuthStore:
             )
         return token
 
-    def validate_session(self, token: str, *, idle_ttl_seconds: int) -> Optional[Dict[str, Any]]:
+    def validate_session(self, token: str, *, idle_ttl_seconds: int) -> dict[str, Any] | None:
         now = _now_unix()
         token_digest = _token_hash(token)
         with self._connect() as conn:

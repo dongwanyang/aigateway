@@ -6,6 +6,6 @@ Authoritative implementation:
 """
 from __future__ import annotations
 
-from aigateway_core.prefix.pii.detector import PIIDetector  # noqa: F401
+from aigateway_core.prefix.pii.detector import PIIDetector
 
 __all__ = ["PIIDetector"]

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Dict, List
+from typing import Any
 
 from aigateway_core.pipelines.generation._common.config import ModelRouterConfig
 from aigateway_core.pipelines.generation._common.models import ComplexityEvaluation
@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # 动态交互关键词（高复杂度物理交互）
-_DYNAMIC_INTERACTION_KEYWORDS: List[str] = [
+_DYNAMIC_INTERACTION_KEYWORDS: list[str] = [
     "碰撞",
     "打斗",
     "爆炸",
@@ -44,7 +44,7 @@ _DYNAMIC_INTERACTION_KEYWORDS: List[str] = [
 ]
 
 # 接触交互关键词（中等复杂度物理交互）
-_CONTACT_INTERACTION_KEYWORDS: List[str] = [
+_CONTACT_INTERACTION_KEYWORDS: list[str] = [
     "接触",
     "握手",
     "touch",
@@ -58,7 +58,7 @@ _CONTACT_INTERACTION_KEYWORDS: List[str] = [
 ]
 
 # 跟踪镜头关键词
-_TRACKING_CAMERA_KEYWORDS: List[str] = [
+_TRACKING_CAMERA_KEYWORDS: list[str] = [
     "跟踪",
     "tracking",
     "follow",
@@ -67,7 +67,7 @@ _TRACKING_CAMERA_KEYWORDS: List[str] = [
 ]
 
 # 平移镜头关键词
-_PAN_CAMERA_KEYWORDS: List[str] = [
+_PAN_CAMERA_KEYWORDS: list[str] = [
     "平移",
     "pan",
     "扫",
@@ -98,8 +98,8 @@ class IntentEvaluatorStrategy:
     def evaluate(
         self,
         prompt: str,
-        reference_images: List[MediaContent],
-        generation_params: Dict[str, Any],
+        reference_images: list[MediaContent],
+        generation_params: dict[str, Any],
     ) -> ComplexityEvaluation:
         """评估生成请求复杂度.
 
@@ -133,7 +133,7 @@ class IntentEvaluatorStrategy:
         total_score = max(0, min(100, total_score))
 
         # 构建 factors 明细
-        factors: Dict[str, Any] = {
+        factors: dict[str, Any] = {
             "subject_count": subject_score,
             "interaction_type": interaction_score,
             "camera_movement": camera_score,
@@ -278,7 +278,7 @@ class IntentEvaluatorStrategy:
 
         return 0
 
-    def _evaluate_resolution(self, generation_params: Dict[str, Any]) -> int:
+    def _evaluate_resolution(self, generation_params: dict[str, Any]) -> int:
         """评估目标分辨率.
 
         从 generation_params 中获取 target_resolution，
@@ -301,7 +301,7 @@ class IntentEvaluatorStrategy:
         else:
             return 0
 
-    def _get_max_resolution(self, generation_params: Dict[str, Any]) -> int:
+    def _get_max_resolution(self, generation_params: dict[str, Any]) -> int:
         """从生成参数中提取最大分辨率维度.
 
         支持多种参数格式:

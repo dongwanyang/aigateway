@@ -7,10 +7,10 @@ path instead of pretending a keyword score is calibrated confidence.
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
 import re
-from typing import Any, Dict, List, Sequence, Tuple
-
+from collections.abc import Sequence
+from dataclasses import asdict, dataclass
+from typing import Any
 
 TASKS = ("coding", "reasoning", "summary", "vision", "general")
 MODALITIES = ("text", "image", "audio", "video")
@@ -28,19 +28,19 @@ class TaskProfile:
 
     operation: str = "general"
     domain: str = "general"
-    modalities: Tuple[str, ...] = ("text",)
+    modalities: tuple[str, ...] = ("text",)
     complexity: int = 50
-    requirements: Tuple[str, ...] = ()
+    requirements: tuple[str, ...] = ()
     confidence: float = 0.5
     source: str = "heuristic"
-    signals: Tuple[str, ...] = ()
+    signals: tuple[str, ...] = ()
 
     @property
     def task(self) -> str:
         """Compatibility alias for the original single-label classifier."""
         return self.operation
 
-    def as_dict(self) -> Dict[str, Any]:
+    def as_dict(self) -> dict[str, Any]:
         data = asdict(self)
         for key in ("modalities", "requirements", "signals"):
             data[key] = list(data[key])
@@ -48,7 +48,7 @@ class TaskProfile:
         return data
 
     @classmethod
-    def from_dict(cls, value: Any, *, source: str = "llm") -> "TaskProfile":
+    def from_dict(cls, value: Any, *, source: str = "llm") -> TaskProfile:
         if not isinstance(value, dict):
             raise ValueError("task_profile must be an object")
 
@@ -103,7 +103,7 @@ TaskClassification = TaskProfile
 class TaskClassifier:
     """Conservative local task profiler with no external I/O."""
 
-    _PATTERNS: Dict[str, Sequence[Tuple[str, str, int]]] = {
+    _PATTERNS: dict[str, Sequence[tuple[str, str, int]]] = {
         "coding": (
             ("code_block", r"```", 6),
             ("coding_zh", r"(写|修改|修复|重构|调试|解释|审查).{0,12}(代码|函数|程序|接口|SQL)", 5),
@@ -126,14 +126,14 @@ class TaskClassifier:
 
     def classify(
         self,
-        messages: List[Dict[str, Any]],
+        messages: list[dict[str, Any]],
         *,
         tools: Any = None,
         structured_output: bool = False,
     ) -> TaskProfile:
         text, modalities = self._request_features(messages)
-        scores: Dict[str, int] = {task: 0 for task in TASKS}
-        signals: Dict[str, List[str]] = {task: [] for task in TASKS}
+        scores: dict[str, int] = {task: 0 for task in TASKS}
+        signals: dict[str, list[str]] = {task: [] for task in TASKS}
 
         if "image" in modalities:
             scores["vision"] += 5
@@ -147,7 +147,7 @@ class TaskClassifier:
 
         best_task = max(TASKS[:-1], key=lambda item: scores[item])
         best_score = scores[best_task]
-        requirements: List[str] = []
+        requirements: list[str] = []
         if "image" in modalities:
             requirements.append("vision")
         if tools:
@@ -184,9 +184,9 @@ class TaskClassifier:
         return profile.confidence >= threshold
 
     @staticmethod
-    def _request_features(messages: List[Dict[str, Any]]) -> Tuple[str, Tuple[str, ...]]:
-        texts: List[str] = []
-        modalities: List[str] = ["text"]
+    def _request_features(messages: list[dict[str, Any]]) -> tuple[str, tuple[str, ...]]:
+        texts: list[str] = []
+        modalities: list[str] = ["text"]
         for message in messages or []:
             if not isinstance(message, dict) or message.get("role") != "user":
                 continue

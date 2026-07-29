@@ -11,7 +11,6 @@ Tests for VideoPreviewGenerator — 视频预览生成与帧插值逻辑
 需求: 3.4
 """
 
-import asyncio
 import json
 import os
 import sys

@@ -183,7 +183,7 @@ def main(
     if hist:
         messages.extend(hist)
 
-    console.print(f"[dim]AI Gateway Chat — 输入 'quit' 或 'exit' 退出，'clear' 清空会话[/]")
+    console.print("[dim]AI Gateway Chat — 输入 'quit' 或 'exit' 退出，'clear' 清空会话[/]")
     if model:
         console.print(f"[dim]模型: {model}[/]")
     console.print()

@@ -10,15 +10,14 @@
 - 边界情况: 空文本, 无PII文本, 多PII混合
 """
 
-import sys
 import os
-import hashlib
+import sys
+
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 
 from aigateway_core.prefix.pii.detector import PIIDetector
-
 
 # ==================================================================
 # 基础构造测试

@@ -1,9 +1,9 @@
 """httpx clients for admin and test-user identities."""
-import pytest
-import httpx
-from typing import Optional
 
-from tests.conftest import BASE, ADMIN_KEY, AGNES_TEXT_MODEL
+import httpx
+import pytest
+
+from tests.conftest import ADMIN_KEY, AGNES_TEXT_MODEL, BASE
 
 
 @pytest.fixture
@@ -54,7 +54,7 @@ def chat(
     client: httpx.Client,
     prompt: str,
     model: str = AGNES_TEXT_MODEL,
-    trace_id: Optional[str] = None,
+    trace_id: str | None = None,
     **extra_body,
 ) -> httpx.Response:
     """POST /v1/chat/completions with a single-user-message body.

@@ -6,9 +6,8 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
-from fastapi import FastAPI
-
 from aigateway_api import capabilities
+from fastapi import FastAPI
 
 
 class _ConfigManager:
@@ -39,7 +38,7 @@ def test_runtime_profile_reports_optional_features_as_unavailable(monkeypatch):
     assert result["capabilities"]["rag"]["available"] is False
     assert result["capabilities"]["vision"]["available"] is False
     assert result["capabilities"]["gpu"]["available"] is False
-    assert "--add rag" in result["capabilities"]["rag"]["install_command"]
+    assert "--edition knowledge" in result["capabilities"]["rag"]["install_command"]
 
 
 def test_full_profile_reports_installed_features_and_cuda(monkeypatch):

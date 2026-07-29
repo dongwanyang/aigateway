@@ -33,7 +33,7 @@ import os
 import sqlite3
 import subprocess
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 _EMPTY_METADATA: dict[str, Any] = {
     "callers": [],
@@ -56,7 +56,9 @@ _EMPTY_METADATA: dict[str, Any] = {
 # event-loop 线程,外加 invalidate 在 loop 线程。故所有缓存访问串行化在 _cache_lock 下;
 # SQL 重建(read_call_edges_strict,~114ms)留在锁外,不阻塞其它仓库的缓存命中。
 import threading
+
 from cachetools import LRUCache  # type: ignore[import-untyped]
+
 _edges_cache: LRUCache = LRUCache(maxsize=32)
 _cache_lock = threading.Lock()
 
@@ -288,7 +290,7 @@ def _run_codegraph_json(
 
 
 def _run_codegraph_raw(
-    args: list[str], *, cwd: Optional[str] = None, timeout: float = _QUERY_TIMEOUT
+    args: list[str], *, cwd: str | None = None, timeout: float = _QUERY_TIMEOUT
 ) -> str:
     """跑不支持 --json 的命令(node / init / sync),返回原始 stdout 文本。
 
@@ -436,7 +438,7 @@ def _get_imports_for_file(graph_repo_path: str, file_path: str) -> list[str]:
 
 def _query_symbol_node(
     graph_repo_path: str, file_path: str, symbol_name: str
-) -> Optional[dict[str, Any]]:
+) -> dict[str, Any] | None:
     """调 `codegraph query <symbol> --json`,过滤出 name==symbol 且 file_path 匹配的节点。
 
     query 是模糊搜索(带 score),可能返回近似名;这里要求精确 name 匹配。
