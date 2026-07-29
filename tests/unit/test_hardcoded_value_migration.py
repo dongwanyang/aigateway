@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 
+import pytest
 import yaml
 
 
@@ -123,6 +124,36 @@ def test_comfyui_missing_config_does_not_assume_localhost():
     assert "http://localhost:8188" not in serialized
     assert "sd_xl_base_1.0.safetensors" not in serialized
     assert "RealESRGAN_x4plus.pth" not in serialized
+
+
+def test_draft_storage_must_be_configured(tmp_path):
+    from aigateway_core.pipelines.generation._common.config import DraftWorkflowConfig
+    from aigateway_core.pipelines.generation._common.exceptions import DraftWorkflowError
+    from aigateway_core.pipelines.generation.draft.draft_cleaner import (
+        DraftSessionCleaner,
+    )
+    from aigateway_core.pipelines.generation.draft.draft_generator import (
+        DraftGeneratorStrategy,
+    )
+
+    unconfigured = DraftWorkflowConfig()
+    assert unconfigured.store_dir == ""
+
+    with pytest.raises(
+        DraftWorkflowError,
+        match="config_missing:generation_optimization.draft_workflow.store_dir",
+    ):
+        DraftGeneratorStrategy(unconfigured)
+
+    with pytest.raises(ValueError, match="config_missing"):
+        DraftSessionCleaner("", session_ttl_hours=24)
+
+    configured_dir = str(tmp_path / "drafts")
+    configured = DraftWorkflowConfig(store_dir=configured_dir)
+    strategy = DraftGeneratorStrategy(configured)
+    cleaner = DraftSessionCleaner(configured_dir, session_ttl_hours=24)
+    assert strategy._store_dir == configured_dir
+    assert cleaner._store_dir == configured_dir
 
 
 def test_cors_preload_reads_yaml_without_overriding_explicit_env(tmp_path, monkeypatch):
