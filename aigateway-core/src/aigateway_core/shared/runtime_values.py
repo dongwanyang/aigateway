@@ -100,3 +100,41 @@ def media_cache_ttl_seconds() -> int:
     if value <= 0:
         raise RuntimeError("runtime_config_invalid:media_optimization.media_cache_ttl")
     return value
+
+
+def configured_model_pricing(model: str) -> dict[str, float] | None:
+    """Return model pricing from ``providers.*.model_grouper[].pricing``.
+
+    The function intentionally has no built-in model table. A missing model is
+    represented by ``None`` so callers can record an unknown cost explicitly
+    instead of silently applying a stale price.
+    """
+    bare_model = model.split("/")[-1]
+    providers = get_runtime_value("providers", required=False)
+    if not isinstance(providers, dict):
+        return None
+
+    for provider in providers.values():
+        if not isinstance(provider, dict):
+            continue
+        groups = provider.get("model_grouper", [])
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            pricing = group.get("pricing")
+            if not isinstance(pricing, dict):
+                continue
+            entry = pricing.get(model) or pricing.get(bare_model)
+            if not isinstance(entry, dict):
+                continue
+            try:
+                prompt = float(entry.get("prompt", 0.0))
+                completion = float(entry.get("completion", prompt))
+            except (TypeError, ValueError):
+                raise RuntimeError(f"runtime_config_invalid:pricing:{bare_model}")
+            if prompt < 0 or completion < 0:
+                raise RuntimeError(f"runtime_config_invalid:pricing:{bare_model}")
+            return {"prompt": prompt, "completion": completion}
+    return None
