@@ -56,6 +56,14 @@ generation:
     poll_endpoint: /v1/videos/{id}
 auth:
   database_path: /app/data/auth.db
+  database_timeout_seconds: 30
+  admin_username: admin
+  admin_user_id: admin
+  session:
+    idle_ttl_seconds: 28800
+    absolute_ttl_seconds: 86400
+  password:
+    pbkdf2_iterations: 600000
   api_keys:
   - key: ${ADMIN_API_KEY:-}
     user_id: admin
@@ -472,6 +480,7 @@ media_optimization:
   max_concurrent_processors: 4
 generation_optimization:
   enabled: true
+  preset_store_dir: /app/data/generation-presets
   ai_director:
     enabled: true
   model_router:
