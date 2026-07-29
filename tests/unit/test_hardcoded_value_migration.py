@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from pathlib import Path
 
 import pytest
 import yaml
@@ -18,14 +19,28 @@ def _write_config(tmp_path, data: dict) -> str:
 
 def _base_config() -> dict:
     return {
+        "auth": {"database_path": "data/auth.db"},
         "observability": {"otel_service_name": "test-gateway"},
         "infrastructure": {
             "redis": {
                 "namespace": "tenant-a",
                 "key_prefixes": {"media": "custom:media:"},
-            }
+            },
+            "qdrant": {
+                "url": "${TEST_QDRANT_URL:-http://configured-qdrant:6333}",
+                "connect_timeout": 7,
+                "read_timeout": 11,
+                "write_timeout": 13,
+                "distance": "DOT",
+                "hnsw_m": 32,
+                "hnsw_ef_construct": 256,
+            },
         },
-        "cache": {"pipeline_version": "9"},
+        "embedding": {"vector_dim": 768},
+        "cache": {
+            "pipeline_version": "9",
+            "key_buckets": {"max_tokens": [100, 200, 400]},
+        },
         "media_optimization": {"media_cache_ttl": 123},
         "providers": {
             "demo": {
@@ -46,6 +61,7 @@ def test_runtime_values_use_yaml_namespace_and_explicit_prefix(tmp_path, monkeyp
     monkeypatch.setenv("AI_GATEWAY_CONFIG_PATH", _write_config(tmp_path, _base_config()))
 
     from aigateway_core.shared.runtime_values import (
+        configured_text,
         media_cache_ttl_seconds,
         redis_key_prefix,
     )
@@ -55,6 +71,23 @@ def test_runtime_values_use_yaml_namespace_and_explicit_prefix(tmp_path, monkeyp
     assert redis_key_prefix("l2_hash") == "tenant-a:cache:v9search"
     assert redis_key_prefix("prompt_template") == "tenant-a:prompt_template"
     assert media_cache_ttl_seconds() == 123
+    assert configured_text("infrastructure.qdrant.url") == "http://configured-qdrant:6333"
+
+    monkeypatch.setenv("TEST_QDRANT_URL", "https://qdrant.example")
+    assert configured_text("infrastructure.qdrant.url") == "https://qdrant.example"
+
+
+def test_configured_relative_path_is_anchored_to_yaml(tmp_path, monkeypatch):
+    monkeypatch.setenv("AI_GATEWAY_CONFIG_PATH", _write_config(tmp_path, _base_config()))
+    monkeypatch.delenv("AI_GATEWAY_AUTH_DB_PATH", raising=False)
+
+    from aigateway_core.shared.auth.sqlite_store import SQLiteStore
+
+    store = SQLiteStore()
+    expected = tmp_path / "data" / "auth.db"
+    assert Path(store.db_path) == expected.resolve()
+    assert expected.is_file()
+    store.conn.close()
 
 
 def test_media_cache_manager_uses_configured_prefix_and_ttl(tmp_path, monkeypatch):
@@ -81,6 +114,17 @@ def test_l2_operations_refresh_prefixes_lazily(tmp_path, monkeypatch):
     assert l2_search.L2_HASH_PREFIX == "tenant-a:cache:v9search:"
 
 
+def test_max_token_buckets_are_loaded_from_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("AI_GATEWAY_CONFIG_PATH", _write_config(tmp_path, _base_config()))
+
+    from aigateway_core.prefix.cache.cache_keys import _bucket_max_tokens
+
+    assert _bucket_max_tokens(50) == "le_100"
+    assert _bucket_max_tokens(150) == "le_200"
+    assert _bucket_max_tokens(300) == "le_400"
+    assert _bucket_max_tokens(500) == "gt_400"
+
+
 def test_prompt_template_manager_resolves_instance_prefixes(tmp_path, monkeypatch):
     monkeypatch.setenv("AI_GATEWAY_CONFIG_PATH", _write_config(tmp_path, _base_config()))
 
@@ -90,6 +134,59 @@ def test_prompt_template_manager_resolves_instance_prefixes(tmp_path, monkeypatc
     manager = PromptTemplateManager(None, PromptTemplateConfig())
     assert manager.KEY_PREFIX == "tenant-a:prompt_template"
     assert manager.INDEX_PREFIX == "tenant-a:prompt_template_index"
+
+
+def test_qdrant_manager_uses_configured_connection_and_index_values(tmp_path, monkeypatch):
+    monkeypatch.setenv("AI_GATEWAY_CONFIG_PATH", _write_config(tmp_path, _base_config()))
+    monkeypatch.delenv("TEST_QDRANT_URL", raising=False)
+
+    import aigateway_core.shared.qdrant_client as qdrant_module
+    from aigateway_core.shared.qdrant_client import QdrantClientManager
+
+    class FakeResponse:
+        status_code = 200
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    class FakeAsyncClient:
+        instances = []
+
+        def __init__(self, *, base_url, timeout):
+            self.base_url = base_url
+            self.timeout = timeout
+            self.put_calls = []
+            self.__class__.instances.append(self)
+
+        async def get(self, path):
+            if path == "/collections/":
+                return FakeResponse({"result": {"collections": []}})
+            return FakeResponse({})
+
+        async def put(self, path, *, json, headers):
+            self.put_calls.append((path, json, headers))
+            return FakeResponse({"result": {}})
+
+        async def aclose(self):
+            return None
+
+    monkeypatch.setattr(qdrant_module, "AsyncClient", FakeAsyncClient)
+
+    manager = QdrantClientManager()
+    assert manager.url == ""
+    asyncio.run(manager.connect())
+    assert manager.url == "http://configured-qdrant:6333"
+
+    assert asyncio.run(manager.upsert_collection("documents")) is True
+    _, payload, _ = manager._http.put_calls[-1]
+    assert payload["vectors"] == {"size": 768, "distance": "DOT"}
+    assert payload["hnsw_config"] == {"m": 32, "ef_construct": 256}
 
 
 def test_costing_uses_provider_pricing_and_no_builtin_fallback(tmp_path, monkeypatch):
