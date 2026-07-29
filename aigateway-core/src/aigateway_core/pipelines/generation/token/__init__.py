@@ -7,26 +7,13 @@ from functools import wraps
 
 from aigateway_core.shared.runtime_values import redis_key_prefix
 
-from . import (
-    feature_cache as _s_fcache,
-)
-from . import (
-    prompt_confirmation as _s_confirm,
-)
-from . import (
-    prompt_template_manager as _s_tmpl,
-)
-from . import (
-    token_compressor as _s_token,
-)
+from . import feature_cache as _s_fcache
+from . import prompt_confirmation as _s_confirm
+from . import prompt_template_manager as _s_tmpl
+from . import token_compressor as _s_token
 from . import token_compressor_plugin as _p_token
-from . import (
-    video_preview as _s_video,
-)
+from . import video_preview as _s_video
 
-# PromptTemplateManager retains its existing implementation and public API. Resolve
-# instance prefixes from config only when a manager is created, avoiding import-time
-# dependence on config.yaml.
 _original_template_init = _s_tmpl.PromptTemplateManager.__init__
 
 
@@ -38,6 +25,21 @@ def _configured_template_init(self, *args, **kwargs):
 
 
 _s_tmpl.PromptTemplateManager.__init__ = _configured_template_init
+
+_original_clip_load = _s_token.TokenCompressorStrategy._load_clip_model
+
+
+@wraps(_original_clip_load)
+def _load_configured_clip_model(self) -> None:
+    if not str(getattr(self._clip_config, "model_name", "")).strip():
+        self._clip_model = None
+        self._clip_processor = None
+        self._clip_available = False
+        return
+    _original_clip_load(self)
+
+
+_s_token.TokenCompressorStrategy._load_clip_model = _load_configured_clip_model
 
 _sources = (_s_token, _s_fcache, _s_confirm, _s_tmpl, _s_video, _p_token)
 _names: list[str] = []
