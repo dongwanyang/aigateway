@@ -29,11 +29,20 @@ def _config_text(config: dict[str, Any], key: str) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
-def _config_number(config: dict[str, Any], key: str) -> float:
-    """Read a required numeric ComfyUI setting."""
-    if key not in config:
+def _config_number(
+    config: dict[str, Any],
+    key: str,
+    *,
+    fallback_key: str | None = None,
+) -> float:
+    """Read a required numeric setting, optionally reusing another configured key."""
+    if key in config:
+        raw_value = config[key]
+    elif fallback_key and fallback_key in config:
+        raw_value = config[fallback_key]
+    else:
         raise ValueError(f"config_missing:{key}")
-    value = float(config[key])
+    value = float(raw_value)
     if value <= 0:
         raise ValueError(f"config_invalid:{key}")
     return value
@@ -274,7 +283,11 @@ async def probe_comfyui(comfy: dict[str, Any]) -> dict[str, Any]:
     try:
         timeout = httpx.Timeout(
             _config_number(comfy, "connect_timeout"),
-            read=_config_number(comfy, "read_timeout"),
+            read=_config_number(
+                comfy,
+                "read_timeout",
+                fallback_key="execution_timeout",
+            ),
         )
         async with httpx.AsyncClient(timeout=timeout) as client:
             stats_response, object_response, queue_response = await asyncio.gather(
