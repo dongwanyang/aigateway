@@ -19,6 +19,57 @@ from aigateway_core.shared.runtime_values import (
     configured_text,
 )
 
+_DEFAULT_DATABASE_TIMEOUT_SECONDS = 30.0
+_DEFAULT_PBKDF2_ITERATIONS = 600_000
+_OPTIONAL_CONFIG_ERRORS = (
+    "runtime_config_unavailable:",
+    "runtime_config_missing:",
+)
+
+
+def _optional_config_number(
+    path: str,
+    number_type: type[int] | type[float],
+    default: int | float,
+) -> int | float:
+    """Read a numeric policy value without requiring a YAML deployment.
+
+    A missing file or missing key falls back to the security-safe code policy.
+    Existing but invalid configuration remains an error.
+    """
+    try:
+        return configured_number(path, number_type)
+    except RuntimeError as exc:
+        if str(exc).startswith(_OPTIONAL_CONFIG_ERRORS):
+            return default
+        raise
+
+
+def _optional_config_text(path: str) -> str:
+    """Return optional text from YAML while preserving invalid-config errors."""
+    try:
+        return configured_text(path)
+    except RuntimeError as exc:
+        if str(exc).startswith(_OPTIONAL_CONFIG_ERRORS):
+            return ""
+        raise
+
+
+def _positive_environment_number(
+    name: str,
+    number_type: type[int] | type[float],
+) -> int | float | None:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        value = number_type(raw)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"invalid {name}") from exc
+    if value <= 0:
+        raise RuntimeError(f"invalid {name}")
+    return value
+
 
 def _now_unix() -> int:
     return int(datetime.now(UTC).timestamp())
@@ -29,16 +80,19 @@ def _token_hash(value: str) -> str:
 
 
 def _pbkdf2_iterations() -> int:
-    explicit = os.environ.get("AI_GATEWAY_PASSWORD_PBKDF2_ITERATIONS", "").strip()
-    if explicit:
-        try:
-            value = int(explicit)
-        except ValueError as exc:
-            raise RuntimeError("invalid AI_GATEWAY_PASSWORD_PBKDF2_ITERATIONS") from exc
-        if value <= 0:
-            raise RuntimeError("invalid AI_GATEWAY_PASSWORD_PBKDF2_ITERATIONS")
-        return value
-    return int(configured_number("auth.password.pbkdf2_iterations", int))
+    explicit = _positive_environment_number(
+        "AI_GATEWAY_PASSWORD_PBKDF2_ITERATIONS",
+        int,
+    )
+    if explicit is not None:
+        return int(explicit)
+    return int(
+        _optional_config_number(
+            "auth.password.pbkdf2_iterations",
+            int,
+            _DEFAULT_PBKDF2_ITERATIONS,
+        )
+    )
 
 
 def _password_hash(password: str, *, salt: bytes | None = None) -> str:
@@ -61,9 +115,10 @@ def _verify_password(password: str, encoded: str) -> bool:
         return False
 
 
-def _admin_user_id() -> str:
+def _admin_user_id(username: str) -> str:
     explicit = os.environ.get("AI_GATEWAY_ADMIN_USER_ID", "").strip()
-    return explicit or configured_text("auth.admin_user_id")
+    configured = _optional_config_text("auth.admin_user_id")
+    return explicit or configured or username
 
 
 class BrowserAuthStore:
@@ -73,11 +128,25 @@ class BrowserAuthStore:
         if not isinstance(db_path, str) or not db_path.strip():
             raise ValueError("auth database path is required")
         self.db_path = db_path.strip()
+        explicit_timeout = _positive_environment_number(
+            "AI_GATEWAY_AUTH_DATABASE_TIMEOUT_SECONDS",
+            float,
+        )
         self._timeout_seconds = (
             float(timeout_seconds)
             if timeout_seconds is not None
-            else float(configured_number("auth.database_timeout_seconds"))
+            else float(explicit_timeout)
+            if explicit_timeout is not None
+            else float(
+                _optional_config_number(
+                    "auth.database_timeout_seconds",
+                    float,
+                    _DEFAULT_DATABASE_TIMEOUT_SECONDS,
+                )
+            )
         )
+        if self._timeout_seconds <= 0:
+            raise ValueError("auth database timeout must be positive")
         self._init_schema()
 
     def _connect(self) -> sqlite3.Connection:
@@ -145,7 +214,7 @@ class BrowserAuthStore:
                         requires_password_change, password_changed_at, created_at, updated_at)
                        VALUES (?, ?, ?, 'active', 1, ?, ?, ?)""",
                     (
-                        _admin_user_id(),
+                        _admin_user_id(username),
                         username,
                         _password_hash(temporary_password),
                         now,
@@ -259,7 +328,17 @@ def get_browser_auth_store(request: Any) -> BrowserAuthStore:
     db_path = getattr(key_store, "db_path", None)
     if not db_path:
         explicit = os.environ.get("AI_GATEWAY_AUTH_DB_PATH", "").strip()
-        db_path = explicit or configured_path("auth.database_path")
+        if explicit:
+            db_path = explicit
+        else:
+            try:
+                db_path = configured_path("auth.database_path")
+            except RuntimeError as exc:
+                if str(exc).startswith(_OPTIONAL_CONFIG_ERRORS):
+                    raise RuntimeError(
+                        "auth_database_path_missing:set AI_GATEWAY_AUTH_DB_PATH or initialize key_store"
+                    ) from exc
+                raise
     store = BrowserAuthStore(str(db_path))
     request.app.state.browser_auth_store = store
     return store
