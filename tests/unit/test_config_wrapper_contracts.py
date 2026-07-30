@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ from aigateway_core.pipelines.generation._common.config import (
     DraftWorkflowConfig,
     parse_generation_optimization_config,
 )
+from aigateway_core.route.metrics.costing import CostEstimate, PricingCost
 from aigateway_core.shared.integration_configs import (
     ConvCompressorConfig,
     PromptCompressConfig,
@@ -49,8 +51,6 @@ def test_builtin_registration_injects_qdrant_without_mutating_environment(
     )
 
     class ConfigManagerStub:
-        integration_configs = integration_configs
-
         @staticmethod
         def get(path, default=None):
             values = {
@@ -67,13 +67,16 @@ def test_builtin_registration_injects_qdrant_without_mutating_environment(
             }
             return values.get(path, default)
 
+    manager = ConfigManagerStub()
+    manager.integration_configs = integration_configs
     monkeypatch.delenv("AI_GATEWAY_QDRANT_URL", raising=False)
     registry = PluginRegistry()
 
-    _register_builtin_plugins(registry, ConfigManagerStub())
+    _register_builtin_plugins(registry, manager)
 
     assert "AI_GATEWAY_QDRANT_URL" not in os.environ
-    registration = registry._registrations["rag_retriever"]
+    registration = registry.get("rag_retriever")
+    assert registration is not None
     configured_rag = registration.config["config"]
     assert configured_rag.qdrant_url == "http://qdrant.internal:6333"
     assert configured_rag.code_graph_db_dir == "/data/code-graphs"
@@ -110,6 +113,51 @@ def test_l2_namespace_is_passed_without_mutating_implementation(
         implementation.L2_INDEX_NAME,
         implementation.L2_HASH_PREFIX,
     ) == implementation_defaults
+
+
+def test_quota_model_usage_distinguishes_free_and_unpriced() -> None:
+    from aigateway_core.shared.auth.sqlite_store import SQLiteStore
+
+    store = object.__new__(SQLiteStore)
+    unpriced_cost = PricingCost(
+        CostEstimate(
+            amount_usd=None,
+            status="unpriced",
+            prompt_tokens=10,
+            completion_tokens=5,
+        )
+    )
+    free_cost = PricingCost(
+        CostEstimate(
+            amount_usd=0.0,
+            status="free",
+            prompt_tokens=8,
+            completion_tokens=2,
+        )
+    )
+
+    quota = store._accumulate_quota(
+        None,
+        tokens=15,
+        cost=unpriced_cost,
+        model="unknown-model",
+        tokens_in=10,
+        tokens_out=5,
+    )
+    quota = store._accumulate_quota(
+        quota,
+        tokens=10,
+        cost=free_cost,
+        model="free-model",
+        tokens_in=8,
+        tokens_out=2,
+    )
+
+    model_usage = json.loads(quota["model_usage"])
+    assert model_usage["unknown-model"]["pricing_status"] == "unpriced"
+    assert model_usage["unknown-model"]["unpriced_requests"] == 1
+    assert model_usage["free-model"]["pricing_status"] == "free"
+    assert model_usage["free-model"]["free_requests"] == 1
 
 
 def test_package_initializers_do_not_assign_runtime_methods() -> None:
