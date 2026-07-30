@@ -1,83 +1,17 @@
-"""Draft-to-HiRes generation - part of the generation pipeline.
-
-Re-exports the strategy + plugin modules that live in this package.
-"""
-from functools import wraps
-
-from aigateway_core.pipelines.generation._common.exceptions import DraftWorkflowError
+"""Draft-to-HiRes generation utilities."""
 
 from . import draft_generator as _strategy
 from . import draft_generator_plugin as _plugin
 
-_CONFIGURATION_ERROR = "config_missing:generation_optimization.draft_workflow.store_dir"
-_original_strategy_init = _strategy.DraftGeneratorStrategy.__init__
-_original_check_local_dependencies = (
-    _strategy.DraftGeneratorStrategy.check_local_dependencies
-)
-
-
-@wraps(_original_strategy_init)
-def _configured_strategy_init(
-    self,
-    config,
-    redis_client=None,
-    comfyui_config=None,
-    store_dir=None,
-    task_tracker=None,
-):
-    """Initialize without inventing a deployment path.
-
-    Direct strategy construction without a configured directory remains an error.
-    The plugin registration API, however, explicitly passes its resolved
-    ``store_dir`` value. When that explicit value is empty, construct an
-    unavailable strategy and defer the configuration error until the draft
-    capability is exercised. This preserves the six-plugin dependency chain
-    without restoring a hard-coded storage path.
-    """
-    store_dir_was_resolved_by_caller = store_dir is not None
-    effective_store_dir = (
-        store_dir if store_dir_was_resolved_by_caller else getattr(config, "store_dir", "")
-    )
-    configured = isinstance(effective_store_dir, str) and bool(
-        effective_store_dir.strip()
-    )
-    if not configured and not store_dir_was_resolved_by_caller:
-        raise DraftWorkflowError(_CONFIGURATION_ERROR)
-
-    normalized_store_dir = effective_store_dir.strip() if configured else ""
-    _original_strategy_init(
-        self,
-        config,
-        redis_client=redis_client,
-        comfyui_config=comfyui_config,
-        store_dir=normalized_store_dir,
-        task_tracker=task_tracker,
-    )
-    self._configuration_error = None if configured else _CONFIGURATION_ERROR
-
-
-@wraps(_original_check_local_dependencies)
-async def _configured_check_local_dependencies(self, *args, **kwargs):
-    configuration_error = getattr(self, "_configuration_error", None)
-    if configuration_error:
-        raise DraftWorkflowError(configuration_error)
-    return await _original_check_local_dependencies(self, *args, **kwargs)
-
-
-_strategy.DraftGeneratorStrategy.__init__ = _configured_strategy_init
-_strategy.DraftGeneratorStrategy.check_local_dependencies = (
-    _configured_check_local_dependencies
-)
-
 _sources = (_strategy, _plugin)
 _names: list[str] = []
-for _src in _sources:
-    for _name in dir(_src):
+for _source in _sources:
+    for _name in dir(_source):
         if _name.startswith("_"):
             continue
         if _name not in globals():
-            globals()[_name] = getattr(_src, _name)
+            globals()[_name] = getattr(_source, _name)
             _names.append(_name)
 
 __all__ = tuple(_names)
-del _strategy, _plugin, _sources, _names, _src, _name
+del _strategy, _plugin, _sources, _names, _source, _name
