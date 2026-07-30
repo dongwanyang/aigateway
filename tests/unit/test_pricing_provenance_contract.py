@@ -73,6 +73,7 @@ def test_default_pricing_is_scoped_to_its_model_group(tmp_path, monkeypatch):
                     "model_grouper": [
                         {
                             "models": [{"name": "group-a-model"}],
+                            "fallback_models": ["group-a-fallback"],
                             "pricing": {
                                 "$default": {
                                     "prompt": 0.01,
@@ -92,10 +93,9 @@ def test_default_pricing_is_scoped_to_its_model_group(tmp_path, monkeypatch):
 
     from aigateway_core.shared.runtime_values import configured_model_pricing
 
-    assert configured_model_pricing("group-a-model") == {
-        "prompt": 0.01,
-        "completion": 0.02,
-    }
+    expected = {"prompt": 0.01, "completion": 0.02}
+    assert configured_model_pricing("group-a-model") == expected
+    assert configured_model_pricing("group-a-fallback") == expected
     assert configured_model_pricing("group-b-model") is None
     assert configured_model_pricing("unknown-model") is None
 
