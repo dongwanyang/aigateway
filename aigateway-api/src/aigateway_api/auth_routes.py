@@ -22,6 +22,13 @@ _INITIAL_PASSWORD_ENV_NAMES = (
     "AI_GATEWAY_ADMIN_PASSWORD",
     "ADMIN_PASSWORD",
 )
+_DEFAULT_ADMIN_USERNAME = "admin"
+_DEFAULT_SESSION_TTL_SECONDS = 28_800
+_DEFAULT_ABSOLUTE_SESSION_TTL_SECONDS = 86_400
+_OPTIONAL_CONFIG_ERRORS = (
+    "runtime_config_unavailable:",
+    "runtime_config_missing:",
+)
 
 
 def _truthy(value: str | None) -> bool:
@@ -47,7 +54,20 @@ def _is_https(request: Request) -> bool:
     return request.url.scheme == "https"
 
 
-def _positive_env_or_config(env_name: str, config_path: str) -> int:
+def _optional_config_text(path: str, default: str) -> str:
+    try:
+        return configured_text(path)
+    except RuntimeError as exc:
+        if str(exc).startswith(_OPTIONAL_CONFIG_ERRORS):
+            return default
+        raise
+
+
+def _positive_env_or_config(
+    env_name: str,
+    config_path: str,
+    default: int,
+) -> int:
     raw = os.environ.get(env_name, "").strip()
     if raw:
         try:
@@ -57,18 +77,27 @@ def _positive_env_or_config(env_name: str, config_path: str) -> int:
         if value <= 0:
             raise RuntimeError(f"invalid {env_name}")
         return value
-    return int(configured_number(config_path, int))
+    try:
+        return int(configured_number(config_path, int))
+    except RuntimeError as exc:
+        if str(exc).startswith(_OPTIONAL_CONFIG_ERRORS):
+            return default
+        raise
 
 
 def _admin_username() -> str:
     explicit = os.environ.get("AI_GATEWAY_ADMIN_USERNAME", "").strip()
-    return explicit or configured_text("auth.admin_username")
+    return explicit or _optional_config_text(
+        "auth.admin_username",
+        _DEFAULT_ADMIN_USERNAME,
+    )
 
 
 def _session_ttl() -> int:
     return _positive_env_or_config(
         "AI_GATEWAY_SESSION_TTL_SECONDS",
         "auth.session.idle_ttl_seconds",
+        _DEFAULT_SESSION_TTL_SECONDS,
     )
 
 
@@ -76,6 +105,7 @@ def _absolute_session_ttl() -> int:
     return _positive_env_or_config(
         "AI_GATEWAY_SESSION_ABSOLUTE_TTL_SECONDS",
         "auth.session.absolute_ttl_seconds",
+        _DEFAULT_ABSOLUTE_SESSION_TTL_SECONDS,
     )
 
 
