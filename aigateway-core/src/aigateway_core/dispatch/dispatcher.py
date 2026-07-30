@@ -1053,7 +1053,10 @@ class RequestDispatcher:
                     logger.warning("task_tracker.register 失败: %s", exc)
 
         # 成本计算对 metrics/账本共用,放在 if metrics_collector 之外避免 NameError
-        final_cost = cost if cost > 0 else _estimate_cost(logged_model, tt)
+        resolved_cost = cost if cost > 0 else _estimate_cost(logged_model, tt)
+        final_cost = (
+            resolved_cost if resolved_cost is not None else 0.0
+        )
         if metrics_collector:
             if pt > 0:
                 metrics_collector.record_tokens(pt, "prompt")
@@ -1354,7 +1357,10 @@ class RequestDispatcher:
             return
 
         # metrics — 优先用 bridge 末块真实成本(与非流式路径一致),否则内置表估算
-        final_cost = _stream_bridge_cost if _stream_bridge_cost > 0 else _estimate_cost(logged_model, tt)
+        resolved_cost = _stream_bridge_cost if _stream_bridge_cost > 0 else _estimate_cost(logged_model, tt)
+        final_cost = (
+            resolved_cost if resolved_cost is not None else 0.0
+        )
         if metrics_collector:
             if pt > 0:
                 metrics_collector.record_tokens(pt, "prompt")
