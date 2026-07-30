@@ -1,6 +1,6 @@
 """Config-aware LiteLLM bridge.
 
-The base implementation remains in ``litellm_bridge.py`` for compatibility.
+The large compatibility implementation lives in ``_litellm_bridge_impl.py``.
 This subclass centralizes cost semantics without mutating class methods during
 package import.
 """
@@ -11,7 +11,7 @@ from typing import Any
 
 from aigateway_core.route.metrics.costing import estimate_model_cost
 
-from .litellm_bridge import LiteLLMBridge as _BaseLiteLLMBridge
+from ._litellm_bridge_impl import LiteLLMBridge as _BaseLiteLLMBridge
 
 logger = logging.getLogger(__name__)
 
