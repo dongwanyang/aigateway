@@ -141,16 +141,24 @@ def media_cache_ttl_seconds() -> int:
 
 def _group_model_names(group: dict[str, Any]) -> set[str]:
     names: set[str] = set()
+
+    def add_name(value: Any) -> None:
+        if isinstance(value, dict):
+            value = value.get("name") or value.get("model")
+        if not isinstance(value, str) or not value.strip():
+            return
+        normalized = value.strip()
+        names.add(normalized)
+        names.add(normalized.split("/")[-1])
+
     models = group.get("models", [])
-    if not isinstance(models, list):
-        return names
-    for model in models:
-        if isinstance(model, str) and model.strip():
-            names.add(model.strip())
-        elif isinstance(model, dict):
-            name = model.get("name")
-            if isinstance(name, str) and name.strip():
-                names.add(name.strip())
+    if isinstance(models, list):
+        for model in models:
+            add_name(model)
+    fallbacks = group.get("fallback_models", [])
+    if isinstance(fallbacks, list):
+        for model in fallbacks:
+            add_name(model)
     return names
 
 
@@ -158,8 +166,8 @@ def configured_model_pricing(model: str) -> dict[str, float] | None:
     """Return model pricing from ``providers.*.model_grouper[].pricing``.
 
     Lookup order matches bridge registration: full model name, bare model name,
-    provider key, then ``$default``. Provider/default fallbacks only apply inside
-    the group that actually contains the model. The function intentionally has no
+    provider key, then ``$default``. Every lookup is constrained to the group that
+    actually registers the model or fallback. The function intentionally has no
     built-in model table; a missing model is represented by ``None``.
     """
     bare_model = model.split("/")[-1]
@@ -176,33 +184,26 @@ def configured_model_pricing(model: str) -> dict[str, float] | None:
         for group in groups:
             if not isinstance(group, dict):
                 continue
+            if bare_model not in _group_model_names(group):
+                continue
             pricing = group.get("pricing")
             if not isinstance(pricing, dict):
                 continue
-            direct_candidates = (pricing.get(model), pricing.get(bare_model))
+            candidates = (
+                pricing.get(model),
+                pricing.get(bare_model),
+                pricing.get(provider_name),
+                pricing.get("$default"),
+            )
             entry = next(
                 (
                     candidate
-                    for candidate in direct_candidates
+                    for candidate in candidates
                     if isinstance(candidate, dict)
                     and ("prompt" in candidate or "completion" in candidate)
                 ),
                 None,
             )
-            if entry is None and bare_model in _group_model_names(group):
-                fallback_candidates = (
-                    pricing.get(provider_name),
-                    pricing.get("$default"),
-                )
-                entry = next(
-                    (
-                        candidate
-                        for candidate in fallback_candidates
-                        if isinstance(candidate, dict)
-                        and ("prompt" in candidate or "completion" in candidate)
-                    ),
-                    None,
-                )
             if entry is None:
                 continue
             try:
