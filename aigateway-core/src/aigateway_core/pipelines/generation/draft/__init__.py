@@ -27,20 +27,24 @@ def _configured_strategy_init(
 ):
     """Initialize without inventing a deployment path.
 
-    Registration is a public API and must remain usable without a ConfigManager.
-    When no store directory is configured, construct an unavailable strategy and
-    defer the explicit configuration error until the draft capability is actually
-    exercised. This preserves the six-plugin dependency chain while preventing
-    writes relative to the process working directory.
+    Direct strategy construction without a configured directory remains an error.
+    The plugin registration API, however, explicitly passes its resolved
+    ``store_dir`` value. When that explicit value is empty, construct an
+    unavailable strategy and defer the configuration error until the draft
+    capability is exercised. This preserves the six-plugin dependency chain
+    without restoring a hard-coded storage path.
     """
+    store_dir_was_resolved_by_caller = store_dir is not None
     effective_store_dir = (
-        store_dir if store_dir is not None else getattr(config, "store_dir", "")
+        store_dir if store_dir_was_resolved_by_caller else getattr(config, "store_dir", "")
     )
     configured = isinstance(effective_store_dir, str) and bool(
         effective_store_dir.strip()
     )
-    normalized_store_dir = effective_store_dir.strip() if configured else ""
+    if not configured and not store_dir_was_resolved_by_caller:
+        raise DraftWorkflowError(_CONFIGURATION_ERROR)
 
+    normalized_store_dir = effective_store_dir.strip() if configured else ""
     _original_strategy_init(
         self,
         config,
