@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react'
 import {
-  Activity,
   BookOpen,
   Bot,
   Database,
@@ -65,6 +64,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
 
   const currentItem = allNavItems.find(item => item.path === location.pathname) ?? allNavItems[0]
+  const CurrentIcon = currentItem.icon
   const accountLabel = state.keyPrefix || '管理员'
 
   useEffect(() => {
@@ -173,7 +173,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
           >
             <Menu size={20} />
           </button>
-          <div className="page-context-icon"><currentItem.icon size={18} /></div>
+          <div className="page-context-icon"><CurrentIcon size={18} /></div>
           <div className="min-w-0">
             <div className="page-context-title">{currentItem.label}</div>
             <div className="page-context-description">{currentItem.description}</div>
@@ -223,7 +223,6 @@ export default function Layout({ children }: { children: React.ReactNode }) {
 
       <div className="ambient-orb ambient-orb-one" aria-hidden="true" />
       <div className="ambient-orb ambient-orb-two" aria-hidden="true" />
-      <Activity className="sr-only" aria-hidden="true" />
     </div>
   )
 }
