@@ -50,11 +50,36 @@ def _config_number(
     return value
 
 
-def builtin_presets(comfy: dict[str, Any]) -> list[dict[str, Any]]:
-    """Return immutable built-ins; custom presets are stored separately.
+def _preset_model_requirements(
+    requirements: list[tuple[str, str, str]],
+    *,
+    feature_enabled: bool = True,
+) -> tuple[list[str], list[str]]:
+    """Return configured model paths and explicit missing-config errors."""
+    models: list[str] = []
+    errors: list[str] = []
+    for folder, config_key, value in requirements:
+        if value:
+            models.append(f"{folder}/{value}")
+        elif feature_enabled:
+            errors.append(f"config_missing:{config_key}")
+    return models, errors
 
-    Model filenames are deployment configuration. Missing values remain empty so
-    dependency validation reports them instead of silently assuming a model.
+
+def _preset_status(feature_enabled: bool, errors: list[str]) -> str:
+    if not feature_enabled:
+        return "disabled"
+    if errors:
+        return "configuration_error"
+    return "ready"
+
+
+def builtin_presets(comfy: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return immutable built-ins with explicit configuration state.
+
+    Model filenames are deployment configuration. Empty values never become
+    synthetic paths such as ``checkpoints/``; the corresponding preset is marked
+    ``configuration_error`` and dependency validation remains fail-closed.
     """
     checkpoint = _config_text(comfy, "checkpoint_name")
     upscale = _config_text(comfy, "upscale_model")
@@ -65,16 +90,45 @@ def builtin_presets(comfy: dict[str, Any]) -> list[dict[str, Any]]:
     video_encoder = _config_text(comfy, "video_text_encoder")
     video_vae = _config_text(comfy, "video_vae")
 
+    sdxl_models, sdxl_errors = _preset_model_requirements(
+        [("checkpoints", "checkpoint_name", checkpoint)]
+    )
+    qwen_enabled = bool(comfy.get("qwen_image_enabled", False))
+    qwen_models, qwen_errors = _preset_model_requirements(
+        [
+            ("diffusion_models", "qwen_image_diffusion_model", qwen_diffusion),
+            ("text_encoders", "qwen_image_text_encoder", qwen_encoder),
+            ("vae", "qwen_image_vae", qwen_vae),
+        ],
+        feature_enabled=qwen_enabled,
+    )
+    video_enabled = bool(comfy.get("video_enabled", False))
+    video_models, video_errors = _preset_model_requirements(
+        [
+            ("diffusion_models", "video_diffusion_model", video_diffusion),
+            ("text_encoders", "video_text_encoder", video_encoder),
+            ("vae", "video_vae", video_vae),
+        ],
+        feature_enabled=video_enabled,
+    )
+    upscale_enabled = bool(comfy.get("upscale_enabled", False))
+    upscale_models, upscale_errors = _preset_model_requirements(
+        [("upscale_models", "upscale_model", upscale)],
+        feature_enabled=upscale_enabled,
+    )
+
     return [
         {
             "id": "sdxl-draft",
             "name": "SDXL 图片草稿",
             "kind": "image",
             "builtin": True,
-            "enabled": bool(checkpoint),
+            "enabled": not sdxl_errors,
+            "configuration_status": _preset_status(True, sdxl_errors),
+            "configuration_errors": sdxl_errors,
             "languages": ["en"],
             "dependencies": {
-                "models": [f"checkpoints/{checkpoint}"],
+                "models": sdxl_models,
                 "nodes": _CORE_IMAGE_NODES,
             },
         },
@@ -83,10 +137,12 @@ def builtin_presets(comfy: dict[str, Any]) -> list[dict[str, Any]]:
             "name": "SDXL 创意精修",
             "kind": "image",
             "builtin": True,
-            "enabled": bool(checkpoint),
+            "enabled": not sdxl_errors,
+            "configuration_status": _preset_status(True, sdxl_errors),
+            "configuration_errors": list(sdxl_errors),
             "languages": ["en"],
             "dependencies": {
-                "models": [f"checkpoints/{checkpoint}"],
+                "models": list(sdxl_models),
                 "nodes": [
                     "LoadImage",
                     "ImageScale",
@@ -100,16 +156,12 @@ def builtin_presets(comfy: dict[str, Any]) -> list[dict[str, Any]]:
             "name": "Qwen-Image 中文/英文图片",
             "kind": "image",
             "builtin": True,
-            "enabled": bool(comfy.get("qwen_image_enabled", False)) and all(
-                (qwen_diffusion, qwen_encoder, qwen_vae)
-            ),
+            "enabled": qwen_enabled and not qwen_errors,
+            "configuration_status": _preset_status(qwen_enabled, qwen_errors),
+            "configuration_errors": qwen_errors,
             "languages": ["zh", "en"],
             "dependencies": {
-                "models": [
-                    f"diffusion_models/{qwen_diffusion}",
-                    f"text_encoders/{qwen_encoder}",
-                    f"vae/{qwen_vae}",
-                ],
+                "models": qwen_models,
                 "nodes": [
                     "UNETLoader",
                     "CLIPLoader",
@@ -128,16 +180,12 @@ def builtin_presets(comfy: dict[str, Any]) -> list[dict[str, Any]]:
             "name": "Wan2.2 图片关键帧到视频",
             "kind": "video",
             "builtin": True,
-            "enabled": bool(comfy.get("video_enabled", False)) and all(
-                (video_diffusion, video_encoder, video_vae)
-            ),
+            "enabled": video_enabled and not video_errors,
+            "configuration_status": _preset_status(video_enabled, video_errors),
+            "configuration_errors": video_errors,
             "languages": ["en"],
             "dependencies": {
-                "models": [
-                    f"diffusion_models/{video_diffusion}",
-                    f"text_encoders/{video_encoder}",
-                    f"vae/{video_vae}",
-                ],
+                "models": video_models,
                 "nodes": [
                     "UNETLoader",
                     "CLIPLoader",
@@ -152,10 +200,12 @@ def builtin_presets(comfy: dict[str, Any]) -> list[dict[str, Any]]:
             "name": "RealESRGAN 4K 保真",
             "kind": "upscale",
             "builtin": True,
-            "enabled": bool(comfy.get("upscale_enabled", False)) and bool(upscale),
+            "enabled": upscale_enabled and not upscale_errors,
+            "configuration_status": _preset_status(upscale_enabled, upscale_errors),
+            "configuration_errors": upscale_errors,
             "languages": ["zh", "en"],
             "dependencies": {
-                "models": [f"upscale_models/{upscale}"],
+                "models": upscale_models,
                 "nodes": [
                     "LoadImage",
                     "UpscaleModelLoader",
@@ -229,20 +279,34 @@ def dependency_status(
     deps = preset.get("dependencies", {})
     models = deps.get("models", []) if isinstance(deps, dict) else []
     nodes = deps.get("nodes", []) if isinstance(deps, dict) else []
+    configuration_errors = preset.get("configuration_errors", [])
+    if not isinstance(configuration_errors, list):
+        configuration_errors = []
     model_root = Path(models_path)
+    missing_models = [
+        item
+        for item in models
+        if not isinstance(item, str)
+        or not item
+        or item.endswith("/")
+        or item.startswith(("/", "\\"))
+        or ".." in Path(item).parts
+        or not (model_root / item).is_file()
+    ]
+    missing_models.extend(
+        str(error)
+        for error in configuration_errors
+        if isinstance(error, str) and error
+    )
     return {
-        "missing_models": [
-            item
-            for item in models
-            if not isinstance(item, str)
-            or not item
-            or item.endswith("/")
-            or item.startswith(("/", "\\"))
-            or ".." in Path(item).parts
-            or not (model_root / item).is_file()
-        ],
+        "missing_models": missing_models,
         "missing_nodes": [
             item for item in nodes if not isinstance(item, str) or item not in available_nodes
+        ],
+        "configuration_errors": [
+            str(error)
+            for error in configuration_errors
+            if isinstance(error, str) and error
         ],
     }
 
@@ -263,6 +327,14 @@ async def probe_comfyui(comfy: dict[str, Any]) -> dict[str, Any]:
         )
         if not value
     ]
+    preset_errors = {
+        error
+        for preset in builtin_presets(comfy)
+        for error in preset.get("configuration_errors", [])
+        if isinstance(error, str) and error
+    }
+    config_errors.extend(sorted(preset_errors))
+
     result: dict[str, Any] = {
         "available": False,
         "manager_enabled": bool(comfy.get("manager_enabled", False)),
@@ -272,6 +344,9 @@ async def probe_comfyui(comfy: dict[str, Any]) -> dict[str, Any]:
         "queue": None,
         "available_nodes": [],
         "disk": None,
+        "configuration_status": (
+            "configuration_error" if config_errors else "configured"
+        ),
         "configuration_errors": config_errors,
         "error": config_errors[0] if config_errors else None,
     }
