@@ -7,8 +7,13 @@ module reference is retained as a stable test and integration seam: patching
 object used by the compatibility implementation.
 """
 from . import _litellm_bridge_impl as _impl
-from .configured_litellm_bridge import ConfiguredLiteLLMBridge as LiteLLMBridge
+from .configured_litellm_bridge import ConfiguredLiteLLMBridge
 
 httpx = _impl.httpx
+
+
+class LiteLLMBridge(ConfiguredLiteLLMBridge):
+    """Stable public bridge class backed by the configured implementation."""
+
 
 __all__ = ["LiteLLMBridge", "httpx"]
