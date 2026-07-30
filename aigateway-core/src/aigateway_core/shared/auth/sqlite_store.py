@@ -6,7 +6,10 @@ import os
 from pathlib import Path
 from typing import Any
 
-from aigateway_core.shared.runtime_values import configured_path
+from aigateway_core.shared.runtime_values import (
+    configured_model_pricing,
+    configured_path,
+)
 
 from . import _sqlite_store_impl as _impl
 
@@ -27,6 +30,30 @@ class SQLiteStore(_impl.SQLiteStore):
         else:
             resolved = configured_path("auth.database_path")
         super().__init__(db_path=resolved)
+
+    @staticmethod
+    def _pricing_status(cost: float, model: str) -> str | None:
+        """Resolve provenance for both rich and plain numeric accounting values.
+
+        Non-stream bridge calls pass ``PricingCost`` with an attached status.
+        Text streaming is finalized in the dispatcher and reaches this store as a
+        plain float, so the status is reconstructed from the same runtime pricing
+        configuration rather than silently collapsing free and unpriced requests.
+        """
+        explicit = getattr(cost, "pricing_status", None)
+        if explicit in {"priced", "free", "unpriced"}:
+            return explicit
+        try:
+            pricing = configured_model_pricing(model)
+        except RuntimeError:
+            return None
+        if pricing is None:
+            return "unpriced"
+        return (
+            "free"
+            if pricing["prompt"] == 0.0 and pricing["completion"] == 0.0
+            else "priced"
+        )
 
     def _accumulate_quota(
         self,
@@ -51,8 +78,8 @@ class SQLiteStore(_impl.SQLiteStore):
             tokens_in,
             tokens_out,
         )
-        pricing_status = getattr(cost, "pricing_status", None)
-        if pricing_status not in {"priced", "free", "unpriced"}:
+        pricing_status = self._pricing_status(cost, model)
+        if pricing_status is None:
             return updated
 
         raw_model_usage = updated.get("model_usage", "{}")
