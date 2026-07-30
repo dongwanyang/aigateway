@@ -24,6 +24,51 @@ logger = logging.getLogger(__name__)
 class ConfiguredLiteLLMBridge(_BaseLiteLLMBridge):
     """LiteLLM bridge using config-backed, split-token cost accounting."""
 
+    def _register_model_pricing(
+        self,
+        group: dict[str, Any],
+        litellm_model: str,
+        base_url: str | None,
+        provider_name: str,
+    ) -> None:
+        """Register LiteLLM placeholders without treating unknown prices as free.
+
+        The compatibility implementation registers a zero-cost placeholder when
+        pricing is absent so LiteLLM does not emit unknown-model warnings. That
+        placeholder is valid only for LiteLLM's internal registry; the gateway's
+        runtime router must keep the model absent from ``_model_pricing`` so an
+        unknown price ranks as infinity rather than as a configured free model.
+        """
+        super()._register_model_pricing(
+            group,
+            litellm_model,
+            base_url,
+            provider_name,
+        )
+
+        pricing = group.get("pricing")
+        if not isinstance(pricing, dict):
+            pricing = {}
+        bare_model = litellm_model.split("/")[-1]
+        candidates = (
+            pricing.get(litellm_model),
+            pricing.get(bare_model),
+            pricing.get(provider_name),
+            pricing.get("$default"),
+        )
+        configured_entry = next(
+            (
+                entry
+                for entry in candidates
+                if isinstance(entry, dict)
+                and ("prompt" in entry or "completion" in entry)
+            ),
+            None,
+        )
+        if configured_entry is None:
+            self._model_pricing.pop(litellm_model, None)
+            self._model_pricing.pop(bare_model, None)
+
     def _track_usage(self, model: str, response: dict[str, Any]) -> PricingCost:
         usage = response.get("usage", {}) if isinstance(response, dict) else {}
         prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
