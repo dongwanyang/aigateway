@@ -117,8 +117,9 @@ def _verify_password(password: str, encoded: str) -> bool:
 
 def _admin_user_id(username: str) -> str:
     explicit = os.environ.get("AI_GATEWAY_ADMIN_USER_ID", "").strip()
-    configured = _optional_config_text("auth.admin_user_id")
-    return explicit or configured or username
+    if explicit:
+        return explicit
+    return _optional_config_text("auth.admin_user_id") or username
 
 
 class BrowserAuthStore:
