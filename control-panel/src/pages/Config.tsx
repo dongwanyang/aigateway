@@ -31,6 +31,11 @@ interface ComfyStatusView {
   error?: string | null
 }
 
+interface GenerationPresetView {
+  configuration_status?: 'ready' | 'disabled' | 'configuration_error'
+  configuration_errors?: unknown
+}
+
 const API_BASE = import.meta.env.VITE_API_BASE ?? ''
 
 const GROUP_LABELS: Record<string, string> = {
@@ -429,7 +434,8 @@ export default function Config() {
 
         <div className="space-y-2">
           {(Array.isArray(presetsQuery.data) ? presetsQuery.data : []).map(preset => {
-            const configurationErrors = stringList(preset.configuration_errors ?? preset.validation?.configuration_errors)
+            const presetView = preset as typeof preset & GenerationPresetView
+            const configurationErrors = stringList(presetView.configuration_errors)
             const dependencyMissing = [
               ...stringList(preset.validation?.missing_models),
               ...stringList(preset.validation?.missing_nodes),
@@ -438,12 +444,12 @@ export default function Config() {
               ? `配置错误：${configurationErrors.join('、')}`
               : dependencyMissing.length
                 ? `缺少依赖：${dependencyMissing.join('、')}`
-                : preset.configuration_status === 'disabled'
+                : presetView.configuration_status === 'disabled'
                   ? '已禁用'
                   : '依赖完整'
             const issueColor = configurationErrors.length || dependencyMissing.length
               ? 'var(--color-warning)'
-              : preset.configuration_status === 'disabled'
+              : presetView.configuration_status === 'disabled'
                 ? 'var(--color-text-tertiary)'
                 : 'var(--color-success)'
             return (
