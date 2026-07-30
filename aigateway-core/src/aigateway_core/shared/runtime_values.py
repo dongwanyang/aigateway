@@ -142,16 +142,17 @@ def media_cache_ttl_seconds() -> int:
 def configured_model_pricing(model: str) -> dict[str, float] | None:
     """Return model pricing from ``providers.*.model_grouper[].pricing``.
 
-    The function intentionally has no built-in model table. A missing model is
-    represented by ``None`` so callers can record an unknown cost explicitly
-    instead of silently applying a stale price.
+    Lookup order matches bridge registration: full model name, bare model name,
+    provider key, then ``$default``. The function intentionally has no built-in
+    model table. A missing model is represented by ``None`` so callers can record
+    an unknown cost explicitly instead of silently applying a stale price.
     """
     bare_model = model.split("/")[-1]
     providers = get_runtime_value("providers", required=False)
     if not isinstance(providers, dict):
         return None
 
-    for provider in providers.values():
+    for provider_name, provider in providers.items():
         if not isinstance(provider, dict):
             continue
         groups = provider.get("model_grouper", [])
@@ -163,14 +164,30 @@ def configured_model_pricing(model: str) -> dict[str, float] | None:
             pricing = group.get("pricing")
             if not isinstance(pricing, dict):
                 continue
-            entry = pricing.get(model) or pricing.get(bare_model)
-            if not isinstance(entry, dict):
+            candidates = (
+                pricing.get(model),
+                pricing.get(bare_model),
+                pricing.get(provider_name),
+                pricing.get("$default"),
+            )
+            entry = next(
+                (
+                    candidate
+                    for candidate in candidates
+                    if isinstance(candidate, dict)
+                    and ("prompt" in candidate or "completion" in candidate)
+                ),
+                None,
+            )
+            if entry is None:
                 continue
             try:
                 prompt = float(entry.get("prompt", 0.0))
                 completion = float(entry.get("completion", prompt))
-            except (TypeError, ValueError):
-                raise RuntimeError(f"runtime_config_invalid:pricing:{bare_model}")
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    f"runtime_config_invalid:pricing:{bare_model}"
+                ) from exc
             if prompt < 0 or completion < 0:
                 raise RuntimeError(f"runtime_config_invalid:pricing:{bare_model}")
             return {"prompt": prompt, "completion": completion}
