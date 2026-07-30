@@ -444,7 +444,6 @@ def test_cors_preload_reads_yaml_without_overriding_explicit_env(
 def test_cors_preload_does_not_import_unrelated_dotenv_values(
     tmp_path, monkeypatch
 ):
-    pytest.importorskip("dotenv")
     (tmp_path / ".env").write_text(
         "AI_GATEWAY_CORS_ORIGINS=https://dotenv.example\n"
         "AI_GATEWAY_ADMIN_USERNAME=dotenv-admin\n"
