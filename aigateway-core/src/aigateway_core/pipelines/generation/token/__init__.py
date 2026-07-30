@@ -1,56 +1,30 @@
-"""Token / feature compression + template + preview - part of generation pipeline.
+"""Token compression, feature cache, templates and preview utilities."""
 
-Re-exports the strategy modules and the token-compressor plugin that live in
-this package.
-"""
-from functools import wraps
+from . import feature_cache as _feature_cache
+from . import prompt_confirmation as _prompt_confirmation
+from . import prompt_template_manager as _prompt_template_manager
+from . import token_compressor as _token_compressor
+from . import token_compressor_plugin as _token_compressor_plugin
+from . import video_preview as _video_preview
 
-from aigateway_core.shared.runtime_values import redis_key_prefix
-
-from . import feature_cache as _s_fcache
-from . import prompt_confirmation as _s_confirm
-from . import prompt_template_manager as _s_tmpl
-from . import token_compressor as _s_token
-from . import token_compressor_plugin as _p_token
-from . import video_preview as _s_video
-
-_original_template_init = _s_tmpl.PromptTemplateManager.__init__
-
-
-@wraps(_original_template_init)
-def _configured_template_init(self, *args, **kwargs):
-    self.KEY_PREFIX = redis_key_prefix("prompt_template")
-    self.INDEX_PREFIX = redis_key_prefix("prompt_template_index")
-    _original_template_init(self, *args, **kwargs)
-
-
-_s_tmpl.PromptTemplateManager.__init__ = _configured_template_init
-
-_original_clip_load = _s_token.TokenCompressorStrategy._load_clip_model
-
-
-@wraps(_original_clip_load)
-def _load_configured_clip_model(self) -> None:
-    if not str(getattr(self._clip_config, "model_name", "")).strip():
-        self._clip_model = None
-        self._clip_processor = None
-        self._clip_available = False
-        return
-    _original_clip_load(self)
-
-
-_s_token.TokenCompressorStrategy._load_clip_model = _load_configured_clip_model
-
-_sources = (_s_token, _s_fcache, _s_confirm, _s_tmpl, _s_video, _p_token)
+_sources = (
+    _token_compressor,
+    _feature_cache,
+    _prompt_confirmation,
+    _prompt_template_manager,
+    _video_preview,
+    _token_compressor_plugin,
+)
 _names: list[str] = []
-for _src in _sources:
-    for _name in dir(_src):
+for _source in _sources:
+    for _name in dir(_source):
         if _name.startswith("_"):
             continue
         if _name not in globals():
-            globals()[_name] = getattr(_src, _name)
+            globals()[_name] = getattr(_source, _name)
             _names.append(_name)
 
 __all__ = tuple(_names)
-del _s_token, _s_fcache, _s_confirm, _s_tmpl, _s_video, _p_token
-del _sources, _names, _src, _name
+del _sources, _names, _source, _name
+del _token_compressor, _feature_cache, _prompt_confirmation
+del _prompt_template_manager, _video_preview, _token_compressor_plugin
