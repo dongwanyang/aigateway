@@ -7,9 +7,14 @@ package import.
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator
 from typing import Any
 
-from aigateway_core.route.metrics.costing import estimate_model_cost
+from aigateway_core.route.metrics.costing import (
+    PricingCost,
+    estimate_model_cost,
+    numeric_cost,
+)
 
 from ._litellm_bridge_impl import LiteLLMBridge as _BaseLiteLLMBridge
 
@@ -19,7 +24,7 @@ logger = logging.getLogger(__name__)
 class ConfiguredLiteLLMBridge(_BaseLiteLLMBridge):
     """LiteLLM bridge using config-backed, split-token cost accounting."""
 
-    def _track_usage(self, model: str, response: dict[str, Any]) -> float | None:
+    def _track_usage(self, model: str, response: dict[str, Any]) -> PricingCost:
         usage = response.get("usage", {}) if isinstance(response, dict) else {}
         prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
         completion_tokens = int(usage.get("completion_tokens", 0) or 0)
@@ -33,11 +38,16 @@ class ConfiguredLiteLLMBridge(_BaseLiteLLMBridge):
             self.cost_tracker.total_tokens += total_tokens
 
         estimate = estimate_model_cost(model, prompt_tokens, completion_tokens)
+        cost = numeric_cost(estimate)
         if self.cost_tracker is not None and estimate.amount_usd is not None:
             self.cost_tracker.total_cost += estimate.amount_usd
 
         if isinstance(response, dict):
-            response.setdefault("_meta", {})["pricing_status"] = estimate.status
+            metadata = response.get("_meta")
+            if not isinstance(metadata, dict):
+                metadata = {}
+                response["_meta"] = metadata
+            metadata["pricing_status"] = estimate.status
 
         if estimate.amount_usd is None:
             logger.warning(
@@ -57,11 +67,44 @@ class ConfiguredLiteLLMBridge(_BaseLiteLLMBridge):
                 estimate.amount_usd,
                 estimate.status,
             )
-        return estimate.amount_usd
+        return cost
 
-    def _estimate_cost(self, model: str, total_tokens: int) -> float | None:
+    def _estimate_cost(self, model: str, total_tokens: int) -> PricingCost:
         """Compatibility API for callers that only know total token count."""
-        return estimate_model_cost(model, total_tokens, 0).amount_usd
+        return numeric_cost(estimate_model_cost(model, total_tokens, 0))
+
+    async def completion(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        """Propagate the structured pricing state to the outer bridge metadata."""
+        result = await super().completion(*args, **kwargs)
+        if not isinstance(result, dict):
+            return result
+        data = result.get("data")
+        data_metadata = data.get("_meta") if isinstance(data, dict) else None
+        pricing_status = (
+            data_metadata.get("pricing_status")
+            if isinstance(data_metadata, dict)
+            else None
+        )
+        if pricing_status:
+            outer_metadata = result.get("_meta")
+            if not isinstance(outer_metadata, dict):
+                outer_metadata = {}
+                result["_meta"] = outer_metadata
+            outer_metadata["pricing_status"] = pricing_status
+        return result
+
+    async def completion_stream(
+        self, *args: Any, **kwargs: Any
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Expose pricing state on generated-media stream chunks."""
+        async for chunk in super().completion_stream(*args, **kwargs):
+            if isinstance(chunk, dict):
+                metadata = chunk.get("_meta")
+                if isinstance(metadata, dict):
+                    status = getattr(metadata.get("cost"), "pricing_status", None)
+                    if status:
+                        metadata["pricing_status"] = status
+            yield chunk
 
 
 __all__ = ["ConfiguredLiteLLMBridge"]
