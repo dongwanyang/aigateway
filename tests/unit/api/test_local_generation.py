@@ -52,4 +52,21 @@ def test_dependency_status_rejects_traversal_and_reports_missing(tmp_path):
     assert status == {
         "missing_models": ["../secret"],
         "missing_nodes": ["MissingNode"],
+        "configuration_errors": [],
+    }
+
+
+def test_dependency_status_surfaces_configuration_errors(tmp_path):
+    status = dependency_status(
+        {
+            "dependencies": {"models": [], "nodes": []},
+            "configuration_errors": ["config_missing:workflow_version"],
+        },
+        str(tmp_path),
+        set(),
+    )
+    assert status == {
+        "missing_models": ["config_missing:workflow_version"],
+        "missing_nodes": [],
+        "configuration_errors": ["config_missing:workflow_version"],
     }
