@@ -1,16 +1,25 @@
 """Public Qdrant client with config-backed defaults."""
 from __future__ import annotations
 
+import logging
+
 from aigateway_core.shared.runtime_values import (
     configured_number,
     configured_text,
     get_runtime_value,
 )
 
-from ._qdrant_client_impl import QdrantClientManager as _BaseQdrantClientManager
+from . import _qdrant_client_impl as _impl
+
+# Preserve the established module-level test seam. Existing callers may replace
+# ``qdrant_client.AsyncClient`` with a fake client without reaching into the
+# private implementation module.
+AsyncClient = _impl.AsyncClient
+Timeout = _impl.Timeout
+logger = logging.getLogger(__name__)
 
 
-class QdrantClientManager(_BaseQdrantClientManager):
+class QdrantClientManager(_impl.QdrantClientManager):
     """Qdrant manager that resolves omitted deployment values from config.yaml."""
 
     def __init__(self) -> None:
@@ -28,25 +37,41 @@ class QdrantClientManager(_BaseQdrantClientManager):
             url.strip()
             if isinstance(url, str) and url.strip()
             else configured_text("infrastructure.qdrant.url")
+        ).rstrip("/")
+        selected_connect_timeout = (
+            float(connect_timeout)
+            if connect_timeout is not None
+            else float(configured_number("infrastructure.qdrant.connect_timeout"))
         )
-        await super().connect(
-            url=selected_url,
-            connect_timeout=(
-                float(connect_timeout)
-                if connect_timeout is not None
-                else float(configured_number("infrastructure.qdrant.connect_timeout"))
-            ),
-            read_timeout=(
-                float(read_timeout)
-                if read_timeout is not None
-                else float(configured_number("infrastructure.qdrant.read_timeout"))
-            ),
-            write_timeout=(
-                float(write_timeout)
-                if write_timeout is not None
-                else float(configured_number("infrastructure.qdrant.write_timeout"))
+        selected_read_timeout = (
+            float(read_timeout)
+            if read_timeout is not None
+            else float(configured_number("infrastructure.qdrant.read_timeout"))
+        )
+        selected_write_timeout = (
+            float(write_timeout)
+            if write_timeout is not None
+            else float(configured_number("infrastructure.qdrant.write_timeout"))
+        )
+
+        self.url = selected_url
+        self._http = AsyncClient(
+            base_url=self.url,
+            timeout=Timeout(
+                connect=selected_connect_timeout,
+                read=selected_read_timeout,
+                write=selected_write_timeout,
+                pool=5.0,
             ),
         )
+        try:
+            response = await self._http.get("/")
+            response.raise_for_status()
+            logger.info("Qdrant 连接成功: %s", self.url)
+        except Exception as exc:
+            await self._http.aclose()
+            self._http = None
+            raise ConnectionError(f"Qdrant 连接失败 ({self.url}): {exc}") from exc
 
     async def upsert_collection(
         self,
@@ -101,4 +126,16 @@ class QdrantClientManager(_BaseQdrantClientManager):
         return True
 
 
-__all__ = ["QdrantClientManager"]
+# Re-export non-private implementation symbols for source compatibility.
+for _name in dir(_impl):
+    if _name.startswith("_") or _name in {
+        "AsyncClient",
+        "Timeout",
+        "QdrantClientManager",
+        "logger",
+    }:
+        continue
+    if _name not in globals():
+        globals()[_name] = getattr(_impl, _name)
+
+__all__ = ["AsyncClient", "Timeout", "QdrantClientManager"]
