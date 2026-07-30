@@ -32,6 +32,26 @@ class CostEstimate:
     completion_tokens: int
 
 
+class PricingCost(float):
+    """Numeric cost carrying whether the model was priced, free or unpriced.
+
+    Existing dispatcher, metrics and SQLite arithmetic expects a float. An
+    unpriced model therefore uses numeric value ``0.0`` for compatibility while
+    retaining ``pricing_status='unpriced'`` for quota metadata and diagnostics.
+    Callers needing strict semantics should use :func:`estimate_model_cost`.
+    """
+
+    pricing_status: PricingStatus
+    pricing_known: bool
+
+    def __new__(cls, estimate: CostEstimate):
+        value = estimate.amount_usd if estimate.amount_usd is not None else 0.0
+        instance = super().__new__(cls, value)
+        instance.pricing_status = estimate.status
+        instance.pricing_known = estimate.amount_usd is not None
+        return instance
+
+
 def estimate_model_cost(
     model: str,
     prompt_tokens: int,
@@ -67,15 +87,26 @@ def estimate_model_cost(
     )
 
 
-def _estimate_cost(model: str, total_tokens: int) -> float | None:
+def numeric_cost(estimate: CostEstimate) -> PricingCost:
+    """Adapt a structured estimate to the legacy numeric accounting interface."""
+    return PricingCost(estimate)
+
+
+def _estimate_cost(model: str, total_tokens: int) -> PricingCost:
     """Compatibility estimator for callers without a token split.
 
-    All tokens are treated as prompt tokens. New accounting code should use
-    :func:`estimate_model_cost` with separate prompt and completion counts.
-    Missing pricing returns ``None`` rather than silently pretending the model
-    is free.
+    All tokens are treated as prompt tokens. The returned float subclass carries
+    ``pricing_status`` so quota records can distinguish an explicitly free model
+    from a missing pricing entry without breaking existing arithmetic.
     """
-    return estimate_model_cost(model, total_tokens, 0).amount_usd
+    return numeric_cost(estimate_model_cost(model, total_tokens, 0))
 
 
-__all__ = ["CostEstimate", "PricingStatus", "estimate_model_cost", "_estimate_cost"]
+__all__ = [
+    "CostEstimate",
+    "PricingCost",
+    "PricingStatus",
+    "estimate_model_cost",
+    "numeric_cost",
+    "_estimate_cost",
+]
