@@ -1,9 +1,12 @@
 """Contract tests for explicit config wrappers replacing import-time patches."""
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 from types import SimpleNamespace
+
+import yaml
 
 from aigateway_core.pipelines.generation._common.config import (
     DraftWorkflowConfig,
@@ -74,6 +77,39 @@ def test_builtin_registration_injects_qdrant_without_mutating_environment(
     configured_rag = registration.config["config"]
     assert configured_rag.qdrant_url == "http://qdrant.internal:6333"
     assert configured_rag.code_graph_db_dir == "/data/code-graphs"
+
+
+def test_l2_namespace_is_passed_without_mutating_implementation(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "infrastructure": {"redis": {"namespace": "isolated-gateway"}},
+                "cache": {"pipeline_version": "12"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AI_GATEWAY_CONFIG_PATH", str(config_path))
+
+    from aigateway_core.prefix.cache import _l2_search_impl as implementation
+    from aigateway_core.prefix.cache import l2_search
+
+    implementation_defaults = (
+        implementation.L2_INDEX_NAME,
+        implementation.L2_HASH_PREFIX,
+    )
+
+    assert asyncio.run(l2_search.ensure_index(None)) is False
+    assert l2_search.L2_INDEX_NAME == "isolated-gateway:l2:idx:v12"
+    assert l2_search.L2_HASH_PREFIX == "isolated-gateway:cache:v12search:"
+    assert (
+        implementation.L2_INDEX_NAME,
+        implementation.L2_HASH_PREFIX,
+    ) == implementation_defaults
 
 
 def test_package_initializers_do_not_assign_runtime_methods() -> None:
