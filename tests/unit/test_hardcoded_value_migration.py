@@ -310,7 +310,10 @@ def test_costing_distinguishes_priced_free_and_unpriced_models(
     assert unpriced.status == "unpriced"
 
     assert _estimate_cost("provider/demo-model", 100) == 0.2
-    assert _estimate_cost("gpt-4o", 100) is None
+    unknown_numeric = _estimate_cost("gpt-4o", 100)
+    assert unknown_numeric == 0.0
+    assert unknown_numeric.pricing_status == "unpriced"
+    assert unknown_numeric.pricing_known is False
 
 
 def test_bridge_tracks_split_token_cost_and_pricing_status(tmp_path, monkeypatch):
@@ -338,10 +341,14 @@ def test_bridge_tracks_split_token_cost_and_pricing_status(tmp_path, monkeypatch
             "total_tokens": 150,
         }
     }
-    assert bridge._track_usage("gpt-4o", unknown_response) is None
+    tracked_unknown = bridge._track_usage("gpt-4o", unknown_response)
+    assert tracked_unknown == 0.0
+    assert tracked_unknown.pricing_status == "unpriced"
     assert unknown_response["_meta"]["pricing_status"] == "unpriced"
     assert bridge._estimate_cost("demo-model", 100) == 0.2
-    assert bridge._estimate_cost("gpt-4o", 100) is None
+    estimated_unknown = bridge._estimate_cost("gpt-4o", 100)
+    assert estimated_unknown == 0.0
+    assert estimated_unknown.pricing_status == "unpriced"
 
 
 def test_comfyui_missing_config_reports_configuration_error():
