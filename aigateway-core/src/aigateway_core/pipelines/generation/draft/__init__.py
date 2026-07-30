@@ -9,7 +9,11 @@ from aigateway_core.pipelines.generation._common.exceptions import DraftWorkflow
 from . import draft_generator as _strategy
 from . import draft_generator_plugin as _plugin
 
+_CONFIGURATION_ERROR = "config_missing:generation_optimization.draft_workflow.store_dir"
 _original_strategy_init = _strategy.DraftGeneratorStrategy.__init__
+_original_check_local_dependencies = (
+    _strategy.DraftGeneratorStrategy.check_local_dependencies
+)
 
 
 @wraps(_original_strategy_init)
@@ -21,22 +25,45 @@ def _configured_strategy_init(
     store_dir=None,
     task_tracker=None,
 ):
-    effective_store_dir = store_dir if store_dir is not None else getattr(config, "store_dir", "")
-    if not isinstance(effective_store_dir, str) or not effective_store_dir.strip():
-        raise DraftWorkflowError(
-            "config_missing:generation_optimization.draft_workflow.store_dir"
-        )
+    """Initialize without inventing a deployment path.
+
+    Registration is a public API and must remain usable without a ConfigManager.
+    When no store directory is configured, construct an unavailable strategy and
+    defer the explicit configuration error until the draft capability is actually
+    exercised. This preserves the six-plugin dependency chain while preventing
+    writes relative to the process working directory.
+    """
+    effective_store_dir = (
+        store_dir if store_dir is not None else getattr(config, "store_dir", "")
+    )
+    configured = isinstance(effective_store_dir, str) and bool(
+        effective_store_dir.strip()
+    )
+    normalized_store_dir = effective_store_dir.strip() if configured else ""
+
     _original_strategy_init(
         self,
         config,
         redis_client=redis_client,
         comfyui_config=comfyui_config,
-        store_dir=effective_store_dir.strip(),
+        store_dir=normalized_store_dir,
         task_tracker=task_tracker,
     )
+    self._configuration_error = None if configured else _CONFIGURATION_ERROR
+
+
+@wraps(_original_check_local_dependencies)
+async def _configured_check_local_dependencies(self, *args, **kwargs):
+    configuration_error = getattr(self, "_configuration_error", None)
+    if configuration_error:
+        raise DraftWorkflowError(configuration_error)
+    return await _original_check_local_dependencies(self, *args, **kwargs)
 
 
 _strategy.DraftGeneratorStrategy.__init__ = _configured_strategy_init
+_strategy.DraftGeneratorStrategy.check_local_dependencies = (
+    _configured_check_local_dependencies
+)
 
 _sources = (_strategy, _plugin)
 _names: list[str] = []
