@@ -37,7 +37,7 @@ jobs:
       - name: Install dependencies
         run: |
           npm install -g --force @colbymchenry/codegraph
-          codegraph --version
+          command -v codegraph
           pip install -e aigateway-core
           pip install -e "aigateway-api[all]"
           pip install -r tests/requirements-test.txt
