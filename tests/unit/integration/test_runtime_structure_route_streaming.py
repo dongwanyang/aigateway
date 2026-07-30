@@ -32,17 +32,14 @@ from aigateway_core.route.streaming.sse import SSEGenerator
 def test_route_streaming_helpers_resolve_from_new_paths():
     assert SSEGenerator.__name__ == "SSEGenerator"
     assert callable(simulate_stream_from_cache)
-    assert _estimate_cost("gpt-4o", 1000) > 0
+    assert _estimate_cost("gpt-4o", 1000) is None
 
 
-def test_estimate_cost_preserves_pricing_logic():
-    """_estimate_cost must keep the same pricing table + rounding behavior."""
-    # gpt-4o: 0.000005 * 1000 = 0.005
-    assert _estimate_cost("gpt-4o", 1000) == 0.005
-    # Unknown model falls back to 0.000001
-    assert _estimate_cost("unknown-model", 100) == 0.0001
-    # Model with provider prefix is stripped
-    assert _estimate_cost("azure/gpt-4o", 1000) == 0.005
+def test_estimate_cost_has_no_builtin_pricing_fallback():
+    """Unconfigured models remain unpriced instead of using stale code prices."""
+    assert _estimate_cost("gpt-4o", 1000) is None
+    assert _estimate_cost("unknown-model", 100) is None
+    assert _estimate_cost("azure/gpt-4o", 1000) is None
 
 
 def test_l3_helpers_resolve_from_core_prefix_cache():
