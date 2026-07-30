@@ -56,19 +56,17 @@ jobs:
               )
           source = source.replace(old_nonstream, new_nonstream, 1)
 
-          old_stream = """        final_cost = (
-              _stream_bridge_cost
-              if _stream_bridge_cost > 0
-              else _estimate_cost(logged_model, tt)
+          old_stream = (
+              "        final_cost = _stream_bridge_cost if "
+              "_stream_bridge_cost > 0 else _estimate_cost(logged_model, tt)\n"
           )
-          """
-          new_stream = """        resolved_cost = (
-              _stream_bridge_cost
-              if _stream_bridge_cost > 0
-              else _estimate_cost(logged_model, tt)
+          new_stream = (
+              "        resolved_cost = _stream_bridge_cost if "
+              "_stream_bridge_cost > 0 else _estimate_cost(logged_model, tt)\n"
+              "        final_cost = (\n"
+              "            resolved_cost if resolved_cost is not None else 0.0\n"
+              "        )\n"
           )
-          final_cost = resolved_cost if resolved_cost is not None else 0.0
-          """
           if source.count(old_stream) != 1:
               raise SystemExit(
                   f"expected one stream cost site, found {source.count(old_stream)}"
