@@ -21,6 +21,16 @@ interface ConfigRow {
   description: string
 }
 
+interface ComfyStatusView {
+  available?: boolean
+  public_url?: string
+  manager_url?: string
+  queue?: { running?: number; pending?: number } | null
+  configuration_status?: string
+  configuration_errors?: unknown
+  error?: string | null
+}
+
 const API_BASE = import.meta.env.VITE_API_BASE ?? ''
 
 const GROUP_LABELS: Record<string, string> = {
@@ -73,6 +83,11 @@ async function updateTableConfig(config: Record<string, unknown>): Promise<{ dat
 
 function isPlainObject(value: unknown): value is Record<string, ConfigValue> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function stringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value.filter((item): item is string => typeof item === 'string' && item.length > 0)
 }
 
 function toConfigValue(value: unknown): ConfigValue {
@@ -263,6 +278,23 @@ export default function Config() {
   const saving = saveMutation.isPending
   const remoteError = configQuery.error ?? schemaQuery.error ?? saveMutation.error
   const error = localError ?? (remoteError instanceof Error ? remoteError.message : null)
+  const comfyStatus = comfyQuery.data as ComfyStatusView | undefined
+  const comfyConfigurationErrors = stringList(comfyStatus?.configuration_errors)
+  const comfyHasConfigurationError = comfyConfigurationErrors.length > 0
+  const comfyStatusText = comfyQuery.isLoading
+    ? '检测中'
+    : comfyHasConfigurationError
+      ? 'ComfyUI 配置错误'
+      : comfyStatus?.available
+        ? 'ComfyUI 可用'
+        : 'ComfyUI 服务不可达'
+  const comfyStatusColor = comfyQuery.isLoading
+    ? 'var(--color-text-tertiary)'
+    : comfyHasConfigurationError
+      ? 'var(--color-warning)'
+      : comfyStatus?.available
+        ? 'var(--color-success)'
+        : 'var(--color-danger)'
 
   useEffect(() => {
     if (config && !hasChanges) setDraftConfig(structuredClone(config))
@@ -282,7 +314,12 @@ export default function Config() {
     setLocalError(null)
     setSuccess(null)
     setHasChanges(false)
-    await Promise.all([configQuery.refetch(), schemaQuery.refetch()])
+    await Promise.all([
+      configQuery.refetch(),
+      schemaQuery.refetch(),
+      comfyQuery.refetch(),
+      presetsQuery.refetch(),
+    ])
   }
 
   async function handleSave() {
@@ -355,29 +392,65 @@ export default function Config() {
               Gateway 提供简易入口；节点、模型和高级工作流仍在 ComfyUI Manager 中管理。
             </p>
           </div>
-          <span style={{ color: comfyQuery.data?.available ? 'var(--color-success)' : 'var(--color-danger)' }}>
-            {comfyQuery.isLoading ? '检测中' : comfyQuery.data?.available ? 'ComfyUI 可用' : 'ComfyUI 不可用'}
-          </span>
+          <span style={{ color: comfyStatusColor }}>{comfyStatusText}</span>
         </div>
+
+        {comfyHasConfigurationError && (
+          <div style={{ marginBottom: '16px', padding: '12px 14px', borderRadius: '8px', border: '1px solid var(--color-warning)', backgroundColor: 'rgba(245, 158, 11, 0.08)', color: 'var(--color-warning)' }}>
+            <div className="flex items-center gap-2 font-semibold text-sm">
+              <AlertTriangle size={15} />
+              本地生成配置不完整
+            </div>
+            <div className="text-xs mt-2" style={{ fontFamily: 'var(--font-mono)', lineHeight: 1.7 }}>
+              {comfyConfigurationErrors.map(item => <div key={item}>{item}</div>)}
+            </div>
+          </div>
+        )}
+
         <div className="flex flex-wrap gap-2 mb-4">
-          <a className="btn btn-secondary" href={comfyQuery.data?.public_url} target="_blank" rel="noreferrer">
-            <ExternalLink size={14} /> 打开 ComfyUI
-          </a>
-          <a className="btn btn-secondary" href={comfyQuery.data?.manager_url} target="_blank" rel="noreferrer">
-            <ExternalLink size={14} /> 打开 Manager
-          </a>
-          {comfyQuery.data?.queue && (
-            <span className="text-sm">队列：{comfyQuery.data.queue.running} 运行 / {comfyQuery.data.queue.pending} 等待</span>
+          {comfyStatus?.public_url ? (
+            <a className="btn btn-secondary" href={comfyStatus.public_url} target="_blank" rel="noreferrer">
+              <ExternalLink size={14} /> 打开 ComfyUI
+            </a>
+          ) : (
+            <button className="btn btn-secondary" disabled>未配置 ComfyUI 地址</button>
+          )}
+          {comfyStatus?.manager_url ? (
+            <a className="btn btn-secondary" href={comfyStatus.manager_url} target="_blank" rel="noreferrer">
+              <ExternalLink size={14} /> 打开 Manager
+            </a>
+          ) : (
+            <button className="btn btn-secondary" disabled>未配置 Manager 地址</button>
+          )}
+          {comfyStatus?.queue && (
+            <span className="text-sm">队列：{comfyStatus.queue.running ?? 0} 运行 / {comfyStatus.queue.pending ?? 0} 等待</span>
           )}
         </div>
+
         <div className="space-y-2">
           {(Array.isArray(presetsQuery.data) ? presetsQuery.data : []).map(preset => {
-            const missing = [...preset.validation.missing_models, ...preset.validation.missing_nodes]
+            const configurationErrors = stringList(preset.configuration_errors ?? preset.validation?.configuration_errors)
+            const dependencyMissing = [
+              ...stringList(preset.validation?.missing_models),
+              ...stringList(preset.validation?.missing_nodes),
+            ].filter(item => !configurationErrors.includes(item))
+            const issueText = configurationErrors.length
+              ? `配置错误：${configurationErrors.join('、')}`
+              : dependencyMissing.length
+                ? `缺少依赖：${dependencyMissing.join('、')}`
+                : preset.configuration_status === 'disabled'
+                  ? '已禁用'
+                  : '依赖完整'
+            const issueColor = configurationErrors.length || dependencyMissing.length
+              ? 'var(--color-warning)'
+              : preset.configuration_status === 'disabled'
+                ? 'var(--color-text-tertiary)'
+                : 'var(--color-success)'
             return (
               <div key={preset.id} className="flex items-start justify-between gap-3 text-sm">
                 <span>{preset.name} <small>({preset.kind})</small></span>
-                <span style={{ color: missing.length ? 'var(--color-warning)' : 'var(--color-success)' }}>
-                  {missing.length ? `缺少：${missing.join('、')}` : '依赖完整'}
+                <span style={{ color: issueColor, textAlign: 'right', overflowWrap: 'anywhere' }}>
+                  {issueText}
                 </span>
               </div>
             )
