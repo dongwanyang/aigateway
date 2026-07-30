@@ -41,6 +41,7 @@ from aigateway_core.pipelines.generation._common.models import (
 from aigateway_core.pipelines.generation.draft.draft_generator import (
     DraftGeneratorStrategy,
 )
+from aigateway_core.shared.integration_configs import ComfyUIConfig
 
 
 @pytest.fixture
@@ -66,7 +67,11 @@ def default_config(tmp_path):
 @pytest.fixture
 def strategy(default_config, monkeypatch):
     """Create a DraftGeneratorStrategy instance with in-memory store + tmp store_dir."""
-    instance = DraftGeneratorStrategy(config=default_config, redis_client=None)
+    instance = DraftGeneratorStrategy(
+        config=default_config,
+        redis_client=None,
+        comfyui_config=ComfyUIConfig(workflow_version="image-v1"),
+    )
     monkeypatch.setattr(instance, "_check_comfyui", AsyncMock(return_value=None))
     monkeypatch.setattr(
         instance,
