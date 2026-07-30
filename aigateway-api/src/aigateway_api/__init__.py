@@ -9,26 +9,46 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Any
 
 __version__ = "1.0.0"
 
 
-def _preload_cors_origins() -> None:
-    """Expose ``server.cors_origins`` before the FastAPI app factory runs.
+def _dotenv_bootstrap_values() -> dict[str, Any]:
+    """Read bootstrap-only values from .env without mutating ``os.environ``.
 
-    ``main._create_app`` must register CORS middleware before lifespan creates a
-    ``ConfigManager``. Reading only this small YAML value here keeps the source of
-    truth in ``config.yaml``. Process environment and ``.env`` values retain
-    higher priority than YAML.
+    Importing ``aigateway_api`` must not load unrelated authentication, database,
+    or provider variables into the process. The regular application entry point
+    remains responsible for loading the complete .env file.
     """
     try:
-        from dotenv import load_dotenv
-
-        load_dotenv(override=False)
+        from dotenv import dotenv_values, find_dotenv
     except ImportError:
-        pass
+        return {}
 
+    dotenv_path = find_dotenv(usecwd=True)
+    if not dotenv_path:
+        return {}
+    try:
+        return dict(dotenv_values(dotenv_path))
+    except OSError:
+        return {}
+
+
+def _preload_cors_origins() -> None:
+    """Expose CORS origins before the FastAPI app factory registers middleware.
+
+    Bootstrap precedence is process environment > .env > config.yaml. Only the
+    CORS value is copied into ``os.environ``; unrelated .env values are never
+    imported as a side effect of package import.
+    """
     if os.environ.get("AI_GATEWAY_CORS_ORIGINS", "").strip():
+        return
+
+    dotenv_values = _dotenv_bootstrap_values()
+    dotenv_cors = str(dotenv_values.get("AI_GATEWAY_CORS_ORIGINS") or "").strip()
+    if dotenv_cors:
+        os.environ["AI_GATEWAY_CORS_ORIGINS"] = dotenv_cors
         return
 
     try:
@@ -36,9 +56,12 @@ def _preload_cors_origins() -> None:
     except ImportError:
         return
 
-    config_path = Path(
-        os.environ.get("AI_GATEWAY_CONFIG_PATH", "./config.yaml")
-    ).expanduser()
+    config_path_value = (
+        os.environ.get("AI_GATEWAY_CONFIG_PATH", "").strip()
+        or str(dotenv_values.get("AI_GATEWAY_CONFIG_PATH") or "").strip()
+        or "./config.yaml"
+    )
+    config_path = Path(config_path_value).expanduser()
     try:
         raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     except (OSError, yaml.YAMLError):
