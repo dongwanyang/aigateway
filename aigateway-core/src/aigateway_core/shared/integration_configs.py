@@ -79,7 +79,7 @@ class ComfyUIConfig:
         default_factory=lambda: ["qwen_image_vae.safetensors"]
     )
     video_enabled: bool = True
-    video_workflow_version: str = "wan2.2-ti2v-5b-v1"
+    video_workflow_version: str = ""
     video_diffusion_model: str = "wan2.2_ti2v_5B_fp16.safetensors"
     video_text_encoder: str = "umt5_xxl_fp8_e4m3fn_scaled.safetensors"
     video_vae: str = "wan2.2_vae.safetensors"
