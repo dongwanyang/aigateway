@@ -6,7 +6,6 @@ Registers all classic and generation-optimization plugins into a ``PluginRegistr
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any
 
 from aigateway_core.pipelines.understanding.compression.plugin import (
@@ -42,8 +41,8 @@ def _register_builtin_plugins(registry: PluginRegistry, config_manager: Any = No
     }
 
     try:
-        from aigateway_core.pipelines.understanding.rag.rag_retriever_plugin import (
-            RAGRetrieverPlugin,
+        from aigateway_core.pipelines.understanding.rag.configured_rag_retriever import (
+            ConfiguredRAGRetrieverPlugin,
         )
 
         rag_config = None
@@ -68,7 +67,7 @@ def _register_builtin_plugins(registry: PluginRegistry, config_manager: Any = No
                     qdrant_cfg.get("url") if isinstance(qdrant_cfg, dict) else None
                 )
                 if isinstance(qdrant_url, str) and qdrant_url.strip():
-                    os.environ.setdefault("AI_GATEWAY_QDRANT_URL", qdrant_url.strip())
+                    rag_config.qdrant_url = qdrant_url.strip()
             except Exception as exc:
                 logger.warning("RAG 集成配置不可用，插件将安全降级: %s", exc)
 
@@ -83,7 +82,10 @@ def _register_builtin_plugins(registry: PluginRegistry, config_manager: Any = No
                 break
 
         if rag_enabled:
-            plugin_map["rag_retriever"] = (RAGRetrieverPlugin, rag_kwargs)
+            plugin_map["rag_retriever"] = (
+                ConfiguredRAGRetrieverPlugin,
+                rag_kwargs,
+            )
     except ImportError:
         logger.debug("RAGRetrieverPlugin 不可用（导入失败）")
 
@@ -123,7 +125,10 @@ def _register_builtin_plugins(registry: PluginRegistry, config_manager: Any = No
             mol_config = config_manager.get("media_optimization", {}) or {}
 
         if mol_config.get("enabled", False):
-            plugin_map["media_optimizer"] = (MediaOptimizationPlugin, {"config": mol_config})
+            plugin_map["media_optimizer"] = (
+                MediaOptimizationPlugin,
+                {"config": mol_config},
+            )
     except ImportError:
         logger.debug("Media Optimization Plugin 不可用（导入失败）")
 
@@ -189,6 +194,9 @@ def _register_builtin_plugins(registry: PluginRegistry, config_manager: Any = No
                 redis_client=redis_client,
             )
         else:
-            logger.info("Generation Optimization Layer 已禁用 (generation_optimization.enabled=false)")
+            logger.info(
+                "Generation Optimization Layer 已禁用 "
+                "(generation_optimization.enabled=false)"
+            )
     except ImportError as exc:
         logger.debug("Generation Optimization Plugins 不可用（导入失败）: %s", exc)
