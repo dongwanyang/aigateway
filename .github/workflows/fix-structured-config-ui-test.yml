@@ -1,0 +1,108 @@
+name: Fix structured config UI test
+
+on:
+  push:
+    branches:
+      - fix/config-hardcode-migration
+    paths:
+      - .github/workflows/fix-structured-config-ui-test.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/config-hardcode-migration
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: control-panel/package-lock.json
+
+      - name: Update structured configuration test
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("control-panel/src/pages/pages.integration.test.tsx")
+          source = path.read_text(encoding="utf-8")
+
+          old_import = (
+              "import { fireEvent, render, screen, waitFor } "
+              "from '@testing-library/react'\n"
+          )
+          new_import = (
+              "import { fireEvent, render, screen, waitFor, within } "
+              "from '@testing-library/react'\n"
+          )
+          if source.count(old_import) != 1:
+              raise SystemExit(
+                  f"expected one testing-library import, found {source.count(old_import)}"
+              )
+          source = source.replace(old_import, new_import, 1)
+
+          old_test = """  it('validates and saves edited JSON configuration', async () => {
+              const user = userEvent.setup()
+              renderPage(<Config />)
+              const editor = await screen.findByRole('textbox')
+              fireEvent.change(editor, { target: { value: JSON.stringify({ server: { port: 9000 } }, null, 2) } })
+              await user.click(screen.getByRole('button', { name: /保存配置/ }))
+              await waitFor(() => expect(fetch).toHaveBeenCalledWith(
+                expect.stringMatching(/\\/admin\\/config$/),
+                expect.objectContaining({
+                  method: 'PUT',
+                  body: JSON.stringify({ server: { port: 9000 } }),
+                }),
+              ))
+            })
+          """
+          new_test = """  it('edits and saves structured configuration', async () => {
+              const user = userEvent.setup()
+              renderPage(<Config />)
+
+              const pathCell = await screen.findByText('server.port')
+              const row = pathCell.closest('tr')
+              if (!row) throw new Error('server.port row not found')
+              const editor = within(row).getByRole('spinbutton')
+              fireEvent.change(editor, { target: { value: '9000' } })
+              await user.click(screen.getByRole('button', { name: /保存配置/ }))
+
+              await waitFor(() => {
+                const call = vi.mocked(fetch).mock.calls.find(
+                  ([url, init]) => String(url).endsWith('/admin/config/table') && init?.method === 'PUT',
+                )
+                expect(call).toBeDefined()
+                const body = JSON.parse(String(call?.[1]?.body))
+                expect(body.server.port).toBe(9000)
+                expect(body.providers).toEqual(fullConfig.providers)
+              })
+            })
+          """
+          if source.count(old_test) != 1:
+              raise SystemExit(
+                  f"expected one stale config test, found {source.count(old_test)}"
+              )
+          path.write_text(source.replace(old_test, new_test, 1), encoding="utf-8")
+          PY
+
+          npm --prefix control-panel ci
+          npm --prefix control-panel test -- --run src/pages/pages.integration.test.tsx
+
+      - name: Commit focused UI test update
+        shell: bash
+        run: |
+          rm .github/workflows/fix-structured-config-ui-test.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add control-panel/src/pages/pages.integration.test.tsx \
+            .github/workflows/fix-structured-config-ui-test.yml
+          git commit -m "test(ui): align config save test with structured editor"
+          git push origin HEAD:fix/config-hardcode-migration
