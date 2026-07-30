@@ -6,10 +6,10 @@ from pathlib import Path
 
 from aigateway_core.shared.runtime_values import configured_path
 
-from ._sqlite_store_impl import SQLiteStore as _BaseSQLiteStore
+from . import _sqlite_store_impl as _impl
 
 
-class SQLiteStore(_BaseSQLiteStore):
+class SQLiteStore(_impl.SQLiteStore):
     """SQLite store resolving omitted paths relative to the active config file."""
 
     def __init__(self, db_path: str | None = None):
@@ -27,4 +27,14 @@ class SQLiteStore(_BaseSQLiteStore):
         super().__init__(db_path=resolved)
 
 
-__all__ = ["SQLiteStore"]
+# Preserve constants, helper functions and data models imported from this module
+# before the implementation was split. Only the configured class is overridden.
+for _name in dir(_impl):
+    if _name.startswith("__") or _name == "SQLiteStore":
+        continue
+    if _name not in globals():
+        globals()[_name] = getattr(_impl, _name)
+
+__all__ = [
+    name for name in globals() if not name.startswith("_") and name != "Path"
+]
