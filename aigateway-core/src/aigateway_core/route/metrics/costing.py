@@ -7,22 +7,75 @@ built-in provider price table, preventing stale duplicated prices.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
+from typing import Literal
 
 from aigateway_core.shared.runtime_values import configured_model_pricing
 
 logger = logging.getLogger(__name__)
 
+PricingStatus = Literal["priced", "free", "unpriced"]
 
-def _estimate_cost(model: str, total_tokens: int) -> float:
-    """Estimate cost using the model's configured prompt-token price.
 
-    This function retains the previous total-token estimate semantics because it
-    receives no prompt/completion split. Missing pricing returns ``0.0`` rather
-    than inventing a fallback rate; the model must be priced in ``config.yaml``
-    for quota and reporting estimates to include cost.
+@dataclass(frozen=True)
+class CostEstimate:
+    """Result of a model cost lookup.
+
+    ``amount_usd`` is ``None`` when no pricing entry exists. A configured model
+    whose prompt and completion prices are both zero is represented as
+    ``status='free'`` with ``amount_usd=0.0``.
     """
+
+    amount_usd: float | None
+    status: PricingStatus
+    prompt_tokens: int
+    completion_tokens: int
+
+
+def estimate_model_cost(
+    model: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+) -> CostEstimate:
+    """Calculate cost from configured prompt/completion token prices."""
+    prompt_count = max(0, int(prompt_tokens))
+    completion_count = max(0, int(completion_tokens))
     pricing = configured_model_pricing(model)
     if pricing is None:
         logger.warning("model pricing is not configured: %s", model)
-        return 0.0
-    return round(max(0, int(total_tokens)) * pricing["prompt"], 6)
+        return CostEstimate(
+            amount_usd=None,
+            status="unpriced",
+            prompt_tokens=prompt_count,
+            completion_tokens=completion_count,
+        )
+
+    prompt_price = float(pricing["prompt"])
+    completion_price = float(pricing["completion"])
+    amount = round(
+        prompt_count * prompt_price + completion_count * completion_price,
+        6,
+    )
+    status: PricingStatus = (
+        "free" if prompt_price == 0.0 and completion_price == 0.0 else "priced"
+    )
+    return CostEstimate(
+        amount_usd=amount,
+        status=status,
+        prompt_tokens=prompt_count,
+        completion_tokens=completion_count,
+    )
+
+
+def _estimate_cost(model: str, total_tokens: int) -> float | None:
+    """Compatibility estimator for callers without a token split.
+
+    All tokens are treated as prompt tokens. New accounting code should use
+    :func:`estimate_model_cost` with separate prompt and completion counts.
+    Missing pricing returns ``None`` rather than silently pretending the model
+    is free.
+    """
+    return estimate_model_cost(model, total_tokens, 0).amount_usd
+
+
+__all__ = ["CostEstimate", "PricingStatus", "estimate_model_cost", "_estimate_cost"]
