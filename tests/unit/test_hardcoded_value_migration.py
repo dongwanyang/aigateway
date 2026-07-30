@@ -59,9 +59,19 @@ def _base_config() -> dict:
             "demo": {
                 "model_grouper": [
                     {
-                        "models": [{"name": "demo-model"}],
+                        "models": [
+                            {"name": "demo-model"},
+                            {"name": "free-model"},
+                        ],
                         "pricing": {
-                            "demo-model": {"prompt": 0.002, "completion": 0.004}
+                            "demo-model": {
+                                "prompt": 0.002,
+                                "completion": 0.004,
+                            },
+                            "free-model": {
+                                "prompt": 0.0,
+                                "completion": 0.0,
+                            },
                         },
                     }
                 ]
@@ -70,8 +80,12 @@ def _base_config() -> dict:
     }
 
 
-def test_runtime_values_use_yaml_namespace_and_explicit_prefix(tmp_path, monkeypatch):
-    monkeypatch.setenv("AI_GATEWAY_CONFIG_PATH", _write_config(tmp_path, _base_config()))
+def test_runtime_values_use_yaml_namespace_and_explicit_prefix(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv(
+        "AI_GATEWAY_CONFIG_PATH", _write_config(tmp_path, _base_config())
+    )
 
     from aigateway_core.shared.runtime_values import (
         configured_text,
@@ -84,14 +98,22 @@ def test_runtime_values_use_yaml_namespace_and_explicit_prefix(tmp_path, monkeyp
     assert redis_key_prefix("l2_hash") == "tenant-a:cache:v9search"
     assert redis_key_prefix("prompt_template") == "tenant-a:prompt_template"
     assert media_cache_ttl_seconds() == 123
-    assert configured_text("infrastructure.qdrant.url") == "http://configured-qdrant:6333"
+    assert (
+        configured_text("infrastructure.qdrant.url")
+        == "http://configured-qdrant:6333"
+    )
 
     monkeypatch.setenv("TEST_QDRANT_URL", "https://qdrant.example")
-    assert configured_text("infrastructure.qdrant.url") == "https://qdrant.example"
+    assert (
+        configured_text("infrastructure.qdrant.url")
+        == "https://qdrant.example"
+    )
 
 
 def test_configured_relative_path_is_anchored_to_yaml(tmp_path, monkeypatch):
-    monkeypatch.setenv("AI_GATEWAY_CONFIG_PATH", _write_config(tmp_path, _base_config()))
+    monkeypatch.setenv(
+        "AI_GATEWAY_CONFIG_PATH", _write_config(tmp_path, _base_config())
+    )
     monkeypatch.delenv("AI_GATEWAY_AUTH_DB_PATH", raising=False)
 
     from aigateway_core.shared.auth.sqlite_store import SQLiteStore
@@ -104,7 +126,9 @@ def test_configured_relative_path_is_anchored_to_yaml(tmp_path, monkeypatch):
 
 
 def test_browser_auth_policy_is_loaded_from_config(tmp_path, monkeypatch):
-    monkeypatch.setenv("AI_GATEWAY_CONFIG_PATH", _write_config(tmp_path, _base_config()))
+    monkeypatch.setenv(
+        "AI_GATEWAY_CONFIG_PATH", _write_config(tmp_path, _base_config())
+    )
     for name in (
         "AI_GATEWAY_ADMIN_USERNAME",
         "AI_GATEWAY_ADMIN_USER_ID",
@@ -129,17 +153,27 @@ def test_browser_auth_policy_is_loaded_from_config(tmp_path, monkeypatch):
     assert store._timeout_seconds == 3.0
 
 
-def test_generation_preset_directory_is_loaded_from_config(tmp_path, monkeypatch):
-    monkeypatch.setenv("AI_GATEWAY_CONFIG_PATH", _write_config(tmp_path, _base_config()))
+def test_generation_preset_directory_is_loaded_from_config(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv(
+        "AI_GATEWAY_CONFIG_PATH", _write_config(tmp_path, _base_config())
+    )
     monkeypatch.delenv("AI_GATEWAY_GENERATION_PRESETS_DIR", raising=False)
 
     from aigateway_api.local_generation import preset_store_dir
 
-    assert preset_store_dir() == (tmp_path / "data" / "generation-presets").resolve()
+    assert preset_store_dir() == (
+        tmp_path / "data" / "generation-presets"
+    ).resolve()
 
 
-def test_media_cache_manager_uses_configured_prefix_and_ttl(tmp_path, monkeypatch):
-    monkeypatch.setenv("AI_GATEWAY_CONFIG_PATH", _write_config(tmp_path, _base_config()))
+def test_media_cache_manager_uses_configured_prefix_and_ttl(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv(
+        "AI_GATEWAY_CONFIG_PATH", _write_config(tmp_path, _base_config())
+    )
 
     from aigateway_core.prefix.media.cache import MediaCacheManager
 
@@ -152,7 +186,9 @@ def test_media_cache_manager_uses_configured_prefix_and_ttl(tmp_path, monkeypatc
 
 
 def test_l2_operations_refresh_prefixes_lazily(tmp_path, monkeypatch):
-    monkeypatch.setenv("AI_GATEWAY_CONFIG_PATH", _write_config(tmp_path, _base_config()))
+    monkeypatch.setenv(
+        "AI_GATEWAY_CONFIG_PATH", _write_config(tmp_path, _base_config())
+    )
 
     from aigateway_core.prefix.cache import l2_search
 
@@ -163,7 +199,9 @@ def test_l2_operations_refresh_prefixes_lazily(tmp_path, monkeypatch):
 
 
 def test_max_token_buckets_are_loaded_from_config(tmp_path, monkeypatch):
-    monkeypatch.setenv("AI_GATEWAY_CONFIG_PATH", _write_config(tmp_path, _base_config()))
+    monkeypatch.setenv(
+        "AI_GATEWAY_CONFIG_PATH", _write_config(tmp_path, _base_config())
+    )
 
     from aigateway_core.prefix.cache.cache_keys import _bucket_max_tokens
 
@@ -173,10 +211,16 @@ def test_max_token_buckets_are_loaded_from_config(tmp_path, monkeypatch):
     assert _bucket_max_tokens(500) == "gt_400"
 
 
-def test_prompt_template_manager_resolves_instance_prefixes(tmp_path, monkeypatch):
-    monkeypatch.setenv("AI_GATEWAY_CONFIG_PATH", _write_config(tmp_path, _base_config()))
+def test_prompt_template_manager_resolves_instance_prefixes(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv(
+        "AI_GATEWAY_CONFIG_PATH", _write_config(tmp_path, _base_config())
+    )
 
-    from aigateway_core.pipelines.generation._common.config import PromptTemplateConfig
+    from aigateway_core.pipelines.generation._common.config import (
+        PromptTemplateConfig,
+    )
     from aigateway_core.pipelines.generation.token import PromptTemplateManager
 
     manager = PromptTemplateManager(None, PromptTemplateConfig())
@@ -184,8 +228,12 @@ def test_prompt_template_manager_resolves_instance_prefixes(tmp_path, monkeypatc
     assert manager.INDEX_PREFIX == "tenant-a:prompt_template_index"
 
 
-def test_qdrant_manager_uses_configured_connection_and_index_values(tmp_path, monkeypatch):
-    monkeypatch.setenv("AI_GATEWAY_CONFIG_PATH", _write_config(tmp_path, _base_config()))
+def test_qdrant_manager_uses_configured_connection_and_index_values(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv(
+        "AI_GATEWAY_CONFIG_PATH", _write_config(tmp_path, _base_config())
+    )
     monkeypatch.delenv("TEST_QDRANT_URL", raising=False)
 
     import aigateway_core.shared.qdrant_client as qdrant_module
@@ -237,43 +285,98 @@ def test_qdrant_manager_uses_configured_connection_and_index_values(tmp_path, mo
     assert payload["hnsw_config"] == {"m": 32, "ef_construct": 256}
 
 
-def test_costing_uses_provider_pricing_and_no_builtin_fallback(tmp_path, monkeypatch):
-    monkeypatch.setenv("AI_GATEWAY_CONFIG_PATH", _write_config(tmp_path, _base_config()))
+def test_costing_distinguishes_priced_free_and_unpriced_models(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv(
+        "AI_GATEWAY_CONFIG_PATH", _write_config(tmp_path, _base_config())
+    )
 
-    from aigateway_core.route.metrics.costing import _estimate_cost
+    from aigateway_core.route.metrics.costing import (
+        _estimate_cost,
+        estimate_model_cost,
+    )
+
+    priced = estimate_model_cost("demo-model", 100, 50)
+    assert priced.amount_usd == 0.4
+    assert priced.status == "priced"
+
+    free = estimate_model_cost("free-model", 100, 50)
+    assert free.amount_usd == 0.0
+    assert free.status == "free"
+
+    unpriced = estimate_model_cost("gpt-4o", 100, 50)
+    assert unpriced.amount_usd is None
+    assert unpriced.status == "unpriced"
 
     assert _estimate_cost("provider/demo-model", 100) == 0.2
-    assert _estimate_cost("gpt-4o", 100) == 0.0
+    assert _estimate_cost("gpt-4o", 100) is None
 
 
-def test_bridge_uses_shared_config_backed_estimator(tmp_path, monkeypatch):
-    monkeypatch.setenv("AI_GATEWAY_CONFIG_PATH", _write_config(tmp_path, _base_config()))
+def test_bridge_tracks_split_token_cost_and_pricing_status(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "AI_GATEWAY_CONFIG_PATH", _write_config(tmp_path, _base_config())
+    )
 
     from aigateway_core.route.bridge import LiteLLMBridge
 
     bridge = LiteLLMBridge({})
+    response = {
+        "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+            "total_tokens": 150,
+        }
+    }
+    assert bridge._track_usage("demo-model", response) == 0.4
+    assert response["_meta"]["pricing_status"] == "priced"
+
+    unknown_response = {
+        "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+            "total_tokens": 150,
+        }
+    }
+    assert bridge._track_usage("gpt-4o", unknown_response) is None
+    assert unknown_response["_meta"]["pricing_status"] == "unpriced"
     assert bridge._estimate_cost("demo-model", 100) == 0.2
-    assert bridge._estimate_cost("gpt-4o", 100) == 0.0
+    assert bridge._estimate_cost("gpt-4o", 100) is None
 
 
-def test_comfyui_missing_config_does_not_assume_localhost():
+def test_comfyui_missing_config_reports_configuration_error():
     from aigateway_api.local_generation import builtin_presets, probe_comfyui
 
     status = asyncio.run(probe_comfyui({}))
     assert status["available"] is False
     assert status["public_url"] == ""
     assert status["manager_url"] == ""
+    assert status["configuration_status"] == "configuration_error"
     assert status["error"] == "config_missing:server_url"
+    assert "config_missing:checkpoint_name" in status["configuration_errors"]
 
-    serialized = json.dumps(builtin_presets({}), ensure_ascii=False)
+    presets = builtin_presets({})
+    sdxl = next(item for item in presets if item["id"] == "sdxl-draft")
+    assert sdxl["configuration_status"] == "configuration_error"
+    assert sdxl["dependencies"]["models"] == []
+    assert sdxl["configuration_errors"] == [
+        "config_missing:checkpoint_name"
+    ]
+
+    serialized = json.dumps(presets, ensure_ascii=False)
     assert "http://localhost:8188" not in serialized
     assert "sd_xl_base_1.0.safetensors" not in serialized
     assert "RealESRGAN_x4plus.pth" not in serialized
+    assert "checkpoints/\"" not in serialized
 
 
 def test_draft_storage_must_be_configured(tmp_path):
-    from aigateway_core.pipelines.generation._common.config import DraftWorkflowConfig
-    from aigateway_core.pipelines.generation._common.exceptions import DraftWorkflowError
+    from aigateway_core.pipelines.generation._common.config import (
+        DraftWorkflowConfig,
+    )
+    from aigateway_core.pipelines.generation._common.exceptions import (
+        DraftWorkflowError,
+    )
     from aigateway_core.pipelines.generation.draft.draft_cleaner import (
         DraftSessionCleaner,
     )
@@ -301,10 +404,19 @@ def test_draft_storage_must_be_configured(tmp_path):
     assert cleaner._store_dir == configured_dir
 
 
-def test_cors_preload_reads_yaml_without_overriding_explicit_env(tmp_path, monkeypatch):
+def test_cors_preload_reads_yaml_without_overriding_explicit_env(
+    tmp_path, monkeypatch
+):
     config_path = _write_config(
         tmp_path,
-        {"server": {"cors_origins": ["https://panel.example", "https://ops.example"]}},
+        {
+            "server": {
+                "cors_origins": [
+                    "https://panel.example",
+                    "https://ops.example",
+                ]
+            }
+        },
     )
     monkeypatch.setenv("AI_GATEWAY_CONFIG_PATH", config_path)
     monkeypatch.delenv("AI_GATEWAY_CORS_ORIGINS", raising=False)
@@ -317,12 +429,19 @@ def test_cors_preload_reads_yaml_without_overriding_explicit_env(tmp_path, monke
         == "https://panel.example,https://ops.example"
     )
 
-    monkeypatch.setenv("AI_GATEWAY_CORS_ORIGINS", "https://explicit.example")
+    monkeypatch.setenv(
+        "AI_GATEWAY_CORS_ORIGINS", "https://explicit.example"
+    )
     aigateway_api._preload_cors_origins()
-    assert os.environ["AI_GATEWAY_CORS_ORIGINS"] == "https://explicit.example"
+    assert (
+        os.environ["AI_GATEWAY_CORS_ORIGINS"]
+        == "https://explicit.example"
+    )
 
 
-def test_cors_preload_does_not_import_unrelated_dotenv_values(tmp_path, monkeypatch):
+def test_cors_preload_does_not_import_unrelated_dotenv_values(
+    tmp_path, monkeypatch
+):
     pytest.importorskip("dotenv")
     (tmp_path / ".env").write_text(
         "AI_GATEWAY_CORS_ORIGINS=https://dotenv.example\n"
@@ -333,7 +452,9 @@ def test_cors_preload_does_not_import_unrelated_dotenv_values(tmp_path, monkeypa
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("AI_GATEWAY_CORS_ORIGINS", raising=False)
     monkeypatch.delenv("AI_GATEWAY_ADMIN_USERNAME", raising=False)
-    monkeypatch.delenv("AI_GATEWAY_PASSWORD_PBKDF2_ITERATIONS", raising=False)
+    monkeypatch.delenv(
+        "AI_GATEWAY_PASSWORD_PBKDF2_ITERATIONS", raising=False
+    )
 
     import aigateway_api
 
