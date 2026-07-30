@@ -69,9 +69,9 @@ class ConfiguredLiteLLMBridge(_BaseLiteLLMBridge):
             )
         return cost
 
-    def _estimate_cost(self, model: str, total_tokens: int) -> PricingCost:
-        """Compatibility API for callers that only know total token count."""
-        return numeric_cost(estimate_model_cost(model, total_tokens, 0))
+    def _estimate_cost(self, model: str, total_tokens: int) -> float | None:
+        """Return strict configured cost for callers with only a total count."""
+        return estimate_model_cost(model, total_tokens, 0).amount_usd
 
     async def completion(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         """Propagate the structured pricing state to the outer bridge metadata."""
