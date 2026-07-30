@@ -118,6 +118,7 @@ class RAGRetrieverConfig:
     chunk_size: int = 512
     chunk_overlap: int = 64
     collection_name: str = ""
+    qdrant_url: str = ""
     embedding_backend: str = "local"
     embedding_model: str = ""
     embedding_device: str = "auto"
