@@ -320,3 +320,52 @@ def test_cors_preload_reads_yaml_without_overriding_explicit_env(tmp_path, monke
     monkeypatch.setenv("AI_GATEWAY_CORS_ORIGINS", "https://explicit.example")
     aigateway_api._preload_cors_origins()
     assert os.environ["AI_GATEWAY_CORS_ORIGINS"] == "https://explicit.example"
+
+
+def test_cors_preload_does_not_import_unrelated_dotenv_values(tmp_path, monkeypatch):
+    pytest.importorskip("dotenv")
+    (tmp_path / ".env").write_text(
+        "AI_GATEWAY_CORS_ORIGINS=https://dotenv.example\n"
+        "AI_GATEWAY_ADMIN_USERNAME=dotenv-admin\n"
+        "AI_GATEWAY_PASSWORD_PBKDF2_ITERATIONS=1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("AI_GATEWAY_CORS_ORIGINS", raising=False)
+    monkeypatch.delenv("AI_GATEWAY_ADMIN_USERNAME", raising=False)
+    monkeypatch.delenv("AI_GATEWAY_PASSWORD_PBKDF2_ITERATIONS", raising=False)
+
+    import aigateway_api
+
+    aigateway_api._preload_cors_origins()
+
+    assert os.environ["AI_GATEWAY_CORS_ORIGINS"] == "https://dotenv.example"
+    assert "AI_GATEWAY_ADMIN_USERNAME" not in os.environ
+    assert "AI_GATEWAY_PASSWORD_PBKDF2_ITERATIONS" not in os.environ
+
+
+def test_config_template_contains_required_runtime_values():
+    repository_root = Path(__file__).resolve().parents[2]
+    template = yaml.safe_load(
+        (repository_root / "config.yaml.template").read_text(encoding="utf-8")
+    )
+
+    auth = template["auth"]
+    assert auth["database_path"]
+    assert auth["database_timeout_seconds"] > 0
+    assert auth["admin_username"]
+    assert auth["admin_user_id"]
+    assert auth["session"]["idle_ttl_seconds"] > 0
+    assert auth["session"]["absolute_ttl_seconds"] > 0
+    assert auth["password"]["pbkdf2_iterations"] > 0
+
+    redis = template["infrastructure"]["redis"]
+    qdrant = template["infrastructure"]["qdrant"]
+    assert redis["namespace"]
+    assert qdrant["distance"]
+    assert template["cache"]["key_buckets"]["max_tokens"]
+
+    generation = template["generation_optimization"]
+    assert generation["preset_store_dir"]
+    assert generation["draft_workflow"]["store_dir"]
+    assert generation["draft_workflow"]["retention_period_hours"] > 0
