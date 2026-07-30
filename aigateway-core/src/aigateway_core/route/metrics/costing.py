@@ -35,10 +35,11 @@ class CostEstimate:
 class PricingCost(float):
     """Numeric cost carrying whether the model was priced, free or unpriced.
 
-    Existing dispatcher, metrics and SQLite arithmetic expects a float. An
-    unpriced model therefore uses numeric value ``0.0`` for compatibility while
-    retaining ``pricing_status='unpriced'`` for quota metadata and diagnostics.
-    Callers needing strict semantics should use :func:`estimate_model_cost`.
+    Internal dispatcher, quota and SQLite arithmetic expects a numeric value.
+    An unpriced model therefore uses numeric value ``0.0`` only on this internal
+    adapter while retaining ``pricing_status='unpriced'``. Strict lookup callers
+    must use :func:`estimate_model_cost` or :func:`_estimate_cost`, both of which
+    preserve ``None`` for an unknown price.
     """
 
     pricing_status: PricingStatus
@@ -88,18 +89,17 @@ def estimate_model_cost(
 
 
 def numeric_cost(estimate: CostEstimate) -> PricingCost:
-    """Adapt a structured estimate to the legacy numeric accounting interface."""
+    """Adapt a structured estimate to the internal numeric accounting interface."""
     return PricingCost(estimate)
 
 
-def _estimate_cost(model: str, total_tokens: int) -> PricingCost:
-    """Compatibility estimator for callers without a token split.
+def _estimate_cost(model: str, total_tokens: int) -> float | None:
+    """Return a strict configured cost for callers without a token split.
 
-    All tokens are treated as prompt tokens. The returned float subclass carries
-    ``pricing_status`` so quota records can distinguish an explicitly free model
-    from a missing pricing entry without breaking existing arithmetic.
+    All tokens are treated as prompt tokens. Missing pricing remains ``None``;
+    explicitly configured free models return ``0.0``.
     """
-    return numeric_cost(estimate_model_cost(model, total_tokens, 0))
+    return estimate_model_cost(model, total_tokens, 0).amount_usd
 
 
 __all__ = [
