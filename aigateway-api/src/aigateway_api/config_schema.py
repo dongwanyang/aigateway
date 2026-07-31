@@ -60,6 +60,12 @@ _DESCRIPTION_FALLBACKS: dict[str, str] = {
     "generation_optimization.draft_workflow.comfyui.video_cfg": "视频 CFG 引导强度",
 }
 
+_DESCRIPTION_OVERRIDES: dict[str, str] = {
+    "providers.*.model_grouper[].models[].capabilities": (
+        "模型能力列表，可选 text | image | video"
+    ),
+}
+
 _TYPE_FALLBACKS: dict[str, str] = {
     "auth.api_keys[].scopes": "string[]",
     "plugins[].depends_on": "string[]",
@@ -71,6 +77,16 @@ _TYPE_FALLBACKS: dict[str, str] = {
     "media_optimization.image.ocr_languages": "string[]",
     "code_rag.allowed_server_paths": "string[]",
     "code_rag.ignore_patterns": "string[]",
+}
+
+_EDITOR_OVERRIDES: dict[str, str] = {
+    "auth.api_keys[].scopes": "token_list",
+    "plugins[].depends_on": "token_list",
+    "providers.*.model_grouper[].models[].capabilities": "token_list",
+    "providers.*.model_grouper[].models[].tasks": "token_list",
+    "providers.*.model_grouper[].models[].features": "token_list",
+    "providers.*.model_grouper[].fallback_models": "token_list",
+    "media_optimization.image.ocr_languages": "token_list",
 }
 
 
@@ -228,20 +244,25 @@ def parse_template_schema(config_path: str) -> list[dict[str, Any]]:
     for path, description in _DESCRIPTION_FALLBACKS.items():
         if path in value_types and path not in comments:
             comments[path] = description
+    for path, description in _DESCRIPTION_OVERRIDES.items():
+        if path in value_types:
+            comments[path] = description
 
     items: list[dict[str, Any]] = []
     for path in order:
         description = comments.get(path)
         if not description:
             continue
-        items.append(
-            {
-                "path": path,
-                "module": path.split(".", 1)[0].replace("[]", ""),
-                "description": description,
-                "value_type": _TYPE_FALLBACKS.get(path, value_types[path]),
-            }
-        )
+        item: dict[str, Any] = {
+            "path": path,
+            "module": path.split(".", 1)[0].replace("[]", ""),
+            "description": description,
+            "value_type": _TYPE_FALLBACKS.get(path, value_types[path]),
+        }
+        editor = _EDITOR_OVERRIDES.get(path)
+        if editor:
+            item["editor"] = editor
+        items.append(item)
     return items
 
 
