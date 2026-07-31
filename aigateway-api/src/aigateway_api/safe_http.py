@@ -13,6 +13,7 @@ from fastapi import HTTPException
 
 MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 MAX_REDIRECTS = 3
+DNS_TIMEOUT_SECONDS = 5.0
 _ALLOWED_TYPES = {
     "application/json",
     "application/xml",
@@ -82,12 +83,21 @@ async def resolve_public_url(url: str) -> ResolvedPublicURL:
         addresses = (_public_address(str(literal)),)
     else:
         try:
-            records = await asyncio.to_thread(
-                socket.getaddrinfo,
-                hostname,
-                port,
-                type=socket.SOCK_STREAM,
+            records = await asyncio.wait_for(
+                asyncio.to_thread(
+                    socket.getaddrinfo,
+                    hostname,
+                    port,
+                    type=socket.SOCK_STREAM,
+                ),
+                timeout=DNS_TIMEOUT_SECONDS,
             )
+        except TimeoutError as exc:
+            raise _error(
+                400,
+                "validation_error",
+                "URL hostname resolution timed out",
+            ) from exc
         except socket.gaierror as exc:
             raise _error(
                 400,
@@ -230,6 +240,7 @@ async def fetch_public_text(url: str) -> tuple[str, str]:
         follow_redirects=False,
         trust_env=False,
         headers={"User-Agent": "aigateway-rag-import/1.0"},
+        limits=httpx.Limits(max_connections=4, max_keepalive_connections=0),
     ) as client:
         for redirect_count in range(MAX_REDIRECTS + 1):
             target = await resolve_public_url(current)
