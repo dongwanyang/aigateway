@@ -1,6 +1,6 @@
 """
 aigateway_api - AI Gateway API 服务层
-====================================
+=====================================
 
 FastAPI 应用，提供 OpenAI 兼容接口和管理接口。
 """
@@ -46,7 +46,9 @@ def _preload_cors_origins() -> None:
         return
 
     dotenv_values = _dotenv_bootstrap_values()
-    dotenv_cors = str(dotenv_values.get("AI_GATEWAY_CORS_ORIGINS") or "").strip()
+    dotenv_cors = str(
+        dotenv_values.get("AI_GATEWAY_CORS_ORIGINS") or ""
+    ).strip()
     if dotenv_cors:
         os.environ["AI_GATEWAY_CORS_ORIGINS"] = dotenv_cors
         return
@@ -81,4 +83,22 @@ def _preload_cors_origins() -> None:
         os.environ["AI_GATEWAY_CORS_ORIGINS"] = ",".join(normalized)
 
 
+def _install_config_manager() -> None:
+    """Expose the environment-aware ConfigManager before the app imports it."""
+    from aigateway_core.shared import config as config_module
+    from aigateway_core.shared.configured_config import ConfigManager
+
+    config_module.ConfigManager = ConfigManager
+
+
+def _install_admin_security_routes() -> None:
+    """Prepend security replacements before legacy admin route definitions."""
+    from . import admin_routes
+    from .security_routes import install_security_routes
+
+    install_security_routes(admin_routes.router)
+
+
 _preload_cors_origins()
+_install_config_manager()
+_install_admin_security_routes()
