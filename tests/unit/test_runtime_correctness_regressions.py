@@ -71,6 +71,16 @@ async def test_quota_update_returns_persisted_values(monkeypatch: pytest.MonkeyP
         "_get_keystore_and_metrics",
         lambda _request: (store, None),
     )
+    monkeypatch.setattr(
+        admin_routes,
+        "_get_auth_defaults",
+        lambda: {
+            "daily_tokens": 1_000_000,
+            "monthly_cost": 50.0,
+            "rate_limit_rpm": 60,
+            "rate_limit_tpm": 100_000,
+        },
+    )
     response = await admin_routes.update_api_key_quota(
         SimpleNamespace(),
         "key_demo",
