@@ -1,6 +1,7 @@
-"""Pure helpers for applying environment configuration consistently."""
+"""Pure helpers for building the effective gateway configuration."""
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -32,6 +33,10 @@ _ENV_PATH_ALIASES = {
         "generation_optimization.draft_workflow.store_dir"
     ),
 }
+
+
+def _environment(environ: Mapping[str, str] | None) -> Mapping[str, str]:
+    return environ if environ is not None else os.environ
 
 
 def parse_env_value(value: str) -> Any:
@@ -134,7 +139,7 @@ def apply_env_overrides(
     schema: Mapping[str, Any] | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> tuple[dict[str, Any], list[tuple[str, str]]]:
-    source = environ or os.environ
+    source = _environment(environ)
     applied: list[tuple[str, str]] = []
     for env_key in sorted(
         key for key in source if key.startswith(_ENV_PREFIX)
@@ -157,14 +162,15 @@ def resolve_env_references(
     *,
     environ: Mapping[str, str] | None = None,
 ) -> Any:
-    source = environ or os.environ
+    source = _environment(environ)
     if isinstance(data, str):
 
         def replace(match: re.Match[str]) -> str:
             expression = match.group(1)
             if ":-" in expression:
                 name, default = expression.split(":-", 1)
-                return source.get(name.strip(), default)
+                selected = source.get(name.strip())
+                return selected if selected else default
             name = expression.strip()
             return source.get(name, match.group(0))
 
@@ -182,8 +188,50 @@ def resolve_env_references(
     return data
 
 
+def apply_environment_mode(
+    config: dict[str, Any],
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    source = _environment(environ)
+    mode = source.get("AI_GATEWAY_ENV", "development")
+    if mode == "production":
+        config["debug_mode"] = False
+        observability = config.setdefault("observability", {})
+        if (
+            isinstance(observability, dict)
+            and str(observability.get("log_level", "info")).lower() == "debug"
+        ):
+            observability["log_level"] = "info"
+    elif mode == "development":
+        config.setdefault("hot_reload", True)
+        config.setdefault("debug_mode", True)
+    return config
+
+
+def build_effective_config(
+    raw: Mapping[str, Any],
+    *,
+    schema: Mapping[str, Any] | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> tuple[dict[str, Any], list[tuple[str, str]]]:
+    """Return one consistently resolved config for all runtime consumers."""
+    config = copy.deepcopy(dict(raw))
+    config, applied = apply_env_overrides(
+        config,
+        schema=schema,
+        environ=environ,
+    )
+    resolved = resolve_env_references(config, environ=environ)
+    if not isinstance(resolved, dict):
+        resolved = config
+    return apply_environment_mode(resolved, environ=environ), applied
+
+
 __all__ = [
+    "apply_environment_mode",
     "apply_env_overrides",
+    "build_effective_config",
     "env_key_to_config_path",
     "parse_env_value",
     "resolve_env_references",
