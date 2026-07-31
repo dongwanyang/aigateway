@@ -1,22 +1,19 @@
-"""RAG retriever with explicit infrastructure configuration.
-
-This adapter removes the process-environment configuration channel from plugin
-registration. The Qdrant URL is carried by ``RAGRetrieverConfig`` and consumed
-by the plugin instance directly.
-"""
+"""RAG retriever with explicit infrastructure configuration."""
 from __future__ import annotations
 
 import logging
+import os
 
 from aigateway_core.pipelines.understanding.rag.rag_retriever_plugin import (
     RAGRetrieverPlugin,
 )
+from aigateway_core.shared.runtime_values import get_runtime_value
 
 logger = logging.getLogger(__name__)
 
 
 class ConfiguredRAGRetrieverPlugin(RAGRetrieverPlugin):
-    """RAG plugin that consumes the Qdrant URL from its config object."""
+    """RAG plugin that consumes Qdrant deployment configuration explicitly."""
 
     def _qdrant_url(self) -> str:
         url = str(getattr(self._config, "qdrant_url", "") or "").strip()
@@ -24,8 +21,25 @@ class ConfiguredRAGRetrieverPlugin(RAGRetrieverPlugin):
             raise RuntimeError("config_missing:infrastructure.qdrant.url")
         return url.rstrip("/")
 
+    @staticmethod
+    def _qdrant_api_key() -> str | None:
+        for env_name in ("QDRANT_API_KEY", "AI_GATEWAY_QDRANT_API_KEY"):
+            value = os.environ.get(env_name, "").strip()
+            if value:
+                return value
+        try:
+            configured = get_runtime_value(
+                "infrastructure.qdrant.api_key",
+                required=False,
+            )
+        except RuntimeError:
+            return None
+        if isinstance(configured, str) and configured.strip():
+            return configured.strip()
+        return None
+
     def _initialize_index(self) -> None:
-        """Initialize LlamaIndex using the explicitly configured Qdrant URL."""
+        """Initialize LlamaIndex using authenticated Qdrant clients."""
         try:
             from llama_index.core import VectorStoreIndex
             from llama_index.vector_stores.qdrant import QdrantVectorStore
@@ -37,9 +51,13 @@ class ConfiguredRAGRetrieverPlugin(RAGRetrieverPlugin):
                 AsyncQdrantClient = None
 
             qdrant_url = self._qdrant_url()
-            client = QdrantClient(url=qdrant_url)
+            api_key = self._qdrant_api_key()
+            client_kwargs = {"url": qdrant_url}
+            if api_key:
+                client_kwargs["api_key"] = api_key
+            client = QdrantClient(**client_kwargs)
             aclient = (
-                AsyncQdrantClient(url=qdrant_url)
+                AsyncQdrantClient(**client_kwargs)
                 if AsyncQdrantClient is not None
                 else None
             )
