@@ -6,12 +6,16 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
 
 from .auth_middleware import authenticate_admin
 from .config_security import (
+    ConfigPreconditionRequiredError,
     ConfigUpdateBusyError,
     ConfigValidationError,
-    read_yaml_config,
+    ConfigVersionConflictError,
+    config_revision,
+    read_versioned_yaml_config,
     redact_config,
     transactional_replace_config,
 )
@@ -36,6 +40,28 @@ def _manager(request: Request) -> Any:
 
 
 def _config_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, ConfigPreconditionRequiredError):
+        return HTTPException(
+            428,
+            detail={
+                "error": {
+                    "code": "config_revision_required",
+                    "message": str(exc),
+                }
+            },
+        )
+    if isinstance(exc, ConfigVersionConflictError):
+        return HTTPException(
+            409,
+            detail={
+                "error": {
+                    "code": "config_version_conflict",
+                    "message": str(exc),
+                    "expected_revision": exc.expected,
+                    "current_revision": exc.current,
+                }
+            },
+        )
     if isinstance(exc, ConfigUpdateBusyError):
         return HTTPException(
             409,
@@ -72,6 +98,32 @@ def _config_error(exc: Exception) -> HTTPException:
     )
 
 
+def _expected_revision(request: Request) -> str:
+    raw = request.headers.get("if-match", "").strip()
+    if not raw:
+        raise ConfigPreconditionRequiredError(
+            "If-Match with the loaded configuration revision is required"
+        )
+    if raw.startswith("W/") or "," in raw or raw == "*":
+        raise ConfigPreconditionRequiredError(
+            "If-Match must contain one strong configuration revision"
+        )
+    if len(raw) >= 2 and raw[0] == raw[-1] == '"':
+        raw = raw[1:-1]
+    if not raw:
+        raise ConfigPreconditionRequiredError(
+            "If-Match configuration revision is empty"
+        )
+    return raw
+
+
+def _versioned_response(data: dict[str, Any], revision: str) -> JSONResponse:
+    return JSONResponse(
+        content={"data": data, "message": "success", "revision": revision},
+        headers={"ETag": f'"{revision}"'},
+    )
+
+
 async def _json_object(request: Request) -> dict[str, Any]:
     try:
         body = await request.json()
@@ -104,10 +156,8 @@ async def get_secure_full_config(
     _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     manager = _manager(request)
-    return {
-        "data": redact_config(read_yaml_config(manager.config_path)),
-        "message": "success",
-    }
+    loaded, revision = read_versioned_yaml_config(manager.config_path)
+    return _versioned_response(redact_config(loaded), revision)
 
 
 @router.put("/config")
@@ -116,40 +166,47 @@ async def update_secure_full_config(
     _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     manager = _manager(request)
-    submitted = await _json_object(request)
-    writable = {
-        "server",
-        "plugins",
-        "providers",
-        "embedding",
-        "observability",
-        "infrastructure",
-        "cache",
-        "circuit_breaker",
-        "rate_limiter",
-        "streaming",
-        "generation_optimization",
-        "code_rag",
-        "plugin_runtime",
-        "retry_budget",
-        "intent_classifier",
-        "model_selector",
-        "task_routing",
-        "generation",
-        "media_optimization",
-        "hot_reload",
-        "debug_mode",
-        "debug",
-    }
-    candidate = read_yaml_config(manager.config_path)
-    for key in writable:
-        if key in submitted:
-            candidate[key] = submitted[key]
     try:
-        transactional_replace_config(manager.config_path, candidate, manager)
+        expected = _expected_revision(request)
+        submitted = await _json_object(request)
+        writable = {
+            "server",
+            "plugins",
+            "providers",
+            "embedding",
+            "observability",
+            "infrastructure",
+            "cache",
+            "circuit_breaker",
+            "rate_limiter",
+            "streaming",
+            "generation_optimization",
+            "code_rag",
+            "plugin_runtime",
+            "retry_budget",
+            "intent_classifier",
+            "model_selector",
+            "task_routing",
+            "generation",
+            "media_optimization",
+            "hot_reload",
+            "debug_mode",
+            "debug",
+        }
+        candidate, _revision = read_versioned_yaml_config(manager.config_path)
+        for key in writable:
+            if key in submitted:
+                candidate[key] = submitted[key]
+        transactional_replace_config(
+            manager.config_path,
+            candidate,
+            manager,
+            expected_revision=expected,
+        )
     except Exception as exc:
         raise _config_error(exc) from exc
-    return {"data": {"updated": True}, "message": "success"}
+    revision = config_revision(manager.config_path)
+    return _versioned_response({"updated": True}, revision)
 
 
 @router.put("/config/table")
@@ -159,14 +216,17 @@ async def update_secure_table_config(
 ):
     manager = _manager(request)
     try:
+        expected = _expected_revision(request)
         transactional_replace_config(
             manager.config_path,
             await _json_object(request),
             manager,
+            expected_revision=expected,
         )
     except Exception as exc:
         raise _config_error(exc) from exc
-    return {"data": {"updated": True}, "message": "success"}
+    revision = config_revision(manager.config_path)
+    return _versioned_response({"updated": True}, revision)
 
 
 def _request_with_json(request: Request, body: dict[str, Any]) -> Request:
