@@ -31,7 +31,9 @@ def _allow_config_precondition_header() -> None:
     # ``main._configure_cors`` predates revisioned config writes and supplies an
     # explicit header list. Extending this construction-time set keeps existing
     # deployments compatible without broadening CORS to every request header.
-    cors.SAFELISTED_HEADERS.add("If-Match")
+    headers = set(getattr(cors, "SAFELISTED_HEADERS", set()))
+    headers.add("If-Match")
+    cors.SAFELISTED_HEADERS = headers
 
 
 def _dotenv_bootstrap_values() -> dict[str, Any]:
