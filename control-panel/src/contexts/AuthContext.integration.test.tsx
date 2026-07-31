@@ -93,6 +93,8 @@ describe('AuthProvider browser-session contract', () => {
     const user = userEvent.setup()
     const { client } = renderProvider()
     await screen.findByText('anonymous')
+    client.setQueryData(['config', 'full'], { secret: 'previous-session' })
+    client.setQueryData(['logs', 'list'], { items: ['previous-session'] })
 
     await user.click(screen.getByRole('button', { name: 'login' }))
     expect(await screen.findByText('authenticated:admin')).toBeInTheDocument()
@@ -104,7 +106,9 @@ describe('AuthProvider browser-session contract', () => {
     await user.click(screen.getByRole('button', { name: 'logout' }))
     await waitFor(() => expect(screen.getByText('anonymous')).toBeInTheDocument())
     expect(api.clearBrowserSession).toHaveBeenCalled()
-    expect(client.getQueryData(['auth', 'session'])).toEqual({ authenticated: false })
+    expect(client.getQueryData(['config', 'full'])).toBeUndefined()
+    expect(client.getQueryData(['logs', 'list'])).toBeUndefined()
+    expect(client.getQueryData(['auth', 'session'])).toMatchObject({ authenticated: false })
   })
 
   it('throws a useful error when consumed outside its provider', () => {

@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useMemo, memo, Fragment } from 'react'
+import { useEffect, useState, useCallback, useMemo, memo, Fragment, useRef } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Search, Filter, Trash2, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, X, Bug, Activity, Clock } from 'lucide-react'
 import Card from '@/components/Card'
@@ -209,6 +209,7 @@ export default function Logs() {
   const [copyFeedback, setCopyFeedback] = useState<string | null>(null)
   const [traceDetail, setTraceDetail] = useState<TraceDetail | null>(null)
   const [traceLoading, setTraceLoading] = useState(false)
+  const traceRequestSequence = useRef(0)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const pageSize = 50
   const queryParams = { page, pageSize, status: filterStatus, cacheOnly: filterCache }
@@ -330,6 +331,7 @@ export default function Logs() {
   }, [])
 
   const handleTraceClick = useCallback(async (traceId: string) => {
+    const requestId = ++traceRequestSequence.current
     setTraceLoading(true)
     try {
       const detail = await queryClient.fetchQuery({
@@ -337,8 +339,10 @@ export default function Logs() {
         queryFn: async () => (await getTraceDetail(traceId)).data,
         staleTime: 30_000,
       })
+      if (requestId !== traceRequestSequence.current) return
       setTraceDetail(detail)
     } catch {
+      if (requestId !== traceRequestSequence.current) return
       const matched = logs.filter(l => l.trace_id === traceId)
       if (matched.length > 0) {
         const primary = matched[0]
@@ -359,7 +363,7 @@ export default function Logs() {
         })
       }
     } finally {
-      setTraceLoading(false)
+      if (requestId === traceRequestSequence.current) setTraceLoading(false)
     }
   }, [logs, queryClient])
 

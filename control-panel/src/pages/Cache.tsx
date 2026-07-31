@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, Cell } from 'recharts'
 import { Database, Trash2, RefreshCw, Settings } from 'lucide-react'
 import Card from '@/components/Card'
@@ -30,6 +30,7 @@ export default function Cache() {
   const [l3ModeFilter, setL3ModeFilter] = useState<string>('')
   const [cleanupRunning, setCleanupRunning] = useState(false)
   const [showConfigPanel, setShowConfigPanel] = useState(false)
+  const l3RequestSequence = useRef(0)
 
   useEffect(() => {
     let cancelled = false
@@ -76,8 +77,7 @@ export default function Cache() {
   // Load L3 config
   useEffect(() => {
     if (activeTab === 'l3-manage') {
-      loadL3Config()
-      loadL3Entries()
+      void loadL3Config()
     }
   }, [activeTab])
 
@@ -91,6 +91,7 @@ export default function Cache() {
   }
 
   const loadL3Entries = useCallback(async () => {
+    const requestId = ++l3RequestSequence.current
     setL3Loading(true)
     try {
       const resp = await listL3Entries({
@@ -98,20 +99,26 @@ export default function Cache() {
         pageSize: 20,
         mode: l3ModeFilter || undefined,
       })
+      if (requestId !== l3RequestSequence.current) return
       setL3Entries(resp.data.items)
       setL3Total(resp.data.pagination.total)
     } catch (e) {
-      console.error('Failed to load L3 entries:', e)
+      if (requestId === l3RequestSequence.current) {
+        console.error('Failed to load L3 entries:', e)
+      }
     } finally {
-      setL3Loading(false)
+      if (requestId === l3RequestSequence.current) setL3Loading(false)
     }
   }, [l3Page, l3ModeFilter])
 
   useEffect(() => {
     if (activeTab === 'l3-manage') {
-      loadL3Entries()
+      void loadL3Entries()
     }
-  }, [l3Page, l3ModeFilter, activeTab, loadL3Entries])
+    return () => {
+      l3RequestSequence.current += 1
+    }
+  }, [activeTab, loadL3Entries])
 
   const handleToggleMode = async (entry: L3CacheEntry) => {
     const newMode = entry.mode === 'auto' ? 'manual' : 'auto'

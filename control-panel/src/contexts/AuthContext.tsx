@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, type ReactNode } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
 import {
   clearBrowserSession,
   getBrowserSession,
@@ -27,6 +27,12 @@ export interface AuthContextValue {
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null)
+
+export function clearSessionScopedQueries(queryClient: QueryClient) {
+  queryClient.removeQueries({
+    predicate: query => query.queryKey[0] !== 'auth',
+  })
+}
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient()
@@ -66,6 +72,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const login = async (username: string, password: string) => {
     const result = await loginWithPassword(username, password)
     const requiresReset = Boolean(result.force_reset)
+    clearSessionScopedQueries(queryClient)
     setAuthenticated(result.key_prefix, requiresReset)
     queryClient.setQueryData(queryKeys.auth.session, {
       authenticated: true,
@@ -82,8 +89,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       await clearBrowserSession()
     } finally {
       clear()
-      queryClient.removeQueries({ queryKey: queryKeys.auth.session })
-      queryClient.removeQueries({ queryKey: queryKeys.runtime.capabilities })
+      clearSessionScopedQueries(queryClient)
+      queryClient.setQueryData(queryKeys.auth.session, {
+        authenticated: false,
+        key_prefix: null,
+        scopes: [],
+        force_reset: false,
+      })
     }
   }
 
