@@ -290,11 +290,31 @@ async def import_secure_rag_document(
     return await import_rag_document(_request_with_json(request, body), _auth)
 
 
+def _route_conflicts(existing: Any, secured_routes: list[Any]) -> bool:
+    existing_path = getattr(existing, "path", None)
+    existing_methods = set(getattr(existing, "methods", set()) or set())
+    if not existing_path or not existing_methods:
+        return False
+    for secured in secured_routes:
+        if getattr(secured, "path", None) != existing_path:
+            continue
+        secured_methods = set(getattr(secured, "methods", set()) or set())
+        if existing_methods & secured_methods:
+            return True
+    return False
+
+
 def install_security_routes(admin_router: APIRouter) -> None:
     marker = "_aigateway_security_routes_installed"
     if getattr(admin_router, marker, False):
         return
-    admin_router.routes[0:0] = list(router.routes)
+    secured_routes = list(router.routes)
+    admin_router.routes[:] = [
+        existing
+        for existing in admin_router.routes
+        if not _route_conflicts(existing, secured_routes)
+    ]
+    admin_router.routes[0:0] = secured_routes
     setattr(admin_router, marker, True)
 
 
