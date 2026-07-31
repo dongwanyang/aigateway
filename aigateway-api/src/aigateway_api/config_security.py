@@ -26,7 +26,25 @@ _SENSITIVE_NAMES = {
     "token",
     "connection_string",
     "dsn",
+    "secret_access_key",
+    "secret_key",
+    "signing_key",
+    "encryption_key",
+    "credential",
+    "credentials",
 }
+_SENSITIVE_SUFFIXES = (
+    "_api_key",
+    "_token",
+    "_password",
+    "_secret",
+    "_secret_key",
+    "_private_key",
+    "_access_key",
+    "_credential",
+    "_credentials",
+)
+_SENSITIVE_LIST_NAMES = {"api_keys", "tokens", "passwords", "secrets"}
 _MISSING = object()
 
 
@@ -107,16 +125,14 @@ def _is_sensitive_path(path: tuple[str, ...]) -> bool:
     if not path:
         return False
     name = _normalized_name(path[-1])
+    ancestors = {_normalized_name(part) for part in path[:-1]}
+    if name.isdigit() and path[:-1]:
+        parent = _normalized_name(path[-2])
+        if parent in _SENSITIVE_LIST_NAMES:
+            return True
     if name == "key":
-        return "api_keys" in {
-            _normalized_name(part) for part in path[:-1]
-        }
-    return (
-        name in _SENSITIVE_NAMES
-        or name.endswith(
-            ("_api_key", "_token", "_password", "_secret")
-        )
-    )
+        return "api_keys" in ancestors
+    return name in _SENSITIVE_NAMES or name.endswith(_SENSITIVE_SUFFIXES)
 
 
 def _uri_contains_credentials(value: str) -> bool:
@@ -178,7 +194,7 @@ def _matching_list_item(
 ) -> Any:
     fallback = current[index] if index < len(current) else None
     if not isinstance(candidate, dict):
-        return fallback
+        return _MISSING if _contains_masked(candidate, path) else fallback
 
     # Use only the strongest supplied stable identity. Never fall through from a
     # missing id to a weaker editable field, and never use array position for a
