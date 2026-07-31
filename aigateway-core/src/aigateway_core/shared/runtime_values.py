@@ -34,13 +34,36 @@ def _environment_fingerprint() -> int:
     return hash(tuple(sorted(os.environ.items())))
 
 
+def _read_yaml_locked(path: Path) -> tuple[int, dict[str, Any]]:
+    """Read one complete inode while honoring the writer's advisory lock."""
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            try:
+                import fcntl
+            except ImportError:
+                mtime_ns = os.fstat(file.fileno()).st_mtime_ns
+                raw = yaml.safe_load(file) or {}
+            else:
+                fcntl.flock(file.fileno(), fcntl.LOCK_SH)
+                try:
+                    mtime_ns = os.fstat(file.fileno()).st_mtime_ns
+                    raw = yaml.safe_load(file) or {}
+                finally:
+                    fcntl.flock(file.fileno(), fcntl.LOCK_UN)
+    except (OSError, yaml.YAMLError) as exc:
+        raise RuntimeError(f"runtime_config_invalid:{path}") from exc
+    if not isinstance(raw, dict):
+        raise RuntimeError(f"runtime_config_not_object:{path}")
+    return mtime_ns, raw
+
+
 def load_runtime_config() -> dict[str, Any]:
     """Load and cache the same effective config observed by ConfigManager."""
     global _CACHE_PATH, _CACHE_MTIME_NS, _CACHE_ENV_FINGERPRINT, _CACHE_DATA
 
     path = _config_path()
     try:
-        stat = path.stat()
+        observed_stat = path.stat()
     except OSError as exc:
         raise RuntimeError(f"runtime_config_unavailable:{path}") from exc
 
@@ -49,22 +72,17 @@ def load_runtime_config() -> dict[str, Any]:
     with _LOCK:
         if (
             _CACHE_PATH == resolved
-            and _CACHE_MTIME_NS == stat.st_mtime_ns
+            and _CACHE_MTIME_NS == observed_stat.st_mtime_ns
             and _CACHE_ENV_FINGERPRINT == env_fingerprint
         ):
             return _CACHE_DATA
-        try:
-            raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        except (OSError, yaml.YAMLError) as exc:
-            raise RuntimeError(f"runtime_config_invalid:{path}") from exc
-        if not isinstance(raw, dict):
-            raise RuntimeError(f"runtime_config_not_object:{path}")
+        locked_mtime_ns, raw = _read_yaml_locked(path)
         effective, _applied = build_effective_config(
             raw,
             schema=_DEFAULT_CONFIG,
         )
         _CACHE_PATH = resolved
-        _CACHE_MTIME_NS = stat.st_mtime_ns
+        _CACHE_MTIME_NS = locked_mtime_ns
         _CACHE_ENV_FINGERPRINT = env_fingerprint
         _CACHE_DATA = effective
         return _CACHE_DATA
