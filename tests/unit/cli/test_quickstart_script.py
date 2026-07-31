@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -25,16 +26,18 @@ def _run(
     script: Path,
     *args: str,
     check: bool = True,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["bash", str(script), *args],
         check=check,
         capture_output=True,
         text=True,
+        env={**os.environ, **(env or {})},
     )
 
 
-def test_quickstart_generates_full_source_state_and_runtime_config(tmp_path):
+def test_quickstart_generates_full_cpu_source_state_without_nvidia(tmp_path):
     script = _fixture_repo(tmp_path)
     _run(
         script,
@@ -45,15 +48,16 @@ def test_quickstart_generates_full_source_state_and_runtime_config(tmp_path):
         "source",
         "--monitoring",
         "--no-start",
+        env={"PATH": "/usr/bin:/bin"},
     )
 
     state = (tmp_path / ".aigateway-install.env").read_text(encoding="utf-8")
     assert "AIGATEWAY_EDITION=full" in state
     assert "AIGATEWAY_DISTRIBUTION=source" in state
-    assert "GATEWAY_IMAGE_TARGET=gateway-full" in state
+    assert "GATEWAY_IMAGE_TARGET=gateway-full-cpu" in state
     assert (
         "GATEWAY_BUILD_CACHE_FROM="
-        "type=registry,ref=ghcr.io/dongwanyang/aigateway-gateway:latest-full-cuda"
+        "type=registry,ref=ghcr.io/dongwanyang/aigateway-gateway:latest-full-cpu"
     ) in state
     assert (
         "COMFYUI_BUILD_CACHE_FROM="
@@ -64,16 +68,81 @@ def test_quickstart_generates_full_source_state_and_runtime_config(tmp_path):
         "type=registry,ref=ghcr.io/dongwanyang/aigateway-control-panel:latest"
     ) in state
     assert "COMPOSE_PROFILES=knowledge,comfy-container,monitoring" in state
+    assert "AIGATEWAY_SHARED_GPU=false" in state
 
     runtime = yaml.safe_load(
         (tmp_path / ".aigateway/runtime/config.yaml").read_text(encoding="utf-8")
     )
     assert runtime["deployment"]["edition"] == "full"
+    assert runtime["deployment"]["accelerator"] == "cpu"
     rag = next(item for item in runtime["plugins"] if item["name"] == "rag_retriever")
     assert rag["enabled"] is True
-    assert rag["config"]["embedding_device"] == "cuda"
-    assert rag["config"]["rerank_device"] == "cuda"
+    assert rag["config"]["embedding_device"] == "cpu"
+    assert rag["config"]["rerank_device"] == "cpu"
     assert runtime["generation_optimization"]["draft_workflow"]["enabled"] is True
+
+
+def test_quickstart_refuses_to_start_local_comfyui_without_nvidia(tmp_path):
+    script = _fixture_repo(tmp_path)
+    result = _run(
+        script,
+        "--non-interactive",
+        "--edition",
+        "studio",
+        "--distribution",
+        "source",
+        check=False,
+        env={"PATH": "/usr/bin:/bin"},
+    )
+    assert result.returncode != 0
+    assert "未检测到可用 NVIDIA GPU" in result.stderr
+    assert "--comfyui remote" in result.stderr
+
+
+def test_quickstart_marks_single_gpu_studio_as_shared(tmp_path):
+    script = _fixture_repo(tmp_path)
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    nvidia_smi = fake_bin / "nvidia-smi"
+    nvidia_smi.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "-L" ]]; then
+  echo 'GPU 0: Test GPU (UUID: GPU-test)'
+  exit 0
+fi
+if [[ " $* " == *" --query-gpu=memory.total "* ]]; then
+  echo '24576'
+  exit 0
+fi
+exit 0
+""",
+        encoding="utf-8",
+    )
+    nvidia_smi.chmod(0o755)
+
+    _run(
+        script,
+        "--non-interactive",
+        "--edition",
+        "studio",
+        "--distribution",
+        "source",
+        "--no-start",
+        env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
+    )
+
+    state = (tmp_path / ".aigateway-install.env").read_text(encoding="utf-8")
+    assert "GATEWAY_IMAGE_TARGET=gateway-vision" in state
+    assert "AIGATEWAY_SHARED_GPU=true" in state
+    assert "GATEWAY_CUDA_MEMORY_FRACTION=0.20" in state
+
+    runtime = yaml.safe_load(
+        (tmp_path / ".aigateway/runtime/config.yaml").read_text(encoding="utf-8")
+    )
+    assert runtime["deployment"]["shared_gpu"] is True
+    clip = runtime["generation_optimization"]["token_compressor"]["clip"]
+    assert clip["device"] == "cpu"
 
 
 def test_quickstart_show_plan_does_not_create_state(tmp_path):

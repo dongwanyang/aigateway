@@ -124,8 +124,12 @@ elif [[ "$os_name" == "Linux" ]]; then
   if grep -qi microsoft /proc/version 2>/dev/null; then
     platform="windows-wsl2"
   fi
-  if [[ "$edition" != "lite" ]]; then
+  if [[ "$edition" != "lite" ]] \
+      && command -v nvidia-smi >/dev/null 2>&1 \
+      && nvidia-smi -L >/dev/null 2>&1; then
     accelerator="cuda"
+  else
+    accelerator="cpu"
   fi
 else
   fail "当前仅支持 Linux、Windows WSL2 和 Apple Silicon"
@@ -168,6 +172,12 @@ case "$edition" in
   studio) needs_studio="true" ;;
   full) needs_knowledge="true"; needs_studio="true" ;;
 esac
+shared_gpu="false"
+if [[ "$accelerator" == "cuda" && "$gpu_count" == "1" \
+      && "$needs_studio" == "true" ]]; then
+  shared_gpu="true"
+  gateway_memory_fraction="0.20"
+fi
 
 if [[ -z "$comfyui_mode" ]]; then
   if [[ "$needs_studio" != "true" ]]; then
@@ -196,6 +206,11 @@ fi
 if [[ "$platform" != "apple" && "$comfyui_mode" == "native" ]]; then
   fail "native ComfyUI 当前仅支持 Apple Silicon"
 fi
+if [[ "$start" == "true" && "$needs_studio" == "true" \
+      && "$platform" != "apple" && "$accelerator" != "cuda" \
+      && "$comfyui_mode" == "container" ]]; then
+  fail "本机未检测到可用 NVIDIA GPU，不能启动容器版 ComfyUI；请使用 --comfyui remote --comfyui-url URL"
+fi
 if [[ "$embedding_mode" == "remote" && "$needs_knowledge" == "true" && -z "$embedding_url" ]]; then
   fail "--embedding remote 必须同时提供 --embedding-url"
 fi
@@ -213,14 +228,17 @@ if [[ "$embedding_mode" == "native" ]]; then
 fi
 
 version="${AIGATEWAY_VERSION:-latest}"
-case "$edition:$platform" in
-  lite:*) target="gateway-runtime"; image_suffix="lite" ;;
-  knowledge:apple) target="gateway-rag-cpu"; image_suffix="knowledge" ;;
-  knowledge:*) target="gateway-rag"; image_suffix="knowledge-cuda" ;;
-  studio:apple) target="gateway-vision-cpu"; image_suffix="studio-arm64" ;;
-  studio:*) target="gateway-vision"; image_suffix="studio-cuda" ;;
-  full:apple) target="gateway-full-cpu"; image_suffix="full-arm64" ;;
-  full:*) target="gateway-full"; image_suffix="full-cuda" ;;
+case "$edition:$platform:$accelerator" in
+  lite:*:*) target="gateway-runtime"; image_suffix="lite" ;;
+  knowledge:apple:*) target="gateway-rag-cpu"; image_suffix="knowledge" ;;
+  knowledge:*:cuda) target="gateway-rag"; image_suffix="knowledge-cuda" ;;
+  knowledge:*:cpu) target="gateway-rag-cpu"; image_suffix="knowledge" ;;
+  studio:apple:*) target="gateway-vision-cpu"; image_suffix="studio-arm64" ;;
+  studio:*:cuda) target="gateway-vision"; image_suffix="studio-cuda" ;;
+  studio:*:cpu) target="gateway-vision-cpu"; image_suffix="studio-cpu" ;;
+  full:apple:*) target="gateway-full-cpu"; image_suffix="full-arm64" ;;
+  full:*:cuda) target="gateway-full"; image_suffix="full-cuda" ;;
+  full:*:cpu) target="gateway-full-cpu"; image_suffix="full-cpu" ;;
 esac
 gateway_image="ghcr.io/dongwanyang/aigateway-gateway:${version}-${image_suffix}"
 control_image="ghcr.io/dongwanyang/aigateway-control-panel:${version}"
@@ -246,6 +264,7 @@ show_summary() {
   fi
   printf '  ComfyUI      : %s\n' "$comfyui_mode"
   printf '  Embedding    : %s\n' "$embedding_mode"
+  printf '  Shared GPU   : %s\n' "$shared_gpu"
   printf '  Profiles     : %s\n' "${compose_profiles:-core}"
   printf '  Monitoring   : %s\n' "$monitoring"
   printf '  Production   : %s\n\n' "$production"
@@ -299,6 +318,7 @@ trap 'rm -f "$tmp_state"' EXIT
   echo "GATEWAY_CUDA_VISIBLE_DEVICES=$gateway_gpu_device"
   echo "COMFYUI_CUDA_VISIBLE_DEVICES=$comfyui_gpu_device"
   echo "GATEWAY_CUDA_MEMORY_FRACTION=$gateway_memory_fraction"
+  echo "AIGATEWAY_SHARED_GPU=$shared_gpu"
   echo "COMFYUI_VRAM_FLAG=$comfyui_vram_flag"
   echo "COMPOSE_PROFILES=$compose_profiles"
 } > "$tmp_state"
@@ -316,6 +336,7 @@ render_args=(
   --embedding-url "$embedding_url"
 )
 [[ "$monitoring" == "true" ]] && render_args+=(--monitoring)
+[[ "$shared_gpu" == "true" ]] && render_args+=(--shared-gpu)
 python3 "${render_args[@]}"
 
 if [[ ! -f "$ROOT_DIR/.env" ]]; then

@@ -596,11 +596,15 @@ async def lifespan(app: "FastAPI"):
     try:
         from aigateway_core.prefix.cache.l3_semantic import (
             set_l3_device,
+            set_l3_idle_unload_seconds,
             set_l3_model,
         )
         l3_dev = config_manager.get("embedding.device", "auto")
         set_l3_model(config_manager.get("embedding.model", "Qwen/Qwen3-Embedding-0.6B"))
         set_l3_device(l3_dev)
+        set_l3_idle_unload_seconds(
+            float(config_manager.get("embedding.idle_unload_seconds", 300))
+        )
     except Exception as exc:
         logger.warning("L3 device 注入失败（默认 auto）: %s", exc)
 

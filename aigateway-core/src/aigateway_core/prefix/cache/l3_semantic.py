@@ -22,6 +22,7 @@ The two do not conflict — different signatures, different call sites.
 from __future__ import annotations
 
 import asyncio
+import gc
 import logging
 import os
 import threading
@@ -42,6 +43,9 @@ _l3_model_lock = threading.Lock()
 # 避免在本 core 层反向依赖 shared.config（参照 LiteLLMBridge.set_auto_resolver 模式）。
 _l3_device: str = "auto"
 _l3_model_name: str = "Qwen/Qwen3-Embedding-0.6B"
+_l3_idle_unload_seconds: float = 300.0
+_l3_idle_generation: int = 0
+_l3_idle_task: asyncio.Task[None] | None = None
 
 
 def set_l3_device(device: str) -> None:
@@ -67,6 +71,99 @@ def set_l3_model(model_name: str) -> None:
     _l3_model_name = model_name.strip() or "Qwen/Qwen3-Embedding-0.6B"
 
 
+def set_l3_idle_unload_seconds(seconds: float) -> None:
+    """Configure automatic model release after an idle interval.
+
+    ``0`` disables automatic release.  The setting only affects future inference
+    calls and never interrupts an active model invocation because release uses the
+    same module lock as loading and inference.
+    """
+    global _l3_idle_unload_seconds
+    value = float(seconds)
+    if value < 0:
+        raise ValueError("embedding.idle_unload_seconds must be >= 0")
+    _l3_idle_unload_seconds = value
+
+
+def _invalidate_idle_release() -> None:
+    """Mark current activity and cancel a pending timer from the event loop."""
+    global _l3_idle_generation, _l3_idle_task
+    _l3_idle_generation += 1
+    previous = _l3_idle_task
+    _l3_idle_task = None
+    if previous is not None and previous is not asyncio.current_task() and not previous.done():
+        previous.cancel()
+
+
+def _release_l3_model_if_generation(expected_generation: int) -> bool | None:
+    """Release only if no request became active after the timer was scheduled."""
+    with _l3_model_lock:
+        if expected_generation != _l3_idle_generation:
+            return None
+        model = _l3_model_cache.pop("model", None)
+        tokenizer = _l3_model_cache.pop("tokenizer", None)
+        _l3_model_cache.pop("device", None)
+        resident = model is not None or tokenizer is not None
+        if model is not None:
+            try:
+                model.to("cpu")
+            except Exception:
+                pass
+        del model, tokenizer
+
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_initialized():
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass
+    return resident
+
+
+def release_l3_model() -> bool:
+    """Release the cached L3 model unless inference became active concurrently."""
+    global _l3_idle_generation, _l3_idle_task
+    _l3_idle_generation += 1
+    generation = _l3_idle_generation
+    _l3_idle_task = None
+    released = _release_l3_model_if_generation(generation)
+    return bool(released)
+
+
+def _schedule_idle_release() -> None:
+    global _l3_idle_generation, _l3_idle_task
+    if _l3_idle_unload_seconds <= 0:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    _l3_idle_generation += 1
+    generation = _l3_idle_generation
+    previous = _l3_idle_task
+    if previous is not None and not previous.done():
+        previous.cancel()
+
+    async def release_after_idle() -> None:
+        try:
+            await asyncio.sleep(_l3_idle_unload_seconds)
+        except asyncio.CancelledError:
+            return
+        released = await asyncio.to_thread(
+            _release_l3_model_if_generation,
+            generation,
+        )
+        if released is not None:
+            logger.info(
+                "L3 embedding model idle cleanup completed after %.0fs",
+                _l3_idle_unload_seconds,
+            )
+
+    _l3_idle_task = loop.create_task(release_after_idle())
+
+
 async def _compute_l3_vector(text: str, *, load_if_missing: bool = True) -> list | None:
     """使用 Qwen/Qwen3-Embedding-0.6B 计算 1024 维 embedding 向量。
 
@@ -81,20 +178,24 @@ async def _compute_l3_vector(text: str, *, load_if_missing: bool = True) -> list
     Returns:
         1024 维归一化向量列表，失败返回 None。
     """
-    if not load_if_missing and "tokenizer" not in _l3_model_cache:
+    if not load_if_missing and "model" not in _l3_model_cache:
         return None
-    return await asyncio.to_thread(
+    _invalidate_idle_release()
+    result = await asyncio.to_thread(
         _compute_l3_vector_sync,
         text,
         load_if_missing,
     )
+    if result is not None:
+        _schedule_idle_release()
+    return result
 
 
 def _compute_l3_vector_sync(
     text: str,
     load_if_missing: bool = True,
 ) -> list | None:
-    """在线程中加载并执行同步 transformers 模型。"""
+    """在线程中加载并执行同步 transformers 模型."""
     try:
         import torch
         from transformers import AutoModel, AutoTokenizer
@@ -102,13 +203,15 @@ def _compute_l3_vector_sync(
         model_name = _l3_model_name
         local_only = os.path.isabs(model_name)
 
-        # 模型对象跨请求共享；串行化加载与推理，避免重复冷加载和并发访问。
+        # Model objects are shared across requests.  Publish tokenizer/model/device
+        # as one atomic cache update only after every loading step succeeds; an
+        # OOM or corrupt model must not leave a permanently poisoned partial cache.
         with _l3_model_lock:
-            if "tokenizer" not in _l3_model_cache:
+            if "model" not in _l3_model_cache:
                 if not load_if_missing:
                     return None
                 logger.info("Loading L3 embedding model: %s", model_name)
-                _l3_model_cache["tokenizer"] = AutoTokenizer.from_pretrained(
+                tokenizer = AutoTokenizer.from_pretrained(
                     model_name,
                     trust_remote_code=True,
                     local_files_only=local_only,
@@ -118,12 +221,18 @@ def _compute_l3_vector_sync(
                     raise RuntimeError("semantic_cache_cuda_unavailable")
                 if device == "auto":
                     device = "cuda" if torch.cuda.is_available() else "cpu"
-                _l3_model_cache["device"] = device
-                _l3_model_cache["model"] = AutoModel.from_pretrained(
+                model = AutoModel.from_pretrained(
                     model_name,
                     trust_remote_code=True,
                     local_files_only=local_only,
                 ).to(device).eval()
+                _l3_model_cache.update(
+                    {
+                        "tokenizer": tokenizer,
+                        "device": device,
+                        "model": model,
+                    }
+                )
                 logger.info("L3 embedding model loaded on device=%s", device)
 
             tokenizer = _l3_model_cache["tokenizer"]
@@ -158,6 +267,11 @@ def _compute_l3_vector_sync(
         return None
     except Exception as exc:
         logger.warning("L3 vector computation failed: %s", exc)
+        try:
+            if torch.cuda.is_initialized():
+                torch.cuda.empty_cache()
+        except (NameError, AttributeError):
+            pass
         return None
 
 
@@ -180,15 +294,13 @@ async def _safe_l3_backfill(
         if cache_manager._qdrant_client is None:
             return
 
-        # 计算 embedding 向量
         vector = await _compute_l3_vector(normalized_messages)
         if vector is None:
             return
 
-        # 存入 Qdrant
         await cache_manager.l3_store(
             prompt_hash=cache_key,
-            prompt_normalized=normalized_messages[:500],  # 截断避免 payload 过大
+            prompt_normalized=normalized_messages[:500],
             model=model,
             response_json=value_str,
             user_id=user_id,

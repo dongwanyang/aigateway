@@ -30,6 +30,7 @@ def render(
     comfyui_url: str,
     embedding_url: str,
     monitoring: bool,
+    shared_gpu: bool = False,
 ) -> dict[str, Any]:
     if edition not in EDITIONS:
         raise ValueError(f"unsupported edition: {edition}")
@@ -51,6 +52,8 @@ def render(
         if knowledge and external_embedding
         else "mps"
         if knowledge and accelerator == "mps"
+        else "cpu"
+        if shared_gpu
         else "cuda"
         if knowledge and accelerator == "cuda"
         else "cpu"
@@ -78,7 +81,9 @@ def render(
                 "embedding_model": "/models/qwen3-embedding-0.6b",
                 "embedding_api_base": None,
                 "embedding_api_key": None,
-                "embedding_device": "cuda" if knowledge else "cpu",
+                "embedding_device": (
+                    "cpu" if shared_gpu else "cuda" if knowledge and accelerator == "cuda" else "cpu"
+                ),
             }
         )
 
@@ -86,11 +91,14 @@ def render(
     embedding_config["model"] = "/models/qwen3-embedding-0.6b"
     embedding_config["device"] = (
         "cuda"
-        if knowledge and accelerator == "cuda" and not external_embedding
+        if knowledge and accelerator == "cuda" and not external_embedding and not shared_gpu
         else "cpu"
     )
+    embedding_config["idle_unload_seconds"] = 300
     prompt_config = _plugin(config, "prompt_compress").setdefault("config", {})
-    prompt_config["device"] = "cuda" if accelerator == "cuda" else "cpu"
+    prompt_config["device"] = (
+        "cuda" if accelerator == "cuda" and not shared_gpu else "cpu"
+    )
     config.setdefault("code_rag", {})["enabled"] = knowledge
     config.setdefault("media_optimization", {})["enabled"] = studio
     config.setdefault("observability", {})["prometheus_enabled"] = monitoring
@@ -104,7 +112,7 @@ def render(
     comfy["required"] = True
     token = generation.setdefault("token_compressor", {})
     token.setdefault("clip", {})["device"] = (
-        "cuda" if studio and accelerator == "cuda" else "cpu"
+        "cuda" if studio and accelerator == "cuda" and not shared_gpu else "cpu"
     )
 
     config["deployment"] = {
@@ -113,6 +121,7 @@ def render(
         "embedding_mode": embedding_mode,
         "comfyui_enabled": studio,
         "rag_enabled": knowledge,
+        "shared_gpu": shared_gpu,
     }
     return config
 
@@ -152,6 +161,7 @@ def main() -> int:
     parser.add_argument("--comfyui-url", required=True)
     parser.add_argument("--embedding-url", default="")
     parser.add_argument("--monitoring", action="store_true")
+    parser.add_argument("--shared-gpu", action="store_true")
     args = parser.parse_args()
     config = render(
         args.source,
@@ -161,6 +171,7 @@ def main() -> int:
         comfyui_url=args.comfyui_url,
         embedding_url=args.embedding_url,
         monitoring=args.monitoring,
+        shared_gpu=args.shared_gpu,
     )
     _atomic_dump(args.output, config)
     return 0

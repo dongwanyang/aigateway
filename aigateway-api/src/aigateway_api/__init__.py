@@ -112,6 +112,14 @@ def _install_admin_security_guards() -> None:
     admin_routes._assert_draft_owner = assert_draft_owner
 
 
+def _install_gpu_routes() -> None:
+    """Install authenticated GPU diagnostics and memory-release endpoints."""
+    from . import admin_routes
+    from .gpu_routes import install_gpu_routes
+
+    install_gpu_routes(admin_routes.router)
+
+
 def _install_config_schema_parser() -> None:
     """Install YAML-aware schema parsing and remove the legacy write route."""
     from . import routes
@@ -132,4 +140,5 @@ _ensure_core_src()
 _allow_config_precondition_header()
 _preload_cors_origins()
 _install_admin_security_guards()
+_install_gpu_routes()
 _install_config_schema_parser()
