@@ -1,10 +1,8 @@
-"""Small, dependency-light accessors for runtime values stored in config.yaml.
+"""Small, dependency-light accessors for effective runtime configuration.
 
-This module is used by low-level components that are created without a
-``ConfigManager`` reference. It keeps deployment values in YAML while avoiding
-new global clients or import-time service initialization.
+Low-level components do not receive a ``ConfigManager`` reference, but they must
+still observe the same process-environment > .env > YAML precedence contract.
 """
-
 from __future__ import annotations
 
 import os
@@ -15,23 +13,29 @@ from typing import Any
 
 import yaml
 
+from .config_env import apply_env_overrides, resolve_env_references
+
 _LOCK = RLock()
 _CACHE_PATH: str | None = None
 _CACHE_MTIME_NS: int | None = None
+_CACHE_ENV_FINGERPRINT: int | None = None
 _CACHE_DATA: dict[str, Any] = {}
 _SAFE_NAMESPACE = re.compile(r"[^A-Za-z0-9_.-]+")
-_ENV_VALUE = re.compile(
-    r"^\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?::-(?P<default>[^}]*))?\}$"
-)
 
 
 def _config_path() -> Path:
-    return Path(os.environ.get("AI_GATEWAY_CONFIG_PATH", "./config.yaml")).expanduser()
+    return Path(
+        os.environ.get("AI_GATEWAY_CONFIG_PATH", "./config.yaml")
+    ).expanduser()
+
+
+def _environment_fingerprint() -> int:
+    return hash(tuple(sorted(os.environ.items())))
 
 
 def load_runtime_config() -> dict[str, Any]:
-    """Load config.yaml and refresh the cache when the file mtime changes."""
-    global _CACHE_PATH, _CACHE_MTIME_NS, _CACHE_DATA
+    """Load YAML, apply environment overrides and cache the effective result."""
+    global _CACHE_PATH, _CACHE_MTIME_NS, _CACHE_ENV_FINGERPRINT, _CACHE_DATA
 
     path = _config_path()
     try:
@@ -40,8 +44,13 @@ def load_runtime_config() -> dict[str, Any]:
         raise RuntimeError(f"runtime_config_unavailable:{path}") from exc
 
     resolved = str(path.resolve())
+    env_fingerprint = _environment_fingerprint()
     with _LOCK:
-        if _CACHE_PATH == resolved and _CACHE_MTIME_NS == stat.st_mtime_ns:
+        if (
+            _CACHE_PATH == resolved
+            and _CACHE_MTIME_NS == stat.st_mtime_ns
+            and _CACHE_ENV_FINGERPRINT == env_fingerprint
+        ):
             return _CACHE_DATA
         try:
             raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
@@ -49,14 +58,18 @@ def load_runtime_config() -> dict[str, Any]:
             raise RuntimeError(f"runtime_config_invalid:{path}") from exc
         if not isinstance(raw, dict):
             raise RuntimeError(f"runtime_config_not_object:{path}")
+        raw, _applied = apply_env_overrides(raw)
+        effective = resolve_env_references(raw)
+        if not isinstance(effective, dict):
+            raise RuntimeError(f"runtime_config_not_object:{path}")
         _CACHE_PATH = resolved
         _CACHE_MTIME_NS = stat.st_mtime_ns
-        _CACHE_DATA = raw
+        _CACHE_ENV_FINGERPRINT = env_fingerprint
+        _CACHE_DATA = effective
         return _CACHE_DATA
 
 
 def get_runtime_value(path: str, *, required: bool = True) -> Any:
-    """Read a dotted configuration path from the current YAML file."""
     value: Any = load_runtime_config()
     for part in path.split("."):
         if not isinstance(value, dict) or part not in value:
@@ -68,23 +81,16 @@ def get_runtime_value(path: str, *, required: bool = True) -> Any:
 
 
 def configured_text(path: str) -> str:
-    """Return a non-empty text value with ``${VAR:-default}`` expansion."""
     raw = get_runtime_value(path)
-    if not isinstance(raw, str):
-        raise RuntimeError(f"runtime_config_invalid:{path}")
-    value = raw.strip()
-    match = _ENV_VALUE.fullmatch(value)
-    if match:
-        env_value = os.environ.get(match.group("name"), "")
-        default = match.group("default")
-        value = env_value if env_value else (default or "")
-    if not value:
+    if not isinstance(raw, str) or not raw.strip():
         raise RuntimeError(f"runtime_config_missing:{path}")
-    return value
+    return raw.strip()
 
 
-def configured_number(path: str, number_type: type[int] | type[float] = float):
-    """Return a positive int/float stored in config.yaml."""
+def configured_number(
+    path: str,
+    number_type: type[int] | type[float] = float,
+):
     raw = get_runtime_value(path)
     try:
         value = number_type(raw)
@@ -96,12 +102,6 @@ def configured_number(path: str, number_type: type[int] | type[float] = float):
 
 
 def configured_path(path: str) -> str:
-    """Resolve a configured filesystem path relative to config.yaml.
-
-    Absolute paths are preserved. Relative paths are anchored to the directory
-    containing the active configuration file rather than the process working
-    directory, making container, systemd and test launches deterministic.
-    """
     raw = configured_text(path)
     value = Path(raw).expanduser()
     if not value.is_absolute():
@@ -110,24 +110,33 @@ def configured_path(path: str) -> str:
 
 
 def _namespace() -> str:
-    explicit = get_runtime_value("infrastructure.redis.namespace", required=False)
+    explicit = get_runtime_value(
+        "infrastructure.redis.namespace",
+        required=False,
+    )
     source = explicit or get_runtime_value("observability.otel_service_name")
     normalized = _SAFE_NAMESPACE.sub("-", str(source).strip()).strip("-:.")
     if not normalized:
-        raise RuntimeError("runtime_config_invalid:infrastructure.redis.namespace")
+        raise RuntimeError(
+            "runtime_config_invalid:infrastructure.redis.namespace"
+        )
     return normalized
 
 
 def redis_key_prefix(component: str) -> str:
-    """Return an explicit component prefix or derive one from the YAML namespace."""
-    overrides = get_runtime_value("infrastructure.redis.key_prefixes", required=False)
+    overrides = get_runtime_value(
+        "infrastructure.redis.key_prefixes",
+        required=False,
+    )
     if isinstance(overrides, dict):
         configured = overrides.get(component)
         if isinstance(configured, str) and configured.strip():
             return configured.strip().rstrip(":")
 
     namespace = _namespace()
-    pipeline_version = str(get_runtime_value("cache.pipeline_version")).strip()
+    pipeline_version = str(
+        get_runtime_value("cache.pipeline_version")
+    ).strip()
     if component == "l2_index":
         return f"{namespace}:l2:idx:v{pipeline_version}"
     if component == "l2_hash":
@@ -136,7 +145,9 @@ def redis_key_prefix(component: str) -> str:
 
 
 def media_cache_ttl_seconds() -> int:
-    return int(configured_number("media_optimization.media_cache_ttl", int))
+    return int(
+        configured_number("media_optimization.media_cache_ttl", int)
+    )
 
 
 def _group_model_names(group: dict[str, Any]) -> set[str]:
@@ -163,13 +174,6 @@ def _group_model_names(group: dict[str, Any]) -> set[str]:
 
 
 def configured_model_pricing(model: str) -> dict[str, float] | None:
-    """Return model pricing from ``providers.*.model_grouper[].pricing``.
-
-    Lookup order matches bridge registration: full model name, bare model name,
-    provider key, then ``$default``. Every lookup is constrained to the group that
-    actually registers the model or fallback. The function intentionally has no
-    built-in model table; a missing model is represented by ``None``.
-    """
     bare_model = model.split("/")[-1]
     providers = get_runtime_value("providers", required=False)
     if not isinstance(providers, dict):
@@ -200,7 +204,10 @@ def configured_model_pricing(model: str) -> dict[str, float] | None:
                     candidate
                     for candidate in candidates
                     if isinstance(candidate, dict)
-                    and ("prompt" in candidate or "completion" in candidate)
+                    and (
+                        "prompt" in candidate
+                        or "completion" in candidate
+                    )
                 ),
                 None,
             )
@@ -214,6 +221,8 @@ def configured_model_pricing(model: str) -> dict[str, float] | None:
                     f"runtime_config_invalid:pricing:{bare_model}"
                 ) from exc
             if prompt < 0 or completion < 0:
-                raise RuntimeError(f"runtime_config_invalid:pricing:{bare_model}")
+                raise RuntimeError(
+                    f"runtime_config_invalid:pricing:{bare_model}"
+                )
             return {"prompt": prompt, "completion": completion}
     return None
