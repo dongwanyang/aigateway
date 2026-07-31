@@ -94,6 +94,16 @@ export interface GenerationPreset {
   validation: { missing_models: string[]; missing_nodes: string[] }
 }
 export async function getComfyUIStatus(): Promise<ApiResponse<ComfyUIStatus>> { return fetchJson<ComfyUIStatus>('/admin/comfyui/status') }
+export interface GpuStatusData {
+  gateway: { available: boolean; name?: string | null; allocated_bytes: number; reserved_bytes: number; device_used_bytes: number; device_free_bytes: number; device_total_bytes: number }
+  comfyui: { available: boolean; memory: { total_bytes: number | null; free_bytes: number | null; used_bytes: number | null } | null; endpoint_errors?: Record<string, string> }
+  queue: { running?: number; pending?: number } | null
+  queue_idle: boolean | null
+  shared_gpu: boolean
+  diagnosis: string[]
+}
+export async function getGpuStatus(): Promise<ApiResponse<GpuStatusData>> { return fetchJson<GpuStatusData>('/admin/gpu/status') }
+export async function releaseGpuMemory(): Promise<ApiResponse<{ gateway_models: Record<string, boolean>; comfyui: Record<string, unknown>; gateway: GpuStatusData['gateway'] }>> { return fetchJson<{ gateway_models: Record<string, boolean>; comfyui: Record<string, unknown>; gateway: GpuStatusData['gateway'] }>('/admin/gpu/release', { method: 'POST', body: JSON.stringify({}) }) }
 export async function getGenerationPresets(): Promise<ApiResponse<GenerationPreset[]>> { return fetchJson<GenerationPreset[]>('/admin/generation-presets') }
 export async function setPluginDebug(name: string, enabled: boolean): Promise<ApiResponse<{ plugin: string; debug: boolean }>> { return fetchJson<{ plugin: string; debug: boolean }>(`/admin/plugins/${encodeURIComponent(name)}/debug`, { method: 'POST', body: JSON.stringify({ enabled }) }) }
 export async function getDebugConfig(): Promise<DebugConfig> { return (await fetchJson<DebugConfig>('/admin/config/debug')).data }

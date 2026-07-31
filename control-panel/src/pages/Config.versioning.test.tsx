@@ -15,6 +15,18 @@ vi.mock('@/api/client', () => ({
     data: [],
     message: 'success',
   })),
+  getGpuStatus: vi.fn(async () => ({
+    data: {
+      gateway: { available: false, allocated_bytes: 0, reserved_bytes: 0, device_used_bytes: 0, device_free_bytes: 0, device_total_bytes: 0 },
+      comfyui: { available: false, memory: null },
+      queue: { running: 0, pending: 0 },
+      queue_idle: true,
+      shared_gpu: false,
+      diagnosis: [],
+    },
+    message: 'success',
+  })),
+  releaseGpuMemory: vi.fn(async () => ({ data: {}, message: 'success' })),
 }))
 
 function renderConfig() {

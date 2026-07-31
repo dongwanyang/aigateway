@@ -178,6 +178,48 @@ function responseFor(input: RequestInfo | URL, init?: RequestInit): Response {
       'gateway_request_duration_seconds_bucket{model="gpt",le="0.5"} 10',
     ].join('\n'))
   }
+  if (url.endsWith('/admin/gpu/status')) {
+    return Response.json({
+      data: {
+        gateway: {
+          available: true,
+          name: 'Test GPU',
+          allocated_bytes: 1024,
+          reserved_bytes: 2048,
+          device_used_bytes: 4096,
+          device_free_bytes: 4096,
+          device_total_bytes: 8192,
+        },
+        comfyui: {
+          available: true,
+          memory: { total_bytes: 8192, free_bytes: 4096, used_bytes: 4096 },
+          endpoint_errors: {},
+        },
+        queue: { running: 0, pending: 0 },
+        queue_idle: true,
+        shared_gpu: true,
+        diagnosis: ['gateway_and_comfyui_share_one_gpu'],
+      },
+      message: 'success',
+    })
+  }
+  if (url.endsWith('/admin/gpu/release')) {
+    return Response.json({
+      data: {
+        gateway_models: { l3_embedding: true, rag_embedding: false },
+        comfyui: { requested: true, released: true },
+        gateway: {
+          available: true,
+          allocated_bytes: 0,
+          reserved_bytes: 0,
+          device_used_bytes: 0,
+          device_free_bytes: 8192,
+          device_total_bytes: 8192,
+        },
+      },
+      message: 'success',
+    })
+  }
   if (url.includes('/admin/config/debug')) {
     return Response.json({
       data: {

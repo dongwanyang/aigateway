@@ -22,6 +22,7 @@ The two do not conflict — different signatures, different call sites.
 from __future__ import annotations
 
 import asyncio
+import gc
 import logging
 import os
 import threading
@@ -42,6 +43,9 @@ _l3_model_lock = threading.Lock()
 # 避免在本 core 层反向依赖 shared.config（参照 LiteLLMBridge.set_auto_resolver 模式）。
 _l3_device: str = "auto"
 _l3_model_name: str = "Qwen/Qwen3-Embedding-0.6B"
+_l3_idle_unload_seconds: float = 300.0
+_l3_idle_generation: int = 0
+_l3_idle_task: asyncio.Task[None] | None = None
 
 
 def set_l3_device(device: str) -> None:
@@ -67,6 +71,79 @@ def set_l3_model(model_name: str) -> None:
     _l3_model_name = model_name.strip() or "Qwen/Qwen3-Embedding-0.6B"
 
 
+def set_l3_idle_unload_seconds(seconds: float) -> None:
+    """Configure automatic model release after an idle interval.
+
+    ``0`` disables automatic release.  The setting only affects future inference
+    calls and never interrupts an active model invocation because release uses the
+    same module lock as loading and inference.
+    """
+    global _l3_idle_unload_seconds
+    value = float(seconds)
+    if value < 0:
+        raise ValueError("embedding.idle_unload_seconds must be >= 0")
+    _l3_idle_unload_seconds = value
+
+
+def release_l3_model() -> bool:
+    """Release the cached L3 model and return whether anything was resident."""
+    global _l3_idle_generation, _l3_idle_task
+    _l3_idle_generation += 1
+    # Incrementing the generation invalidates a pending idle timer.  Do not
+    # call Task.cancel() here: this function can run in a worker thread and may
+    # also have been invoked by the timer task itself.
+    _l3_idle_task = None
+
+    with _l3_model_lock:
+        model = _l3_model_cache.pop("model", None)
+        tokenizer = _l3_model_cache.pop("tokenizer", None)
+        _l3_model_cache.pop("device", None)
+        resident = model is not None or tokenizer is not None
+        if model is not None:
+            try:
+                model.to("cpu")
+            except Exception:
+                pass
+        del model, tokenizer
+
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass
+    return resident
+
+
+def _schedule_idle_release() -> None:
+    global _l3_idle_generation, _l3_idle_task
+    if _l3_idle_unload_seconds <= 0:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    _l3_idle_generation += 1
+    generation = _l3_idle_generation
+    previous = _l3_idle_task
+    if previous is not None and not previous.done():
+        previous.cancel()
+
+    async def release_after_idle() -> None:
+        try:
+            await asyncio.sleep(_l3_idle_unload_seconds)
+        except asyncio.CancelledError:
+            return
+        if generation != _l3_idle_generation:
+            return
+        await asyncio.to_thread(release_l3_model)
+        logger.info("L3 embedding model released after %.0fs idle", _l3_idle_unload_seconds)
+
+    _l3_idle_task = loop.create_task(release_after_idle())
+
+
 async def _compute_l3_vector(text: str, *, load_if_missing: bool = True) -> list | None:
     """使用 Qwen/Qwen3-Embedding-0.6B 计算 1024 维 embedding 向量。
 
@@ -83,11 +160,14 @@ async def _compute_l3_vector(text: str, *, load_if_missing: bool = True) -> list
     """
     if not load_if_missing and "tokenizer" not in _l3_model_cache:
         return None
-    return await asyncio.to_thread(
+    result = await asyncio.to_thread(
         _compute_l3_vector_sync,
         text,
         load_if_missing,
     )
+    if result is not None:
+        _schedule_idle_release()
+    return result
 
 
 def _compute_l3_vector_sync(

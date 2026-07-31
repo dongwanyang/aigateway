@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Save, RefreshCw, AlertTriangle, ExternalLink } from 'lucide-react'
 import Card from '@/components/Card'
-import { getComfyUIStatus, getGenerationPresets } from '@/api/client'
+import { getComfyUIStatus, getGenerationPresets, getGpuStatus, releaseGpuMemory } from '@/api/client'
 import { queryKeys } from '@/query/keys'
 import {
   type ConfigObject,
@@ -110,6 +110,14 @@ async function updateTableConfig(input: { config: Record<string, unknown>; revis
     headers: input.revision ? { 'If-Match': `"${input.revision}"` } : {},
     body: JSON.stringify(input.config),
   })
+}
+
+function formatBytes(value: unknown): string {
+  const bytes = typeof value === 'number' && Number.isFinite(value) ? value : 0
+  if (bytes <= 0) return '0 B'
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB']
+  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
+  return `${(bytes / 1024 ** index).toFixed(index >= 3 ? 2 : 0)} ${units[index]}`
 }
 
 function stringList(value: unknown): string[] {
@@ -282,6 +290,17 @@ export default function Config() {
     queryKey: ['generation-presets'],
     queryFn: async () => (await getGenerationPresets()).data,
   })
+  const gpuQuery = useQuery({
+    queryKey: ['gpu', 'status'],
+    queryFn: async () => (await getGpuStatus()).data,
+    refetchInterval: 30_000,
+  })
+  const releaseGpuMutation = useMutation({
+    mutationFn: releaseGpuMemory,
+    onSuccess: async () => {
+      await Promise.all([gpuQuery.refetch(), comfyQuery.refetch()])
+    },
+  })
   const saveMutation = useMutation({ mutationFn: updateTableConfig })
   const config = configQuery.data?.config ?? null
   const revision = configQuery.data?.revision ?? ''
@@ -341,6 +360,7 @@ export default function Config() {
       schemaQuery.refetch(),
       comfyQuery.refetch(),
       presetsQuery.refetch(),
+      gpuQuery.refetch(),
     ])
   }
 
@@ -461,7 +481,42 @@ export default function Config() {
           {comfyStatus?.queue && (
             <span className="text-sm">队列：{comfyStatus.queue.running ?? 0} 运行 / {comfyStatus.queue.pending ?? 0} 等待</span>
           )}
+          <button
+            className="btn btn-secondary"
+            disabled={gpuQuery.data?.queue_idle !== true || releaseGpuMutation.isPending}
+            onClick={() => releaseGpuMutation.mutate()}
+            title={gpuQuery.data?.queue_idle === true ? '卸载空闲模型并清理 PyTorch 缓存' : '队列非空时不能释放显存'}
+          >
+            <RefreshCw size={14} /> {releaseGpuMutation.isPending ? '释放中...' : '释放空闲显存'}
+          </button>
         </div>
+
+        {gpuQuery.data && (
+          <div className="grid grid-cols-1 gap-3 mb-4 md:grid-cols-2">
+            <div className="rounded-lg border p-3" style={{ borderColor: 'var(--color-border)' }}>
+              <div className="text-xs font-semibold mb-2">Gateway / PyTorch</div>
+              <div className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>
+                allocated {formatBytes(gpuQuery.data.gateway.allocated_bytes)} · reserved {formatBytes(gpuQuery.data.gateway.reserved_bytes)}
+              </div>
+            </div>
+            <div className="rounded-lg border p-3" style={{ borderColor: 'var(--color-border)' }}>
+              <div className="text-xs font-semibold mb-2">ComfyUI / Device</div>
+              <div className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>
+                used {formatBytes(gpuQuery.data.comfyui.memory?.used_bytes)} · free {formatBytes(gpuQuery.data.comfyui.memory?.free_bytes)}
+              </div>
+            </div>
+            <div className="md:col-span-2 text-xs" style={{ color: 'var(--color-text-tertiary)' }}>
+              队列为空只表示没有执行任务；模型权重和 PyTorch reserved cache 仍可能常驻显存。
+              {gpuQuery.data.shared_gpu ? ' 当前 Gateway 与 ComfyUI 共用同一块 GPU。' : ''}
+            </div>
+          </div>
+        )}
+
+        {releaseGpuMutation.error instanceof Error && (
+          <div role="alert" className="text-xs mb-4" style={{ color: 'var(--color-danger)' }}>
+            显存释放失败：{releaseGpuMutation.error.message}
+          </div>
+        )}
 
         <div className="space-y-2">
           {(Array.isArray(presetsQuery.data) ? presetsQuery.data : []).map(preset => {
