@@ -102,6 +102,13 @@ def _preload_cors_origins() -> None:
         os.environ[_CORS_YAML_BOOTSTRAP_MARKER] = "1"
 
 
+def _install_exception_sanitizer() -> None:
+    """Ensure all subsequently registered 5xx handlers are fail-closed."""
+    from .exception_sanitizer import install_exception_response_sanitizer
+
+    install_exception_response_sanitizer()
+
+
 def _install_admin_security_guards() -> None:
     """Install sensitive-route and draft-ownership replacements."""
     from . import admin_routes
@@ -138,6 +145,7 @@ def _install_runtime_regression_fixes() -> None:
 _ensure_core_src()
 _allow_config_precondition_header()
 _preload_cors_origins()
+_install_exception_sanitizer()
 _install_admin_security_guards()
 _install_config_schema_parser()
 _install_runtime_regression_fixes()
