@@ -357,7 +357,7 @@ async def test_safe_fetch_pins_connection_to_validated_address(
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.host == "93.184.216.34"
         assert request.headers["host"] == "example.com"
-        assert request.extensions["sni_hostname"] == b"example.com"
+        assert request.extensions["sni_hostname"] == "example.com"
         return httpx.Response(
             200,
             headers={"content-type": "text/plain"},
