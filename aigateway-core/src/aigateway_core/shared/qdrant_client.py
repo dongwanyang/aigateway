@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Any
 
 from aigateway_core.shared.runtime_values import (
     configured_number,
@@ -79,16 +80,25 @@ class QdrantClientManager(_impl.QdrantClientManager):
         )
 
         self.url = selected_url
-        self._http = AsyncClient(
-            base_url=self.url,
-            timeout=Timeout(
+        client_kwargs: dict[str, Any] = {
+            "base_url": self.url,
+            "timeout": Timeout(
                 connect=selected_connect_timeout,
                 read=selected_read_timeout,
                 write=selected_write_timeout,
                 pool=5.0,
             ),
-            headers=self._headers(),
-        )
+        }
+        # Only pass constructor headers when authentication requires defaults on
+        # health/list requests. Keeping the unauthenticated constructor minimal
+        # preserves lightweight AsyncClient-compatible adapters and test seams.
+        api_key = self._configured_api_key()
+        if api_key:
+            client_kwargs["headers"] = {
+                "Content-Type": "application/json",
+                "api-key": api_key,
+            }
+        self._http = AsyncClient(**client_kwargs)
         try:
             response = await self._http.get("/")
             response.raise_for_status()
