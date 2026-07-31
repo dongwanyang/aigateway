@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import threading
 from types import SimpleNamespace
 
 import pytest
+import yaml
 from fastapi import HTTPException, Request
 
 from aigateway_api import security_routes
@@ -13,6 +15,7 @@ from aigateway_api.config_security import (
     redact_config,
     restore_masked_values,
 )
+from aigateway_core.shared.config import ConfigManager
 
 
 def _request(body: bytes, *, content_type: str = "application/json") -> Request:
@@ -86,3 +89,53 @@ async def test_config_route_preserves_json_validation_as_http_400(payload: bytes
 
     assert exc_info.value.status_code == 400
     assert exc_info.value.detail["error"]["code"] == "validation_error"
+
+
+def test_full_reload_transactions_are_serialized(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "server": {"host": "0.0.0.0", "port": 8000},
+                "plugins": [],
+                "providers": {},
+                "observability": {"log_level": "info"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AI_GATEWAY_ENV", "production")
+    manager = ConfigManager(str(path))
+
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_entered = threading.Event()
+    calls = 0
+    calls_lock = threading.Lock()
+
+    def callback(_config: dict) -> None:
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+            current = calls
+        if current == 1:
+            first_entered.set()
+            assert release_first.wait(2)
+        else:
+            second_entered.set()
+
+    manager.on_reload(callback)
+    first = threading.Thread(target=manager.load)
+    second = threading.Thread(target=manager.load)
+    first.start()
+    assert first_entered.wait(2)
+    second.start()
+
+    assert not second_entered.wait(0.1)
+    release_first.set()
+    first.join(2)
+    second.join(2)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert second_entered.is_set()
