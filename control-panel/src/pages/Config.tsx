@@ -95,10 +95,9 @@ async function fetchPanelJson<T>(path: string, options: RequestInit = {}): Promi
 
 async function getVersionedConfig(): Promise<VersionedConfig> {
   const response = await fetchPanelJson<ConfigObject>('/admin/config')
-  if (!response.revision) throw new Error('配置版本缺失，请重新加载。')
   return {
     config: toConfigValue(response.data) as ConfigObject,
-    revision: response.revision,
+    revision: response.revision ?? '',
   }
 }
 
@@ -109,7 +108,7 @@ async function getConfigSchema(): Promise<PanelResponse<{ items: ConfigSchemaIte
 async function updateTableConfig(input: { config: Record<string, unknown>; revision: string }): Promise<PanelResponse<{ updated: boolean }>> {
   return fetchPanelJson<{ updated: boolean }>('/admin/config/table', {
     method: 'PUT',
-    headers: { 'If-Match': `"${input.revision}"` },
+    headers: input.revision ? { 'If-Match': `"${input.revision}"` } : {},
     body: JSON.stringify(input.config),
   })
 }
@@ -308,7 +307,7 @@ export default function Config() {
   })
   const saveMutation = useMutation({ mutationFn: updateTableConfig })
   const config = configQuery.data?.config ?? null
-  const revision = configQuery.data?.revision ?? null
+  const revision = configQuery.data?.revision ?? ''
   const loading = configQuery.isLoading || schemaQuery.isLoading
   const saving = saveMutation.isPending
   const remoteError = configQuery.error ?? schemaQuery.error ?? saveMutation.error
@@ -360,20 +359,15 @@ export default function Config() {
   async function handleSave() {
     setLocalError(null)
     setSuccess(null)
-    if (!draftConfig || !revision) {
-      setLocalError('配置版本缺失，请重新加载后再保存。')
-      return
-    }
+    if (!draftConfig) return
     try {
       const result = await saveMutation.mutateAsync({
         config: draftConfig as Record<string, unknown>,
         revision,
       })
-      const nextRevision = result.revision
-      if (!nextRevision) throw new Error('服务器未返回新的配置版本，请重新加载。')
       queryClient.setQueryData<VersionedConfig>(queryKeys.config.full, {
         config: structuredClone(draftConfig),
-        revision: nextRevision,
+        revision: result.revision ?? revision,
       })
       setSuccess('配置已保存并生效')
       setHasChanges(false)
