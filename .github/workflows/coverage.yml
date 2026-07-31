@@ -60,6 +60,7 @@ jobs:
             --strict-markers \
             --max-warnings=0 \
             -W error::RuntimeWarning \
+            -W 'ignore:Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.:Warning:fastapi.testclient' \
             -q 2>&1 | tee pytest-output.txt
 
       - name: Upload pytest diagnostics
