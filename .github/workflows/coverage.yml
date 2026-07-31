@@ -114,3 +114,6 @@ jobs:
 
       - name: Run UI tests and enforce coverage (>= 70%)
         run: npm run test:coverage
+
+      - name: Build control panel
+        run: npm run build
