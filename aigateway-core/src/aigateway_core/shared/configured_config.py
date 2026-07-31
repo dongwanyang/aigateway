@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import copy
 import logging
+from pathlib import Path
 from typing import Any
+
+import yaml
 
 from .config import ConfigManager as _BaseConfigManager
 from .config import _DEFAULT_CONFIG, parse_integration_configs
@@ -59,6 +62,45 @@ class _ReloadFailureCapture(logging.Handler):
 
 class ConfigManager(_BaseConfigManager):
     """Config manager with one resolver and restart-equivalent full reloads."""
+
+    def _load_yaml(self, path: str) -> dict[str, Any]:
+        """Read existing YAML strictly; preserve missing-file compatibility."""
+        filepath = Path(path)
+        if not filepath.exists():
+            logger.warning("配置文件不存在，使用空配置: %s", path)
+            return {}
+        try:
+            with filepath.open("r", encoding="utf-8") as file:
+                try:
+                    import fcntl
+                except ImportError:
+                    data = yaml.safe_load(file)
+                else:
+                    fcntl.flock(file.fileno(), fcntl.LOCK_SH)
+                    try:
+                        data = yaml.safe_load(file)
+                    finally:
+                        fcntl.flock(file.fileno(), fcntl.LOCK_UN)
+        except yaml.YAMLError as exc:
+            raise ConfigStrictValidationError(
+                [{"level": "ERROR", "message": f"invalid YAML: {exc}"}]
+            ) from exc
+        except OSError as exc:
+            raise ConfigStrictValidationError(
+                [{"level": "ERROR", "message": f"config read failed: {exc}"}]
+            ) from exc
+        if data is None:
+            return {}
+        if not isinstance(data, dict):
+            raise ConfigStrictValidationError(
+                [
+                    {
+                        "level": "ERROR",
+                        "message": "config root must be a YAML object",
+                    }
+                ]
+            )
+        return data
 
     def load(self) -> dict[str, Any]:
         old_config = copy.deepcopy(getattr(self, "_config", {}))
