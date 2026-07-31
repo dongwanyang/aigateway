@@ -131,7 +131,7 @@ def _uri_contains_credentials(value: str) -> bool:
 
 
 def redact_config(value: Any, path: tuple[str, ...] = ()) -> Any:
-    """Recursively mask persisted secrets while preserving env references."""
+    """Recursively mask persisted secrets, including env-expression defaults."""
     if isinstance(value, dict):
         return {
             key: redact_config(child, (*path, str(key)))
@@ -143,12 +143,7 @@ def redact_config(value: Any, path: tuple[str, ...] = ()) -> Any:
             for index, child in enumerate(value)
         ]
     if isinstance(value, str):
-        if value.startswith("${") and value.endswith("}"):
-            return value
-        if (
-            (_is_sensitive_path(path) and value)
-            or _uri_contains_credentials(value)
-        ):
+        if (_is_sensitive_path(path) and value) or _uri_contains_credentials(value):
             return MASKED_SECRET
     return value
 
@@ -185,27 +180,19 @@ def _matching_list_item(
     if not isinstance(candidate, dict):
         return fallback
 
-    identities: list[tuple[str, str]] = []
+    # Use only the strongest supplied stable identity. Never fall through from a
+    # missing id to a weaker editable field, and never use array position for a
+    # masked object. This permits display-name edits when an immutable id exists.
     for key in ("id", "key_id", "name", "user_id"):
         identity = candidate.get(key)
-        if isinstance(identity, str) and identity:
-            identities.append((key, identity))
-
-    selected_index: int | None = None
-    for key, identity in identities:
+        if not isinstance(identity, str) or not identity:
+            continue
         matches = [
-            item_index
-            for item_index, item in enumerate(current)
+            item
+            for item in current
             if isinstance(item, dict) and item.get(key) == identity
         ]
-        if len(matches) != 1:
-            return _MISSING
-        if selected_index is None:
-            selected_index = matches[0]
-        elif selected_index != matches[0]:
-            return _MISSING
-    if selected_index is not None:
-        return current[selected_index]
+        return matches[0] if len(matches) == 1 else _MISSING
     if _contains_masked(candidate, path):
         return _MISSING
     return fallback
@@ -363,7 +350,12 @@ def _write_bytes_atomic(path: str, payload: bytes) -> None:
             file.flush()
             os.fsync(file.fileno())
         try:
-            os.chmod(temp_path, stat.S_IMODE(os.stat(path).st_mode))
+            existing = os.stat(path)
+            os.chmod(temp_path, stat.S_IMODE(existing.st_mode))
+            try:
+                os.chown(temp_path, existing.st_uid, existing.st_gid)
+            except PermissionError:
+                pass
         except OSError:
             pass
         try:
