@@ -13,6 +13,9 @@ from pathlib import Path
 from typing import Any
 
 __version__ = "1.0.0"
+_CORS_YAML_BOOTSTRAP_MARKER = (
+    "AI_GATEWAY_CORS_ORIGINS_BOOTSTRAPPED_FROM_YAML"
+)
 
 
 def _ensure_core_src() -> None:
@@ -28,21 +31,13 @@ def _allow_config_precondition_header() -> None:
         from starlette.middleware import cors
     except ImportError:
         return
-    # ``main._configure_cors`` predates revisioned config writes and supplies an
-    # explicit header list. Extending this construction-time set keeps existing
-    # deployments compatible without broadening CORS to every request header.
     headers = set(getattr(cors, "SAFELISTED_HEADERS", set()))
     headers.add("If-Match")
     cors.SAFELISTED_HEADERS = headers
 
 
 def _dotenv_bootstrap_values() -> dict[str, Any]:
-    """Read bootstrap-only values from .env without mutating ``os.environ``.
-
-    Importing ``aigateway_api`` must not load unrelated authentication, database,
-    or provider variables into the process. The regular application entry point
-    remains responsible for loading the complete .env file.
-    """
+    """Read bootstrap-only values from .env without mutating ``os.environ``."""
     try:
         from dotenv import dotenv_values, find_dotenv
     except ImportError:
@@ -58,11 +53,12 @@ def _dotenv_bootstrap_values() -> dict[str, Any]:
 
 
 def _preload_cors_origins() -> None:
-    """Expose CORS origins before the FastAPI app factory registers middleware.
+    """Expose CORS origins before the FastAPI app factory adds middleware.
 
-    Bootstrap precedence is process environment > .env > config.yaml. Only the
-    CORS value is copied into ``os.environ``; unrelated .env values are never
-    imported as a side effect of package import.
+    A process or .env value is a real environment override. A YAML value is only
+    copied temporarily because middleware is constructed before the lifespan
+    ConfigManager exists; ConfigManager consumes the marker and removes the
+    synthetic environment value before loading runtime configuration.
     """
     if os.environ.get("AI_GATEWAY_CORS_ORIGINS", "").strip():
         return
@@ -103,6 +99,7 @@ def _preload_cors_origins() -> None:
     ]
     if normalized:
         os.environ["AI_GATEWAY_CORS_ORIGINS"] = ",".join(normalized)
+        os.environ[_CORS_YAML_BOOTSTRAP_MARKER] = "1"
 
 
 def _install_admin_security_guards() -> None:
