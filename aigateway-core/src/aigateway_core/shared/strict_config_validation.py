@@ -47,6 +47,29 @@ _INTEGRATION_SPECS: tuple[_IntegrationSpec, ...] = (
         "UNSTRUCTURED",
     ),
 )
+_OBJECT_SECTIONS = {
+    "server",
+    "plugin_runtime",
+    "retry_budget",
+    "intent_classifier",
+    "model_selector",
+    "task_routing",
+    "generation",
+    "auth",
+    "providers",
+    "embedding",
+    "observability",
+    "infrastructure",
+    "cache",
+    "circuit_breaker",
+    "rate_limiter",
+    "streaming",
+    "code_rag",
+    "media_optimization",
+    "generation_optimization",
+    "debug",
+}
+_BOOLEAN_SECTIONS = {"hot_reload", "debug_mode"}
 _GENERATION_EXTENSION_FIELDS = {
     "draft_workflow": {"comfyui"},
     "token_compressor": {"clip"},
@@ -55,6 +78,21 @@ _GENERATION_EXTENSION_FIELDS = {
 
 def _error(path: str, message: str) -> dict[str, str]:
     return {"level": "ERROR", "message": f"{path}: {message}"}
+
+
+def _validate_top_level_structure(
+    config: dict[str, Any],
+) -> list[dict[str, str]]:
+    issues: list[dict[str, str]] = []
+    for section in _OBJECT_SECTIONS:
+        if section in config and not isinstance(config[section], dict):
+            issues.append(_error(section, "must be an object"))
+    for section in _BOOLEAN_SECTIONS:
+        if section in config and not isinstance(config[section], bool):
+            issues.append(_error(section, "must be a boolean"))
+    if "plugins" in config and not isinstance(config["plugins"], list):
+        issues.append(_error("plugins", "must be a list"))
+    return issues
 
 
 def _nested_value(
@@ -121,9 +159,7 @@ def _validate_integrations(
 ) -> list[dict[str, str]]:
     issues: list[dict[str, str]] = []
     plugins = config.get("plugins")
-    if plugins is not None and not isinstance(plugins, list):
-        issues.append(_error("plugins", "must be a list"))
-    elif isinstance(plugins, list):
+    if isinstance(plugins, list):
         for index, item in enumerate(plugins):
             if not isinstance(item, dict):
                 issues.append(_error(f"plugins.{index}", "must be an object"))
@@ -166,7 +202,7 @@ def _validate_generation(
     if raw is None:
         raw = {}
     if not isinstance(raw, dict):
-        return [_error("generation_optimization", "must be an object")]
+        return []
 
     working = {
         key: dict(value) if isinstance(value, dict) else value
@@ -260,6 +296,7 @@ def validate_component_config_strict(
 ) -> list[dict[str, str]]:
     """Return component-level errors that tolerant runtime parsers would hide."""
     return [
+        *_validate_top_level_structure(config),
         *_validate_integrations(
             config,
             apply_specific_env=apply_specific_env,
