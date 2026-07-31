@@ -183,7 +183,7 @@ def _node_value_type(node: Node) -> str:
 
 
 def parse_template_schema(config_path: str) -> list[dict[str, Any]]:
-    """Extract inline descriptions with stable paths for dynamic mappings."""
+    """Extract concrete and wildcard descriptions from the YAML template."""
     template_path = next(
         (path for path in _template_candidates(config_path) if path.is_file()),
         None,
@@ -202,12 +202,22 @@ def parse_template_schema(config_path: str) -> list[dict[str, Any]]:
     lines = text.splitlines()
     comments: dict[str, str] = {}
     value_types: dict[str, str] = {}
+    metadata_paths: dict[str, str] = {}
     order: list[str] = []
     visiting: set[int] = set()
 
-    def remember(path: str, node: Node, comment: str) -> None:
+    def remember(
+        path: str,
+        node: Node,
+        comment: str,
+        metadata_path: str,
+    ) -> None:
         if path not in value_types:
-            value_types[path] = _TYPE_FALLBACKS.get(path, _node_value_type(node))
+            value_types[path] = _TYPE_FALLBACKS.get(
+                metadata_path,
+                _node_value_type(node),
+            )
+            metadata_paths[path] = metadata_path
             order.append(path)
         if comment and path not in comments:
             comments[path] = comment
@@ -223,6 +233,7 @@ def parse_template_schema(config_path: str) -> list[dict[str, Any]]:
                     if not isinstance(key_node, ScalarNode):
                         continue
                     child_path = (*path, str(key_node.value))
+                    exact = ".".join(child_path)
                     normalized = _normalized_schema_path(child_path)
                     line_number = key_node.start_mark.line
                     comment = (
@@ -230,7 +241,9 @@ def parse_template_schema(config_path: str) -> list[dict[str, Any]]:
                         if 0 <= line_number < len(lines)
                         else ""
                     )
-                    remember(normalized, value_node, comment)
+                    remember(exact, value_node, comment, normalized)
+                    if normalized != exact:
+                        remember(normalized, value_node, comment, normalized)
                     walk(value_node, child_path)
             elif isinstance(node, SequenceNode):
                 item_path = _sequence_path(path)
@@ -253,13 +266,17 @@ def parse_template_schema(config_path: str) -> list[dict[str, Any]]:
         description = comments.get(path)
         if not description:
             continue
+        metadata_path = metadata_paths[path]
         item: dict[str, Any] = {
             "path": path,
             "module": path.split(".", 1)[0].replace("[]", ""),
             "description": description,
-            "value_type": _TYPE_FALLBACKS.get(path, value_types[path]),
+            "value_type": _TYPE_FALLBACKS.get(
+                metadata_path,
+                value_types[path],
+            ),
         }
-        editor = _EDITOR_OVERRIDES.get(path)
+        editor = _EDITOR_OVERRIDES.get(metadata_path)
         if editor:
             item["editor"] = editor
         items.append(item)
