@@ -5,4 +5,80 @@ aigateway_api - AI Gateway API 服务层
 FastAPI 应用，提供 OpenAI 兼容接口和管理接口。
 """
 
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import Any
+
 __version__ = "1.0.0"
+
+
+def _dotenv_bootstrap_values() -> dict[str, Any]:
+    """Read bootstrap-only values from .env without mutating ``os.environ``.
+
+    Importing ``aigateway_api`` must not load unrelated authentication, database,
+    or provider variables into the process. The regular application entry point
+    remains responsible for loading the complete .env file.
+    """
+    try:
+        from dotenv import dotenv_values, find_dotenv
+    except ImportError:
+        return {}
+
+    dotenv_path = find_dotenv(usecwd=True)
+    if not dotenv_path:
+        return {}
+    try:
+        return dict(dotenv_values(dotenv_path))
+    except OSError:
+        return {}
+
+
+def _preload_cors_origins() -> None:
+    """Expose CORS origins before the FastAPI app factory registers middleware.
+
+    Bootstrap precedence is process environment > .env > config.yaml. Only the
+    CORS value is copied into ``os.environ``; unrelated .env values are never
+    imported as a side effect of package import.
+    """
+    if os.environ.get("AI_GATEWAY_CORS_ORIGINS", "").strip():
+        return
+
+    dotenv_values = _dotenv_bootstrap_values()
+    dotenv_cors = str(dotenv_values.get("AI_GATEWAY_CORS_ORIGINS") or "").strip()
+    if dotenv_cors:
+        os.environ["AI_GATEWAY_CORS_ORIGINS"] = dotenv_cors
+        return
+
+    try:
+        import yaml
+    except ImportError:
+        return
+
+    config_path_value = (
+        os.environ.get("AI_GATEWAY_CONFIG_PATH", "").strip()
+        or str(dotenv_values.get("AI_GATEWAY_CONFIG_PATH") or "").strip()
+        or "./config.yaml"
+    )
+    config_path = Path(config_path_value).expanduser()
+    try:
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        return
+
+    server = raw.get("server", {}) if isinstance(raw, dict) else {}
+    origins = server.get("cors_origins") if isinstance(server, dict) else None
+    if not isinstance(origins, list):
+        return
+
+    normalized = [
+        value.strip()
+        for value in origins
+        if isinstance(value, str) and value.strip()
+    ]
+    if normalized:
+        os.environ["AI_GATEWAY_CORS_ORIGINS"] = ",".join(normalized)
+
+
+_preload_cors_origins()

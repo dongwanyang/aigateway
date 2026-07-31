@@ -154,10 +154,13 @@ async def test_console_chat_blocks_force_reset_browser_session(tmp_path):
     app.state.browser_auth_store = store
     app.include_router(routes_router)
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as client:
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+        cookies={SESSION_COOKIE_NAME: token},
+    ) as client:
         response = await client.post(
             "/admin/console/chat/completions",
-            cookies={SESSION_COOKIE_NAME: token},
             json={"model": "auto", "messages": [{"role": "user", "content": "hello"}]},
         )
 
@@ -181,10 +184,13 @@ async def test_console_chat_requires_server_side_api_key(tmp_path, monkeypatch):
     app.state.browser_auth_store = store
     app.include_router(routes_router)
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as client:
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+        cookies={SESSION_COOKIE_NAME: token},
+    ) as client:
         response = await client.post(
             "/admin/console/chat/completions",
-            cookies={SESSION_COOKIE_NAME: token},
             json={"model": "auto", "messages": [{"role": "user", "content": "hello"}]},
         )
 

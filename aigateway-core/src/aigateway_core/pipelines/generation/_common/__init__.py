@@ -3,17 +3,6 @@ generation_optimization — 生成优化层
 =====================================
 
 AI Gateway 平台的核心成本优化组件，位于用户生成请求与昂贵生成模型之间。
-通过以下核心策略在保证输出质量的前提下大幅降低生成式 AI 的调用成本：
-
-- AI 导演 Prompt 优化
-- 智能模型路由
-- 渐进式生成工作流（Draft-to-HiRes）
-- 输入端视觉 Token 压缩与资产复用
-- 成本追踪与 Prometheus 指标上报
-- 提示词模板管理
-
-该层以插件形式集成到现有 PipelineEngine，复用 ConfigManager、
-MediaCacheManager、MetricsCollector 等基础设施。
 """
 
 from __future__ import annotations
@@ -67,14 +56,10 @@ __all__ = [
     "DraftResult",
     "DraftWorkflowError",
     "FeatureCacheError",
-    # Metrics
     "GenerationCostTracker",
-    # Config
     "GenerationOptimizationConfig",
     "GenerationOptimizationConfigWatcher",
-    # Exceptions
     "GenerationOptimizationError",
-    # Models
     "GenerationRequest",
     "ModelRoutingError",
     "PrometheusMetricsRegistry",
@@ -86,7 +71,6 @@ __all__ = [
     "TokenCompressionError",
     "UpscaleResult",
     "__version__",
-    # API Key Groups
     "build_api_key_groups",
     "get_prometheus_registry",
     "parse_generation_optimization_config",

@@ -209,3 +209,155 @@ async def test_nonstream_video_id_inside_data_meta_registers_task():
     assert response.status_code == 200
     task_tracker.register.assert_awaited_once()
     assert task_tracker.register.await_args.kwargs["task_id"] == "vid_1"
+
+
+
+@pytest.mark.asyncio
+async def test_nonstream_unpriced_cost_is_safe_for_numeric_sinks():
+    key_store = MagicMock()
+    key_store.increment_usage = AsyncMock()
+    key_store.record_request_cost = AsyncMock()
+    bridge = MagicMock()
+    bridge.completion = AsyncMock(return_value={
+        "data": {
+            "model": "unpriced-model",
+            "choices": [
+                {"message": {"role": "assistant", "content": "ok"}}
+            ],
+            "usage": {
+                "prompt_tokens": 3,
+                "completion_tokens": 2,
+                "total_tokens": 5,
+            },
+        },
+        "usage": {
+            "prompt_tokens": 3,
+            "completion_tokens": 2,
+            "total_tokens": 5,
+        },
+        "_meta": {
+            "cost": 0.0,
+            "routed_to": {
+                "provider": "test-provider",
+                "model": "unpriced-model",
+            },
+        },
+    })
+    dispatcher = RequestDispatcher({"key_store": key_store})
+    request = SimpleNamespace(
+        state=SimpleNamespace(trace_id="trace-unpriced", request_id="req-unpriced")
+    )
+    body = SimpleNamespace(
+        messages=[{"role": "user", "content": "hello"}],
+        model="auto",
+        temperature=1.0,
+        max_tokens=None,
+        top_p=1.0,
+        frequency_penalty=0.0,
+        presence_penalty=0.0,
+        tools=None,
+        tool_choice=None,
+        stop=None,
+    )
+
+    with (
+        patch(
+            "aigateway_api.openai_compat._record_request_log",
+            new=AsyncMock(),
+        ),
+        patch(
+            "aigateway_core.route.metrics.costing._estimate_cost",
+            return_value=None,
+        ),
+    ):
+        response = await dispatcher._call_llm_nonstream(
+            body,
+            request,
+            bridge,
+            plugin_trace=[],
+            request_start_time=time.time(),
+            user_id="user-1",
+            key_hash="key-hash",
+            cache_key=None,
+            normalized_messages=None,
+            pipeline_kind="understanding",
+            group_id="group-1",
+        )
+
+    assert response.status_code == 200
+    key_store.record_request_cost.assert_awaited_once()
+    assert key_store.record_request_cost.await_args.kwargs["cost_usd"] == 0.0
+    key_store.increment_usage.assert_awaited_once()
+    assert key_store.increment_usage.await_args.kwargs["cost"] == 0.0
+
+
+async def _unpriced_stream_chunks():
+    yield {
+        "id": "chatcmpl-unpriced",
+        "model": "unpriced-model",
+        "choices": [
+            {
+                "index": 0,
+                "delta": {"role": "assistant", "content": "ok"},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 3,
+            "completion_tokens": 2,
+            "total_tokens": 5,
+        },
+        "_meta": {
+            "cost": 0.0,
+            "routed_to": {
+                "provider": "test-provider",
+                "model": "unpriced-model",
+            },
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_stream_unpriced_cost_is_safe_for_numeric_sinks():
+    key_store = MagicMock()
+    key_store.increment_usage = AsyncMock()
+    key_store.record_request_cost = AsyncMock()
+    dispatcher = RequestDispatcher({})
+    request = SimpleNamespace(
+        state=SimpleNamespace(trace_id="trace-stream-unpriced", request_id="req-stream-unpriced")
+    )
+
+    with (
+        patch(
+            "aigateway_api.openai_compat._record_request_log",
+            new=AsyncMock(),
+        ),
+        patch(
+            "aigateway_core.route.metrics.costing._estimate_cost",
+            return_value=None,
+        ),
+    ):
+        chunks = [
+            chunk
+            async for chunk in dispatcher._wrap_stream_full(
+                _unpriced_stream_chunks(),
+                metrics_collector=None,
+                cache_manager=None,
+                key_store=key_store,
+                request=request,
+                model="auto",
+                user_id="user-1",
+                key_hash="key-hash",
+                cache_key=None,
+                normalized_messages=None,
+                llm_start=time.time(),
+                group_id="group-1",
+                pipeline_kind="understanding",
+            )
+        ]
+
+    assert len(chunks) == 1
+    key_store.record_request_cost.assert_awaited_once()
+    assert key_store.record_request_cost.await_args.kwargs["cost_usd"] == 0.0
+    key_store.increment_usage.assert_awaited_once()
+    assert key_store.increment_usage.await_args.kwargs["cost"] == 0.0

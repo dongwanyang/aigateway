@@ -6,7 +6,7 @@ Validates:
 - Environment variable override with AI_GATEWAY_ prefix
 - Type validation and range checking
 - Invalid values retain previous config
-- Default values match spec
+- Deployment values remain unconfigured until YAML/env supplies them
 """
 
 import os
@@ -29,7 +29,7 @@ from aigateway_core.shared.integration_configs import (
 
 
 class TestParseIntegrationConfigsDefaults:
-    """Test that empty/missing config produces correct defaults."""
+    """Test that empty/missing config produces safe generic defaults."""
 
     def test_empty_config_returns_all_defaults(self):
         result = parse_integration_configs({})
@@ -46,7 +46,7 @@ class TestParseIntegrationConfigsDefaults:
         pc = result.prompt_compress
         assert pc.enabled is True
         assert pc.compression_ratio == 0.5
-        assert pc.model_name == "microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbank"
+        assert pc.model_name == ""
         assert pc.target_token == -1
         assert pc.force_tokens == []
         assert pc.device == "cpu"
@@ -54,29 +54,35 @@ class TestParseIntegrationConfigsDefaults:
     def test_default_clip_values(self):
         result = parse_integration_configs({})
         c = result.clip
-        assert c.model_name == "openai/clip-vit-large-patch14"
+        assert c.model_name == ""
         assert c.device == "cpu"
         assert c.batch_size == 1
 
     def test_default_comfyui_values(self):
         result = parse_integration_configs({})
         c = result.comfyui
-        assert c.server_url == "http://localhost:8188"
+        assert c.server_url == ""
+        assert c.public_url == ""
         assert c.connect_timeout == 10
         assert c.execution_timeout == 1200
         assert c.qwen_image_draft_steps == 12
         assert c.qwen_image_max_draft_edge == 768
         assert c.ws_reconnect_attempts == 3
         assert c.required is True
-        assert c.workflow_version == "image-v1"
-        assert c.checkpoint_name == "sd_xl_base_1.0.safetensors"
-        assert c.allowed_checkpoints == ["sd_xl_base_1.0.safetensors"]
+        assert c.workflow_version == ""
+        assert c.checkpoint_name == ""
+        assert c.allowed_checkpoints == []
+        assert c.models_path == ""
+        assert c.output_path == ""
+        assert c.workflow_path == ""
+        assert c.upscale_model == ""
+        assert c.allowed_upscale_models == []
         assert c.max_concurrency == 1
         assert c.min_free_gb == 30.0
         assert c.model_budget_gb == 80.0
         assert c.output_budget_gb == 10.0
         assert c.video_enabled is True
-        assert c.video_workflow_version == "wan2.2-ti2v-5b-v1"
+        assert c.video_workflow_version == ""
         assert c.video_width == 512
         assert c.video_height == 288
         assert c.video_frames == 17
@@ -89,19 +95,22 @@ class TestParseIntegrationConfigsDefaults:
         assert r.top_k == 5
         assert r.similarity_threshold == 0.7
         assert r.rerank_enabled is False
+        assert r.rerank_model == ""
         assert r.chunk_size == 512
         assert r.chunk_overlap == 64
+        assert r.collection_name == ""
+        assert r.embedding_model == ""
+        assert r.code_graph_db_dir == ""
 
     def test_default_conv_compressor_values(self):
         result = parse_integration_configs({})
         c = result.conv_compressor
         assert c.enabled is True
         assert c.max_history == 20
-        # 默认走 gateway 自身而非 OpenAI，避免容器强依赖 OPENAI_API_KEY
-        assert c.summary_model == "agnes-2.0-flash"
+        assert c.summary_model == ""
         assert c.max_token_limit == 4000
         assert c.summary_interval == 5
-        assert c.api_base == "http://localhost:8000/v1"
+        assert c.api_base == ""
         assert c.api_key is None
 
     def test_default_paddleocr_values(self):
@@ -361,16 +370,14 @@ class TestPreviousFallback:
         previous = parse_integration_configs(
             {"plugins": [{"name": "prompt_compress", "config": {"compression_ratio": 0.3}}]}
         )
-        assert previous.prompt_compress.compression_ratio == 0.3  # not 0.5 (default)
+        assert previous.prompt_compress.compression_ratio == 0.3
 
         config_bad = {"plugins": [{"name": "prompt_compress", "config": {"compression_ratio": 2.0}}]}
         result = parse_integration_configs(config_bad, previous)
-        # Should be 0.3 (previous), not 0.5 (default)
         assert result.prompt_compress.compression_ratio == 0.3
 
     def test_no_previous_invalid_value_uses_default(self):
         """When no previous and new config is invalid, field uses dataclass default."""
         config_bad = {"plugins": [{"name": "prompt_compress", "config": {"compression_ratio": 2.0}}]}
         result = parse_integration_configs(config_bad, None)
-        # Should fall back to default 0.5
         assert result.prompt_compress.compression_ratio == 0.5

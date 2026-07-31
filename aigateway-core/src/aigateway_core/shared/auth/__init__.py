@@ -1,5 +1,5 @@
-"""Authentication / authorization utilities — shared layer.
+"""Authentication and authorization utilities."""
 
-Authoritative implementation of ``KeyStore`` lives in
-``aigateway_core.shared.auth.key_store``.
-"""
+from .sqlite_store import SQLiteStore
+
+__all__ = ["SQLiteStore"]

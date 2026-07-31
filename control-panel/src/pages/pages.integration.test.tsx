@@ -1,6 +1,6 @@
 import React from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -790,19 +790,26 @@ describe('control panel pages against production API response shapes', () => {
     await waitFor(() => expect(screen.queryByText('https://example.test/repo.git')).not.toBeInTheDocument())
   })
 
-  it('validates and saves edited JSON configuration', async () => {
+  it('edits and saves structured configuration', async () => {
     const user = userEvent.setup()
     renderPage(<Config />)
-    const editor = await screen.findByRole('textbox')
-    fireEvent.change(editor, { target: { value: JSON.stringify({ server: { port: 9000 } }, null, 2) } })
+
+    const pathCell = await screen.findByText('server.port')
+    const row = pathCell.closest('tr')
+    if (!row) throw new Error('server.port row not found')
+    const editor = within(row).getByRole('spinbutton')
+    fireEvent.change(editor, { target: { value: '9000' } })
     await user.click(screen.getByRole('button', { name: /保存配置/ }))
-    await waitFor(() => expect(fetch).toHaveBeenCalledWith(
-      expect.stringMatching(/\/admin\/config$/),
-      expect.objectContaining({
-        method: 'PUT',
-        body: JSON.stringify({ server: { port: 9000 } }),
-      }),
-    ))
+
+    await waitFor(() => {
+      const call = vi.mocked(fetch).mock.calls.find(
+        ([url, init]) => String(url).endsWith('/admin/config/table') && init?.method === 'PUT',
+      )
+      expect(call).toBeDefined()
+      const body = JSON.parse(String(call?.[1]?.body))
+      expect(body.server.port).toBe(9000)
+      expect(body.providers).toEqual(fullConfig.providers)
+    })
   })
 
   it('sends a real SSE chat request, renders routed output and clears the conversation', async () => {

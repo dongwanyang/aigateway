@@ -1,7 +1,7 @@
 """Control-panel account and opaque browser-session storage.
 
 API keys remain machine credentials. Browser cookies contain only random session
-secrets whose hashes are persisted in the existing SQLite auth database.
+secrets whose hashes are persisted in the configured SQLite auth database.
 """
 from __future__ import annotations
 
@@ -13,6 +13,63 @@ import sqlite3
 from datetime import UTC, datetime
 from typing import Any
 
+from aigateway_core.shared.runtime_values import (
+    configured_number,
+    configured_path,
+    configured_text,
+)
+
+_DEFAULT_DATABASE_TIMEOUT_SECONDS = 30.0
+_DEFAULT_PBKDF2_ITERATIONS = 600_000
+_OPTIONAL_CONFIG_ERRORS = (
+    "runtime_config_unavailable:",
+    "runtime_config_missing:",
+)
+
+
+def _optional_config_number(
+    path: str,
+    number_type: type[int] | type[float],
+    default: int | float,
+) -> int | float:
+    """Read a numeric policy value without requiring a YAML deployment.
+
+    A missing file or missing key falls back to the security-safe code policy.
+    Existing but invalid configuration remains an error.
+    """
+    try:
+        return configured_number(path, number_type)
+    except RuntimeError as exc:
+        if str(exc).startswith(_OPTIONAL_CONFIG_ERRORS):
+            return default
+        raise
+
+
+def _optional_config_text(path: str) -> str:
+    """Return optional text from YAML while preserving invalid-config errors."""
+    try:
+        return configured_text(path)
+    except RuntimeError as exc:
+        if str(exc).startswith(_OPTIONAL_CONFIG_ERRORS):
+            return ""
+        raise
+
+
+def _positive_environment_number(
+    name: str,
+    number_type: type[int] | type[float],
+) -> int | float | None:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        value = number_type(raw)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"invalid {name}") from exc
+    if value <= 0:
+        raise RuntimeError(f"invalid {name}")
+    return value
+
 
 def _now_unix() -> int:
     return int(datetime.now(UTC).timestamp())
@@ -22,9 +79,25 @@ def _token_hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def _pbkdf2_iterations() -> int:
+    explicit = _positive_environment_number(
+        "AI_GATEWAY_PASSWORD_PBKDF2_ITERATIONS",
+        int,
+    )
+    if explicit is not None:
+        return int(explicit)
+    return int(
+        _optional_config_number(
+            "auth.password.pbkdf2_iterations",
+            int,
+            _DEFAULT_PBKDF2_ITERATIONS,
+        )
+    )
+
+
 def _password_hash(password: str, *, salt: bytes | None = None) -> str:
     salt = salt or secrets.token_bytes(16)
-    iterations = int(os.environ.get("AI_GATEWAY_PASSWORD_PBKDF2_ITERATIONS", "600000"))
+    iterations = _pbkdf2_iterations()
     digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
     return f"pbkdf2_sha256${iterations}${salt.hex()}${digest.hex()}"
 
@@ -42,15 +115,43 @@ def _verify_password(password: str, encoded: str) -> bool:
         return False
 
 
+def _admin_user_id(username: str) -> str:
+    explicit = os.environ.get("AI_GATEWAY_ADMIN_USER_ID", "").strip()
+    if explicit:
+        return explicit
+    return _optional_config_text("auth.admin_user_id") or username
+
+
 class BrowserAuthStore:
     """SQLite-backed administrator account and revocable browser sessions."""
 
-    def __init__(self, db_path: str):
-        self.db_path = db_path
+    def __init__(self, db_path: str, *, timeout_seconds: float | None = None):
+        if not isinstance(db_path, str) or not db_path.strip():
+            raise ValueError("auth database path is required")
+        self.db_path = db_path.strip()
+        explicit_timeout = _positive_environment_number(
+            "AI_GATEWAY_AUTH_DATABASE_TIMEOUT_SECONDS",
+            float,
+        )
+        self._timeout_seconds = (
+            float(timeout_seconds)
+            if timeout_seconds is not None
+            else float(explicit_timeout)
+            if explicit_timeout is not None
+            else float(
+                _optional_config_number(
+                    "auth.database_timeout_seconds",
+                    float,
+                    _DEFAULT_DATABASE_TIMEOUT_SECONDS,
+                )
+            )
+        )
+        if self._timeout_seconds <= 0:
+            raise ValueError("auth database timeout must be positive")
         self._init_schema()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn = sqlite3.connect(self.db_path, timeout=self._timeout_seconds)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
@@ -104,13 +205,7 @@ class BrowserAuthStore:
         return row is not None
 
     def provision_admin(self, username: str, temporary_password: str) -> dict[str, Any] | None:
-        """Create the initial admin account exactly once.
-
-        First-login requests can race when two browser tabs submit the installer
-        password at the same time. SQLite enforces uniqueness on both user_id and
-        username; treat an IntegrityError as "another request won" instead of
-        overwriting or returning that competing account as a successful login.
-        """
+        """Create the initial configured administrator account exactly once."""
         now = _now_unix()
         try:
             with self._connect() as conn:
@@ -118,8 +213,15 @@ class BrowserAuthStore:
                     """INSERT INTO admin_users
                        (user_id, username, password_hash, status,
                         requires_password_change, password_changed_at, created_at, updated_at)
-                       VALUES ('admin', ?, ?, 'active', 1, ?, ?, ?)""",
-                    (username, _password_hash(temporary_password), now, now, now),
+                       VALUES (?, ?, ?, 'active', 1, ?, ?, ?)""",
+                    (
+                        _admin_user_id(username),
+                        username,
+                        _password_hash(temporary_password),
+                        now,
+                        now,
+                        now,
+                    ),
                 )
         except sqlite3.IntegrityError:
             return None
@@ -128,7 +230,6 @@ class BrowserAuthStore:
     def verify_credentials(self, username: str, password: str) -> dict[str, Any] | None:
         user = self.get_user(username)
         if not user or user.get("status") != "active":
-            # Keep a comparable slow-hash cost for unknown users.
             _password_hash(password, salt=b"\0" * 16)
             return None
         if not _verify_password(password, str(user.get("password_hash", ""))):
@@ -153,8 +254,14 @@ class BrowserAuthStore:
                     absolute_expires_at, ip_address, user_agent)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    _token_hash(token), user_id, now, now, now + ttl_seconds,
-                    now + absolute_ttl_seconds, ip_address[:128], user_agent[:512],
+                    _token_hash(token),
+                    user_id,
+                    now,
+                    now,
+                    now + ttl_seconds,
+                    now + absolute_ttl_seconds,
+                    ip_address[:128],
+                    user_agent[:512],
                 ),
             )
         return token
@@ -219,9 +326,20 @@ def get_browser_auth_store(request: Any) -> BrowserAuthStore:
     if store is not None:
         return store
     key_store = getattr(request.app.state, "key_store", None)
-    db_path = getattr(key_store, "db_path", None) or os.environ.get(
-        "AI_GATEWAY_AUTH_DB_PATH", "data/auth.db"
-    )
-    store = BrowserAuthStore(db_path)
+    db_path = getattr(key_store, "db_path", None)
+    if not db_path:
+        explicit = os.environ.get("AI_GATEWAY_AUTH_DB_PATH", "").strip()
+        if explicit:
+            db_path = explicit
+        else:
+            try:
+                db_path = configured_path("auth.database_path")
+            except RuntimeError as exc:
+                if str(exc).startswith(_OPTIONAL_CONFIG_ERRORS):
+                    raise RuntimeError(
+                        "auth_database_path_missing:set AI_GATEWAY_AUTH_DB_PATH or initialize key_store"
+                    ) from exc
+                raise
+    store = BrowserAuthStore(str(db_path))
     request.app.state.browser_auth_store = store
     return store

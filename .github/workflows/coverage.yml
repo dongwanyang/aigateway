@@ -29,8 +29,15 @@ jobs:
           python-version: '3.12'
           cache: 'pip'
 
+      - name: Set up Node.js for CodeGraph
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
       - name: Install dependencies
         run: |
+          npm install -g --force @colbymchenry/codegraph
+          command -v codegraph
           pip install -e aigateway-core
           pip install -e "aigateway-api[all]"
           pip install -r tests/requirements-test.txt

@@ -19,25 +19,19 @@ logger = logging.getLogger(__name__)
 
 
 def _register_builtin_plugins(registry: PluginRegistry, config_manager: Any = None) -> None:
-    """注册所有内置插件到注册表。
-
-    Args:
-        registry: PluginRegistry 实例。
-        config_manager: 可选的配置管理器，用于读取插件配置。
-    """
+    """注册所有内置插件到注册表。"""
 
     plugins_config = []
     if config_manager is not None:
         plugins_config = config_manager.get("plugins", []) or []
 
-    # 获取集成配置（用于 PromptCompressPlugin 等）
     prompt_compress_kwargs: dict[str, Any] = {}
     if config_manager is not None:
         try:
             integration_cfgs = config_manager.integration_configs
             prompt_compress_kwargs = {"config": integration_cfgs.prompt_compress}
         except Exception:
-            pass  # 回退到默认配置
+            logger.warning("PromptCompress 集成配置不可用，使用未配置的安全对象")
 
     plugin_map = {
         "pii_detector": (PIIDetectorPlugin, {"strategy": "sanitize"}),
@@ -46,10 +40,9 @@ def _register_builtin_plugins(registry: PluginRegistry, config_manager: Any = No
         "prompt_compress": (PromptCompressPlugin, prompt_compress_kwargs),
     }
 
-    # 注册 RAGRetrieverPlugin（可选依赖）
     try:
-        from aigateway_core.pipelines.understanding.rag.rag_retriever_plugin import (
-            RAGRetrieverPlugin,
+        from aigateway_core.pipelines.understanding.rag.configured_rag_retriever import (
+            ConfiguredRAGRetrieverPlugin,
         )
 
         rag_config = None
@@ -57,8 +50,26 @@ def _register_builtin_plugins(registry: PluginRegistry, config_manager: Any = No
             try:
                 integration_cfgs = config_manager.integration_configs
                 rag_config = integration_cfgs.rag_retriever
-            except Exception:
-                pass
+
+                code_rag_cfg = config_manager.get("code_rag", {}) or {}
+                if isinstance(code_rag_cfg, dict):
+                    graph_dir = code_rag_cfg.get("graph_db_dir")
+                    if isinstance(graph_dir, str) and graph_dir.strip():
+                        rag_config.code_graph_db_dir = graph_dir.strip()
+
+                infrastructure = config_manager.get("infrastructure", {}) or {}
+                qdrant_cfg = (
+                    infrastructure.get("qdrant", {})
+                    if isinstance(infrastructure, dict)
+                    else {}
+                )
+                qdrant_url = (
+                    qdrant_cfg.get("url") if isinstance(qdrant_cfg, dict) else None
+                )
+                if isinstance(qdrant_url, str) and qdrant_url.strip():
+                    rag_config.qdrant_url = qdrant_url.strip()
+            except Exception as exc:
+                logger.warning("RAG 集成配置不可用，插件将安全降级: %s", exc)
 
         rag_kwargs: dict[str, Any] = {}
         if rag_config is not None:
@@ -71,11 +82,13 @@ def _register_builtin_plugins(registry: PluginRegistry, config_manager: Any = No
                 break
 
         if rag_enabled:
-            plugin_map["rag_retriever"] = (RAGRetrieverPlugin, rag_kwargs)
+            plugin_map["rag_retriever"] = (
+                ConfiguredRAGRetrieverPlugin,
+                rag_kwargs,
+            )
     except ImportError:
         logger.debug("RAGRetrieverPlugin 不可用（导入失败）")
 
-    # 注册 ConvCompressorPlugin（可选依赖）
     try:
         from aigateway_core.pipelines.understanding.conversation.conv_compressor_plugin import (
             ConvCompressorPlugin,
@@ -87,7 +100,7 @@ def _register_builtin_plugins(registry: PluginRegistry, config_manager: Any = No
                 integration_cfgs = config_manager.integration_configs
                 conv_config = integration_cfgs.conv_compressor
             except Exception:
-                pass
+                logger.warning("ConvCompressor 集成配置不可用，使用未配置的安全对象")
 
         conv_kwargs: dict[str, Any] = {}
         if conv_config is not None:
@@ -104,7 +117,6 @@ def _register_builtin_plugins(registry: PluginRegistry, config_manager: Any = No
     except ImportError:
         logger.debug("ConvCompressorPlugin 不可用（导入失败）")
 
-    # 注册 Media Optimization Plugin（V2）
     try:
         from aigateway_core.prefix.media.plugin import MediaOptimizationPlugin
 
@@ -113,7 +125,10 @@ def _register_builtin_plugins(registry: PluginRegistry, config_manager: Any = No
             mol_config = config_manager.get("media_optimization", {}) or {}
 
         if mol_config.get("enabled", False):
-            plugin_map["media_optimizer"] = (MediaOptimizationPlugin, {"config": mol_config})
+            plugin_map["media_optimizer"] = (
+                MediaOptimizationPlugin,
+                {"config": mol_config},
+            )
     except ImportError:
         logger.debug("Media Optimization Plugin 不可用（导入失败）")
 
@@ -155,7 +170,6 @@ def _register_builtin_plugins(registry: PluginRegistry, config_manager: Any = No
             failure_policy=failure_policy,
         )
 
-    # 注册 Generation Optimization Plugins（6 个优化插件）
     try:
         from aigateway_core.pipelines.generation.registration import (
             register_generation_optimization_plugins,
@@ -180,6 +194,9 @@ def _register_builtin_plugins(registry: PluginRegistry, config_manager: Any = No
                 redis_client=redis_client,
             )
         else:
-            logger.info("Generation Optimization Layer 已禁用 (generation_optimization.enabled=false)")
+            logger.info(
+                "Generation Optimization Layer 已禁用 "
+                "(generation_optimization.enabled=false)"
+            )
     except ImportError as exc:
         logger.debug("Generation Optimization Plugins 不可用（导入失败）: %s", exc)

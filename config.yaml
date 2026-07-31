@@ -55,6 +55,15 @@ generation:
   video:
     poll_endpoint: /v1/videos/{id}
 auth:
+  database_path: /app/data/auth.db
+  database_timeout_seconds: 30
+  admin_username: admin
+  admin_user_id: admin
+  session:
+    idle_ttl_seconds: 28800
+    absolute_ttl_seconds: 86400
+  password:
+    pbkdf2_iterations: 600000
   api_keys:
   - key: ${ADMIN_API_KEY:-}
     user_id: admin
@@ -285,6 +294,7 @@ observability:
 infrastructure:
   redis:
     url: ${AI_GATEWAY_REDIS_URL:-redis://localhost:6379/0}
+    namespace: ai-gateway
     connect_timeout: 5
     socket_timeout: 10
     health_check_interval: 30
@@ -295,10 +305,20 @@ infrastructure:
     connect_timeout: 5
     read_timeout: 10
     write_timeout: 10
+    distance: COSINE
     hnsw_m: 16
     hnsw_ef_construct: 128
 cache:
   pipeline_version: '2'
+  key_buckets:
+    max_tokens:
+    - 256
+    - 512
+    - 1024
+    - 2048
+    - 4096
+    - 8192
+    - 16384
   l1:
     max_entries: 1000
     max_value_bytes: 102400
@@ -460,6 +480,7 @@ media_optimization:
   max_concurrent_processors: 4
 generation_optimization:
   enabled: true
+  preset_store_dir: /app/data/generation-presets
   ai_director:
     enabled: true
   model_router:
@@ -483,6 +504,8 @@ generation_optimization:
       batch_size: 1
     enabled: true
   draft_workflow:
+    store_dir: /app/data/drafts
+    retention_period_hours: 24
     comfyui:
       server_url: http://comfyui:8188
       public_url: http://localhost:8188

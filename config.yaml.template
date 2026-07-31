@@ -44,6 +44,16 @@ retry_budget:
 # 认证与配额
 # ==========================
 auth:
+  database_path: /app/data/auth.db       # API Key、配额和控制台 Session 的 SQLite 文件
+  database_timeout_seconds: 30           # SQLite 获取写锁的最长等待时间（秒）
+  admin_username: admin                  # 控制台初始管理员用户名
+  admin_user_id: admin                   # 管理员持久化用户 ID
+  session:
+    idle_ttl_seconds: 28800              # 控制台 Session 空闲过期时间（8 小时）
+    absolute_ttl_seconds: 86400          # 控制台 Session 最长存活时间（24 小时）
+  password:
+    pbkdf2_iterations: 600000            # 管理员密码 PBKDF2-SHA256 迭代次数
+
   api_keys:                  # API Key 列表（启动时导入 Redis）
     - key: ${ADMIN_API_KEY:-}
       user_id: admin         # 关联的用户 ID
@@ -216,6 +226,7 @@ observability:
 infrastructure:
   redis:
     url: ${AI_GATEWAY_REDIS_URL:-redis://localhost:6379/0}  # Redis 连接 URL
+    namespace: ai-gateway    # 共享 Redis 中用于隔离本服务所有键的命名空间
     connect_timeout: 5       # 连接超时（秒）
     socket_timeout: 10       # 读写超时（秒）
     health_check_interval: 30  # 健康检查间隔（秒）
@@ -227,6 +238,7 @@ infrastructure:
     connect_timeout: 5.0     # HTTP 连接超时（秒）
     read_timeout: 10.0       # HTTP 读取超时（秒）
     write_timeout: 10.0      # HTTP 写入超时（秒）
+    distance: COSINE         # 向量距离：COSINE | DOT | EUCLID | MANHATTAN
     hnsw_m: 16               # HNSW 索引参数 M（影响召回率和内存）
     hnsw_ef_construct: 128   # HNSW 构建时 ef 值（越大索引越准但越慢）
 
@@ -235,6 +247,15 @@ infrastructure:
 # ==========================
 cache:
   pipeline_version: "2"       # 管道语义变化时递增，强制失效旧响应
+  key_buckets:
+    max_tokens:               # 参与缓存键的 max_tokens 分桶边界，必须递增且不重复
+      - 256
+      - 512
+      - 1024
+      - 2048
+      - 4096
+      - 8192
+      - 16384
   l1:                        # L1 进程内 LRU 缓存
     max_entries: 1000        # 最大条目数（LRU 淘汰）
     max_value_bytes: 102400  # 单条最大字节数（100KB），超过不进 L1
@@ -421,6 +442,8 @@ media_optimization:
 # ==========================
 # 6 大策略降低图片/视频生成成本
 generation_optimization:
+  enabled: true                # 是否启用生成优化插件链
+  preset_store_dir: /app/data/generation-presets  # 控制台自定义生成预设目录
   ai_director: {}              # Prompt 结构化改写
   model_router: {}             # 生成模型路由策略
   feature_cache: {}            # 特征向量缓存
@@ -432,6 +455,8 @@ generation_optimization:
       device: cpu            # 运行设备：cpu | cuda
       batch_size: 1          # 批量处理大小
   draft_workflow:             # Draft-to-HiRes 草图工作流
+    store_dir: /app/data/drafts       # 草稿、预览和确认结果的持久化根目录
+    retention_period_hours: 24        # 草稿会话保留时长（小时）
     comfyui:
       server_url: "http://comfyui:8188"  # Compose 内网地址；不直接暴露公网
       public_url: "http://localhost:8188" # 浏览器打开 ComfyUI/Manager 的地址

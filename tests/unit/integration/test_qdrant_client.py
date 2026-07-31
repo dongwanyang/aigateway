@@ -20,7 +20,7 @@ class TestQdrantClientManagerSingleton:
         from aigateway_core.shared.qdrant_client import QdrantClientManager
         mgr = QdrantClientManager()
         assert mgr._http is None
-        assert mgr.url == "http://localhost:6333"
+        assert mgr.url == ""
 
 
 class TestConnectDisconnect:
@@ -203,16 +203,10 @@ class TestStoreEmbedding:
         mgr = QdrantClientManager()
         mock_http = AsyncMock()
 
-        # upsert_collection calls GET /collections/ first
         collections_resp = MagicMock()
         collections_resp.json.return_value = {"result": {"collections": []}}
         mock_http.get = AsyncMock(return_value=collections_resp)
 
-        # Sequence of HTTP calls:
-        # 1. PUT /collections/.../points → 404
-        # 2. GET /collections/ → empty (for upsert_collection)
-        # 3. PUT /collections/... → create collection (success)
-        # 4. PUT /collections/.../points → success
         first_put = MagicMock()
         first_put.status_code = 404
         first_put.raise_for_status = MagicMock()
@@ -234,7 +228,7 @@ class TestStoreEmbedding:
             {"prompt_hash": "abc"},
             [0.1, 0.2, 0.3],
         )
-        assert mock_http.put.call_count == 3  # 404 → create → retry put
+        assert mock_http.put.call_count == 3
 
 
 class TestQueryVector:
