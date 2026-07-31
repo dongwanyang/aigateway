@@ -110,7 +110,10 @@ def release_l3_model() -> bool:
     try:
         import torch
 
-        if torch.cuda.is_available():
+        # empty_cache() is useful only after this process already initialized
+        # CUDA.  Calling it from an otherwise idle CPU deployment must not create
+        # the very CUDA context that the release operation is intended to avoid.
+        if torch.cuda.is_initialized():
             torch.cuda.empty_cache()
     except ImportError:
         pass
