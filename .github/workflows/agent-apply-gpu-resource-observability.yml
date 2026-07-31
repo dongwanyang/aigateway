@@ -1,0 +1,48 @@
+name: Agent Apply GPU Resource Observability
+
+on:
+  push:
+    branches:
+      - agent/fix-gpu-resource-observability
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply deterministic patch
+        run: |
+          python3 scripts/apply_gpu_resource_observability.py
+          python3 scripts/finalize_gpu_resource_patch.py
+      - name: Validate patch formatting
+        run: git diff --check
+      - name: Commit generated changes
+        run: |
+          if git diff --quiet; then
+            echo 'No changes to commit'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/workflows/docker-images.yml \
+                  aigateway-api/src/aigateway_api/__init__.py \
+                  aigateway-api/src/aigateway_api/gpu_routes.py \
+                  aigateway-api/src/aigateway_api/main.py \
+                  aigateway-core/src/aigateway_core/prefix/cache/l3_semantic.py \
+                  config.yaml.template \
+                  control-panel/src/api/client.ts \
+                  control-panel/src/pages/Config.tsx \
+                  control-panel/src/pages/Config.versioning.test.tsx \
+                  control-panel/src/pages/GpuStatus.regression.test.tsx \
+                  control-panel/src/pages/pages.integration.test.tsx \
+                  scripts/quickstart.sh \
+                  scripts/render-deployment-config.py \
+                  tests/unit/test_gpu_resource_policy.py
+          git commit -m 'fix(gpu): make resident memory observable and releasable'
+          git push origin HEAD
