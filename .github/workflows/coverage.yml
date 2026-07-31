@@ -20,10 +20,10 @@ jobs:
           fetch-depth: 0
       - name: Merge validated GPU component
         run: |
-          python3 scripts/merge_gpu_component.py
-          git diff --check --cached
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          python3 scripts/merge_gpu_component.py
+          git diff --check --cached
           git commit -m 'merge: combine validated GPU resource fixes'
           git push origin HEAD
 
