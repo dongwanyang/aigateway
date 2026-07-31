@@ -21,16 +21,16 @@ def _by_path(items: list[dict[str, object]]) -> dict[str, dict[str, object]]:
     return {str(item["path"]): item for item in items}
 
 
-def test_provider_and_pricing_paths_are_wildcarded(
+def test_provider_and_pricing_paths_include_concrete_and_wildcard_forms(
     schema_items: list[dict[str, object]],
 ) -> None:
     by_path = _by_path(schema_items)
+    assert "providers.agnes.api_key" in by_path
+    assert "providers.deepseek.api_key" in by_path
     assert "providers.*.api_key" in by_path
     assert "providers.*.model_grouper[].models[].features" in by_path
     assert "providers.*.model_grouper[].pricing.*.prompt" in by_path
     assert "providers.*.model_grouper[].pricing.*.completion" in by_path
-    assert not any(path.startswith("providers.agnes.") for path in by_path)
-    assert not any(path.startswith("providers.deepseek.") for path in by_path)
 
 
 def test_dynamic_leaf_descriptions_are_not_reduced_to_parent_text(
@@ -56,9 +56,14 @@ def test_array_element_types_and_editors_are_reported(
 ) -> None:
     by_path = _by_path(schema_items)
     features = by_path["providers.*.model_grouper[].models[].features"]
+    concrete_features = by_path[
+        "providers.agnes.model_grouper[].models[].features"
+    ]
     fallback = by_path["providers.*.model_grouper[].fallback_models"]
     assert features["value_type"] == "string[]"
     assert features["editor"] == "token_list"
+    assert concrete_features["value_type"] == "string[]"
+    assert concrete_features["editor"] == "token_list"
     assert fallback["value_type"] == "string[]"
     assert fallback["editor"] == "token_list"
     assert by_path["cache.key_buckets.max_tokens"]["value_type"] == "integer[]"
@@ -99,5 +104,6 @@ def test_yaml_parser_preserves_hashes_inside_quoted_values(
     items = parse_template_schema(str(tmp_path / "config.yaml"))
 
     by_path = _by_path(items)
+    assert by_path["providers.custom.base_url"]["description"] == "API 基地址"
     assert by_path["providers.*.base_url"]["description"] == "API 基地址"
     assert by_path["providers.*.base_url"]["value_type"] == "string"
