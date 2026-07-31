@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -36,6 +37,38 @@ def test_shared_gpu_renderer_moves_gateway_models_to_cpu(tmp_path: Path) -> None
     assert config["embedding"]["device"] == "cpu"
     assert config["deployment"]["shared_gpu"] is True
     assert config["generation_optimization"]["token_compressor"]["clip"]["device"] == "cpu"
+
+
+def test_gpu_status_does_not_initialize_torch_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Cuda:
+        @staticmethod
+        def is_initialized() -> bool:
+            return False
+
+        @staticmethod
+        def current_device() -> int:
+            raise AssertionError("status polling initialized CUDA")
+
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(cuda=Cuda()))
+    monkeypatch.setattr(
+        gpu_routes,
+        "_nvidia_smi_status",
+        lambda: {
+            "available": True,
+            "device": "0",
+            "name": "Test GPU",
+            "device_used_bytes": 2,
+            "device_free_bytes": 3,
+            "device_total_bytes": 5,
+            "device_memory_source": "nvidia-smi",
+        },
+    )
+    status = gpu_routes._gateway_cuda_status()
+    assert status["available"] is True
+    assert status["torch_initialized"] is False
+    assert status["allocated_bytes"] == 0
+    assert status["reserved_bytes"] == 0
+    assert status["device_used_bytes"] == 2
 
 
 def test_release_l3_model_clears_cached_objects(monkeypatch: pytest.MonkeyPatch) -> None:
