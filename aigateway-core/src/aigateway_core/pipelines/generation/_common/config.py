@@ -214,7 +214,11 @@ class GenerationOptimizationConfigWatcher:
         errors = new_config.validate()
         if errors:
             raise ValueError("; ".join(errors))
-        self._commit_config(new_config, previous)
+        self._commit_config(
+            new_config,
+            previous,
+            propagate_callback_errors=True,
+        )
 
     def _on_config_reload(self, new_full_config: dict[str, Any]) -> None:
         """Compatibility seam for callers that submit partial config patches."""
@@ -241,42 +245,59 @@ class GenerationOptimizationConfigWatcher:
                     error,
                 )
             return
-        self._commit_config(new_config, previous)
+        self._commit_config(
+            new_config,
+            previous,
+            propagate_callback_errors=False,
+        )
 
     def _commit_config(
         self,
         new_config: GenerationOptimizationConfig,
         previous: GenerationOptimizationConfig,
+        *,
+        propagate_callback_errors: bool,
     ) -> None:
         with self._lock:
             self._current_config = new_config
-        try:
+        if not propagate_callback_errors:
             self._notify_callbacks(new_config)
+            return
+        try:
+            self._notify_callbacks_strict(new_config)
         except Exception:
             with self._lock:
                 self._current_config = previous
-            try:
-                self._notify_callbacks(previous)
-            except Exception as rollback_exc:
-                logger.error(
-                    "generation config callback rollback failed: %s",
-                    rollback_exc,
-                )
+            # Rollback notifications are best effort: the original rejection is
+            # the transaction result and must not be hidden by rollback observers.
+            self._notify_callbacks(previous)
             raise
 
     def _notify_callbacks(
         self,
         new_config: GenerationOptimizationConfig,
     ) -> None:
-        # Watcher subscribers remain isolated: one observer failure must not stop
-        # later observers or direct watcher callers. ConfigManager wraps this
-        # callback with a log-failure capture, so a transactional file reload still
-        # observes the failure and rolls the complete runtime configuration back.
+        """Compatibility notification: isolate observer failures."""
         for callback in tuple(self._callbacks):
             try:
                 callback(new_config)
             except Exception:
                 logger.exception("generation config callback failed")
+
+    def _notify_callbacks_strict(
+        self,
+        new_config: GenerationOptimizationConfig,
+    ) -> None:
+        """Transactional notification: run all observers, then reject on error."""
+        errors: list[Exception] = []
+        for callback in tuple(self._callbacks):
+            try:
+                callback(new_config)
+            except Exception as exc:
+                logger.exception("generation config callback failed")
+                errors.append(exc)
+        if errors:
+            raise errors[0]
 
 
 __all__ = [
