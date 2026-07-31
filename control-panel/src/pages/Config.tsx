@@ -246,8 +246,21 @@ function groupRows(rows: ConfigRow[]): Array<[string, ConfigRow[]]> {
   return Array.from(groups.entries())
 }
 
-function ConfigValueEditor({ row, onChange }: { row: ConfigRow; onChange: (path: string, input: string) => void }) {
-  const text = valueToText(row.value)
+function ConfigValueEditor({ row, onChange }: { row: ConfigRow; onChange: (path: string, input: string) => boolean }) {
+  const canonicalText = valueToText(row.value)
+  const [draftText, setDraftText] = useState(canonicalText)
+  const [editing, setEditing] = useState(false)
+
+  useEffect(() => {
+    if (!editing) setDraftText(canonicalText)
+  }, [canonicalText, editing, row.path])
+
+  function commitDraft() {
+    setEditing(false)
+    if (draftText === canonicalText) return
+    if (!onChange(row.path, draftText)) setDraftText(canonicalText)
+  }
+
   if (typeof row.value === 'boolean') {
     return (
       <select
@@ -264,8 +277,10 @@ function ConfigValueEditor({ row, onChange }: { row: ConfigRow; onChange: (path:
   if (Array.isArray(row.value) || isPlainObject(row.value)) {
     return (
       <textarea
-        value={text}
-        onChange={event => onChange(row.path, event.target.value)}
+        value={draftText}
+        onFocus={() => setEditing(true)}
+        onChange={event => setDraftText(event.target.value)}
+        onBlur={commitDraft}
         style={{ width: '100%', minHeight: 76, fontFamily: 'var(--font-mono)', fontSize: '12px' }}
         spellCheck={false}
       />
@@ -275,8 +290,17 @@ function ConfigValueEditor({ row, onChange }: { row: ConfigRow; onChange: (path:
     <input
       className="input"
       type={typeof row.value === 'number' ? 'number' : 'text'}
-      value={text}
-      onChange={event => onChange(row.path, event.target.value)}
+      value={draftText}
+      onFocus={() => setEditing(true)}
+      onChange={event => setDraftText(event.target.value)}
+      onBlur={commitDraft}
+      onKeyDown={event => {
+        if (event.key === 'Enter') event.currentTarget.blur()
+        if (event.key === 'Escape') {
+          setDraftText(canonicalText)
+          event.currentTarget.blur()
+        }
+      }}
       style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: '12px' }}
     />
   )
@@ -377,8 +401,8 @@ export default function Config() {
     }
   }
 
-  function handleValueChange(path: string, input: string) {
-    if (!draftConfig) return
+  function handleValueChange(path: string, input: string): boolean {
+    if (!draftConfig) return false
     setLocalError(null)
     try {
       const previous = readByPath(draftConfig, path)
@@ -386,8 +410,10 @@ export default function Config() {
       const next = writeByPath(draftConfig, path, parsed) as ConfigObject
       setDraftConfig(next)
       setHasChanges(JSON.stringify(next) !== JSON.stringify(config))
+      return true
     } catch (exc) {
       setLocalError(exc instanceof Error ? `${path}: ${exc.message}` : '配置值格式无效')
+      return false
     }
   }
 
