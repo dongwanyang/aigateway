@@ -8,12 +8,15 @@ import pytest
 import yaml
 from fastapi import HTTPException, Request
 
-from aigateway_api import security_routes
+from aigateway_api import config_security, security_routes
 from aigateway_api.config_security import (
     ConfigValidationError,
+    ConfigVersionConflictError,
     MASKED_SECRET,
+    config_revision,
     redact_config,
     restore_masked_values,
+    transactional_replace_config,
 )
 from aigateway_core.shared.config import ConfigManager
 
@@ -50,6 +53,15 @@ def _request(body: bytes, *, content_type: str = "application/json") -> Request:
         },
         receive,
     )
+
+
+def _minimal_config(port: int = 8000) -> dict:
+    return {
+        "server": {"host": "0.0.0.0", "port": port},
+        "plugins": [],
+        "providers": {},
+        "observability": {"log_level": "info"},
+    }
 
 
 def test_redacts_additional_secret_names_and_scalar_api_keys() -> None:
@@ -93,17 +105,7 @@ async def test_config_route_preserves_json_validation_as_http_400(payload: bytes
 
 def test_full_reload_transactions_are_serialized(tmp_path, monkeypatch) -> None:
     path = tmp_path / "config.yaml"
-    path.write_text(
-        yaml.safe_dump(
-            {
-                "server": {"host": "0.0.0.0", "port": 8000},
-                "plugins": [],
-                "providers": {},
-                "observability": {"log_level": "info"},
-            }
-        ),
-        encoding="utf-8",
-    )
+    path.write_text(yaml.safe_dump(_minimal_config()), encoding="utf-8")
     monkeypatch.setenv("AI_GATEWAY_ENV", "production")
     manager = ConfigManager(str(path))
 
@@ -139,3 +141,36 @@ def test_full_reload_transactions_are_serialized(tmp_path, monkeypatch) -> None:
     assert not first.is_alive()
     assert not second.is_alive()
     assert second_entered.is_set()
+
+
+def test_transaction_rechecks_revision_immediately_before_replace(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(_minimal_config()), encoding="utf-8")
+    monkeypatch.setenv("AI_GATEWAY_ENV", "production")
+    manager = ConfigManager(str(path))
+    expected = config_revision(str(path))
+    original_validate = config_security.validate_candidate
+
+    def validate_then_external_write(selected_manager, candidate):
+        result = original_validate(selected_manager, candidate)
+        path.write_text(yaml.safe_dump(_minimal_config(8100)), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(
+        config_security,
+        "validate_candidate",
+        validate_then_external_write,
+    )
+
+    with pytest.raises(ConfigVersionConflictError):
+        transactional_replace_config(
+            str(path),
+            _minimal_config(8200),
+            manager,
+            expected_revision=expected,
+        )
+
+    assert yaml.safe_load(path.read_text(encoding="utf-8"))["server"]["port"] == 8100
