@@ -86,8 +86,10 @@ def test_masked_scalar_list_does_not_restore_by_position() -> None:
     current = {"auth": {"api_keys": ["first-secret", "second-secret"]}}
     candidate = {"auth": {"api_keys": [MASKED_SECRET, MASKED_SECRET]}}
 
-    with pytest.raises(ConfigValidationError, match="unambiguous persisted value"):
+    with pytest.raises(ConfigValidationError) as exc_info:
         restore_masked_values(candidate, current)
+
+    assert "unambiguous persisted value" in str(exc_info.value.issues)
 
 
 @pytest.mark.asyncio
