@@ -99,20 +99,26 @@ def _config_error(exc: Exception) -> HTTPException:
 
 
 def _expected_revision(request: Request) -> str:
-    raw = request.headers.get("if-match", "").strip()
+    # Browsers may use the query parameter because the existing deployment CORS
+    # contract does not permit the non-safelisted If-Match request header. Other
+    # clients should prefer the standard strong If-Match precondition.
+    raw = (
+        request.headers.get("if-match", "").strip()
+        or request.query_params.get("revision", "").strip()
+    )
     if not raw:
         raise ConfigPreconditionRequiredError(
-            "If-Match with the loaded configuration revision is required"
+            "If-Match or revision query precondition is required"
         )
     if raw.startswith("W/") or "," in raw or raw == "*":
         raise ConfigPreconditionRequiredError(
-            "If-Match must contain one strong configuration revision"
+            "revision must contain one strong configuration revision"
         )
     if len(raw) >= 2 and raw[0] == raw[-1] == '"':
         raw = raw[1:-1]
     if not raw:
         raise ConfigPreconditionRequiredError(
-            "If-Match configuration revision is empty"
+            "configuration revision is empty"
         )
     return raw
 
