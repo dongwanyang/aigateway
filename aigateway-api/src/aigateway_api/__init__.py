@@ -103,12 +103,14 @@ def _preload_cors_origins() -> None:
 
 
 def _install_admin_security_guards() -> None:
-    """Install sensitive-route and draft-ownership replacements."""
+    """Install sensitive-route, transactional-config and ownership replacements."""
     from . import admin_routes
+    from .config_management_routes import install_config_management_routes
     from .draft_security import assert_draft_owner
     from .security_routes import install_security_routes
 
     install_security_routes(admin_routes.router)
+    install_config_management_routes(admin_routes.router)
     admin_routes._assert_draft_owner = assert_draft_owner
 
 
