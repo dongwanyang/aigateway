@@ -15,6 +15,11 @@ from .config_env import (
 )
 
 logger = logging.getLogger(__name__)
+_RELOAD_FAILURE_MARKERS = (
+    "热重载回调执行失败",
+    "configuration reload callback failed",
+    "config callback failed",
+)
 
 
 class ConfigReloadCallbackError(RuntimeError):
@@ -37,6 +42,19 @@ class ConfigStrictValidationError(ValueError):
             + "; ".join(str(issue.get("message", issue)) for issue in issues)
         )
         self.issues = issues
+
+
+class _ReloadFailureCapture(logging.Handler):
+    """Capture legacy reload callbacks that log and swallow their exception."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.ERROR)
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        message = record.getMessage()
+        if any(marker in message for marker in _RELOAD_FAILURE_MARKERS):
+            self.messages.append(message)
 
 
 class ConfigManager(_BaseConfigManager):
@@ -164,11 +182,18 @@ class ConfigManager(_BaseConfigManager):
     ) -> None:
         errors: list[BaseException] = []
         for callback in tuple(self._reload_callbacks):
+            capture = _ReloadFailureCapture()
+            callback_logger = logging.getLogger(callback.__module__)
+            callback_logger.addHandler(capture)
             try:
                 callback(new_config)
             except Exception as exc:
                 logger.exception("热重载回调执行失败")
                 errors.append(exc)
+            finally:
+                callback_logger.removeHandler(capture)
+            if capture.messages:
+                errors.append(RuntimeError("; ".join(capture.messages)))
         if errors:
             raise ConfigReloadCallbackError(errors)
 
