@@ -455,6 +455,10 @@ def transactional_replace_config(
             _write_bytes_atomic(path, payload)
             committed = True
             config_manager.load()
+            # A non-cooperating writer can still replace the file while runtime
+            # callbacks are executing. Return success only for the revision that
+            # remains persisted after the complete reload transaction.
+            _assert_revision_unchanged(path, committed_revision)
         except Exception as exc:
             if committed:
                 after_failure = config_revision(path)
