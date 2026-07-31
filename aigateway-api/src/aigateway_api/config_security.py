@@ -51,6 +51,14 @@ class ConfigPreconditionRequiredError(RuntimeError):
     pass
 
 
+class ConfigCommit(dict[str, Any]):
+    """Committed persisted config with the exact revision created under lock."""
+
+    def __init__(self, config: dict[str, Any], revision: str):
+        super().__init__(config)
+        self.revision = revision
+
+
 def config_revision_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
@@ -384,7 +392,7 @@ def transactional_replace_config(
     config_manager: Any,
     *,
     expected_revision: str | None = None,
-) -> dict[str, Any]:
+) -> ConfigCommit:
     """Validate, compare-and-swap, persist and reload with rollback."""
     with open(path + ".lock", "a+", encoding="utf-8") as lock_file:
         try:
@@ -427,6 +435,7 @@ def transactional_replace_config(
             default_flow_style=False,
             sort_keys=False,
         ).encode("utf-8")
+        committed_revision = config_revision_bytes(payload)
         committed = False
         try:
             _write_bytes_atomic(path, payload)
@@ -442,10 +451,11 @@ def transactional_replace_config(
             raise
         finally:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-        return restored
+        return ConfigCommit(restored, committed_revision)
 
 
 __all__ = [
+    "ConfigCommit",
     "ConfigPreconditionRequiredError",
     "ConfigUpdateBusyError",
     "ConfigValidationError",
