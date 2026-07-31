@@ -483,9 +483,9 @@ export default function Config() {
           )}
           <button
             className="btn btn-secondary"
-            disabled={gpuQuery.data?.queue_idle !== true || releaseGpuMutation.isPending}
+            disabled={!gpuQuery.data || gpuQuery.data.queue_idle === false || releaseGpuMutation.isPending}
             onClick={() => releaseGpuMutation.mutate()}
-            title={gpuQuery.data?.queue_idle === true ? '卸载空闲模型并清理 PyTorch 缓存' : '队列非空时不能释放显存'}
+            title={gpuQuery.data?.queue_idle === false ? '队列非空时不能释放显存' : '卸载空闲模型并清理 PyTorch 缓存'}
           >
             <RefreshCw size={14} /> {releaseGpuMutation.isPending ? '释放中...' : '释放空闲显存'}
           </button>

@@ -124,7 +124,9 @@ elif [[ "$os_name" == "Linux" ]]; then
   if grep -qi microsoft /proc/version 2>/dev/null; then
     platform="windows-wsl2"
   fi
-  if [[ "$edition" != "lite" ]]       && command -v nvidia-smi >/dev/null 2>&1       && nvidia-smi -L >/dev/null 2>&1; then
+  if [[ "$edition" != "lite" ]] \
+      && command -v nvidia-smi >/dev/null 2>&1 \
+      && nvidia-smi -L >/dev/null 2>&1; then
     accelerator="cuda"
   else
     accelerator="cpu"
@@ -171,7 +173,8 @@ case "$edition" in
   full) needs_knowledge="true"; needs_studio="true" ;;
 esac
 shared_gpu="false"
-if [[ "$accelerator" == "cuda" && "$gpu_count" == "1"       && "$needs_knowledge" == "true" && "$needs_studio" == "true" ]]; then
+if [[ "$accelerator" == "cuda" && "$gpu_count" == "1" \
+      && "$needs_studio" == "true" ]]; then
   shared_gpu="true"
   gateway_memory_fraction="0.20"
 fi
@@ -203,7 +206,9 @@ fi
 if [[ "$platform" != "apple" && "$comfyui_mode" == "native" ]]; then
   fail "native ComfyUI 当前仅支持 Apple Silicon"
 fi
-if [[ "$needs_studio" == "true" && "$platform" != "apple"       && "$accelerator" != "cuda" && "$comfyui_mode" == "container" ]]; then
+if [[ "$start" == "true" && "$needs_studio" == "true" \
+      && "$platform" != "apple" && "$accelerator" != "cuda" \
+      && "$comfyui_mode" == "container" ]]; then
   fail "本机未检测到可用 NVIDIA GPU，不能启动容器版 ComfyUI；请使用 --comfyui remote --comfyui-url URL"
 fi
 if [[ "$embedding_mode" == "remote" && "$needs_knowledge" == "true" && -z "$embedding_url" ]]; then
