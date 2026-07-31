@@ -215,7 +215,10 @@ async def test_global_config_merges_partial_debug_and_applies_runtime(
     assert persisted["debug"]["plugins"]["enabled"] is True
     assert persisted["debug"]["plugins_enabled"] is True
     assert persisted["debug"]["cache"] is False
-    assert calls == ["start", "DEBUG"]
+    # Production environment mode intentionally keeps the effective runtime
+    # debug flag disabled even when the persisted operator preference is true.
+    assert manager.get("debug_mode") is False
+    assert calls == ["start", "INFO"]
     assert json.loads(response.body)["data"]["hot_reload"] is True
 
 
