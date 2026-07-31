@@ -16,8 +16,6 @@ from . import _config_impl as _impl
 
 logger = logging.getLogger(__name__)
 
-# Preserve compatibility for helpers and configuration classes that are not
-# overridden below, including private helpers used by existing unit tests.
 for _name in dir(_impl):
     if _name.startswith("__"):
         continue
@@ -47,7 +45,9 @@ def _draft_from_compat(
 class GenerationOptimizationConfig(_impl.GenerationOptimizationConfig):
     """Generation configuration whose Draft storage path is explicitly supplied."""
 
-    draft_workflow: DraftWorkflowConfig = field(default_factory=DraftWorkflowConfig)
+    draft_workflow: DraftWorkflowConfig = field(
+        default_factory=DraftWorkflowConfig
+    )
 
     @classmethod
     def load_from_dict(
@@ -60,9 +60,10 @@ class GenerationOptimizationConfig(_impl.GenerationOptimizationConfig):
             raw,
             previous=previous,
         )
-
         draft_section = raw.get("draft_workflow", {})
-        draft_section = draft_section if isinstance(draft_section, dict) else {}
+        draft_section = (
+            draft_section if isinstance(draft_section, dict) else {}
+        )
         env_key = (
             "AI_GATEWAY_GENERATION_OPTIMIZATION_"
             "DRAFT_WORKFLOW_STORE_DIR"
@@ -74,9 +75,11 @@ class GenerationOptimizationConfig(_impl.GenerationOptimizationConfig):
             raw_store_dir = draft_section.get("store_dir")
 
         if isinstance(raw_store_dir, str) and raw_store_dir.strip():
-            selected_store_dir = str(compat.draft_workflow.store_dir).strip()
+            selected_store_dir = raw_store_dir.strip()
         elif previous is not None:
-            selected_store_dir = str(previous.draft_workflow.store_dir or "").strip()
+            selected_store_dir = str(
+                previous.draft_workflow.store_dir or ""
+            ).strip()
         else:
             selected_store_dir = ""
 
@@ -115,7 +118,10 @@ def parse_generation_optimization_config(
     data: dict[str, Any],
     previous: GenerationOptimizationConfig | None = None,
 ) -> GenerationOptimizationConfig:
-    return GenerationOptimizationConfig.load_from_dict(data, previous=previous)
+    return GenerationOptimizationConfig.load_from_dict(
+        data,
+        previous=previous,
+    )
 
 
 def validate_generation_optimization_config(
@@ -138,7 +144,9 @@ class GenerationOptimizationConfigWatcher:
         self._current_config = (
             initial_config
             if initial_config is not None
-            else GenerationOptimizationConfig.load_from_config_manager(config_manager)
+            else GenerationOptimizationConfig.load_from_config_manager(
+                config_manager
+            )
         )
         if hasattr(config_manager, "on_reload"):
             config_manager.on_reload(self._on_config_reload)
@@ -155,8 +163,14 @@ class GenerationOptimizationConfigWatcher:
             self._config_manager,
             previous=previous,
         )
-        for error in new_config.validate():
-            logger.error("generation configuration reload error: %s", error)
+        errors = new_config.validate()
+        if errors:
+            for error in errors:
+                logger.error(
+                    "generation configuration reload rejected: %s",
+                    error,
+                )
+            return previous
         with self._lock:
             self._current_config = new_config
         self._notify_callbacks(new_config)
@@ -181,13 +195,22 @@ class GenerationOptimizationConfigWatcher:
             raw_section,
             previous=previous,
         )
-        for error in new_config.validate():
-            logger.error("generation configuration reload error: %s", error)
+        errors = new_config.validate()
+        if errors:
+            for error in errors:
+                logger.error(
+                    "generation configuration reload rejected: %s",
+                    error,
+                )
+            return
         with self._lock:
             self._current_config = new_config
         self._notify_callbacks(new_config)
 
-    def _notify_callbacks(self, new_config: GenerationOptimizationConfig) -> None:
+    def _notify_callbacks(
+        self,
+        new_config: GenerationOptimizationConfig,
+    ) -> None:
         for callback in tuple(self._callbacks):
             try:
                 callback(new_config)
