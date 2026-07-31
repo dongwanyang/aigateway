@@ -46,19 +46,24 @@ def test_dynamic_leaf_descriptions_are_not_reduced_to_parent_text(
     assert "模型标识符" in str(
         by_path["providers.*.model_grouper[].models[].name"]["description"]
     )
+    assert by_path["providers.*.model_grouper[].models[].capabilities"][
+        "description"
+    ] == "模型能力列表，可选 text | image | video"
 
 
-def test_array_element_types_are_reported(
+def test_array_element_types_and_editors_are_reported(
     schema_items: list[dict[str, object]],
 ) -> None:
     by_path = _by_path(schema_items)
-    assert by_path["providers.*.model_grouper[].models[].features"][
-        "value_type"
-    ] == "string[]"
-    assert by_path["providers.*.model_grouper[].fallback_models"][
-        "value_type"
-    ] == "string[]"
+    features = by_path["providers.*.model_grouper[].models[].features"]
+    fallback = by_path["providers.*.model_grouper[].fallback_models"]
+    assert features["value_type"] == "string[]"
+    assert features["editor"] == "token_list"
+    assert fallback["value_type"] == "string[]"
+    assert fallback["editor"] == "token_list"
     assert by_path["cache.key_buckets.max_tokens"]["value_type"] == "integer[]"
+    assert "editor" not in by_path["server.cors_origins"]
+    assert "editor" not in by_path["code_rag.allowed_server_paths"]
 
 
 def test_missing_inline_comments_receive_backend_fallbacks(
