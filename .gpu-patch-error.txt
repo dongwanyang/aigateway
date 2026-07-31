@@ -1,2 +1,2 @@
 python3: can't open file '/home/runner/work/aigateway/aigateway/scripts/apply_gpu_resource_observability.py': [Errno 2] No such file or directory
-expected block not found in aigateway-core/src/aigateway_core/prefix/cache/l3_semantic.py: '    task = _l3_idle_task\n    _l3_idle_task = None\n    if task is not None and not task.done():\n        task.cancel()\n\n  '
+python3: can't open file '/home/runner/work/aigateway/aigateway/scripts/finalize_gpu_resource_patch.py': [Errno 2] No such file or directory
