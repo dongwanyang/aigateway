@@ -80,6 +80,29 @@ def _error(path: str, message: str) -> dict[str, str]:
     return {"level": "ERROR", "message": f"{path}: {message}"}
 
 
+def _matches_type(value: Any, type_hint: Any) -> bool:
+    """Handle postponed PEP 604 annotations without tolerant coercion."""
+    text = str(type_hint).strip().lower().replace("typing.", "")
+    optional = "none" in text or "optional" in text
+    if value is None:
+        return optional
+    if "bool" in text:
+        return isinstance(value, bool)
+    if "int" in text:
+        return isinstance(value, int) and not isinstance(value, bool)
+    if "float" in text:
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if "str" in text:
+        return isinstance(value, str)
+    if "list" in text:
+        return isinstance(value, list)
+    if "dict" in text:
+        return isinstance(value, dict)
+    if "tuple" in text:
+        return isinstance(value, (list, tuple))
+    return True
+
+
 def _validate_top_level_structure(
     config: dict[str, Any],
 ) -> list[dict[str, str]]:
@@ -134,7 +157,7 @@ def _validate_dataclass_values(
         if field is None:
             issues.append(_error(f"{path}.{name}", "unknown field"))
             continue
-        if not config_module._check_type(value, field.type):
+        if not _matches_type(value, field.type):
             issues.append(
                 _error(
                     f"{path}.{name}",
