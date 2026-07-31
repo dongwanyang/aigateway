@@ -46,3 +46,5 @@ jobs:
                   tests/unit/test_gpu_resource_policy.py
           git commit -m 'fix(gpu): make resident memory observable and releasable'
           git push origin HEAD
+
+# This workflow is temporary and removed after the deterministic patch is applied.
