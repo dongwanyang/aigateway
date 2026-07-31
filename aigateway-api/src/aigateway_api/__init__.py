@@ -1,6 +1,6 @@
 """
 aigateway_api - AI Gateway API 服务层
-=====================================
+====================================
 
 FastAPI 应用，提供 OpenAI 兼容接口和管理接口。
 """
@@ -128,8 +128,16 @@ def _install_config_schema_parser() -> None:
     ]
 
 
+def _install_runtime_regression_fixes() -> None:
+    """Install post-review fixes for admin routes, probes, and GPU defaults."""
+    from .regression_fixes import install_runtime_regression_fixes
+
+    install_runtime_regression_fixes()
+
+
 _ensure_core_src()
 _allow_config_precondition_header()
 _preload_cors_origins()
 _install_admin_security_guards()
 _install_config_schema_parser()
+_install_runtime_regression_fixes()
