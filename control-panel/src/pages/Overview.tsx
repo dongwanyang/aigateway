@@ -1,6 +1,7 @@
+import type { CSSProperties } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area } from 'recharts'
-import { Activity, Clock, DollarSign, Zap, TrendingDown } from 'lucide-react'
+import { Activity, Clock, DollarSign, Zap, TrendingDown, Radio, ServerCog } from 'lucide-react'
 import Card from '@/components/Card'
 import { getHealth, getCostSummary } from '@/api/client'
 import { queryKeys } from '@/query/keys'
@@ -14,9 +15,6 @@ const statCards = [
 ]
 
 async function loadOverviewMetrics() {
-  // All overview business metrics use the same durable 30-day SQLite window.
-  // Prometheus counters reset on process restart and must not be mixed with
-  // ledger totals that survive rebuilds.
   const summary = await getCostSummary(30)
   const total = summary.total ?? {}
   const totalRequests = Number(total.requests ?? 0)
@@ -68,102 +66,132 @@ export default function Overview() {
   const stats = metricsQuery.data?.stats ?? statCards
   const costByUser = metricsQuery.data?.costByUser ?? []
   const latencyData = metricsQuery.data?.latencyData ?? []
-
-  // 成本分布数据（至少显示一个占位）
   const displayCostData = costByUser.length > 0 ? costByUser : [{ user: '暂无数据', cost: 0 }]
+  const healthy = health?.status === 'healthy'
 
   return (
-    <div className="space-y-6">
-      <h2 className="text-2xl font-bold">概览</h2>
+    <div className="space-y-7">
+      <header className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+        <div>
+          <div className="page-eyebrow"><Radio size={13} /> Live operations</div>
+          <h2>概览</h2>
+          <p className="page-subtitle">
+            汇总最近 30 天的请求、成本与缓存表现，并持续检查 Gateway 及基础设施依赖状态。
+          </p>
+        </div>
+        <div className={`badge ${healthy ? 'badge-success' : healthLoading ? 'badge-neutral' : 'badge-warning'}`}>
+          <span className="status-dot" />
+          {healthLoading ? '正在检查服务状态' : healthy ? '服务运行正常' : '服务需要关注'}
+        </div>
+      </header>
 
-      {/* 统计卡片 */}
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
         {stats.map(({ icon: Icon, label, value, unit, color }) => (
-          <Card key={label}>
-            <div className="flex items-center justify-between mb-3">
-              <span className="text-sm" style={{ color: 'var(--color-text-secondary)' }}>{label}</span>
-              <Icon size={18} style={{ color: `var(${color})` }} />
+          <Card
+            key={label}
+            className="metric-card card-interactive"
+            style={{ '--metric-color': `var(${color})` } as CSSProperties}
+          >
+            <div className="mb-5 flex items-start justify-between gap-3">
+              <div>
+                <div className="text-xs font-semibold" style={{ color: 'var(--color-text-secondary)' }}>{label}</div>
+                <div className="mt-1 text-[10px]" style={{ color: 'var(--color-text-quaternary)' }}>{unit}</div>
+              </div>
+              <div className="metric-icon"><Icon size={18} /></div>
             </div>
-            <div className="text-3xl font-bold" style={{ color: `var(${color})` }}>{value}</div>
-            <div className="text-sm mt-1" style={{ color: 'var(--color-text-tertiary)' }}>{unit}</div>
+            <div className="metric-value">{value}</div>
           </Card>
         ))}
       </div>
 
-      {/* 延迟趋势图 */}
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1.35fr_0.65fr]">
         <Card title="平均延迟趋势 · 最近 24 个有请求时段 (ms)">
-          <ResponsiveContainer width="100%" height={280}>
+          <ResponsiveContainer width="100%" height={300}>
             <AreaChart data={latencyData.length > 0 ? latencyData : [{ time: '暂无数据', avg: 0 }]}>
-              <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
-              <XAxis dataKey="time" tick={{ fontSize: 11, fill: 'var(--color-text-quaternary)' }} />
-              <YAxis tick={{ fontSize: 11, fill: 'var(--color-text-quaternary)' }} />
+              <defs>
+                <linearGradient id="latencyGradient" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="var(--color-primary)" stopOpacity={0.28} />
+                  <stop offset="100%" stopColor="var(--color-primary)" stopOpacity={0} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="4 6" stroke="var(--color-border)" vertical={false} />
+              <XAxis dataKey="time" tick={{ fontSize: 11, fill: 'var(--color-text-quaternary)' }} axisLine={false} tickLine={false} />
+              <YAxis tick={{ fontSize: 11, fill: 'var(--color-text-quaternary)' }} axisLine={false} tickLine={false} />
               <Tooltip
-                contentStyle={{ backgroundColor: 'var(--color-bg-elevated)', border: '1px solid var(--color-border)', borderRadius: 8 }}
+                contentStyle={{ backgroundColor: 'var(--color-bg-elevated-solid)', border: '1px solid var(--color-border)', borderRadius: 12, boxShadow: 'var(--shadow-md)' }}
                 labelStyle={{ color: 'var(--color-text-secondary)' }}
               />
-              <Area type="monotone" dataKey="avg" stroke="var(--color-primary)" fill="var(--color-primary)" fillOpacity={0.1} name="平均延迟" />
+              <Area type="monotone" dataKey="avg" stroke="var(--color-primary)" strokeWidth={2.2} fill="url(#latencyGradient)" name="平均延迟" />
             </AreaChart>
           </ResponsiveContainer>
         </Card>
 
-        {/* 服务健康 */}
         <Card title="服务健康">
           {healthLoading ? (
-            <div className="space-y-3">
-              {[1, 2, 3].map(i => <div key={i} className="h-4 skeleton rounded" />)}
+            <div className="space-y-4">
+              {[1, 2, 3, 4].map(i => <div key={i} className="h-11 skeleton rounded-xl" />)}
             </div>
           ) : health ? (
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <span style={{ color: 'var(--color-text-secondary)' }}>整体状态</span>
-                <span className={`badge ${health.status === 'healthy' ? 'badge-success' : 'badge-warning'}`}>
-                  {health.status}
-                </span>
+            <div className="space-y-3">
+              <div className="mb-5 flex items-center gap-3 rounded-xl border p-3" style={{ borderColor: 'var(--color-border)', background: 'var(--color-bg-overlay)' }}>
+                <div className="metric-icon"><ServerCog size={18} /></div>
+                <div>
+                  <div className="text-xs font-semibold">Gateway Runtime</div>
+                  <div className="mt-1 text-[10px]" style={{ color: 'var(--color-text-tertiary)' }}>
+                    已运行 {Math.floor(health.uptime_seconds / 3600)}h {Math.floor((health.uptime_seconds % 3600) / 60)}m
+                  </div>
+                </div>
               </div>
-              <div className="flex items-center justify-between">
-                <span style={{ color: 'var(--color-text-secondary)' }}>运行时间</span>
-                <span style={{ fontFamily: 'var(--font-mono)' }}>{Math.floor(health.uptime_seconds / 3600)}h {Math.floor((health.uptime_seconds % 3600) / 60)}m</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span style={{ color: 'var(--color-text-secondary)' }}>Redis</span>
-                <span className={`badge ${health.dependencies?.redis?.status === 'connected' ? 'badge-success' : 'badge-danger'}`}>
-                  {health.dependencies?.redis?.status} ({health.dependencies?.redis?.latency_ms}ms)
-                </span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span style={{ color: 'var(--color-text-secondary)' }}>Qdrant</span>
-                <span className={`badge ${health.dependencies?.qdrant?.status === 'connected' ? 'badge-success' : 'badge-danger'}`}>
-                  {health.dependencies?.qdrant?.status} ({health.dependencies?.qdrant?.latency_ms}ms)
-                </span>
-              </div>
+              <HealthRow label="整体状态" value={health.status} state={healthy ? 'success' : 'warning'} />
+              <HealthRow
+                label="Redis Stack"
+                value={`${health.dependencies?.redis?.status ?? 'unknown'} · ${health.dependencies?.redis?.latency_ms ?? '—'}ms`}
+                state={health.dependencies?.redis?.status === 'connected' ? 'success' : 'danger'}
+              />
+              <HealthRow
+                label="Qdrant"
+                value={`${health.dependencies?.qdrant?.status ?? 'unknown'} · ${health.dependencies?.qdrant?.latency_ms ?? '—'}ms`}
+                state={health.dependencies?.qdrant?.status === 'connected' ? 'success' : 'danger'}
+              />
             </div>
           ) : (
-            <div className="text-center py-8" style={{ color: 'var(--color-text-tertiary)' }}>
-              无法获取健康状态
+            <div className="empty-state min-h-[240px] py-8">
+              <ServerCog className="empty-state-icon" />
+              <div className="empty-state-title">无法获取健康状态</div>
+              <div className="empty-state-desc">请检查 Gateway 服务和浏览器网络连接。</div>
             </div>
           )}
         </Card>
       </div>
 
-      {/* 成本分布 by 用户 */}
       <Card title="成本分布 by 用户 · 近 30 天 (Top 5)">
         {costByUser.length === 0 ? (
-          <div className="text-center py-12" style={{ color: 'var(--color-text-tertiary)' }}>
-            暂无用户成本数据，等待更多请求...
+          <div className="empty-state min-h-[250px] py-8">
+            <DollarSign className="empty-state-icon" />
+            <div className="empty-state-title">暂无用户成本数据</div>
+            <div className="empty-state-desc">产生请求后，这里会显示成本最高的前 5 个用户。</div>
           </div>
         ) : (
-          <ResponsiveContainer width="100%" height={280}>
+          <ResponsiveContainer width="100%" height={290}>
             <LineChart data={displayCostData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
-              <XAxis dataKey="user" tick={{ fontSize: 11, fill: 'var(--color-text-quaternary)' }} />
-              <YAxis tick={{ fontSize: 11, fill: 'var(--color-text-quaternary)' }} />
-              <Tooltip contentStyle={{ backgroundColor: 'var(--color-bg-elevated)', border: '1px solid var(--color-border)', borderRadius: 8 }} />
-              <Line type="monotone" dataKey="cost" stroke="var(--color-primary)" strokeWidth={2} dot={{ fill: 'var(--color-primary)' }} name="Cost ($)" />
+              <CartesianGrid strokeDasharray="4 6" stroke="var(--color-border)" vertical={false} />
+              <XAxis dataKey="user" tick={{ fontSize: 11, fill: 'var(--color-text-quaternary)' }} axisLine={false} tickLine={false} />
+              <YAxis tick={{ fontSize: 11, fill: 'var(--color-text-quaternary)' }} axisLine={false} tickLine={false} />
+              <Tooltip contentStyle={{ backgroundColor: 'var(--color-bg-elevated-solid)', border: '1px solid var(--color-border)', borderRadius: 12, boxShadow: 'var(--shadow-md)' }} />
+              <Line type="monotone" dataKey="cost" stroke="var(--color-primary)" strokeWidth={2.4} dot={{ fill: 'var(--color-primary)', strokeWidth: 0, r: 4 }} activeDot={{ r: 6 }} name="Cost ($)" />
             </LineChart>
           </ResponsiveContainer>
         )}
       </Card>
+    </div>
+  )
+}
+
+function HealthRow({ label, value, state }: { label: string; value: string; state: 'success' | 'warning' | 'danger' }) {
+  return (
+    <div className="flex items-center justify-between gap-3 border-b py-3 last:border-b-0" style={{ borderColor: 'var(--color-border-light)' }}>
+      <span className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>{label}</span>
+      <span className={`badge badge-${state}`}>{value}</span>
     </div>
   )
 }

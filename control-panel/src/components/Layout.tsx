@@ -1,108 +1,228 @@
-import { LayoutDashboard, Puzzle, DollarSign, Shield, Database, FileText, Sun, Moon, BookOpen, Settings, Bot, MessageSquare } from 'lucide-react'
-import { Link, useLocation } from 'react-router'
+import { useEffect, useState } from 'react'
+import {
+  BookOpen,
+  Bot,
+  Database,
+  DollarSign,
+  FileText,
+  LayoutDashboard,
+  LogOut,
+  Menu,
+  MessageSquare,
+  Moon,
+  Puzzle,
+  Settings,
+  Shield,
+  Sparkles,
+  Sun,
+  X,
+} from 'lucide-react'
+import { NavLink, useLocation } from 'react-router'
 import { useTheme } from '@/hooks/useTheme'
 import { useAuth } from '@/contexts/AuthContext'
 import CapabilityBanner from '@/components/CapabilityBanner'
-import { LogOut } from 'lucide-react'
 
-const navItems = [
-  { path: '/', label: '概览', icon: LayoutDashboard },
-  { path: '/chat', label: '聊天', icon: MessageSquare },
-  { path: '/models', label: '模型配置', icon: Bot },
-  { path: '/plugins', label: '插件管理', icon: Puzzle },
-  { path: '/costs', label: '成本分析', icon: DollarSign },
-  { path: '/quotas', label: '配额管理', icon: Shield },
-  { path: '/cache', label: '缓存监控', icon: Database },
-  { path: '/logs', label: '请求日志', icon: FileText },
-  { path: '/knowledge', label: '知识库', icon: BookOpen },
-  { path: '/config', label: '系统配置', icon: Settings },
+const navGroups = [
+  {
+    label: '工作台',
+    items: [
+      { path: '/', label: '概览', description: '运行状态与关键指标', icon: LayoutDashboard },
+      { path: '/chat', label: '聊天', description: '验证模型与路由效果', icon: MessageSquare },
+    ],
+  },
+  {
+    label: 'AI 能力',
+    items: [
+      { path: '/models', label: '模型配置', description: '供应商与模型路由', icon: Bot },
+      { path: '/plugins', label: '插件管理', description: '请求处理流水线', icon: Puzzle },
+      { path: '/knowledge', label: '知识库', description: 'RAG 与代码检索', icon: BookOpen },
+    ],
+  },
+  {
+    label: '运营治理',
+    items: [
+      { path: '/costs', label: '成本分析', description: '费用与 Token 用量', icon: DollarSign },
+      { path: '/quotas', label: '配额管理', description: '密钥、分组与限额', icon: Shield },
+      { path: '/cache', label: '缓存监控', description: '命中率与存储状态', icon: Database },
+      { path: '/logs', label: '请求日志', description: '链路与异常排查', icon: FileText },
+    ],
+  },
+  {
+    label: '系统',
+    items: [
+      { path: '/config', label: '系统配置', description: '运行参数与调试开关', icon: Settings },
+    ],
+  },
 ]
+
+const allNavItems = navGroups.flatMap(group => group.items)
 
 export default function Layout({ children }: { children: React.ReactNode }) {
   const location = useLocation()
   const { toggleTheme, isDark } = useTheme()
   const { state, logout } = useAuth()
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
+
+  const currentItem = allNavItems.find(item => item.path === location.pathname) ?? allNavItems[0]
+  const CurrentIcon = currentItem.icon
+  const accountLabel = state.keyPrefix || '管理员'
+
+  useEffect(() => {
+    setMobileMenuOpen(false)
+  }, [location.pathname])
+
+  useEffect(() => {
+    if (!mobileMenuOpen) return
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.body.style.overflow = previousOverflow
+    }
+  }, [mobileMenuOpen])
 
   async function handleLogout() {
     await logout()
   }
 
-  return (
-    <div className="min-h-screen" style={{ backgroundColor: 'var(--color-bg-base)', color: 'var(--color-text-primary)' }}>
-      {/* 顶部导航栏 */}
-      <header
-        className="fixed top-0 left-0 right-0 z-50 flex items-center justify-between px-6"
-        style={{ height: 'var(--nav-height)', backgroundColor: 'var(--color-bg-elevated)', borderBottom: '1px solid var(--color-border)' }}
-      >
-        <h1 className="text-lg font-semibold">AI Gateway Control Panel</h1>
-        <button
-          onClick={toggleTheme}
-          className="flex items-center gap-2 px-3 py-1.5 rounded-md cursor-pointer text-sm transition-colors"
-          style={{ color: 'var(--color-text-secondary)', backgroundColor: 'var(--color-bg-overlay)' }}
-          title={isDark ? '切换到亮色主题' : '切换到暗色主题'}
-        >
-          {isDark ? <Sun size={16} /> : <Moon size={16} />}
-          <span>{isDark ? '亮色' : '暗色'}</span>
-        </button>
-        {state.isAuthenticated && (
-          <div className="flex items-center gap-2">
-            {state.keyPrefix && (
-              <span className="text-xs px-2 py-1 rounded" style={{
-                backgroundColor: 'var(--color-bg-overlay)',
-                color: 'var(--color-text-secondary)',
-                fontFamily: 'var(--font-mono)',
-              }}>
-                ...{String(state.keyPrefix).slice(-4)}
-              </span>
-            )}
-            <button
-              onClick={handleLogout}
-              className="flex items-center gap-1 px-2 py-1 rounded cursor-pointer text-sm transition-colors"
-              style={{ color: 'var(--color-text-secondary)', backgroundColor: 'var(--color-bg-overlay)' }}
-              title="退出登录"
-            >
-              <LogOut size={14} />
-            </button>
-          </div>
-        )}
-      </header>
+  const navigation = (
+    <>
+      <div className="sidebar-brand">
+        <div className="brand-mark" aria-hidden="true">
+          <Sparkles size={19} strokeWidth={2.2} />
+        </div>
+        <div className="min-w-0">
+          <div className="brand-name">AI Gateway</div>
+          <div className="brand-subtitle">Control Plane</div>
+        </div>
+      </div>
 
-      {/* 侧边栏 */}
-      <aside
-        className="fixed top-[56px] left-0 bottom-0 z-40 flex flex-col"
-        style={{ width: 'var(--sidebar-width)', backgroundColor: 'var(--color-bg-elevated)', borderRight: '1px solid var(--color-border)' }}
-      >
-        <nav className="flex-1 py-4">
-          {navItems.map(item => {
-            const Icon = item.icon
-            const isActive = location.pathname === item.path
-            return (
-              <Link
-                key={item.path}
-                to={item.path}
-                className="flex items-center gap-3 px-4 py-2.5 text-sm transition-colors cursor-pointer"
-                style={{
-                  color: isActive ? 'var(--color-text-inverse)' : 'var(--color-text-secondary)',
-                  backgroundColor: isActive ? 'var(--color-primary)' : 'transparent',
-                }}
-              >
-                <Icon size={18} />
-                {item.label}
-              </Link>
-            )
-          })}
-        </nav>
+      <nav className="sidebar-nav" aria-label="控制台导航">
+        {navGroups.map(group => (
+          <div className="nav-group" key={group.label}>
+            <div className="nav-group-label">{group.label}</div>
+            <div className="nav-group-items">
+              {group.items.map(item => {
+                const Icon = item.icon
+                return (
+                  <NavLink
+                    key={item.path}
+                    to={item.path}
+                    end={item.path === '/'}
+                    className={({ isActive }) => `nav-item ${isActive ? 'nav-item-active' : ''}`}
+                  >
+                    <span className="nav-item-icon"><Icon size={18} /></span>
+                    <span className="nav-item-copy">
+                      <span className="nav-item-label">{item.label}</span>
+                      <span className="nav-item-description">{item.description}</span>
+                    </span>
+                  </NavLink>
+                )
+              })}
+            </div>
+          </div>
+        ))}
+      </nav>
+
+      <div className="sidebar-footer">
+        <div className="sidebar-status">
+          <span className="status-dot" />
+          <div>
+            <div className="sidebar-status-title">控制台会话已保护</div>
+            <div className="sidebar-status-copy">Cookie Session · HttpOnly</div>
+          </div>
+        </div>
+      </div>
+    </>
+  )
+
+  return (
+    <div className="app-shell">
+      <aside className="app-sidebar desktop-sidebar">
+        {navigation}
       </aside>
 
-      {/* 主内容区 */}
-      <main
-        style={{ marginTop: '56px', marginLeft: 'var(--sidebar-width)', padding: '24px' }}
-      >
-        <div style={{ maxWidth: '1440px' }}>
+      {mobileMenuOpen && (
+        <div className="mobile-nav-layer">
+          <button
+            type="button"
+            className="mobile-nav-backdrop"
+            aria-label="关闭导航"
+            onClick={() => setMobileMenuOpen(false)}
+          />
+          <aside className="app-sidebar mobile-sidebar">
+            <button
+              type="button"
+              className="icon-button mobile-close-button"
+              aria-label="关闭导航"
+              onClick={() => setMobileMenuOpen(false)}
+            >
+              <X size={19} />
+            </button>
+            {navigation}
+          </aside>
+        </div>
+      )}
+
+      <header className="app-header">
+        <div className="app-header-leading">
+          <button
+            type="button"
+            className="icon-button mobile-menu-button"
+            aria-label="打开导航"
+            onClick={() => setMobileMenuOpen(true)}
+          >
+            <Menu size={20} />
+          </button>
+          <div className="page-context-icon"><CurrentIcon size={18} /></div>
+          <div className="min-w-0">
+            <div className="page-context-title">{currentItem.label}</div>
+            <div className="page-context-description">{currentItem.description}</div>
+          </div>
+        </div>
+
+        <div className="app-header-actions">
+          <button
+            type="button"
+            onClick={toggleTheme}
+            className="icon-button"
+            title={isDark ? '切换到亮色主题' : '切换到暗色主题'}
+            aria-label={isDark ? '切换到亮色主题' : '切换到暗色主题'}
+          >
+            {isDark ? <Sun size={18} /> : <Moon size={18} />}
+          </button>
+
+          {state.isAuthenticated && (
+            <div className="account-menu">
+              <div className="account-avatar" aria-hidden="true">
+                {String(accountLabel).slice(0, 1).toUpperCase()}
+              </div>
+              <div className="account-copy">
+                <div className="account-name">{accountLabel}</div>
+                <div className="account-role">系统管理员</div>
+              </div>
+              <button
+                type="button"
+                onClick={handleLogout}
+                className="icon-button account-logout"
+                title="退出登录"
+                aria-label="退出登录"
+              >
+                <LogOut size={17} />
+              </button>
+            </div>
+          )}
+        </div>
+      </header>
+
+      <main className="app-main">
+        <div className="app-content">
           <CapabilityBanner />
           {children}
         </div>
       </main>
+
+      <div className="ambient-orb ambient-orb-one" aria-hidden="true" />
+      <div className="ambient-orb ambient-orb-two" aria-hidden="true" />
     </div>
   )
 }
