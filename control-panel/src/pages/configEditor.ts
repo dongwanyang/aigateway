@@ -7,6 +7,7 @@ export interface ConfigSchemaItem {
   module: string
   description: string
   value_type?: string
+  editor?: string
 }
 
 export interface ConfigRow {
@@ -16,6 +17,7 @@ export interface ConfigRow {
   value: ConfigValue
   description: string
   schemaType?: string
+  schemaEditor?: string
 }
 
 export function isPlainObject(value: unknown): value is Record<string, ConfigValue> {
@@ -37,8 +39,12 @@ function compactStringValue(value: string): boolean {
   return value === value.trim() && !value.includes(',') && !value.includes('\n') && !value.includes('\r')
 }
 
-export function isCompactStringArray(value: ConfigValue, schemaType?: string): value is string[] {
-  if (schemaType !== 'string[]' || !Array.isArray(value)) return false
+export function isCompactStringArray(
+  value: ConfigValue,
+  schemaType?: string,
+  schemaEditor?: string,
+): value is string[] {
+  if (schemaType !== 'string[]' || schemaEditor !== 'token_list' || !Array.isArray(value)) return false
   return value.every(item => typeof item === 'string' && compactStringValue(item))
 }
 
@@ -49,15 +55,24 @@ export function parseCompactStringArray(input: string): string[] {
   return parts
 }
 
-export function valueToText(value: ConfigValue, schemaType?: string): string {
+export function valueToText(
+  value: ConfigValue,
+  schemaType?: string,
+  schemaEditor?: string,
+): string {
   if (typeof value === 'string') return value
   if (typeof value === 'number' || typeof value === 'boolean') return String(value)
   if (value === null) return 'null'
-  if (isCompactStringArray(value, schemaType)) return value.join(', ')
+  if (isCompactStringArray(value, schemaType, schemaEditor)) return value.join(', ')
   return JSON.stringify(value, null, 2)
 }
 
-export function parseEditedValue(input: string, previous: ConfigValue, schemaType?: string): ConfigValue {
+export function parseEditedValue(
+  input: string,
+  previous: ConfigValue,
+  schemaType?: string,
+  schemaEditor?: string,
+): ConfigValue {
   if (typeof previous === 'boolean') return input === 'true'
   if (typeof previous === 'number') {
     if (input.trim() === '') throw new Error('数字不能为空')
@@ -69,7 +84,7 @@ export function parseEditedValue(input: string, previous: ConfigValue, schemaTyp
     if (input.trim() === '' || input.trim() === 'null') return null
     try { return toConfigValue(JSON.parse(input)) } catch { return input }
   }
-  if (isCompactStringArray(previous, schemaType)) return parseCompactStringArray(input)
+  if (isCompactStringArray(previous, schemaType, schemaEditor)) return parseCompactStringArray(input)
   if (Array.isArray(previous) || isPlainObject(previous)) {
     try { return toConfigValue(JSON.parse(input)) } catch { throw new Error('JSON 格式无效') }
   }
@@ -125,20 +140,9 @@ function schemaTokens(segments: ConfigPathSegment[], wildcard: boolean): string[
 }
 
 export function schemaPathCandidates(segments: ConfigPathSegment[]): string[] {
-  const exact = schemaTokens(segments, false)
-  const wildcard = schemaTokens(segments, true)
-  const candidates: string[] = []
-  const add = (parts: string[]) => {
-    const candidate = parts.join('.')
-    if (candidate && !candidates.includes(candidate)) candidates.push(candidate)
-  }
-  add(exact)
-  add(wildcard)
-  for (let length = exact.length - 1; length > 0; length -= 1) {
-    add(exact.slice(0, length))
-    add(wildcard.slice(0, length))
-  }
-  return candidates
+  const exact = schemaTokens(segments, false).join('.')
+  const wildcard = schemaTokens(segments, true).join('.')
+  return wildcard && wildcard !== exact ? [exact, wildcard] : [exact]
 }
 
 function schemaForPath(
@@ -170,18 +174,42 @@ export function flattenConfig(
 
   if (Array.isArray(value)) {
     if (value.length === 0 || value.every(item => !isPlainObject(item) && !Array.isArray(item))) {
-      return [{ path, group, segments, value, description, schemaType: schemaItem?.value_type }]
+      return [{
+        path,
+        group,
+        segments,
+        value,
+        description,
+        schemaType: schemaItem?.value_type,
+        schemaEditor: schemaItem?.editor,
+      }]
     }
     return value.flatMap((item, index) => flattenConfig(item, schema, [...segments, index]))
   }
   if (isPlainObject(value)) {
     const entries = Object.entries(value)
     if (entries.length === 0) {
-      return [{ path, group, segments, value, description, schemaType: schemaItem?.value_type }]
+      return [{
+        path,
+        group,
+        segments,
+        value,
+        description,
+        schemaType: schemaItem?.value_type,
+        schemaEditor: schemaItem?.editor,
+      }]
     }
     return entries.flatMap(([key, child]) => flattenConfig(child, schema, [...segments, key]))
   }
-  return [{ path, group, segments, value, description, schemaType: schemaItem?.value_type }]
+  return [{
+    path,
+    group,
+    segments,
+    value,
+    description,
+    schemaType: schemaItem?.value_type,
+    schemaEditor: schemaItem?.editor,
+  }]
 }
 
 export function readByPath(root: ConfigValue, segments: ConfigPathSegment[]): ConfigValue {
