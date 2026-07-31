@@ -49,6 +49,7 @@ jobs:
         env:
           AI_GATEWAY_REDIS_URL: redis://localhost:6379/0
         run: |
+          set -o pipefail
           python -m pytest tests/unit/ \
             --cov=aigateway_api \
             --cov=aigateway_core \
@@ -59,14 +60,17 @@ jobs:
             --strict-markers \
             --max-warnings=0 \
             -W error::RuntimeWarning \
-            -q
+            -q 2>&1 | tee pytest-output.txt
 
-      - name: Upload pytest report
+      - name: Upload pytest diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: pytest-results
-          path: pytest-results.xml
+          path: |
+            pytest-results.xml
+            pytest-output.txt
+            coverage.xml
           if-no-files-found: warn
           retention-days: 7
 
