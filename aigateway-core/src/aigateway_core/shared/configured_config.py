@@ -46,40 +46,58 @@ class ConfigManager(_BaseConfigManager):
         old_config = copy.deepcopy(getattr(self, "_config", {}))
         old_integrations = getattr(self, "_integration_configs", None)
 
-        config = self._load_yaml(self.config_path)
-        config = self._apply_env_overrides(config)
-        config = self._resolve_env_vars_in_values(config)
-        config = self._apply_environment_mode(config)
+        raw = self._load_yaml(self.config_path)
+        persisted = self._resolve_env_vars_in_values(copy.deepcopy(raw))
+        persisted = self._apply_environment_mode(persisted)
+        effective = self._apply_env_overrides(copy.deepcopy(raw))
+        effective = self._resolve_env_vars_in_values(effective)
+        effective = self._apply_environment_mode(effective)
 
         from .strict_config_validation import validate_component_config_strict
 
         issues = [
-            *self._validate_config_strict(config),
+            *self._validate_config_strict(persisted),
             *validate_component_config_strict(
-                config,
+                persisted,
+                apply_specific_env=False,
+            ),
+            *self._validate_config_strict(effective),
+            *validate_component_config_strict(
+                effective,
                 apply_specific_env=True,
             ),
         ]
-        errors = [issue for issue in issues if issue.get("level") == "ERROR"]
+        errors: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for issue in issues:
+            if issue.get("level") != "ERROR":
+                continue
+            marker = (
+                str(issue.get("level")),
+                str(issue.get("message")),
+            )
+            if marker not in seen:
+                errors.append(issue)
+                seen.add(marker)
         if errors:
             raise ConfigStrictValidationError(errors)
 
-        self._validate_config(config)
+        self._validate_config(effective)
         with self._lock:
-            self._config = copy.deepcopy(config)
+            self._config = copy.deepcopy(effective)
         try:
             # A file load is a full snapshot, not a partial patch. Rebuilding from
             # defaults makes deletion behave identically before and after restart.
-            self._integration_configs = parse_integration_configs(config, None)
+            self._integration_configs = parse_integration_configs(effective, None)
             if old_config:
-                self._notify_reload(old_config, config)
+                self._notify_reload(old_config, effective)
         except Exception:
             with self._lock:
                 self._config = old_config
             self._integration_configs = old_integrations
             if old_config:
                 try:
-                    self._notify_reload(config, old_config)
+                    self._notify_reload(effective, old_config)
                 except Exception as rollback_exc:
                     logger.error(
                         "configuration callback rollback failed: %s",
@@ -90,7 +108,7 @@ class ConfigManager(_BaseConfigManager):
         logger.info(
             "配置已加载: path=%s, keys=%s",
             self.config_path,
-            list(config.keys()),
+            list(effective.keys()),
         )
         return self._config
 
