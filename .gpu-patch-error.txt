@@ -1,2 +1,0 @@
-python3: can't open file '/home/runner/work/aigateway/aigateway/scripts/apply_gpu_resource_observability.py': [Errno 2] No such file or directory
-python3: can't open file '/home/runner/work/aigateway/aigateway/scripts/finalize_gpu_resource_patch.py': [Errno 2] No such file or directory
