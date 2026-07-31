@@ -71,6 +71,38 @@ def test_gpu_status_does_not_initialize_torch_cuda(monkeypatch: pytest.MonkeyPat
     assert status["device_used_bytes"] == 2
 
 
+def test_failed_l3_model_load_does_not_poison_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Tokenizer:
+        @staticmethod
+        def from_pretrained(*args: object, **kwargs: object) -> object:
+            return object()
+
+    class Model:
+        @staticmethod
+        def from_pretrained(*args: object, **kwargs: object) -> object:
+            raise RuntimeError("model load failed")
+
+    class Cuda:
+        @staticmethod
+        def is_available() -> bool:
+            return False
+
+        @staticmethod
+        def is_initialized() -> bool:
+            return False
+
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(cuda=Cuda()))
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers",
+        SimpleNamespace(AutoModel=Model, AutoTokenizer=Tokenizer),
+    )
+    monkeypatch.setattr(l3_semantic, "_l3_device", "cpu")
+    l3_semantic._l3_model_cache.clear()
+    assert l3_semantic._compute_l3_vector_sync("hello") is None
+    assert l3_semantic._l3_model_cache == {}
+
+
 def test_release_l3_model_clears_cached_objects(monkeypatch: pytest.MonkeyPatch) -> None:
     class Model:
         def __init__(self) -> None:
@@ -99,3 +131,42 @@ async def test_gpu_release_rejects_active_comfyui_queue(monkeypatch: pytest.Monk
     with pytest.raises(Exception) as exc_info:
         await gpu_routes.release_gpu_memory(request, {})
     assert getattr(exc_info.value, "status_code", None) == 409
+
+
+@pytest.mark.asyncio
+async def test_gpu_release_never_frees_comfyui_when_queue_is_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Manager:
+        def get(self, _path: str, _default: object) -> dict[str, object]:
+            return {"server_url": "http://comfyui:8188"}
+
+    class ForbiddenClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            raise AssertionError("ComfyUI /free must not be called without queue state")
+
+    async def release_gateway() -> dict[str, bool]:
+        return {"l3_embedding": True, "rag_embedding": False}
+
+    monkeypatch.setattr(
+        gpu_routes,
+        "_probe",
+        lambda _request: asyncio.sleep(0, result={"available": True, "queue": None}),
+    )
+    monkeypatch.setattr(gpu_routes, "_release_gateway_models", release_gateway)
+    monkeypatch.setattr(gpu_routes.httpx, "AsyncClient", ForbiddenClient)
+    monkeypatch.setattr(
+        gpu_routes,
+        "_gateway_cuda_status",
+        lambda: {"available": False, "allocated_bytes": 0, "reserved_bytes": 0},
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(config_manager=Manager()))
+    )
+    response = await gpu_routes.release_gpu_memory(request, {})
+    assert response["data"]["gateway_models"]["l3_embedding"] is True
+    assert response["data"]["comfyui"] == {
+        "requested": False,
+        "released": False,
+        "skipped": "queue_status_unknown",
+    }
