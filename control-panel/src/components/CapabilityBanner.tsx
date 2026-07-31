@@ -37,7 +37,7 @@ export default function CapabilityBanner() {
           </div>
           <p className="mt-1 text-xs leading-5" style={{ color: 'var(--color-text-tertiary)' }}>
             当前运行 <strong style={{ color: 'var(--color-text-secondary)' }}>{data.profile}</strong> profile，
-            暂不可用：{limited.map(name => LABELS[name]).join('、')}。
+            受限能力：{limited.map(name => LABELS[name]).join('、')}。
           </p>
         </div>
       </div>
