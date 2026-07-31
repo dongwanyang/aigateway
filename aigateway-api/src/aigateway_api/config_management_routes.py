@@ -230,13 +230,18 @@ def _merge_debug_section(current: Any, submitted: Any) -> dict[str, Any]:
                     )
                 current_per_plugin[name] = value
 
-    flat_enabled = submitted_debug.get("plugins_enabled")
-    if flat_enabled is not None:
+    if "plugins_enabled" in submitted_debug:
+        flat_enabled = submitted_debug["plugins_enabled"]
         if type(flat_enabled) is not bool:
             raise _validation_error("debug.plugins_enabled must be a boolean")
         current_plugins["enabled"] = flat_enabled
     elif "enabled" in current_plugins:
         flat_enabled = bool(current_plugins["enabled"])
+    elif type(current_debug.get("plugins_enabled")) is bool:
+        # Preserve legacy configs that predate debug.plugins.enabled.  A partial
+        # update must migrate the flat value, not silently reset it to false.
+        flat_enabled = current_debug["plugins_enabled"]
+        current_plugins["enabled"] = flat_enabled
     else:
         flat_enabled = False
         current_plugins["enabled"] = False
