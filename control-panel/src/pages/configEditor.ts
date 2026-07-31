@@ -38,9 +38,8 @@ function compactStringValue(value: string): boolean {
 }
 
 export function isCompactStringArray(value: ConfigValue, schemaType?: string): value is string[] {
-  if (!Array.isArray(value)) return false
-  if (!value.every(item => typeof item === 'string' && compactStringValue(item))) return false
-  return value.length > 0 || schemaType === 'string[]'
+  if (schemaType !== 'string[]' || !Array.isArray(value)) return false
+  return value.every(item => typeof item === 'string' && compactStringValue(item))
 }
 
 export function parseCompactStringArray(input: string): string[] {
