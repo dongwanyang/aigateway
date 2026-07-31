@@ -6,7 +6,27 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: write
+
 jobs:
+  merge-gpu-component:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+          fetch-depth: 0
+      - name: Merge validated GPU component
+        run: |
+          python3 scripts/merge_gpu_component.py
+          git diff --check --cached
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'merge: combine validated GPU resource fixes'
+          git push origin HEAD
+
   python-coverage:
     runs-on: ubuntu-latest
     timeout-minutes: 20
