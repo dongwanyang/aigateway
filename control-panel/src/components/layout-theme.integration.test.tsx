@@ -38,8 +38,10 @@ describe('layout, theme and shared UI state', () => {
       </ThemeProvider>,
     )
     expect(screen.getByText('page body')).toBeInTheDocument()
-    expect(screen.getByText('模型配置').closest('a')).toHaveStyle({ backgroundColor: 'var(--color-primary)' })
-    expect(screen.getByText('...cdef')).toBeInTheDocument()
+    const activeModelLink = screen.getByRole('link', { name: /模型配置/ })
+    expect(activeModelLink).toHaveAttribute('aria-current', 'page')
+    expect(activeModelLink).toHaveClass('nav-item-active')
+    expect(screen.getByText('gw-abcdef')).toBeInTheDocument()
     await user.click(screen.getByTitle('切换到亮色主题'))
     expect(document.documentElement).toHaveClass('light')
     expect(localStorage.getItem('aigateway_theme')).toBe('light')
