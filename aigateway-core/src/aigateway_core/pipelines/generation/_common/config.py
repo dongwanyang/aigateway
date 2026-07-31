@@ -149,7 +149,7 @@ class GenerationOptimizationConfigWatcher:
             )
         )
         if hasattr(config_manager, "on_reload"):
-            config_manager.on_reload(self._on_config_reload)
+            config_manager.on_reload(self._on_manager_config_reload)
 
     @property
     def config(self) -> GenerationOptimizationConfig:
@@ -157,27 +157,67 @@ class GenerationOptimizationConfigWatcher:
             return self._current_config
 
     def reload(self) -> GenerationOptimizationConfig:
-        with self._lock:
-            previous = self._current_config
-        new_config = GenerationOptimizationConfig.load_from_config_manager(
-            self._config_manager,
-            previous=previous,
-        )
-        errors = new_config.validate()
-        if errors:
-            for error in errors:
-                logger.error(
-                    "generation configuration reload rejected: %s",
-                    error,
+        if hasattr(self._config_manager, "snapshot"):
+            full_config = self._config_manager.snapshot()
+        else:
+            full_config = {
+                "generation_optimization": self._config_manager.get(
+                    "generation_optimization",
+                    {},
                 )
-            return previous
-        self._commit_config(new_config, previous)
-        return new_config
+            }
+        self._on_manager_config_reload(full_config)
+        return self.config
 
     def on_change(self, callback: Any) -> None:
         self._callbacks.append(callback)
 
+    @staticmethod
+    def _strict_generation_errors(
+        new_full_config: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        from aigateway_core.shared.strict_config_validation import (
+            validate_component_config_strict,
+        )
+
+        return [
+            issue
+            for issue in validate_component_config_strict(
+                new_full_config,
+                apply_specific_env=True,
+            )
+            if str(issue.get("message", "")).startswith(
+                "generation_optimization"
+            )
+        ]
+
+    def _on_manager_config_reload(
+        self,
+        new_full_config: dict[str, Any],
+    ) -> None:
+        issues = self._strict_generation_errors(new_full_config)
+        if issues:
+            raise ValueError(
+                "; ".join(str(issue.get("message", issue)) for issue in issues)
+            )
+        raw_section = new_full_config.get("generation_optimization") or {}
+        if not isinstance(raw_section, dict):
+            raise TypeError("generation_optimization must be an object")
+        with self._lock:
+            previous = self._current_config
+        # ConfigManager callbacks receive a complete file snapshot. Rebuild from
+        # defaults so deleting a field has the same effect as restarting.
+        new_config = GenerationOptimizationConfig.load_from_dict(
+            raw_section,
+            previous=None,
+        )
+        errors = new_config.validate()
+        if errors:
+            raise ValueError("; ".join(errors))
+        self._commit_config(new_config, previous)
+
     def _on_config_reload(self, new_full_config: dict[str, Any]) -> None:
+        """Compatibility seam for callers that submit partial config patches."""
         raw_section = new_full_config.get("generation_optimization")
         if raw_section is None:
             return
