@@ -113,7 +113,16 @@ def _install_admin_security_routes() -> None:
     install_security_routes(admin_routes.router)
 
 
+def _install_config_schema_parser() -> None:
+    """Replace the indentation-regex parser with the YAML node implementation."""
+    from . import routes
+    from .config_schema import parse_template_schema
+
+    routes._parse_template_schema = parse_template_schema
+
+
 _ensure_core_src()
 _allow_config_precondition_header()
 _preload_cors_origins()
 _install_admin_security_routes()
+_install_config_schema_parser()
