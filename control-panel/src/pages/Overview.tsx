@@ -63,6 +63,11 @@ export default function Overview() {
   })
   const health = healthQuery.data ?? null
   const healthLoading = healthQuery.isLoading
+  const metricsError = metricsQuery.error instanceof Error
+    ? metricsQuery.error.message
+    : metricsQuery.isError
+      ? '无法加载运营指标'
+      : null
   const stats = metricsQuery.data?.stats ?? statCards
   const costByUser = metricsQuery.data?.costByUser ?? []
   const latencyData = metricsQuery.data?.latencyData ?? []
@@ -84,6 +89,20 @@ export default function Overview() {
           {healthLoading ? '正在检查服务状态' : healthy ? '服务运行正常' : '服务需要关注'}
         </div>
       </header>
+
+      {metricsError && (
+        <div
+          role="alert"
+          className="rounded-xl border px-4 py-3 text-sm"
+          style={{
+            borderColor: 'var(--color-danger)',
+            backgroundColor: 'rgba(239, 68, 68, 0.08)',
+            color: 'var(--color-danger)',
+          }}
+        >
+          运营指标加载失败：{metricsError}。下方零值仅为占位，不代表当前没有请求。
+        </div>
+      )}
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
         {stats.map(({ icon: Icon, label, value, unit, color }) => (
