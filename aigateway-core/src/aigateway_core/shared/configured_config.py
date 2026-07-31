@@ -94,6 +94,28 @@ class ConfigManager(_BaseConfigManager):
         )
         return self._config
 
+    async def safe_reload(self, key_store: Any = None) -> bool:
+        """Run every reload path through the same strict transactional loader."""
+        import time as _time
+
+        try:
+            self.load()
+        except Exception:
+            logger.exception("配置安全重载失败")
+            self._inc_reload_failure_metric()
+            return False
+
+        self._inc_reload_success_metric()
+        if key_store and hasattr(key_store, "broadcast_config_reload"):
+            try:
+                await key_store.broadcast_config_reload(
+                    config_version=str(_time.time())
+                )
+            except Exception as exc:
+                logger.warning("配置变更广播失败: %s", exc)
+        logger.info("配置安全重载完成")
+        return True
+
     def _apply_env_overrides(self, config: dict[str, Any]) -> dict[str, Any]:
         config, applied = apply_env_overrides(config, schema=_DEFAULT_CONFIG)
         if applied:
