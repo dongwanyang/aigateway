@@ -55,8 +55,17 @@ def config_revision_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _read_bytes_locked(path: str) -> bytes:
+    with open(path, "rb") as file:
+        fcntl.flock(file.fileno(), fcntl.LOCK_SH)
+        try:
+            return file.read()
+        finally:
+            fcntl.flock(file.fileno(), fcntl.LOCK_UN)
+
+
 def config_revision(path: str) -> str:
-    return config_revision_bytes(Path(path).read_bytes())
+    return config_revision_bytes(_read_bytes_locked(path))
 
 
 def _parse_yaml_payload(payload: bytes) -> dict[str, Any]:
@@ -74,7 +83,7 @@ def _parse_yaml_payload(payload: bytes) -> dict[str, Any]:
 
 
 def read_versioned_yaml_config(path: str) -> tuple[dict[str, Any], str]:
-    payload = Path(path).read_bytes()
+    payload = _read_bytes_locked(path)
     return _parse_yaml_payload(payload), config_revision_bytes(payload)
 
 
@@ -174,16 +183,22 @@ def _matching_list_item(
         if isinstance(identity, str) and identity:
             identities.append((key, identity))
 
-    matched_indexes: set[int] = set()
+    selected_index: int | None = None
     for key, identity in identities:
-        matched_indexes.update(
+        matches = [
             item_index
             for item_index, item in enumerate(current)
             if isinstance(item, dict) and item.get(key) == identity
-        )
-    if len(matched_indexes) == 1:
-        return current[next(iter(matched_indexes))]
-    if identities or _contains_masked(candidate, path):
+        ]
+        if len(matches) != 1:
+            return _MISSING
+        if selected_index is None:
+            selected_index = matches[0]
+        elif selected_index != matches[0]:
+            return _MISSING
+    if selected_index is not None:
+        return current[selected_index]
+    if _contains_masked(candidate, path):
         return _MISSING
     return fallback
 
@@ -382,7 +397,7 @@ def transactional_replace_config(
                 "another configuration update is in progress"
             ) from exc
 
-        old_bytes = Path(path).read_bytes()
+        old_bytes = _read_bytes_locked(path)
         current_revision = config_revision_bytes(old_bytes)
         if (
             expected_revision is not None
