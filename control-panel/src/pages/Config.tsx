@@ -117,7 +117,7 @@ function stringList(value: unknown): string[] {
   return value.filter((item): item is string => typeof item === 'string' && item.length > 0)
 }
 
-function ConfigValueEditor({
+export function ConfigValueEditor({
   row,
   onChange,
   onValidityChange,
@@ -204,7 +204,6 @@ function ConfigValueEditor({
         onKeyDown={event => {
           if (event.key === 'Enter') event.currentTarget.blur()
         }}
-        aria-invalid={false}
         placeholder="逗号分隔，如 tool_calling, structured_output"
         style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: '12px' }}
       />
