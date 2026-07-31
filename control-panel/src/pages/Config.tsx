@@ -4,27 +4,26 @@ import { Save, RefreshCw, AlertTriangle, ExternalLink } from 'lucide-react'
 import Card from '@/components/Card'
 import { getComfyUIStatus, getGenerationPresets } from '@/api/client'
 import { queryKeys } from '@/query/keys'
+import {
+  type ConfigObject,
+  type ConfigRow,
+  type ConfigSchemaItem,
+  flattenConfig,
+  groupRows,
+  isCompactStringArray,
+  isPlainObject,
+  parseEditedValue,
+  readByPath,
+  toConfigValue,
+  valueToText,
+  writeByPath,
+} from './configEditor'
 
-type ConfigValue = string | number | boolean | null | ConfigValue[] | { [key: string]: ConfigValue }
-type ConfigObject = Record<string, ConfigValue>
 type PanelResponse<T> = { data: T; message: string; revision?: string }
 
 interface VersionedConfig {
   config: ConfigObject
   revision: string
-}
-
-interface ConfigSchemaItem {
-  path: string
-  module: string
-  description: string
-}
-
-interface ConfigRow {
-  path: string
-  group: string
-  value: ConfigValue
-  description: string
 }
 
 interface ComfyStatusView {
@@ -113,137 +112,9 @@ async function updateTableConfig(input: { config: Record<string, unknown>; revis
   })
 }
 
-function isPlainObject(value: unknown): value is Record<string, ConfigValue> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
 function stringList(value: unknown): string[] {
   if (!Array.isArray(value)) return []
   return value.filter((item): item is string => typeof item === 'string' && item.length > 0)
-}
-
-function toConfigValue(value: unknown): ConfigValue {
-  if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return value
-  if (Array.isArray(value)) return value.map(toConfigValue)
-  if (isPlainObject(value)) {
-    const out: Record<string, ConfigValue> = {}
-    for (const [key, child] of Object.entries(value)) out[key] = toConfigValue(child)
-    return out
-  }
-  return String(value)
-}
-
-function valueToText(value: ConfigValue): string {
-  if (typeof value === 'string') return value
-  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
-  if (value === null) return 'null'
-  return JSON.stringify(value, null, 2)
-}
-
-function parseEditedValue(input: string, previous: ConfigValue): ConfigValue {
-  if (typeof previous === 'boolean') return input === 'true'
-  if (typeof previous === 'number') {
-    if (input.trim() === '') throw new Error('数字不能为空')
-    const parsed = Number(input)
-    if (!Number.isFinite(parsed)) throw new Error('数字格式无效')
-    return parsed
-  }
-  if (previous === null) {
-    if (input.trim() === '' || input.trim() === 'null') return null
-    try { return toConfigValue(JSON.parse(input)) } catch { return input }
-  }
-  if (Array.isArray(previous) || isPlainObject(previous)) {
-    try { return toConfigValue(JSON.parse(input)) } catch { throw new Error('JSON 格式无效') }
-  }
-  return input
-}
-
-function normalizePath(path: string): string {
-  return path.replace(/\[\d+\]/g, '[]')
-}
-
-function descriptionForPath(path: string, value: ConfigValue, schema: Map<string, string>): string {
-  const normalized = normalizePath(path)
-  const description = schema.get(normalized) ?? schema.get(path)
-  if (description) return description
-  if (Array.isArray(value)) return '配置模板未提供说明；该值为列表，可用 JSON 数组格式编辑。'
-  if (isPlainObject(value)) return '配置模板未提供说明；该值为对象，可用 JSON 对象格式编辑。'
-  return '配置模板未提供说明。请在 config.yaml.template 中为该参数补充行内注释。'
-}
-
-function flattenConfig(value: ConfigValue, schema: Map<string, string>, path: string[] = []): ConfigRow[] {
-  const currentPath = path.join('.')
-  const group = path[0] ?? 'root'
-  if (Array.isArray(value)) {
-    if (value.length === 0 || value.every(item => !isPlainObject(item) && !Array.isArray(item))) {
-      return [{ path: currentPath, group, value, description: descriptionForPath(currentPath, value, schema) }]
-    }
-    return value.flatMap((item, index) => flattenConfig(item, schema, [...path.slice(0, -1), `${path.at(-1)}[${index}]`]))
-  }
-  if (isPlainObject(value)) {
-    const entries = Object.entries(value)
-    if (entries.length === 0) return [{ path: currentPath, group, value, description: descriptionForPath(currentPath, value, schema) }]
-    return entries.flatMap(([key, child]) => flattenConfig(child, schema, [...path, key]))
-  }
-  return [{ path: currentPath, group, value, description: descriptionForPath(currentPath, value, schema) }]
-}
-
-function parsePath(path: string): Array<string | number> {
-  const parts: Array<string | number> = []
-  for (const raw of path.split('.')) {
-    const match = raw.match(/^([^\[]+)(?:\[(\d+)\])?$/)
-    if (!match) { parts.push(raw); continue }
-    parts.push(match[1])
-    if (match[2] !== undefined) parts.push(Number(match[2]))
-  }
-  return parts
-}
-
-function readByPath(root: ConfigValue, path: string): ConfigValue {
-  let cursor: ConfigValue = root
-  for (const part of parsePath(path)) {
-    if (typeof part === 'number') {
-      cursor = Array.isArray(cursor) ? cursor[part] : null
-    } else {
-      cursor = isPlainObject(cursor) ? cursor[part] : null
-    }
-  }
-  return cursor
-}
-
-function writeByPath(root: ConfigValue, path: string, value: ConfigValue): ConfigValue {
-  const cloned = structuredClone(root)
-  let cursor: ConfigValue = cloned
-  const parts = parsePath(path)
-  for (let index = 0; index < parts.length - 1; index += 1) {
-    const part = parts[index]
-    if (typeof part === 'number') {
-      if (!Array.isArray(cursor)) throw new Error(`路径无效: ${path}`)
-      cursor = cursor[part]
-    } else {
-      if (!isPlainObject(cursor)) throw new Error(`路径无效: ${path}`)
-      cursor = cursor[part]
-    }
-  }
-  const last = parts.at(-1)
-  if (typeof last === 'number') {
-    if (!Array.isArray(cursor)) throw new Error(`路径无效: ${path}`)
-    cursor[last] = value
-  } else if (last) {
-    if (!isPlainObject(cursor)) throw new Error(`路径无效: ${path}`)
-    cursor[last] = value
-  }
-  return cloned
-}
-
-function groupRows(rows: ConfigRow[]): Array<[string, ConfigRow[]]> {
-  const groups = new Map<string, ConfigRow[]>()
-  for (const row of rows) {
-    const list = groups.get(row.group) ?? []
-    list.push(row)
-    groups.set(row.group, list)
-  }
-  return Array.from(groups.entries())
 }
 
 function ConfigValueEditor({
@@ -252,10 +123,11 @@ function ConfigValueEditor({
   onValidityChange,
 }: {
   row: ConfigRow
-  onChange: (path: string, input: string) => boolean
+  onChange: (row: ConfigRow, input: string) => boolean
   onValidityChange: (path: string, valid: boolean) => void
 }) {
-  const canonicalText = valueToText(row.value)
+  const canonicalText = valueToText(row.value, row.schemaType)
+  const compactStringArray = isCompactStringArray(row.value, row.schemaType)
   const [draftText, setDraftText] = useState(canonicalText)
   const [editing, setEditing] = useState(false)
 
@@ -265,6 +137,17 @@ function ConfigValueEditor({
 
   function updateDraft(next: string) {
     setDraftText(next)
+    if (compactStringArray) {
+      try {
+        parseEditedValue(next, row.value, row.schemaType)
+      } catch {
+        onValidityChange(row.path, false)
+        return
+      }
+      onValidityChange(row.path, true)
+      onChange(row, next)
+      return
+    }
     if (Array.isArray(row.value) || isPlainObject(row.value)) {
       try {
         JSON.parse(next)
@@ -273,7 +156,7 @@ function ConfigValueEditor({
         return
       }
       onValidityChange(row.path, true)
-      onChange(row.path, next)
+      onChange(row, next)
       return
     }
     if (typeof row.value === 'number') {
@@ -283,7 +166,7 @@ function ConfigValueEditor({
       }
     }
     onValidityChange(row.path, true)
-    onChange(row.path, next)
+    onChange(row, next)
   }
 
   function commitDraft() {
@@ -292,22 +175,39 @@ function ConfigValueEditor({
       onValidityChange(row.path, true)
       return
     }
-    const accepted = onChange(row.path, draftText)
-    onValidityChange(row.path, true)
-    if (!accepted) setDraftText(canonicalText)
+    const accepted = onChange(row, draftText)
+    onValidityChange(row.path, accepted)
   }
 
   if (typeof row.value === 'boolean') {
     return (
       <select
         value={String(row.value)}
-        onChange={event => onChange(row.path, event.target.value)}
+        onChange={event => onChange(row, event.target.value)}
         className="input"
         style={{ width: '100%', fontSize: '12px' }}
       >
         <option value="true">true</option>
         <option value="false">false</option>
       </select>
+    )
+  }
+  if (compactStringArray) {
+    return (
+      <input
+        className="input"
+        type="text"
+        value={draftText}
+        onFocus={() => setEditing(true)}
+        onChange={event => updateDraft(event.target.value)}
+        onBlur={commitDraft}
+        onKeyDown={event => {
+          if (event.key === 'Enter') event.currentTarget.blur()
+        }}
+        aria-invalid={false}
+        placeholder="逗号分隔，如 tool_calling, structured_output"
+        style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: '12px' }}
+      />
     )
   }
   if (Array.isArray(row.value) || isPlainObject(row.value)) {
@@ -395,9 +295,9 @@ export default function Config() {
   }, [config, hasChanges])
 
   const schemaMap = useMemo(() => {
-    const map = new Map<string, string>()
+    const map = new Map<string, ConfigSchemaItem>()
     for (const item of schemaQuery.data ?? []) {
-      if (item.path && item.description) map.set(item.path, item.description)
+      if (item.path && item.description) map.set(item.path, item)
     }
     return map
   }, [schemaQuery.data])
@@ -448,18 +348,18 @@ export default function Config() {
     }
   }
 
-  function handleValueChange(path: string, input: string): boolean {
+  function handleValueChange(row: ConfigRow, input: string): boolean {
     if (!draftConfig) return false
     setLocalError(null)
     try {
-      const previous = readByPath(draftConfig, path)
-      const parsed = parseEditedValue(input, previous)
-      const next = writeByPath(draftConfig, path, parsed) as ConfigObject
+      const previous = readByPath(draftConfig, row.segments)
+      const parsed = parseEditedValue(input, previous, row.schemaType)
+      const next = writeByPath(draftConfig, row.segments, parsed) as ConfigObject
       setDraftConfig(next)
       setHasChanges(JSON.stringify(next) !== JSON.stringify(config))
       return true
     } catch (exc) {
-      setLocalError(exc instanceof Error ? `${path}: ${exc.message}` : '配置值格式无效')
+      setLocalError(exc instanceof Error ? `${row.path}: ${exc.message}` : '配置值格式无效')
       return false
     }
   }
