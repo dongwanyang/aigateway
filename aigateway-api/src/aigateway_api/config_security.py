@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import errno
 import fcntl
+import hashlib
 import os
 import stat
 import tempfile
@@ -26,6 +27,7 @@ _SENSITIVE_NAMES = {
     "connection_string",
     "dsn",
 }
+_MISSING = object()
 
 
 class ConfigUpdateBusyError(RuntimeError):
@@ -38,14 +40,46 @@ class ConfigValidationError(ValueError):
         self.issues = issues
 
 
-def read_yaml_config(path: str) -> dict[str, Any]:
-    with open(path, "r", encoding="utf-8") as file:
-        data = yaml.safe_load(file) or {}
+class ConfigVersionConflictError(RuntimeError):
+    def __init__(self, expected: str, current: str):
+        super().__init__("configuration changed since it was loaded")
+        self.expected = expected
+        self.current = current
+
+
+class ConfigPreconditionRequiredError(RuntimeError):
+    pass
+
+
+def config_revision_bytes(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def config_revision(path: str) -> str:
+    return config_revision_bytes(Path(path).read_bytes())
+
+
+def _parse_yaml_payload(payload: bytes) -> dict[str, Any]:
+    try:
+        data = yaml.safe_load(payload.decode("utf-8")) or {}
+    except (UnicodeDecodeError, yaml.YAMLError) as exc:
+        raise ConfigValidationError(
+            [{"level": "ERROR", "message": "config file is not valid YAML"}]
+        ) from exc
     if not isinstance(data, dict):
         raise ConfigValidationError(
             [{"level": "ERROR", "message": "config root must be an object"}]
         )
     return data
+
+
+def read_versioned_yaml_config(path: str) -> tuple[dict[str, Any], str]:
+    payload = Path(path).read_bytes()
+    return _parse_yaml_payload(payload), config_revision_bytes(payload)
+
+
+def read_yaml_config(path: str) -> dict[str, Any]:
+    return read_versioned_yaml_config(path)[0]
 
 
 def _normalized_name(name: str) -> str:
@@ -102,28 +136,60 @@ def redact_config(value: Any, path: tuple[str, ...] = ()) -> Any:
     return value
 
 
+def _legacy_masked(value: Any, path: tuple[str, ...]) -> bool:
+    return (
+        isinstance(value, str)
+        and value.endswith("***")
+        and _is_sensitive_path(path)
+    )
+
+
+def _contains_masked(value: Any, path: tuple[str, ...]) -> bool:
+    if isinstance(value, dict):
+        return any(
+            _contains_masked(child, (*path, str(key)))
+            for key, child in value.items()
+        )
+    if isinstance(value, list):
+        return any(
+            _contains_masked(child, (*path, str(index)))
+            for index, child in enumerate(value)
+        )
+    return value == MASKED_SECRET or _legacy_masked(value, path)
+
+
 def _matching_list_item(
     candidate: Any,
     current: list[Any],
     index: int,
+    path: tuple[str, ...],
 ) -> Any:
     fallback = current[index] if index < len(current) else None
     if not isinstance(candidate, dict):
         return fallback
+
+    identities: list[tuple[str, str]] = []
     for key in ("id", "key_id", "name", "user_id"):
         identity = candidate.get(key)
-        if not isinstance(identity, str) or not identity:
-            continue
-        return next(
-            (
-                item
-                for item in current
-                if isinstance(item, dict)
-                and item.get(key) == identity
-            ),
-            fallback,
+        if isinstance(identity, str) and identity:
+            identities.append((key, identity))
+
+    matched_indexes: set[int] = set()
+    for key, identity in identities:
+        matched_indexes.update(
+            item_index
+            for item_index, item in enumerate(current)
+            if isinstance(item, dict) and item.get(key) == identity
         )
+    if len(matched_indexes) == 1:
+        return current[next(iter(matched_indexes))]
+    if identities or _contains_masked(candidate, path):
+        return _MISSING
     return fallback
+
+
+def _path_text(path: tuple[str, ...]) -> str:
+    return ".".join(path) if path else "config"
 
 
 def restore_masked_values(
@@ -131,7 +197,7 @@ def restore_masked_values(
     current: Any,
     path: tuple[str, ...] = (),
 ) -> Any:
-    """Replace masked placeholders with the corresponding persisted value."""
+    """Replace masks only when they map to one unambiguous persisted secret."""
     if isinstance(candidate, dict):
         existing = current if isinstance(current, dict) else {}
         return {
@@ -147,48 +213,75 @@ def restore_masked_values(
         return [
             restore_masked_values(
                 child,
-                _matching_list_item(child, existing, index),
+                _matching_list_item(
+                    child,
+                    existing,
+                    index,
+                    (*path, str(index)),
+                ),
                 (*path, str(index)),
             )
             for index, child in enumerate(candidate)
         ]
-    legacy_masked = (
-        isinstance(candidate, str)
-        and candidate.endswith("***")
-        and _is_sensitive_path(path)
-    )
-    if candidate == MASKED_SECRET or legacy_masked:
+    if candidate == MASKED_SECRET or _legacy_masked(candidate, path):
+        if current is _MISSING or current is None:
+            raise ConfigValidationError(
+                [
+                    {
+                        "level": "ERROR",
+                        "message": (
+                            f"{_path_text(path)}: masked secret has no "
+                            "unambiguous persisted value"
+                        ),
+                    }
+                ]
+            )
         return copy.deepcopy(current)
     return candidate
 
 
-def _strict_issues(
+def _resolved_config(
     config_manager: Any,
     candidate: dict[str, Any],
-) -> list[dict[str, Any]]:
-    resolved = config_manager._resolve_env_vars_in_values(
-        copy.deepcopy(candidate)
-    )
-    resolved = config_manager._apply_environment_mode(resolved)
-    return list(config_manager._validate_config_strict(resolved))
+    *,
+    apply_overrides: bool,
+) -> dict[str, Any]:
+    resolved = copy.deepcopy(candidate)
+    if apply_overrides:
+        resolved = config_manager._apply_env_overrides(resolved)
+    resolved = config_manager._resolve_env_vars_in_values(resolved)
+    return config_manager._apply_environment_mode(resolved)
 
 
 def validate_candidate(
     config_manager: Any,
     candidate: dict[str, Any],
 ) -> dict[str, Any]:
-    """Validate both persisted YAML and the effective env-overridden config."""
-    persisted_issues = _strict_issues(config_manager, candidate)
-    effective = config_manager._apply_env_overrides(copy.deepcopy(candidate))
-    effective = config_manager._resolve_env_vars_in_values(effective)
-    effective = config_manager._apply_environment_mode(effective)
-    effective_issues = list(
-        config_manager._validate_config_strict(effective)
+    """Strictly validate persisted and effective component configuration."""
+    from aigateway_core.shared.strict_config_validation import (
+        validate_component_config_strict,
     )
+
+    persisted = _resolved_config(
+        config_manager,
+        candidate,
+        apply_overrides=False,
+    )
+    effective = _resolved_config(
+        config_manager,
+        candidate,
+        apply_overrides=True,
+    )
+    collected = [
+        *config_manager._validate_config_strict(persisted),
+        *validate_component_config_strict(persisted),
+        *config_manager._validate_config_strict(effective),
+        *validate_component_config_strict(effective),
+    ]
 
     issues: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
-    for issue in [*persisted_issues, *effective_issues]:
+    for issue in collected:
         marker = (
             str(issue.get("level")),
             str(issue.get("message")),
@@ -198,13 +291,6 @@ def validate_candidate(
             seen.add(marker)
     if any(issue.get("level") == "ERROR" for issue in issues):
         raise ConfigValidationError(issues)
-
-    from aigateway_core.shared.config import parse_integration_configs
-
-    parse_integration_configs(
-        effective,
-        config_manager.integration_configs,
-    )
     return effective
 
 
@@ -219,6 +305,17 @@ def _write_bytes_inplace(path: str, payload: bytes) -> None:
             os.fsync(file.fileno())
         finally:
             fcntl.flock(file.fileno(), fcntl.LOCK_UN)
+
+
+def _fsync_directory(path: Path) -> None:
+    try:
+        descriptor = os.open(str(path), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _write_bytes_atomic(path: str, payload: bytes) -> None:
@@ -242,6 +339,7 @@ def _write_bytes_atomic(path: str, payload: bytes) -> None:
             pass
         try:
             os.replace(temp_path, path)
+            _fsync_directory(target.parent)
         except OSError as exc:
             if exc.errno not in {
                 errno.EBUSY,
@@ -263,8 +361,10 @@ def transactional_replace_config(
     path: str,
     candidate: dict[str, Any],
     config_manager: Any,
+    *,
+    expected_revision: str | None = None,
 ) -> dict[str, Any]:
-    """Validate, persist and reload a full config with automatic rollback."""
+    """Validate, compare-and-swap, persist and reload with rollback."""
     with open(path + ".lock", "a+", encoding="utf-8") as lock_file:
         try:
             fcntl.flock(
@@ -277,9 +377,18 @@ def transactional_replace_config(
             ) from exc
 
         old_bytes = Path(path).read_bytes()
+        current_revision = config_revision_bytes(old_bytes)
+        if (
+            expected_revision is not None
+            and expected_revision != current_revision
+        ):
+            raise ConfigVersionConflictError(
+                expected_revision,
+                current_revision,
+            )
         restored = restore_masked_values(
             copy.deepcopy(candidate),
-            read_yaml_config(path),
+            _parse_yaml_payload(old_bytes),
         )
         if not isinstance(restored, dict):
             raise ConfigValidationError(
@@ -316,9 +425,14 @@ def transactional_replace_config(
 
 
 __all__ = [
+    "ConfigPreconditionRequiredError",
     "ConfigUpdateBusyError",
     "ConfigValidationError",
+    "ConfigVersionConflictError",
     "MASKED_SECRET",
+    "config_revision",
+    "config_revision_bytes",
+    "read_versioned_yaml_config",
     "read_yaml_config",
     "redact_config",
     "restore_masked_values",
