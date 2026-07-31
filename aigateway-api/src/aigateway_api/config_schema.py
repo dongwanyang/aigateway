@@ -263,10 +263,10 @@ def parse_template_schema(config_path: str) -> list[dict[str, Any]]:
 
     items: list[dict[str, Any]] = []
     for path in order:
-        description = comments.get(path)
+        metadata_path = metadata_paths[path]
+        description = comments.get(path) or comments.get(metadata_path)
         if not description:
             continue
-        metadata_path = metadata_paths[path]
         item: dict[str, Any] = {
             "path": path,
             "module": path.split(".", 1)[0].replace("[]", ""),
