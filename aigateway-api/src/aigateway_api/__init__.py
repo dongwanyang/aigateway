@@ -8,10 +8,18 @@ FastAPI 应用，提供 OpenAI 兼容接口和管理接口。
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
 __version__ = "1.0.0"
+
+
+def _ensure_core_src() -> None:
+    """Support repository-source execution before importing core modules."""
+    core_src = Path(__file__).resolve().parents[3] / "aigateway-core" / "src"
+    if core_src.is_dir() and str(core_src) not in sys.path:
+        sys.path.insert(0, str(core_src))
 
 
 def _dotenv_bootstrap_values() -> dict[str, Any]:
@@ -83,14 +91,6 @@ def _preload_cors_origins() -> None:
         os.environ["AI_GATEWAY_CORS_ORIGINS"] = ",".join(normalized)
 
 
-def _install_config_manager() -> None:
-    """Expose the environment-aware ConfigManager before the app imports it."""
-    from aigateway_core.shared import config as config_module
-    from aigateway_core.shared.configured_config import ConfigManager
-
-    config_module.ConfigManager = ConfigManager
-
-
 def _install_admin_security_routes() -> None:
     """Prepend security replacements before legacy admin route definitions."""
     from . import admin_routes
@@ -99,6 +99,6 @@ def _install_admin_security_routes() -> None:
     install_security_routes(admin_routes.router)
 
 
+_ensure_core_src()
 _preload_cors_origins()
-_install_config_manager()
 _install_admin_security_routes()
