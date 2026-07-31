@@ -121,4 +121,28 @@ describe('Config revision writes', () => {
       ])
     })
   })
+
+  it('discards an invalid local draft when configuration is reloaded', async () => {
+    const user = userEvent.setup()
+    renderConfig()
+
+    const pathCell = await screen.findByText('server.cors_origins')
+    const row = pathCell.closest('tr')
+    if (!row) throw new Error('server.cors_origins row not found')
+    const editor = within(row).getByRole('textbox')
+
+    fireEvent.focus(editor)
+    fireEvent.change(editor, { target: { value: '[' } })
+    expect(editor).toHaveValue('[')
+    expect(screen.getByRole('button', { name: /保存配置/ })).toBeDisabled()
+
+    await user.click(screen.getByRole('button', { name: /重新加载/ }))
+
+    await waitFor(() => {
+      expect(within(row).getByRole('textbox')).toHaveValue(
+        '[\n  "http://localhost:5173"\n]',
+      )
+      expect(screen.getByRole('button', { name: /保存配置/ })).toBeDisabled()
+    })
+  })
 })
