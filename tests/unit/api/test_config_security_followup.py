@@ -174,3 +174,27 @@ def test_transaction_rechecks_revision_immediately_before_replace(
         )
 
     assert yaml.safe_load(path.read_text(encoding="utf-8"))["server"]["port"] == 8100
+
+
+def test_transaction_rejects_component_fields_that_runtime_would_ignore(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(_minimal_config()), encoding="utf-8")
+    monkeypatch.setenv("AI_GATEWAY_ENV", "production")
+    manager = ConfigManager(str(path))
+    candidate = _minimal_config()
+    candidate["plugins"] = [
+        {
+            "name": "rag_retriever",
+            "enabled": True,
+            "config": {"top_kk": 9},
+        }
+    ]
+
+    with pytest.raises(ConfigValidationError) as exc_info:
+        transactional_replace_config(str(path), candidate, manager)
+
+    assert "top_kk" in str(exc_info.value.issues)
+    assert "unknown field" in str(exc_info.value.issues)
