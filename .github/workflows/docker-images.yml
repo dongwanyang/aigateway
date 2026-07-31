@@ -29,12 +29,18 @@ jobs:
           - target: gateway-vision-cpu
             suffix: studio-arm64
             platforms: linux/arm64
+          - target: gateway-vision-cpu
+            suffix: studio-cpu
+            platforms: linux/amd64
           - target: gateway-vision
             suffix: studio-cuda
             platforms: linux/amd64
           - target: gateway-full-cpu
             suffix: full-arm64
             platforms: linux/arm64
+          - target: gateway-full-cpu
+            suffix: full-cpu
+            platforms: linux/amd64
           - target: gateway-full
             suffix: full-cuda
             platforms: linux/amd64
