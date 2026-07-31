@@ -132,6 +132,7 @@ def _validate_dataclass_values(
     for name, value in values.items():
         field = fields.get(name)
         if field is None:
+            issues.append(_error(f"{path}.{name}", "unknown field"))
             continue
         if not config_module._check_type(value, field.type):
             issues.append(
@@ -249,6 +250,7 @@ def _validate_generation(
                 continue
             field = field_map.get(name)
             if field is None:
+                issues.append(_error(f"{path}.{name}", "unknown field"))
                 continue
             if (
                 section_name == "draft_workflow"
