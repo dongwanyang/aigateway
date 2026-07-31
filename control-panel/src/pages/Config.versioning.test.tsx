@@ -44,7 +44,13 @@ describe('Config revision writes', () => {
       if (url.endsWith('/admin/config')) {
         return Response.json(
           {
-            data: { server: { host: '0.0.0.0', port: 8000 } },
+            data: {
+              server: {
+                host: '0.0.0.0',
+                port: 8000,
+                cors_origins: ['http://localhost:5173'],
+              },
+            },
             message: 'success',
             revision: 'revision-1',
           },
@@ -67,9 +73,9 @@ describe('Config revision writes', () => {
     const pathCell = await screen.findByText('server.port')
     const row = pathCell.closest('tr')
     if (!row) throw new Error('server.port row not found')
-    fireEvent.change(within(row).getByRole('spinbutton'), {
-      target: { value: '9000' },
-    })
+    const input = within(row).getByRole('spinbutton')
+    fireEvent.change(input, { target: { value: '9000' } })
+    fireEvent.blur(input)
     await user.click(screen.getByRole('button', { name: /保存配置/ }))
 
     await waitFor(() => {
@@ -81,6 +87,37 @@ describe('Config revision writes', () => {
         expect.objectContaining({ 'If-Match': '"revision-1"' }),
       )
       expect(JSON.parse(String(call?.[1]?.body)).server.port).toBe(9000)
+    })
+  })
+
+  it('preserves intermediate JSON until blur', async () => {
+    const user = userEvent.setup()
+    renderConfig()
+
+    const pathCell = await screen.findByText('server.cors_origins')
+    const row = pathCell.closest('tr')
+    if (!row) throw new Error('server.cors_origins row not found')
+    const editor = within(row).getByRole('textbox')
+
+    fireEvent.focus(editor)
+    fireEvent.change(editor, { target: { value: '[' } })
+    expect(editor).toHaveValue('[')
+    expect(screen.queryByText(/JSON 格式无效/)).not.toBeInTheDocument()
+
+    fireEvent.change(editor, {
+      target: { value: '["https://panel.example"]' },
+    })
+    fireEvent.blur(editor)
+    await user.click(screen.getByRole('button', { name: /保存配置/ }))
+
+    await waitFor(() => {
+      const call = vi.mocked(fetch).mock.calls.find(
+        ([url, init]) => String(url).endsWith('/admin/config/table') && init?.method === 'PUT',
+      )
+      expect(call).toBeDefined()
+      expect(JSON.parse(String(call?.[1]?.body)).server.cors_origins).toEqual([
+        'https://panel.example',
+      ])
     })
   })
 })
