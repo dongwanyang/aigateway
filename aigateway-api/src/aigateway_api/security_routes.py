@@ -117,6 +117,13 @@ def _expected_revision(request: Request) -> str:
     return raw
 
 
+def _commit_revision(commit: Any, path: str) -> str:
+    revision = getattr(commit, "revision", None)
+    if isinstance(revision, str) and revision:
+        return revision
+    return config_revision(path)
+
+
 def _versioned_response(data: dict[str, Any], revision: str) -> JSONResponse:
     return JSONResponse(
         content={"data": data, "message": "success", "revision": revision},
@@ -205,8 +212,10 @@ async def update_secure_full_config(
         )
     except Exception as exc:
         raise _config_error(exc) from exc
-    revision = getattr(commit, "revision", config_revision(manager.config_path))
-    return _versioned_response({"updated": True}, revision)
+    return _versioned_response(
+        {"updated": True},
+        _commit_revision(commit, manager.config_path),
+    )
 
 
 @router.put("/config/table")
@@ -225,8 +234,10 @@ async def update_secure_table_config(
         )
     except Exception as exc:
         raise _config_error(exc) from exc
-    revision = getattr(commit, "revision", config_revision(manager.config_path))
-    return _versioned_response({"updated": True}, revision)
+    return _versioned_response(
+        {"updated": True},
+        _commit_revision(commit, manager.config_path),
+    )
 
 
 def _request_with_json(request: Request, body: dict[str, Any]) -> Request:
