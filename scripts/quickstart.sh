@@ -176,7 +176,11 @@ shared_gpu="false"
 if [[ "$accelerator" == "cuda" && "$gpu_count" == "1" \
       && "$needs_studio" == "true" ]]; then
   shared_gpu="true"
-  gateway_memory_fraction="0.20"
+  # A fractional PyTorch limit still initializes a CUDA context during Gateway
+  # startup.  On a one-GPU Studio/Full installation the GPU belongs exclusively
+  # to ComfyUI; Gateway helper models are rendered onto CPU and CUDA is hidden.
+  gateway_gpu_device=-1
+  gateway_memory_fraction=""
 fi
 
 if [[ -z "$comfyui_mode" ]]; then
