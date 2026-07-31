@@ -20,6 +20,7 @@ const row: ConfigRow = {
   value: ['tool_calling'],
   description: '运行时能力',
   schemaType: 'string[]',
+  schemaEditor: 'token_list',
 }
 
 describe('ConfigValueEditor', () => {
@@ -64,6 +65,7 @@ describe('ConfigValueEditor', () => {
     await user.tab()
 
     expect(input).toHaveValue('tool_calling,')
+    expect(input).toHaveAttribute('aria-invalid', 'true')
     expect(onValidityChange).toHaveBeenLastCalledWith(row.path, false)
   })
 })
