@@ -63,7 +63,9 @@ def _nested_value(
 ) -> tuple[bool, Any]:
     current: Any = config
     for part in dotted_path.split("."):
-        if not isinstance(current, dict) or part not in current:
+        if not isinstance(current, dict):
+            return True, current
+        if part not in current:
             return False, None
         current = current[part]
     return True, current
@@ -74,10 +76,8 @@ def _plugin_value(
     plugin_name: str,
 ) -> tuple[bool, Any]:
     plugins = config.get("plugins")
-    if plugins is None:
-        return False, None
     if not isinstance(plugins, list):
-        return True, plugins
+        return False, None
     for item in plugins:
         if isinstance(item, dict) and item.get("name") == plugin_name:
             return True, item.get("config", {})
@@ -120,8 +120,22 @@ def _validate_integrations(
     apply_specific_env: bool,
 ) -> list[dict[str, str]]:
     issues: list[dict[str, str]] = []
+    plugins = config.get("plugins")
+    if plugins is not None and not isinstance(plugins, list):
+        issues.append(_error("plugins", "must be a list"))
+    elif isinstance(plugins, list):
+        for index, item in enumerate(plugins):
+            if not isinstance(item, dict):
+                issues.append(_error(f"plugins.{index}", "must be an object"))
+            elif "config" in item and not isinstance(item.get("config"), dict):
+                issues.append(
+                    _error(f"plugins.{index}.config", "must be an object")
+                )
+
     for source_kind, source, config_class, env_name in _INTEGRATION_SPECS:
         if source_kind == "plugin":
+            if plugins is not None and not isinstance(plugins, list):
+                continue
             present, raw = _plugin_value(config, source)
             display_path = f'plugins[name="{source}"].config'
         else:
