@@ -879,16 +879,17 @@ async def update_api_key_quota(
         updated_data = {**data, **updated_fields}
 
     logger.info("API Key 配额已更新: key_id=%s, fields=%s", key_id, list(updated_fields.keys()))
+    defaults = _get_auth_defaults()
 
     return {
         "data": {
             "id": key_id,
             "user_id": updated_data.get("user_id", ""),
             "quotas": {
-                "daily_tokens_limit": int(updated_data.get("daily_tokens_limit", _get_auth_defaults()["daily_tokens"])),
-                "monthly_cost_limit": float(updated_data.get("monthly_cost_limit", _get_auth_defaults()["monthly_cost"])),
-                "rate_limit_rpm": int(updated_data.get("rate_limit_rpm", _get_auth_defaults()["rate_limit_rpm"])),
-                "rate_limit_tpm": int(updated_data.get("rate_limit_tpm", _get_auth_defaults()["rate_limit_tpm"])),
+                "daily_tokens_limit": int(updated_data.get("daily_tokens_limit", defaults["daily_tokens"])),
+                "monthly_cost_limit": float(updated_data.get("monthly_cost_limit", defaults["monthly_cost"])),
+                "rate_limit_rpm": int(updated_data.get("rate_limit_rpm", defaults["rate_limit_rpm"])),
+                "rate_limit_tpm": int(updated_data.get("rate_limit_tpm", defaults["rate_limit_tpm"])),
             },
         },
         "message": "success",
