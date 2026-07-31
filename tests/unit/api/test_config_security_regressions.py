@@ -12,15 +12,19 @@ from fastapi import APIRouter, HTTPException, Request
 
 from aigateway_api import admin_routes, safe_http, security_routes
 from aigateway_api.config_security import (
+    ConfigPreconditionRequiredError,
     ConfigUpdateBusyError,
     ConfigValidationError,
+    ConfigVersionConflictError,
     MASKED_SECRET,
+    config_revision,
     redact_config,
     restore_masked_values,
     transactional_replace_config,
 )
 from aigateway_api.security_routes import _validate_public_url
-from aigateway_core.shared.configured_config import ConfigManager
+from aigateway_core.shared.config import ConfigManager
+from aigateway_core.shared.configured_config import ConfigReloadCallbackError
 
 
 def _config() -> dict:
@@ -57,6 +61,7 @@ def _request(
     *,
     app: object | None = None,
     invalid_json: bool = False,
+    headers: dict[str, str] | None = None,
 ) -> Request:
     payload = b"{" if invalid_json else json.dumps(body).encode("utf-8")
     sent = False
@@ -72,6 +77,7 @@ def _request(
             "more_body": False,
         }
 
+    raw_headers = {"content-type": "application/json", **(headers or {})}
     return Request(
         {
             "type": "http",
@@ -81,13 +87,20 @@ def _request(
             "path": "/",
             "raw_path": b"/",
             "query_string": b"",
-            "headers": [(b"content-type", b"application/json")],
+            "headers": [
+                (key.lower().encode(), value.encode())
+                for key, value in raw_headers.items()
+            ],
             "client": ("127.0.0.1", 12345),
             "server": ("testserver", 80),
             "app": app or SimpleNamespace(state=SimpleNamespace()),
         },
         receive,
     )
+
+
+def _response_json(response) -> dict:
+    return json.loads(response.body.decode("utf-8"))
 
 
 def _public_dns(*_args, **_kwargs):
@@ -139,6 +152,27 @@ def test_mask_restoration_matches_named_items_after_reordering() -> None:
     assert restored["plugins"][1]["config"]["api_key"] == "secret-one"
 
 
+def test_mask_restoration_rejects_new_or_conflicting_identity() -> None:
+    current = {
+        "plugins": [
+            {"id": "one", "name": "first", "config": {"api_key": "one"}},
+            {"id": "two", "name": "second", "config": {"api_key": "two"}},
+        ]
+    }
+    candidate = {
+        "plugins": [
+            {
+                "id": "missing",
+                "name": "second",
+                "config": {"api_key": MASKED_SECRET},
+            }
+        ]
+    }
+
+    with pytest.raises(ConfigValidationError, match="masked secret"):
+        restore_masked_values(candidate, current)
+
+
 def test_invalid_candidate_never_replaces_config_file(
     tmp_path,
     monkeypatch,
@@ -162,6 +196,30 @@ def test_invalid_candidate_never_replaces_config_file(
     assert manager.get("server.port") == 9000
 
 
+def test_invalid_component_value_is_not_hidden_by_environment(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(_config()), encoding="utf-8")
+    monkeypatch.setenv("AI_GATEWAY_ENV", "production")
+    monkeypatch.setenv("AI_GATEWAY_COMFYUI_MAX_CONCURRENCY", "2")
+    manager = ConfigManager(str(path))
+    before = path.read_bytes()
+    candidate = _config()
+    candidate["generation_optimization"] = {
+        "draft_workflow": {
+            "comfyui": {"max_concurrency": 0},
+        }
+    }
+
+    with pytest.raises(ConfigValidationError) as exc_info:
+        transactional_replace_config(str(path), candidate, manager)
+
+    assert "max_concurrency" in str(exc_info.value.issues)
+    assert path.read_bytes() == before
+
+
 def test_valid_candidate_is_committed_and_reloaded(
     tmp_path,
     monkeypatch,
@@ -183,7 +241,7 @@ def test_valid_candidate_is_committed_and_reloaded(
     assert manager.get("server.port") == 9001
 
 
-def test_reload_failure_rolls_back_persisted_bytes(
+def test_reload_callback_failure_rolls_back_file_and_manager(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -195,17 +253,45 @@ def test_reload_failure_rolls_back_persisted_bytes(
     monkeypatch.setenv("AI_GATEWAY_ENV", "production")
     manager = ConfigManager(str(path))
     before = path.read_bytes()
+
+    def reject(_config):
+        raise RuntimeError("component rejected config")
+
+    manager.on_reload(reject)
     candidate = _config()
     candidate["server"]["port"] = 9000
 
-    def fail_load():
-        raise RuntimeError("reload failed")
-
-    monkeypatch.setattr(manager, "load", fail_load)
-    with pytest.raises(RuntimeError, match="reload failed"):
+    with pytest.raises(ConfigReloadCallbackError):
         transactional_replace_config(str(path), candidate, manager)
 
     assert path.read_bytes() == before
+    assert manager.get("server.port") == 8000
+
+
+def test_compare_and_swap_rejects_stale_revision(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(_config()), encoding="utf-8")
+    monkeypatch.setenv("AI_GATEWAY_ENV", "production")
+    manager = ConfigManager(str(path))
+    stale = config_revision(str(path))
+    changed = _config()
+    changed["server"]["port"] = 8100
+    path.write_text(yaml.safe_dump(changed), encoding="utf-8")
+    candidate = _config()
+    candidate["server"]["port"] = 8200
+
+    with pytest.raises(ConfigVersionConflictError):
+        transactional_replace_config(
+            str(path),
+            candidate,
+            manager,
+            expected_revision=stale,
+        )
+
+    assert yaml.safe_load(path.read_text())["server"]["port"] == 8100
 
 
 @pytest.mark.parametrize(
@@ -216,6 +302,7 @@ def test_reload_failure_rolls_back_persisted_bytes(
         "http://169.254.169.254/latest/meta-data",
         "file:///etc/passwd",
         "http://user:password@example.com/",
+        "http://[fe80::1%25eth0]/",
     ],
 )
 def test_rag_url_validation_rejects_private_or_unsafe_targets(
@@ -245,17 +332,82 @@ async def test_rag_url_validation_rejects_unresolvable_dns(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_safe_fetch_follows_validated_redirect_and_reads_text(
+async def test_safe_fetch_pins_connection_to_validated_address(
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr(safe_http.socket, "getaddrinfo", _public_dns)
+    dns_calls = 0
+
+    def rebinding_dns(*_args, **_kwargs):
+        nonlocal dns_calls
+        dns_calls += 1
+        address = "93.184.216.34" if dns_calls == 1 else "127.0.0.1"
+        return [
+            (
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                socket.IPPROTO_TCP,
+                "",
+                (address, 443),
+            )
+        ]
+
+    monkeypatch.setattr(safe_http.socket, "getaddrinfo", rebinding_dns)
     real_async_client = httpx.AsyncClient
-    requests: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        requests.append(str(request.url))
+        assert request.url.host == "93.184.216.34"
+        assert request.headers["host"] == "example.com"
+        assert request.extensions["sni_hostname"] == b"example.com"
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/plain"},
+            content=b"safe document",
+        )
+
+    def client_factory(**_kwargs):
+        return real_async_client(transport=httpx.MockTransport(handler))
+
+    monkeypatch.setattr(safe_http.httpx, "AsyncClient", client_factory)
+
+    text, filename = await safe_http.fetch_public_text(
+        "https://example.com/document.txt"
+    )
+
+    assert text == "safe document"
+    assert filename == "document.txt"
+    assert dns_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_safe_fetch_revalidates_and_pins_each_redirect(
+    monkeypatch,
+) -> None:
+    dns_calls: list[str] = []
+
+    def resolving_dns(host, *_args, **_kwargs):
+        dns_calls.append(host)
+        address = "93.184.216.34" if host == "example.com" else "1.1.1.1"
+        return [
+            (
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                socket.IPPROTO_TCP,
+                "",
+                (address, 443),
+            )
+        ]
+
+    monkeypatch.setattr(safe_http.socket, "getaddrinfo", resolving_dns)
+    real_async_client = httpx.AsyncClient
+    requests: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.url.host, request.headers["host"]))
         if request.url.path == "/start":
-            return httpx.Response(302, headers={"location": "/final"})
+            return httpx.Response(
+                302,
+                headers={"location": "https://example.net/final"},
+            )
         return httpx.Response(
             200,
             headers={"content-type": "text/plain; charset=utf-8"},
@@ -276,9 +428,10 @@ async def test_safe_fetch_follows_validated_redirect_and_reads_text(
 
     assert text == "safe document"
     assert filename == "final"
+    assert dns_calls == ["example.com", "example.net"]
     assert requests == [
-        "https://example.com/start",
-        "https://example.com/final",
+        ("93.184.216.34", "example.com"),
+        ("1.1.1.1", "example.net"),
     ]
 
 
@@ -319,6 +472,12 @@ async def test_safe_fetch_rejects_unsupported_or_declared_large_response(
 
 
 def test_config_error_mapping_preserves_status_and_details() -> None:
+    required = security_routes._config_error(
+        ConfigPreconditionRequiredError("required")
+    )
+    conflict = security_routes._config_error(
+        ConfigVersionConflictError("old", "new")
+    )
     busy = security_routes._config_error(ConfigUpdateBusyError("busy"))
     invalid = security_routes._config_error(
         ConfigValidationError(
@@ -327,6 +486,9 @@ def test_config_error_mapping_preserves_status_and_details() -> None:
     )
     unknown = security_routes._config_error(RuntimeError("disk error"))
 
+    assert required.status_code == 428
+    assert conflict.status_code == 409
+    assert conflict.detail["error"]["current_revision"] == "new"
     assert busy.status_code == 409
     assert invalid.status_code == 422
     assert invalid.detail["error"]["issues"][0]["level"] == "ERROR"
@@ -345,7 +507,7 @@ async def test_json_object_rejects_invalid_and_non_object_payloads() -> None:
 
 
 @pytest.mark.asyncio
-async def test_secure_config_routes_redact_and_delegate_transaction(
+async def test_secure_config_routes_return_and_require_revision(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -353,10 +515,17 @@ async def test_secure_config_routes_redact_and_delegate_transaction(
     path.write_text(yaml.safe_dump(_config()), encoding="utf-8")
     manager = SimpleNamespace(config_path=str(path))
     app = SimpleNamespace(state=SimpleNamespace(config_manager=manager))
-    captured: list[dict] = []
+    revision = config_revision(str(path))
+    captured: list[tuple[dict, str]] = []
 
-    def fake_transaction(_path, candidate, selected_manager):
-        captured.append(candidate)
+    def fake_transaction(
+        _path,
+        candidate,
+        selected_manager,
+        *,
+        expected_revision,
+    ):
+        captured.append((candidate, expected_revision))
         assert selected_manager is manager
         return candidate
 
@@ -366,24 +535,74 @@ async def test_secure_config_routes_redact_and_delegate_transaction(
         fake_transaction,
     )
 
-    loaded = await security_routes.get_secure_full_config(
+    loaded_response = await security_routes.get_secure_full_config(
         _request({}, app=app),
         {},
     )
-    updated = await security_routes.update_secure_full_config(
-        _request({"server": {"host": "127.0.0.1", "port": 9000}}, app=app),
+    loaded = _response_json(loaded_response)
+    updated_response = await security_routes.update_secure_full_config(
+        _request(
+            {"server": {"host": "127.0.0.1", "port": 9000}},
+            app=app,
+            headers={"if-match": f'"{revision}"'},
+        ),
         {},
     )
-    table = await security_routes.update_secure_table_config(
-        _request(_config(), app=app),
+    table_response = await security_routes.update_secure_table_config(
+        _request(
+            _config(),
+            app=app,
+            headers={"if-match": revision},
+        ),
         {},
     )
 
+    assert loaded["revision"] == revision
+    assert loaded_response.headers["etag"] == f'"{revision}"'
     assert loaded["data"]["providers"]["openai"]["api_key"] == MASKED_SECRET
-    assert updated["data"]["updated"] is True
-    assert table["data"]["updated"] is True
-    assert captured[0]["server"]["port"] == 9000
-    assert captured[1]["server"]["port"] == 8000
+    assert _response_json(updated_response)["data"]["updated"] is True
+    assert _response_json(table_response)["data"]["updated"] is True
+    assert captured[0][0]["server"]["port"] == 9000
+    assert captured[0][1] == revision
+    assert captured[1][0]["server"]["port"] == 8000
+
+    with pytest.raises(HTTPException) as missing:
+        await security_routes.update_secure_table_config(
+            _request(_config(), app=app),
+            {},
+        )
+    assert missing.value.status_code == 428
+
+
+@pytest.mark.asyncio
+async def test_secure_config_route_rejects_stale_revision(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(_config()), encoding="utf-8")
+    monkeypatch.setenv("AI_GATEWAY_ENV", "production")
+    manager = ConfigManager(str(path))
+    app = SimpleNamespace(state=SimpleNamespace(config_manager=manager))
+    stale = config_revision(str(path))
+    changed = _config()
+    changed["server"]["port"] = 8100
+    path.write_text(yaml.safe_dump(changed), encoding="utf-8")
+
+    with pytest.raises(HTTPException) as exc_info:
+        await security_routes.update_secure_table_config(
+            _request(
+                _config(),
+                app=app,
+                headers={"if-match": stale},
+            ),
+            {},
+        )
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["error"]["code"] == (
+        "config_version_conflict"
+    )
 
 
 @pytest.mark.asyncio
