@@ -1,7 +1,7 @@
 """Small, dependency-light accessors for effective runtime configuration.
 
-Low-level components do not receive a ``ConfigManager`` reference, but they must
-still observe the same process-environment > .env > YAML precedence contract.
+Low-level components do not receive a ``ConfigManager`` reference, but they use
+exactly the same environment-path schema and environment-mode transformation.
 """
 from __future__ import annotations
 
@@ -13,7 +13,8 @@ from typing import Any
 
 import yaml
 
-from .config_env import apply_env_overrides, resolve_env_references
+from .config import _DEFAULT_CONFIG
+from .config_env import build_effective_config
 
 _LOCK = RLock()
 _CACHE_PATH: str | None = None
@@ -34,7 +35,7 @@ def _environment_fingerprint() -> int:
 
 
 def load_runtime_config() -> dict[str, Any]:
-    """Load YAML, apply environment overrides and cache the effective result."""
+    """Load and cache the same effective config observed by ConfigManager."""
     global _CACHE_PATH, _CACHE_MTIME_NS, _CACHE_ENV_FINGERPRINT, _CACHE_DATA
 
     path = _config_path()
@@ -58,10 +59,10 @@ def load_runtime_config() -> dict[str, Any]:
             raise RuntimeError(f"runtime_config_invalid:{path}") from exc
         if not isinstance(raw, dict):
             raise RuntimeError(f"runtime_config_not_object:{path}")
-        raw, _applied = apply_env_overrides(raw)
-        effective = resolve_env_references(raw)
-        if not isinstance(effective, dict):
-            raise RuntimeError(f"runtime_config_not_object:{path}")
+        effective, _applied = build_effective_config(
+            raw,
+            schema=_DEFAULT_CONFIG,
+        )
         _CACHE_PATH = resolved
         _CACHE_MTIME_NS = stat.st_mtime_ns
         _CACHE_ENV_FINGERPRINT = env_fingerprint
