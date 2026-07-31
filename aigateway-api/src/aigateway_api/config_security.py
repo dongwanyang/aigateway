@@ -54,7 +54,12 @@ class ConfigUpdateBusyError(RuntimeError):
 
 class ConfigValidationError(ValueError):
     def __init__(self, issues: list[dict[str, Any]]):
-        super().__init__("configuration validation failed")
+        messages = [
+            str(issue.get("message", "invalid configuration"))
+            for issue in issues
+        ]
+        detail = ": " + "; ".join(messages) if messages else ""
+        super().__init__("configuration validation failed" + detail)
         self.issues = issues
 
 
@@ -449,22 +454,15 @@ def transactional_replace_config(
         committed_revision = config_revision_bytes(payload)
         committed = False
         try:
-            # Internal writers honor ``.lock``; this second CAS check also catches
-            # editors or deployment agents that do not.
             _assert_revision_unchanged(path, current_revision)
             _write_bytes_atomic(path, payload)
             committed = True
             config_manager.load()
-            # A non-cooperating writer can still replace the file while runtime
-            # callbacks are executing. Return success only for the revision that
-            # remains persisted after the complete reload transaction.
             _assert_revision_unchanged(path, committed_revision)
         except Exception as exc:
             if committed:
                 after_failure = config_revision(path)
                 if after_failure != committed_revision:
-                    # An external writer won after our commit. Never overwrite it
-                    # with stale rollback bytes; synchronize runtime best-effort.
                     try:
                         config_manager.load()
                     except Exception:
