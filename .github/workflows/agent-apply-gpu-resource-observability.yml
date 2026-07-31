@@ -17,9 +17,25 @@ jobs:
         with:
           fetch-depth: 0
       - name: Apply deterministic patch
+        id: patch
+        shell: bash
         run: |
-          python3 scripts/apply_gpu_resource_observability.py
-          python3 scripts/finalize_gpu_resource_patch.py
+          set +e
+          {
+            python3 scripts/apply_gpu_resource_observability.py
+            python3 scripts/finalize_gpu_resource_patch.py
+          } > /tmp/gpu-patch.log 2>&1
+          status=$?
+          cat /tmp/gpu-patch.log
+          if [[ $status -ne 0 ]]; then
+            cp /tmp/gpu-patch.log .gpu-patch-error.txt
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add .gpu-patch-error.txt
+            git commit -m 'chore: capture GPU patch failure'
+            git push origin HEAD
+            exit $status
+          fi
       - name: Validate patch formatting
         run: git diff --check
       - name: Commit generated changes
