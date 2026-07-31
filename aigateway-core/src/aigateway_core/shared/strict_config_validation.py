@@ -86,6 +86,14 @@ def _matches_type(value: Any, type_hint: Any) -> bool:
     optional = "none" in text or "optional" in text
     if value is None:
         return optional
+    # Containers must be checked before their element-type text (for example,
+    # ``list[str]`` contains the substring ``str``).
+    if "list" in text:
+        return isinstance(value, list)
+    if "dict" in text:
+        return isinstance(value, dict)
+    if "tuple" in text:
+        return isinstance(value, (list, tuple))
     if "bool" in text:
         return isinstance(value, bool)
     if "int" in text:
@@ -94,12 +102,6 @@ def _matches_type(value: Any, type_hint: Any) -> bool:
         return isinstance(value, (int, float)) and not isinstance(value, bool)
     if "str" in text:
         return isinstance(value, str)
-    if "list" in text:
-        return isinstance(value, list)
-    if "dict" in text:
-        return isinstance(value, dict)
-    if "tuple" in text:
-        return isinstance(value, (list, tuple))
     return True
 
 
