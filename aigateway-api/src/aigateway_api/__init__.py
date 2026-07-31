@@ -1,6 +1,6 @@
 """
 aigateway_api - AI Gateway API 服务层
-====================================
+=====================================
 
 FastAPI 应用，提供 OpenAI 兼容接口和管理接口。
 """
@@ -8,19 +8,36 @@ FastAPI 应用，提供 OpenAI 兼容接口和管理接口。
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
 __version__ = "1.0.0"
+_CORS_YAML_BOOTSTRAP_MARKER = (
+    "AI_GATEWAY_CORS_ORIGINS_BOOTSTRAPPED_FROM_YAML"
+)
+
+
+def _ensure_core_src() -> None:
+    """Support repository-source execution before importing core modules."""
+    core_src = Path(__file__).resolve().parents[3] / "aigateway-core" / "src"
+    if core_src.is_dir() and str(core_src) not in sys.path:
+        sys.path.insert(0, str(core_src))
+
+
+def _allow_config_precondition_header() -> None:
+    """Extend Starlette's CORS allow-list before middleware construction."""
+    try:
+        from starlette.middleware import cors
+    except ImportError:
+        return
+    headers = set(getattr(cors, "SAFELISTED_HEADERS", set()))
+    headers.add("If-Match")
+    cors.SAFELISTED_HEADERS = headers
 
 
 def _dotenv_bootstrap_values() -> dict[str, Any]:
-    """Read bootstrap-only values from .env without mutating ``os.environ``.
-
-    Importing ``aigateway_api`` must not load unrelated authentication, database,
-    or provider variables into the process. The regular application entry point
-    remains responsible for loading the complete .env file.
-    """
+    """Read bootstrap-only values from .env without mutating ``os.environ``."""
     try:
         from dotenv import dotenv_values, find_dotenv
     except ImportError:
@@ -36,17 +53,20 @@ def _dotenv_bootstrap_values() -> dict[str, Any]:
 
 
 def _preload_cors_origins() -> None:
-    """Expose CORS origins before the FastAPI app factory registers middleware.
+    """Expose CORS origins before the FastAPI app factory adds middleware.
 
-    Bootstrap precedence is process environment > .env > config.yaml. Only the
-    CORS value is copied into ``os.environ``; unrelated .env values are never
-    imported as a side effect of package import.
+    A process or .env value is a real environment override. A YAML value is only
+    copied temporarily because middleware is constructed before the lifespan
+    ConfigManager exists; ConfigManager consumes the marker and removes the
+    synthetic environment value before loading runtime configuration.
     """
     if os.environ.get("AI_GATEWAY_CORS_ORIGINS", "").strip():
         return
 
     dotenv_values = _dotenv_bootstrap_values()
-    dotenv_cors = str(dotenv_values.get("AI_GATEWAY_CORS_ORIGINS") or "").strip()
+    dotenv_cors = str(
+        dotenv_values.get("AI_GATEWAY_CORS_ORIGINS") or ""
+    ).strip()
     if dotenv_cors:
         os.environ["AI_GATEWAY_CORS_ORIGINS"] = dotenv_cors
         return
@@ -79,6 +99,37 @@ def _preload_cors_origins() -> None:
     ]
     if normalized:
         os.environ["AI_GATEWAY_CORS_ORIGINS"] = ",".join(normalized)
+        os.environ[_CORS_YAML_BOOTSTRAP_MARKER] = "1"
 
 
+def _install_admin_security_guards() -> None:
+    """Install sensitive-route and draft-ownership replacements."""
+    from . import admin_routes
+    from .draft_security import assert_draft_owner
+    from .security_routes import install_security_routes
+
+    install_security_routes(admin_routes.router)
+    admin_routes._assert_draft_owner = assert_draft_owner
+
+
+def _install_config_schema_parser() -> None:
+    """Install YAML-aware schema parsing and remove the legacy write route."""
+    from . import routes
+    from .config_schema import parse_template_schema
+
+    routes._parse_template_schema = parse_template_schema
+    routes.router.routes[:] = [
+        route
+        for route in routes.router.routes
+        if not (
+            getattr(route, "path", None) == "/admin/config/table"
+            and "PUT" in set(getattr(route, "methods", set()) or set())
+        )
+    ]
+
+
+_ensure_core_src()
+_allow_config_precondition_header()
 _preload_cors_origins()
+_install_admin_security_guards()
+_install_config_schema_parser()

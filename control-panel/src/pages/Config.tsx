@@ -2,11 +2,17 @@ import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Save, RefreshCw, AlertTriangle, ExternalLink } from 'lucide-react'
 import Card from '@/components/Card'
-import { getComfyUIStatus, getFullConfig, getGenerationPresets } from '@/api/client'
+import { getComfyUIStatus, getGenerationPresets } from '@/api/client'
 import { queryKeys } from '@/query/keys'
 
 type ConfigValue = string | number | boolean | null | ConfigValue[] | { [key: string]: ConfigValue }
 type ConfigObject = Record<string, ConfigValue>
+type PanelResponse<T> = { data: T; message: string; revision?: string }
+
+interface VersionedConfig {
+  config: ConfigObject
+  revision: string
+}
 
 interface ConfigSchemaItem {
   path: string
@@ -64,26 +70,47 @@ const GROUP_LABELS: Record<string, string> = {
   debug_mode: '调试模式',
 }
 
-async function fetchPanelJson<T>(path: string, options: RequestInit = {}): Promise<{ data: T; message: string }> {
+function normalizeRevision(value: unknown): string | null {
+  if (typeof value !== 'string' || !value.trim()) return null
+  return value.trim().replace(/^W\//, '').replace(/^"|"$/g, '') || null
+}
+
+async function fetchPanelJson<T>(path: string, options: RequestInit = {}): Promise<PanelResponse<T>> {
   const res = await fetch(`${API_BASE}${path}`, {
     ...options,
     credentials: 'include',
     headers: { 'Content-Type': 'application/json', ...(options.headers ?? {}) },
   })
+  const body = await res.json().catch(() => ({}))
   if (!res.ok) {
-    const body = await res.json().catch(() => ({}))
-    const message = body?.error?.message ?? body?.detail?.error?.message ?? body?.detail ?? `HTTP ${res.status}`
+    const code = body?.error?.code ?? body?.detail?.error?.code
+    const message = code === 'config_version_conflict'
+      ? '配置已被其他会话修改，请重新加载后再保存。'
+      : body?.error?.message ?? body?.detail?.error?.message ?? body?.detail ?? `HTTP ${res.status}`
     throw new Error(String(message))
   }
-  return res.json()
+  const revision = normalizeRevision(body?.revision ?? res.headers.get('etag'))
+  return { ...body, ...(revision ? { revision } : {}) } as PanelResponse<T>
 }
 
-async function getConfigSchema(): Promise<{ data: { items: ConfigSchemaItem[] }; message: string }> {
+async function getVersionedConfig(): Promise<VersionedConfig> {
+  const response = await fetchPanelJson<ConfigObject>('/admin/config')
+  return {
+    config: toConfigValue(response.data) as ConfigObject,
+    revision: response.revision ?? '',
+  }
+}
+
+async function getConfigSchema(): Promise<PanelResponse<{ items: ConfigSchemaItem[] }>> {
   return fetchPanelJson<{ items: ConfigSchemaItem[] }>('/admin/config/schema')
 }
 
-async function updateTableConfig(config: Record<string, unknown>): Promise<{ data: { updated: boolean }; message: string }> {
-  return fetchPanelJson<{ updated: boolean }>('/admin/config/table', { method: 'PUT', body: JSON.stringify(config) })
+async function updateTableConfig(input: { config: Record<string, unknown>; revision: string }): Promise<PanelResponse<{ updated: boolean }>> {
+  return fetchPanelJson<{ updated: boolean }>('/admin/config/table', {
+    method: 'PUT',
+    headers: input.revision ? { 'If-Match': `"${input.revision}"` } : {},
+    body: JSON.stringify(input.config),
+  })
 }
 
 function isPlainObject(value: unknown): value is Record<string, ConfigValue> {
@@ -116,6 +143,7 @@ function valueToText(value: ConfigValue): string {
 function parseEditedValue(input: string, previous: ConfigValue): ConfigValue {
   if (typeof previous === 'boolean') return input === 'true'
   if (typeof previous === 'number') {
+    if (input.trim() === '') throw new Error('数字不能为空')
     const parsed = Number(input)
     if (!Number.isFinite(parsed)) throw new Error('数字格式无效')
     return parsed
@@ -218,8 +246,57 @@ function groupRows(rows: ConfigRow[]): Array<[string, ConfigRow[]]> {
   return Array.from(groups.entries())
 }
 
-function ConfigValueEditor({ row, onChange }: { row: ConfigRow; onChange: (path: string, input: string) => void }) {
-  const text = valueToText(row.value)
+function ConfigValueEditor({
+  row,
+  onChange,
+  onValidityChange,
+}: {
+  row: ConfigRow
+  onChange: (path: string, input: string) => boolean
+  onValidityChange: (path: string, valid: boolean) => void
+}) {
+  const canonicalText = valueToText(row.value)
+  const [draftText, setDraftText] = useState(canonicalText)
+  const [editing, setEditing] = useState(false)
+
+  useEffect(() => {
+    if (!editing) setDraftText(canonicalText)
+  }, [canonicalText, editing, row.path])
+
+  function updateDraft(next: string) {
+    setDraftText(next)
+    if (Array.isArray(row.value) || isPlainObject(row.value)) {
+      try {
+        JSON.parse(next)
+      } catch {
+        onValidityChange(row.path, false)
+        return
+      }
+      onValidityChange(row.path, true)
+      onChange(row.path, next)
+      return
+    }
+    if (typeof row.value === 'number') {
+      if (next.trim() === '' || !Number.isFinite(Number(next))) {
+        onValidityChange(row.path, false)
+        return
+      }
+    }
+    onValidityChange(row.path, true)
+    onChange(row.path, next)
+  }
+
+  function commitDraft() {
+    setEditing(false)
+    if (draftText === canonicalText) {
+      onValidityChange(row.path, true)
+      return
+    }
+    const accepted = onChange(row.path, draftText)
+    onValidityChange(row.path, true)
+    if (!accepted) setDraftText(canonicalText)
+  }
+
   if (typeof row.value === 'boolean') {
     return (
       <select
@@ -236,8 +313,10 @@ function ConfigValueEditor({ row, onChange }: { row: ConfigRow; onChange: (path:
   if (Array.isArray(row.value) || isPlainObject(row.value)) {
     return (
       <textarea
-        value={text}
-        onChange={event => onChange(row.path, event.target.value)}
+        value={draftText}
+        onFocus={() => setEditing(true)}
+        onChange={event => updateDraft(event.target.value)}
+        onBlur={commitDraft}
         style={{ width: '100%', minHeight: 76, fontFamily: 'var(--font-mono)', fontSize: '12px' }}
         spellCheck={false}
       />
@@ -247,8 +326,13 @@ function ConfigValueEditor({ row, onChange }: { row: ConfigRow; onChange: (path:
     <input
       className="input"
       type={typeof row.value === 'number' ? 'number' : 'text'}
-      value={text}
-      onChange={event => onChange(row.path, event.target.value)}
+      value={draftText}
+      onFocus={() => setEditing(true)}
+      onChange={event => updateDraft(event.target.value)}
+      onBlur={commitDraft}
+      onKeyDown={event => {
+        if (event.key === 'Enter') event.currentTarget.blur()
+      }}
       style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: '12px' }}
     />
   )
@@ -260,13 +344,17 @@ export default function Config() {
   const [localError, setLocalError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
   const [hasChanges, setHasChanges] = useState(false)
+  const [invalidDraftPaths, setInvalidDraftPaths] = useState<Set<string>>(() => new Set())
   const configQuery = useQuery({
     queryKey: queryKeys.config.full,
-    queryFn: async () => toConfigValue((await getFullConfig()).data) as ConfigObject,
+    queryFn: getVersionedConfig,
   })
   const schemaQuery = useQuery({
     queryKey: ['config-schema'],
-    queryFn: async () => (await getConfigSchema()).data.items,
+    queryFn: async () => {
+      const response = await getConfigSchema()
+      return Array.isArray(response.data?.items) ? response.data.items : []
+    },
   })
   const comfyQuery = useQuery({
     queryKey: ['comfyui', 'status'],
@@ -278,7 +366,8 @@ export default function Config() {
     queryFn: async () => (await getGenerationPresets()).data,
   })
   const saveMutation = useMutation({ mutationFn: updateTableConfig })
-  const config = configQuery.data ?? null
+  const config = configQuery.data?.config ?? null
+  const revision = configQuery.data?.revision ?? ''
   const loading = configQuery.isLoading || schemaQuery.isLoading
   const saving = saveMutation.isPending
   const remoteError = configQuery.error ?? schemaQuery.error ?? saveMutation.error
@@ -315,10 +404,20 @@ export default function Config() {
   const rows = useMemo(() => draftConfig ? flattenConfig(draftConfig, schemaMap) : [], [draftConfig, schemaMap])
   const groupedRows = useMemo(() => groupRows(rows), [rows])
 
+  function handleDraftValidity(path: string, valid: boolean) {
+    setInvalidDraftPaths(previous => {
+      const next = new Set(previous)
+      if (valid) next.delete(path)
+      else next.add(path)
+      return next
+    })
+  }
+
   async function loadConfig() {
     setLocalError(null)
     setSuccess(null)
     setHasChanges(false)
+    setInvalidDraftPaths(new Set())
     await Promise.all([
       configQuery.refetch(),
       schemaQuery.refetch(),
@@ -330,20 +429,27 @@ export default function Config() {
   async function handleSave() {
     setLocalError(null)
     setSuccess(null)
-    if (!draftConfig) return
+    if (!draftConfig || invalidDraftPaths.size > 0) return
     try {
-      await saveMutation.mutateAsync(draftConfig as Record<string, unknown>)
-      queryClient.setQueryData(queryKeys.config.full, draftConfig)
+      const result = await saveMutation.mutateAsync({
+        config: draftConfig as Record<string, unknown>,
+        revision,
+      })
+      queryClient.setQueryData<VersionedConfig>(queryKeys.config.full, {
+        config: structuredClone(draftConfig),
+        revision: result.revision ?? revision,
+      })
       setSuccess('配置已保存并生效')
       setHasChanges(false)
+      setInvalidDraftPaths(new Set())
       setTimeout(() => setSuccess(null), 3000)
     } catch (exc) {
       setLocalError(exc instanceof Error ? exc.message : '保存失败')
     }
   }
 
-  function handleValueChange(path: string, input: string) {
-    if (!draftConfig) return
+  function handleValueChange(path: string, input: string): boolean {
+    if (!draftConfig) return false
     setLocalError(null)
     try {
       const previous = readByPath(draftConfig, path)
@@ -351,8 +457,10 @@ export default function Config() {
       const next = writeByPath(draftConfig, path, parsed) as ConfigObject
       setDraftConfig(next)
       setHasChanges(JSON.stringify(next) !== JSON.stringify(config))
+      return true
     } catch (exc) {
       setLocalError(exc instanceof Error ? `${path}: ${exc.message}` : '配置值格式无效')
+      return false
     }
   }
 
@@ -364,7 +472,7 @@ export default function Config() {
           <button className="btn btn-secondary" style={{ padding: '8px 14px', fontSize: '12px' }} onClick={loadConfig} disabled={loading}>
             <RefreshCw size={14} /> 重新加载
           </button>
-          <button className="btn btn-primary" style={{ padding: '8px 14px', fontSize: '12px' }} onClick={handleSave} disabled={saving || !hasChanges || Boolean(localError)}>
+          <button className="btn btn-primary" style={{ padding: '8px 14px', fontSize: '12px' }} onClick={handleSave} disabled={saving || !hasChanges || invalidDraftPaths.size > 0 || Boolean(localError)}>
             <Save size={14} /> {saving ? '保存中...' : '保存配置'}
           </button>
         </div>
@@ -469,7 +577,7 @@ export default function Config() {
           <div>
             <h3 className="font-semibold">配置参数</h3>
             <p className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>
-              按功能模块分组展示 config.yaml。第三列说明来自 config.yaml.template 行内注释；providers 中的 API Key 已脱敏显示。
+              按功能模块分组展示 config.yaml。第三列说明来自 config.yaml.template 行内注释；敏感配置已脱敏显示。
             </p>
           </div>
           <span className="text-xs" style={{ color: 'var(--color-text-quaternary)' }}>{rows.length} 个参数</span>
@@ -495,7 +603,9 @@ export default function Config() {
                       {groupItems.map(row => (
                         <tr key={row.path} style={{ borderBottom: '1px solid var(--color-border-subtle)' }}>
                           <td style={{ padding: '8px', fontFamily: 'var(--font-mono)', verticalAlign: 'top', wordBreak: 'break-all' }}>{row.path}</td>
-                          <td style={{ padding: '8px', verticalAlign: 'top' }}><ConfigValueEditor row={row} onChange={handleValueChange} /></td>
+                          <td style={{ padding: '8px', verticalAlign: 'top' }}>
+                            <ConfigValueEditor row={row} onChange={handleValueChange} onValidityChange={handleDraftValidity} />
+                          </td>
                           <td style={{ padding: '8px', color: 'var(--color-text-tertiary)', verticalAlign: 'top' }}>{row.description}</td>
                         </tr>
                       ))}

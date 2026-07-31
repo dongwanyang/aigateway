@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import logging
+import os
+from typing import Any
 
 from aigateway_core.shared.runtime_values import (
     configured_number,
@@ -25,6 +27,29 @@ class QdrantClientManager(_impl.QdrantClientManager):
     def __init__(self) -> None:
         super().__init__()
         self.url = ""
+
+    def _configured_api_key(self) -> str | None:
+        for env_name in ("QDRANT_API_KEY", "AI_GATEWAY_QDRANT_API_KEY"):
+            value = os.environ.get(env_name, "").strip()
+            if value:
+                return value
+        try:
+            configured = get_runtime_value(
+                "infrastructure.qdrant.api_key",
+                required=False,
+            )
+        except RuntimeError:
+            return None
+        if isinstance(configured, str) and configured.strip():
+            return configured.strip()
+        return None
+
+    def _headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        api_key = self._configured_api_key()
+        if api_key:
+            headers["api-key"] = api_key
+        return headers
 
     async def connect(
         self,
@@ -55,15 +80,25 @@ class QdrantClientManager(_impl.QdrantClientManager):
         )
 
         self.url = selected_url
-        self._http = AsyncClient(
-            base_url=self.url,
-            timeout=Timeout(
+        client_kwargs: dict[str, Any] = {
+            "base_url": self.url,
+            "timeout": Timeout(
                 connect=selected_connect_timeout,
                 read=selected_read_timeout,
                 write=selected_write_timeout,
                 pool=5.0,
             ),
-        )
+        }
+        # Only pass constructor headers when authentication requires defaults on
+        # health/list requests. Keeping the unauthenticated constructor minimal
+        # preserves lightweight AsyncClient-compatible adapters and test seams.
+        api_key = self._configured_api_key()
+        if api_key:
+            client_kwargs["headers"] = {
+                "Content-Type": "application/json",
+                "api-key": api_key,
+            }
+        self._http = AsyncClient(**client_kwargs)
         try:
             response = await self._http.get("/")
             response.raise_for_status()
