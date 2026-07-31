@@ -75,7 +75,6 @@ describe('Config revision writes', () => {
     if (!row) throw new Error('server.port row not found')
     const input = within(row).getByRole('spinbutton')
     fireEvent.change(input, { target: { value: '9000' } })
-    fireEvent.blur(input)
     await user.click(screen.getByRole('button', { name: /保存配置/ }))
 
     await waitFor(() => {
@@ -90,7 +89,7 @@ describe('Config revision writes', () => {
     })
   })
 
-  it('preserves intermediate JSON until blur', async () => {
+  it('preserves intermediate JSON and blocks stale saves', async () => {
     const user = userEvent.setup()
     renderConfig()
 
@@ -98,17 +97,19 @@ describe('Config revision writes', () => {
     const row = pathCell.closest('tr')
     if (!row) throw new Error('server.cors_origins row not found')
     const editor = within(row).getByRole('textbox')
+    const save = screen.getByRole('button', { name: /保存配置/ })
 
     fireEvent.focus(editor)
     fireEvent.change(editor, { target: { value: '[' } })
     expect(editor).toHaveValue('[')
     expect(screen.queryByText(/JSON 格式无效/)).not.toBeInTheDocument()
+    expect(save).toBeDisabled()
 
     fireEvent.change(editor, {
       target: { value: '["https://panel.example"]' },
     })
-    fireEvent.blur(editor)
-    await user.click(screen.getByRole('button', { name: /保存配置/ }))
+    expect(save).toBeEnabled()
+    await user.click(save)
 
     await waitFor(() => {
       const call = vi.mocked(fetch).mock.calls.find(
