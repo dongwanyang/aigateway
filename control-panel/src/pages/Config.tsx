@@ -126,8 +126,12 @@ export function ConfigValueEditor({
   onChange: (row: ConfigRow, input: string) => boolean
   onValidityChange: (path: string, valid: boolean) => void
 }) {
-  const canonicalText = valueToText(row.value, row.schemaType)
-  const compactStringArray = isCompactStringArray(row.value, row.schemaType)
+  const canonicalText = valueToText(row.value, row.schemaType, row.schemaEditor)
+  const compactStringArray = isCompactStringArray(
+    row.value,
+    row.schemaType,
+    row.schemaEditor,
+  )
   const [draftText, setDraftText] = useState(canonicalText)
   const [editing, setEditing] = useState(false)
   const [draftInvalid, setDraftInvalid] = useState(false)
@@ -146,7 +150,7 @@ export function ConfigValueEditor({
     setDraftText(next)
     if (compactStringArray) {
       try {
-        parseEditedValue(next, row.value, row.schemaType)
+        parseEditedValue(next, row.value, row.schemaType, row.schemaEditor)
       } catch {
         setDraftInvalid(true)
         onValidityChange(row.path, false)
@@ -257,6 +261,7 @@ export default function Config() {
   const [success, setSuccess] = useState<string | null>(null)
   const [hasChanges, setHasChanges] = useState(false)
   const [invalidDraftPaths, setInvalidDraftPaths] = useState<Set<string>>(() => new Set())
+  const [editorEpoch, setEditorEpoch] = useState(0)
   const configQuery = useQuery({
     queryKey: queryKeys.config.full,
     queryFn: getVersionedConfig,
@@ -330,6 +335,7 @@ export default function Config() {
     setSuccess(null)
     setHasChanges(false)
     setInvalidDraftPaths(new Set())
+    setEditorEpoch(previous => previous + 1)
     await Promise.all([
       configQuery.refetch(),
       schemaQuery.refetch(),
@@ -365,7 +371,12 @@ export default function Config() {
     setLocalError(null)
     try {
       const previous = readByPath(draftConfig, row.segments)
-      const parsed = parseEditedValue(input, previous, row.schemaType)
+      const parsed = parseEditedValue(
+        input,
+        previous,
+        row.schemaType,
+        row.schemaEditor,
+      )
       const next = writeByPath(draftConfig, row.segments, parsed) as ConfigObject
       setDraftConfig(next)
       setHasChanges(JSON.stringify(next) !== JSON.stringify(config))
@@ -516,7 +527,12 @@ export default function Config() {
                         <tr key={row.path} style={{ borderBottom: '1px solid var(--color-border-subtle)' }}>
                           <td style={{ padding: '8px', fontFamily: 'var(--font-mono)', verticalAlign: 'top', wordBreak: 'break-all' }}>{row.path}</td>
                           <td style={{ padding: '8px', verticalAlign: 'top' }}>
-                            <ConfigValueEditor row={row} onChange={handleValueChange} onValidityChange={handleDraftValidity} />
+                            <ConfigValueEditor
+                              key={`${editorEpoch}:${row.path}`}
+                              row={row}
+                              onChange={handleValueChange}
+                              onValidityChange={handleDraftValidity}
+                            />
                           </td>
                           <td style={{ padding: '8px', color: 'var(--color-text-tertiary)', verticalAlign: 'top' }}>{row.description}</td>
                         </tr>
