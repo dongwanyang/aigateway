@@ -171,9 +171,7 @@ class GenerationOptimizationConfigWatcher:
                     error,
                 )
             return previous
-        with self._lock:
-            self._current_config = new_config
-        self._notify_callbacks(new_config)
+        self._commit_config(new_config, previous)
         return new_config
 
     def on_change(self, callback: Any) -> None:
@@ -203,19 +201,45 @@ class GenerationOptimizationConfigWatcher:
                     error,
                 )
             return
+        self._commit_config(new_config, previous)
+
+    def _commit_config(
+        self,
+        new_config: GenerationOptimizationConfig,
+        previous: GenerationOptimizationConfig,
+    ) -> None:
         with self._lock:
             self._current_config = new_config
-        self._notify_callbacks(new_config)
+        try:
+            self._notify_callbacks(new_config)
+        except Exception:
+            with self._lock:
+                self._current_config = previous
+            try:
+                self._notify_callbacks(previous)
+            except Exception as rollback_exc:
+                logger.error(
+                    "generation config callback rollback failed: %s",
+                    rollback_exc,
+                )
+            raise
 
     def _notify_callbacks(
         self,
         new_config: GenerationOptimizationConfig,
     ) -> None:
+        errors: list[BaseException] = []
         for callback in tuple(self._callbacks):
             try:
                 callback(new_config)
             except Exception as exc:
-                logger.error("generation config callback failed: %s", exc)
+                logger.exception("generation config callback failed")
+                errors.append(exc)
+        if errors:
+            raise RuntimeError(
+                "generation config callback failed: "
+                + "; ".join(str(error) for error in errors)
+            )
 
 
 __all__ = [
