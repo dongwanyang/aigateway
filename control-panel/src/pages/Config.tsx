@@ -130,10 +130,17 @@ export function ConfigValueEditor({
   const compactStringArray = isCompactStringArray(row.value, row.schemaType)
   const [draftText, setDraftText] = useState(canonicalText)
   const [editing, setEditing] = useState(false)
+  const [draftInvalid, setDraftInvalid] = useState(false)
 
   useEffect(() => {
-    if (!editing) setDraftText(canonicalText)
-  }, [canonicalText, editing, row.path])
+    if (!editing && !draftInvalid) setDraftText(canonicalText)
+  }, [canonicalText, draftInvalid, editing, row.path])
+
+  function applyValidDraft(next: string) {
+    const accepted = onChange(row, next)
+    setDraftInvalid(!accepted)
+    onValidityChange(row.path, accepted)
+  }
 
   function updateDraft(next: string) {
     setDraftText(next)
@@ -141,41 +148,44 @@ export function ConfigValueEditor({
       try {
         parseEditedValue(next, row.value, row.schemaType)
       } catch {
+        setDraftInvalid(true)
         onValidityChange(row.path, false)
         return
       }
-      onValidityChange(row.path, true)
-      onChange(row, next)
+      applyValidDraft(next)
       return
     }
     if (Array.isArray(row.value) || isPlainObject(row.value)) {
       try {
         JSON.parse(next)
       } catch {
+        setDraftInvalid(true)
         onValidityChange(row.path, false)
         return
       }
-      onValidityChange(row.path, true)
-      onChange(row, next)
+      applyValidDraft(next)
       return
     }
     if (typeof row.value === 'number') {
       if (next.trim() === '' || !Number.isFinite(Number(next))) {
+        setDraftInvalid(true)
         onValidityChange(row.path, false)
         return
       }
     }
-    onValidityChange(row.path, true)
-    onChange(row, next)
+    applyValidDraft(next)
   }
 
   function commitDraft() {
-    setEditing(false)
     if (draftText === canonicalText) {
+      setDraftInvalid(false)
+      setEditing(false)
       onValidityChange(row.path, true)
       return
     }
     const accepted = onChange(row, draftText)
+    setDraftInvalid(!accepted)
+    setEditing(false)
     onValidityChange(row.path, accepted)
   }
 
@@ -204,6 +214,7 @@ export function ConfigValueEditor({
         onKeyDown={event => {
           if (event.key === 'Enter') event.currentTarget.blur()
         }}
+        aria-invalid={draftInvalid}
         placeholder="逗号分隔，如 tool_calling, structured_output"
         style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: '12px' }}
       />
@@ -216,6 +227,7 @@ export function ConfigValueEditor({
         onFocus={() => setEditing(true)}
         onChange={event => updateDraft(event.target.value)}
         onBlur={commitDraft}
+        aria-invalid={draftInvalid}
         style={{ width: '100%', minHeight: 76, fontFamily: 'var(--font-mono)', fontSize: '12px' }}
         spellCheck={false}
       />
@@ -232,6 +244,7 @@ export function ConfigValueEditor({
       onKeyDown={event => {
         if (event.key === 'Enter') event.currentTarget.blur()
       }}
+      aria-invalid={draftInvalid}
       style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: '12px' }}
     />
   )
