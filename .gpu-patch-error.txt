@@ -1,0 +1,2 @@
+expected block not found in aigateway-core/src/aigateway_core/prefix/cache/l3_semantic.py: 'import asyncio\nimport logging\nimport os\nimport threading\n'
+expected block not found in aigateway-core/src/aigateway_core/prefix/cache/l3_semantic.py: '    task = _l3_idle_task\n    _l3_idle_task = None\n    if task is not None and not task.done():\n        task.cancel()\n\n  '
