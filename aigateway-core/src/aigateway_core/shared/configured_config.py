@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import os
 import threading
 from functools import wraps
 from pathlib import Path
@@ -20,6 +21,9 @@ from .config_env import (
 )
 
 logger = logging.getLogger(__name__)
+_CORS_YAML_BOOTSTRAP_MARKER = (
+    "AI_GATEWAY_CORS_ORIGINS_BOOTSTRAPPED_FROM_YAML"
+)
 _RELOAD_FAILURE_MARKERS = (
     "热重载回调执行失败",
     "configuration reload callback failed",
@@ -80,6 +84,11 @@ class ConfigManager(_BaseConfigManager):
         # Base initialization invokes ``self.load()``, so the reload lock must
         # exist before delegating to it.
         self._reload_lock = threading.RLock()
+        # ``aigateway_api`` may temporarily copy YAML CORS origins into the env so
+        # middleware can be constructed before lifespan startup. It is not a real
+        # operator override and must not outrank YAML in runtime configuration.
+        if os.environ.pop(_CORS_YAML_BOOTSTRAP_MARKER, None) == "1":
+            os.environ.pop("AI_GATEWAY_CORS_ORIGINS", None)
         super().__init__(config_path=config_path)
 
     def _load_yaml(self, path: str) -> dict[str, Any]:
@@ -166,8 +175,6 @@ class ConfigManager(_BaseConfigManager):
         with self._lock:
             self._config = copy.deepcopy(effective)
         try:
-            # A file load is a full snapshot, not a partial patch. Rebuilding from
-            # defaults makes deletion behave identically before and after restart.
             self._integration_configs = parse_integration_configs(effective, None)
             if old_config:
                 self._notify_reload(old_config, effective)
