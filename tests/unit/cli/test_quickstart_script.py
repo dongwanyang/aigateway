@@ -135,7 +135,9 @@ exit 0
     state = (tmp_path / ".aigateway-install.env").read_text(encoding="utf-8")
     assert "GATEWAY_IMAGE_TARGET=gateway-vision" in state
     assert "AIGATEWAY_SHARED_GPU=true" in state
-    assert "GATEWAY_CUDA_MEMORY_FRACTION=0.20" in state
+    assert "GATEWAY_CUDA_VISIBLE_DEVICES=-1" in state
+    assert "GATEWAY_CUDA_MEMORY_FRACTION=" in state
+    assert "GATEWAY_CUDA_MEMORY_FRACTION=0.20" not in state
 
     runtime = yaml.safe_load(
         (tmp_path / ".aigateway/runtime/config.yaml").read_text(encoding="utf-8")
