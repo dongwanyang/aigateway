@@ -268,18 +268,15 @@ class GenerationOptimizationConfigWatcher:
         self,
         new_config: GenerationOptimizationConfig,
     ) -> None:
-        errors: list[BaseException] = []
+        # Watcher subscribers remain isolated: one observer failure must not stop
+        # later observers or direct watcher callers. ConfigManager wraps this
+        # callback with a log-failure capture, so a transactional file reload still
+        # observes the failure and rolls the complete runtime configuration back.
         for callback in tuple(self._callbacks):
             try:
                 callback(new_config)
-            except Exception as exc:
+            except Exception:
                 logger.exception("generation config callback failed")
-                errors.append(exc)
-        if errors:
-            raise RuntimeError(
-                "generation config callback failed: "
-                + "; ".join(str(error) for error in errors)
-            )
 
 
 __all__ = [
