@@ -274,9 +274,15 @@ def validate_candidate(
     )
     collected = [
         *config_manager._validate_config_strict(persisted),
-        *validate_component_config_strict(persisted),
+        *validate_component_config_strict(
+            persisted,
+            apply_specific_env=False,
+        ),
         *config_manager._validate_config_strict(effective),
-        *validate_component_config_strict(effective),
+        *validate_component_config_strict(
+            effective,
+            apply_specific_env=True,
+        ),
     ]
 
     issues: list[dict[str, Any]] = []
