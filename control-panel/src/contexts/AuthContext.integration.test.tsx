@@ -87,7 +87,7 @@ describe('AuthProvider browser-session contract', () => {
     expect(screen.queryByText('login page')).not.toBeInTheDocument()
   })
 
-  it('logs in with username and password, completes reset, and clears state on logout', async () => {
+  it('logs in with username and password, completes reset, and clears all cached user data on logout', async () => {
     api.getBrowserSession.mockResolvedValue({ authenticated: false })
     api.loginWithPassword.mockResolvedValue({ key_prefix: 'admin', force_reset: true })
     const user = userEvent.setup()
@@ -101,10 +101,15 @@ describe('AuthProvider browser-session contract', () => {
     expect(screen.getByText('normal')).toBeInTheDocument()
     expect(client.getQueryData(['auth', 'session'])).toMatchObject({ force_reset: false })
 
+    client.setQueryData(['config', 'full'], { secret: 'previous-session-value' })
+    client.setQueryData(['logs'], [{ request_id: 'previous-session-request' }])
+    localStorage.setItem('aigateway_session_active', '1')
+
     await user.click(screen.getByRole('button', { name: 'logout' }))
     await waitFor(() => expect(screen.getByText('anonymous')).toBeInTheDocument())
     expect(api.clearBrowserSession).toHaveBeenCalled()
-    expect(client.getQueryData(['auth', 'session'])).toEqual({ authenticated: false })
+    expect(client.getQueryCache().getAll()).toHaveLength(0)
+    expect(localStorage.getItem('aigateway_session_active')).toBeNull()
   })
 
   it('throws a useful error when consumed outside its provider', () => {
