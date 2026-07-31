@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
+import logging
 
 import pytest
 import yaml
@@ -17,6 +17,7 @@ from aigateway_core.pipelines.generation._common.config import (
     GenerationOptimizationConfigWatcher,
 )
 from aigateway_core.shared.config import ConfigManager
+from aigateway_core.shared.configured_config import ConfigReloadCallbackError
 
 
 def _base_config() -> dict:
@@ -130,6 +131,31 @@ def test_transaction_rejects_numeric_draft_store_dir(
         transactional_replace_config(str(path), candidate, manager)
 
     assert "store_dir" in str(exc_info.value.issues)
+
+
+def test_logged_reload_failure_rolls_back_transaction(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(_base_config()), encoding="utf-8")
+    monkeypatch.setenv("AI_GATEWAY_ENV", "production")
+    manager = ConfigManager(str(path))
+    before = path.read_bytes()
+    callback_logger = logging.getLogger(__name__)
+
+    def legacy_callback(_config) -> None:
+        callback_logger.error("热重载回调执行失败: engine rebuild failed")
+
+    manager.on_reload(legacy_callback)
+    candidate = _base_config()
+    candidate["server"]["port"] = 9000
+
+    with pytest.raises(ConfigReloadCallbackError):
+        transactional_replace_config(str(path), candidate, manager)
+
+    assert path.read_bytes() == before
+    assert manager.get("server.port") == 8000
 
 
 class _FakeConfigManager:
