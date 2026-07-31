@@ -6,7 +6,28 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: write
+
 jobs:
+  apply-shared-gpu-exclusion:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+          fetch-depth: 0
+      - name: Apply deterministic policy patch
+        run: |
+          python3 scripts/fix_shared_gpu_exclusion.py
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add scripts/quickstart.sh tests/unit/cli/test_quickstart_script.py
+          git commit -m 'fix(gpu): hide CUDA from Gateway on shared single GPU'
+          git push origin HEAD
+
   python-coverage:
     runs-on: ubuntu-latest
     timeout-minutes: 20
