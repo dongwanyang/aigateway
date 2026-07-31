@@ -137,13 +137,13 @@ def _host_header(target: ResolvedPublicURL) -> str:
     return f"{host}:{target.port}" if target.port != default_port else host
 
 
-def _request_extensions(target: ResolvedPublicURL) -> dict[str, bytes]:
+def _request_extensions(target: ResolvedPublicURL) -> dict[str, str]:
     if target.parsed.scheme != "https":
         return {}
     try:
         ipaddress.ip_address(target.hostname)
     except ValueError:
-        return {"sni_hostname": target.hostname.encode("ascii")}
+        return {"sni_hostname": target.hostname}
     return {}
 
 
