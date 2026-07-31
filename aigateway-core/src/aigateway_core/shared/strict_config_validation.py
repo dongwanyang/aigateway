@@ -200,6 +200,13 @@ def _validate_generation(
             field = field_map.get(name)
             if field is None:
                 continue
+            if (
+                section_name == "draft_workflow"
+                and name == "store_dir"
+                and not isinstance(value, str)
+            ):
+                issues.append(_error(f"{path}.{name}", "must be a string"))
+                continue
             try:
                 coerced = generation_impl._coerce_value(
                     value,
