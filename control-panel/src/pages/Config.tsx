@@ -2,11 +2,17 @@ import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Save, RefreshCw, AlertTriangle, ExternalLink } from 'lucide-react'
 import Card from '@/components/Card'
-import { getComfyUIStatus, getFullConfig, getGenerationPresets } from '@/api/client'
+import { getComfyUIStatus, getGenerationPresets } from '@/api/client'
 import { queryKeys } from '@/query/keys'
 
 type ConfigValue = string | number | boolean | null | ConfigValue[] | { [key: string]: ConfigValue }
 type ConfigObject = Record<string, ConfigValue>
+type PanelResponse<T> = { data: T; message: string; revision?: string }
+
+interface VersionedConfig {
+  config: ConfigObject
+  revision: string
+}
 
 interface ConfigSchemaItem {
   path: string
@@ -64,26 +70,48 @@ const GROUP_LABELS: Record<string, string> = {
   debug_mode: '调试模式',
 }
 
-async function fetchPanelJson<T>(path: string, options: RequestInit = {}): Promise<{ data: T; message: string }> {
+function normalizeRevision(value: unknown): string | null {
+  if (typeof value !== 'string' || !value.trim()) return null
+  return value.trim().replace(/^W\//, '').replace(/^"|"$/g, '') || null
+}
+
+async function fetchPanelJson<T>(path: string, options: RequestInit = {}): Promise<PanelResponse<T>> {
   const res = await fetch(`${API_BASE}${path}`, {
     ...options,
     credentials: 'include',
     headers: { 'Content-Type': 'application/json', ...(options.headers ?? {}) },
   })
+  const body = await res.json().catch(() => ({}))
   if (!res.ok) {
-    const body = await res.json().catch(() => ({}))
-    const message = body?.error?.message ?? body?.detail?.error?.message ?? body?.detail ?? `HTTP ${res.status}`
+    const code = body?.error?.code ?? body?.detail?.error?.code
+    const message = code === 'config_version_conflict'
+      ? '配置已被其他会话修改，请重新加载后再保存。'
+      : body?.error?.message ?? body?.detail?.error?.message ?? body?.detail ?? `HTTP ${res.status}`
     throw new Error(String(message))
   }
-  return res.json()
+  const revision = normalizeRevision(body?.revision ?? res.headers.get('etag'))
+  return { ...body, ...(revision ? { revision } : {}) } as PanelResponse<T>
 }
 
-async function getConfigSchema(): Promise<{ data: { items: ConfigSchemaItem[] }; message: string }> {
+async function getVersionedConfig(): Promise<VersionedConfig> {
+  const response = await fetchPanelJson<ConfigObject>('/admin/config')
+  if (!response.revision) throw new Error('配置版本缺失，请重新加载。')
+  return {
+    config: toConfigValue(response.data) as ConfigObject,
+    revision: response.revision,
+  }
+}
+
+async function getConfigSchema(): Promise<PanelResponse<{ items: ConfigSchemaItem[] }>> {
   return fetchPanelJson<{ items: ConfigSchemaItem[] }>('/admin/config/schema')
 }
 
-async function updateTableConfig(config: Record<string, unknown>): Promise<{ data: { updated: boolean }; message: string }> {
-  return fetchPanelJson<{ updated: boolean }>('/admin/config/table', { method: 'PUT', body: JSON.stringify(config) })
+async function updateTableConfig(input: { config: Record<string, unknown>; revision: string }): Promise<PanelResponse<{ updated: boolean }>> {
+  return fetchPanelJson<{ updated: boolean }>('/admin/config/table', {
+    method: 'PUT',
+    headers: { 'If-Match': `"${input.revision}"` },
+    body: JSON.stringify(input.config),
+  })
 }
 
 function isPlainObject(value: unknown): value is Record<string, ConfigValue> {
@@ -116,6 +144,7 @@ function valueToText(value: ConfigValue): string {
 function parseEditedValue(input: string, previous: ConfigValue): ConfigValue {
   if (typeof previous === 'boolean') return input === 'true'
   if (typeof previous === 'number') {
+    if (input.trim() === '') throw new Error('数字不能为空')
     const parsed = Number(input)
     if (!Number.isFinite(parsed)) throw new Error('数字格式无效')
     return parsed
@@ -262,7 +291,7 @@ export default function Config() {
   const [hasChanges, setHasChanges] = useState(false)
   const configQuery = useQuery({
     queryKey: queryKeys.config.full,
-    queryFn: async () => toConfigValue((await getFullConfig()).data) as ConfigObject,
+    queryFn: getVersionedConfig,
   })
   const schemaQuery = useQuery({
     queryKey: ['config-schema'],
@@ -278,7 +307,8 @@ export default function Config() {
     queryFn: async () => (await getGenerationPresets()).data,
   })
   const saveMutation = useMutation({ mutationFn: updateTableConfig })
-  const config = configQuery.data ?? null
+  const config = configQuery.data?.config ?? null
+  const revision = configQuery.data?.revision ?? null
   const loading = configQuery.isLoading || schemaQuery.isLoading
   const saving = saveMutation.isPending
   const remoteError = configQuery.error ?? schemaQuery.error ?? saveMutation.error
@@ -330,10 +360,21 @@ export default function Config() {
   async function handleSave() {
     setLocalError(null)
     setSuccess(null)
-    if (!draftConfig) return
+    if (!draftConfig || !revision) {
+      setLocalError('配置版本缺失，请重新加载后再保存。')
+      return
+    }
     try {
-      await saveMutation.mutateAsync(draftConfig as Record<string, unknown>)
-      queryClient.setQueryData(queryKeys.config.full, draftConfig)
+      const result = await saveMutation.mutateAsync({
+        config: draftConfig as Record<string, unknown>,
+        revision,
+      })
+      const nextRevision = result.revision
+      if (!nextRevision) throw new Error('服务器未返回新的配置版本，请重新加载。')
+      queryClient.setQueryData<VersionedConfig>(queryKeys.config.full, {
+        config: structuredClone(draftConfig),
+        revision: nextRevision,
+      })
       setSuccess('配置已保存并生效')
       setHasChanges(false)
       setTimeout(() => setSuccess(null), 3000)
@@ -469,7 +510,7 @@ export default function Config() {
           <div>
             <h3 className="font-semibold">配置参数</h3>
             <p className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>
-              按功能模块分组展示 config.yaml。第三列说明来自 config.yaml.template 行内注释；providers 中的 API Key 已脱敏显示。
+              按功能模块分组展示 config.yaml。第三列说明来自 config.yaml.template 行内注释；敏感配置已脱敏显示。
             </p>
           </div>
           <span className="text-xs" style={{ color: 'var(--color-text-quaternary)' }}>{rows.length} 个参数</span>
