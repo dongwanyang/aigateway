@@ -105,24 +105,34 @@ def _preload_cors_origins() -> None:
         os.environ["AI_GATEWAY_CORS_ORIGINS"] = ",".join(normalized)
 
 
-def _install_admin_security_routes() -> None:
-    """Prepend security replacements before legacy admin route definitions."""
+def _install_admin_security_guards() -> None:
+    """Install sensitive-route and draft-ownership replacements."""
     from . import admin_routes
+    from .draft_security import assert_draft_owner
     from .security_routes import install_security_routes
 
     install_security_routes(admin_routes.router)
+    admin_routes._assert_draft_owner = assert_draft_owner
 
 
 def _install_config_schema_parser() -> None:
-    """Replace the indentation-regex parser with the YAML node implementation."""
+    """Install YAML-aware schema parsing and remove the legacy write route."""
     from . import routes
     from .config_schema import parse_template_schema
 
     routes._parse_template_schema = parse_template_schema
+    routes.router.routes[:] = [
+        route
+        for route in routes.router.routes
+        if not (
+            getattr(route, "path", None) == "/admin/config/table"
+            and "PUT" in set(getattr(route, "methods", set()) or set())
+        )
+    ]
 
 
 _ensure_core_src()
 _allow_config_precondition_header()
 _preload_cors_origins()
-_install_admin_security_routes()
+_install_admin_security_guards()
 _install_config_schema_parser()
