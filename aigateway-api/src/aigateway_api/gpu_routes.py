@@ -95,7 +95,7 @@ def _gateway_cuda_status() -> dict[str, Any]:
         return result
 
     # current_device(), mem_get_info() and get_device_name() can create a CUDA
-    # context.  Polling /admin/gpu/status must never become the reason an idle
+    # context. Polling /admin/gpu/status must never become the reason an idle
     # Gateway starts consuming VRAM.
     if not torch.cuda.is_initialized():
         if not result["available"]:
@@ -243,25 +243,28 @@ async def release_gpu_memory(
 ):
     comfy = await _probe(request)
     queue = comfy.get("queue") if isinstance(comfy, dict) else None
-    if isinstance(queue, dict) and (
-        int(queue.get("running", 0) or 0) > 0
-        or int(queue.get("pending", 0) or 0) > 0
-    ):
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "code": "gpu_busy",
-                    "message": "GPU memory cannot be released while ComfyUI has active or pending work",
-                }
-            },
-        )
+    queue_idle = None
+    if isinstance(queue, dict):
+        running = int(queue.get("running", 0) or 0)
+        pending = int(queue.get("pending", 0) or 0)
+        queue_idle = running == 0 and pending == 0
+        if not queue_idle:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": {
+                        "code": "gpu_busy",
+                        "message": "GPU memory cannot be released while ComfyUI has active or pending work",
+                    }
+                },
+            )
 
     released = await _release_gateway_models()
     comfy_release: dict[str, Any] = {"requested": False, "released": False}
     config = _comfy_config(request)
     server_url = str(config.get("server_url") or "").rstrip("/")
-    if server_url and bool(comfy.get("available")):
+    comfy_available = bool(comfy.get("available")) if isinstance(comfy, dict) else False
+    if server_url and comfy_available and queue_idle is True:
         comfy_release["requested"] = True
         try:
             timeout = httpx.Timeout(5.0, read=15.0)
@@ -274,6 +277,11 @@ async def release_gpu_memory(
             comfy_release["released"] = True
         except (httpx.HTTPError, ValueError, TypeError) as exc:
             comfy_release["error"] = type(exc).__name__
+    elif server_url and comfy_available and queue_idle is None:
+        # Queue state is a safety precondition for unloading ComfyUI. Gateway
+        # caches can still be released independently, but never disrupt an
+        # unknown ComfyUI workload merely because /queue was unavailable.
+        comfy_release["skipped"] = "queue_status_unknown"
 
     return {
         "data": {
