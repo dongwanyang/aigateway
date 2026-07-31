@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import copy
 import logging
+import threading
+from functools import wraps
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 
@@ -60,8 +62,25 @@ class _ReloadFailureCapture(logging.Handler):
             self.messages.append(message)
 
 
+def _serialized_reload(method: Callable[..., dict[str, Any]]):
+    """Serialize validation, state commit and callbacks for one manager."""
+
+    @wraps(method)
+    def wrapped(self: "ConfigManager", *args: Any, **kwargs: Any) -> dict[str, Any]:
+        with self._reload_lock:
+            return method(self, *args, **kwargs)
+
+    return wrapped
+
+
 class ConfigManager(_BaseConfigManager):
     """Config manager with one resolver and restart-equivalent full reloads."""
+
+    def __init__(self, config_path: str | None = None) -> None:
+        # Base initialization invokes ``self.load()``, so the reload lock must
+        # exist before delegating to it.
+        self._reload_lock = threading.RLock()
+        super().__init__(config_path=config_path)
 
     def _load_yaml(self, path: str) -> dict[str, Any]:
         """Read existing YAML strictly; preserve missing-file compatibility."""
@@ -102,6 +121,7 @@ class ConfigManager(_BaseConfigManager):
             )
         return data
 
+    @_serialized_reload
     def load(self) -> dict[str, Any]:
         old_config = copy.deepcopy(getattr(self, "_config", {}))
         old_integrations = getattr(self, "_integration_configs", None)
