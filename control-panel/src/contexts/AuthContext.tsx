@@ -81,9 +81,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       await clearBrowserSession()
     } finally {
+      localStorage.removeItem('aigateway_session_active')
       clear()
-      queryClient.removeQueries({ queryKey: queryKeys.auth.session })
-      queryClient.removeQueries({ queryKey: queryKeys.runtime.capabilities })
+      // Query keys are not currently scoped by user/session. Clearing the whole
+      // cache prevents the next browser session from briefly rendering the
+      // previous operator's config, logs, quotas, costs, or knowledge data.
+      queryClient.clear()
     }
   }
 
