@@ -197,7 +197,7 @@ async def update_secure_full_config(
         for key in writable:
             if key in submitted:
                 candidate[key] = submitted[key]
-        transactional_replace_config(
+        commit = transactional_replace_config(
             manager.config_path,
             candidate,
             manager,
@@ -205,7 +205,7 @@ async def update_secure_full_config(
         )
     except Exception as exc:
         raise _config_error(exc) from exc
-    revision = config_revision(manager.config_path)
+    revision = getattr(commit, "revision", config_revision(manager.config_path))
     return _versioned_response({"updated": True}, revision)
 
 
@@ -217,7 +217,7 @@ async def update_secure_table_config(
     manager = _manager(request)
     try:
         expected = _expected_revision(request)
-        transactional_replace_config(
+        commit = transactional_replace_config(
             manager.config_path,
             await _json_object(request),
             manager,
@@ -225,7 +225,7 @@ async def update_secure_table_config(
         )
     except Exception as exc:
         raise _config_error(exc) from exc
-    revision = config_revision(manager.config_path)
+    revision = getattr(commit, "revision", config_revision(manager.config_path))
     return _versioned_response({"updated": True}, revision)
 
 
