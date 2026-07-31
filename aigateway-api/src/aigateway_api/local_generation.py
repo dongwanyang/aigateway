@@ -348,6 +348,7 @@ async def probe_comfyui(comfy: dict[str, Any]) -> dict[str, Any]:
             "configuration_error" if config_errors else "configured"
         ),
         "configuration_errors": config_errors,
+        "endpoint_errors": {},
         "error": config_errors[0] if config_errors else None,
     }
     if not server_url:
@@ -363,28 +364,51 @@ async def probe_comfyui(comfy: dict[str, Any]) -> dict[str, Any]:
             ),
         )
         async with httpx.AsyncClient(timeout=timeout) as client:
-            stats_response, object_response, queue_response = await asyncio.gather(
+            responses = await asyncio.gather(
                 client.get(f"{server_url}/system_stats"),
                 client.get(f"{server_url}/object_info"),
                 client.get(f"{server_url}/queue"),
+                return_exceptions=True,
             )
-        stats_response.raise_for_status()
-        object_response.raise_for_status()
-        queue_response.raise_for_status()
-        stats = stats_response.json()
-        objects = object_response.json()
-        queue = queue_response.json()
+
+        payloads: dict[str, Any] = {}
+        endpoint_errors: dict[str, str] = {}
+        for endpoint, response in zip(
+            ("system_stats", "object_info", "queue"),
+            responses,
+            strict=True,
+        ):
+            if isinstance(response, BaseException):
+                endpoint_errors[endpoint] = type(response).__name__
+                continue
+            try:
+                response.raise_for_status()
+                payloads[endpoint] = response.json()
+            except (httpx.HTTPError, ValueError, TypeError) as exc:
+                endpoint_errors[endpoint] = type(exc).__name__
+
+        stats = payloads.get("system_stats")
+        objects = payloads.get("object_info")
+        queue = payloads.get("queue")
         devices = stats.get("devices", []) if isinstance(stats, dict) else []
+        queue_view = None
+        if isinstance(queue, dict):
+            queue_view = {
+                "running": len(queue.get("queue_running", [])),
+                "pending": len(queue.get("queue_pending", [])),
+            }
         result.update(
             {
-                "available": True,
+                "available": bool(payloads),
                 "gpu": devices[0] if devices else None,
-                "queue": {
-                    "running": len(queue.get("queue_running", [])),
-                    "pending": len(queue.get("queue_pending", [])),
-                },
+                "queue": queue_view,
                 "available_nodes": sorted(objects) if isinstance(objects, dict) else [],
-                "error": config_errors[0] if config_errors else None,
+                "endpoint_errors": endpoint_errors,
+                "error": (
+                    config_errors[0]
+                    if config_errors
+                    else (next(iter(endpoint_errors.values())) if not payloads and endpoint_errors else None)
+                ),
             }
         )
     except (httpx.HTTPError, ValueError, TypeError) as exc:

@@ -149,12 +149,23 @@ def _register_exception_handlers(app_instance: "FastAPI") -> None:
         request_id = _get_request_id(request)
         body = {"error": {"code": code, "message": msg}}
 
-        # 5xx 错误不能在 message 中回显原始异常。旧实现只脱敏 detail，
-        # 但 message 仍会泄露 API key、连接串和服务器路径，使脱敏形同虚设。
-        # 对外使用固定文案，诊断信息仅放在经过脱敏的 detail 中。
+        # 5xx diagnostics belong in server logs only.  Even a carefully redacted
+        # exception string can contain provider-specific credentials or internal
+        # topology that a generic regular expression does not recognize.
         if status >= 500:
-            body["error"]["message"] = "Internal Server Error"
-            body["error"]["detail"] = f"{type(exc).__name__}: {_redact_5xx_msg(msg)}"
+            logger.error(
+                "GatewayError (request_id=%s, type=%s): %s",
+                request_id,
+                type(exc).__name__,
+                _redact_5xx_msg(msg),
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+            body = {
+                "error": {
+                    "code": code,
+                    "message": "Internal Server Error",
+                }
+            }
 
         return JSONResponse(
             status_code=status,
@@ -169,12 +180,32 @@ def _register_exception_handlers(app_instance: "FastAPI") -> None:
     ) -> JSONResponse:
         """FastAPI HTTPException 处理器 — 保留 detail 中的统一错误格式。"""
         detail = exc.detail
-        if isinstance(detail, dict) and "error" in detail:
+        request_id = _get_request_id(request)
+        if exc.status_code >= 500:
+            error_code = "internal_error"
+            if isinstance(detail, dict):
+                nested_error = detail.get("error")
+                if isinstance(nested_error, dict):
+                    candidate = nested_error.get("code")
+                    if isinstance(candidate, str) and candidate:
+                        error_code = candidate
+            logger.error(
+                "HTTPException (request_id=%s, status=%s): %r",
+                request_id,
+                exc.status_code,
+                detail,
+            )
+            body = {
+                "error": {
+                    "code": error_code,
+                    "message": "Internal Server Error",
+                }
+            }
+        elif isinstance(detail, dict) and "error" in detail:
             body = detail
         else:
             body = {"error": {"code": "internal_error", "message": str(detail) if detail else "Internal error"}}
 
-        request_id = _get_request_id(request)
         return JSONResponse(
             status_code=exc.status_code,
             content=body,
@@ -206,7 +237,6 @@ def _register_exception_handlers(app_instance: "FastAPI") -> None:
                 "error": {
                     "code": "internal_error",
                     "message": "Internal Server Error",
-                    "detail": f"{type(exc).__name__}: {redacted_msg}",
                 }
             },
             headers={"X-Request-ID": request_id},

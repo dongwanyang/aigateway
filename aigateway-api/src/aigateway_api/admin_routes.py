@@ -446,11 +446,17 @@ def _atomic_write_yaml(config_path: str, file_config: dict[str, Any]) -> None:
 
 
 def _read_yaml(config_path: str) -> dict[str, Any]:
-    """Read the small runtime YAML file from disk."""
+    """Read runtime YAML while cooperating with in-place bind-mount writes."""
+    import fcntl
+
     import yaml
 
     with open(config_path, encoding="utf-8") as file:
-        return yaml.safe_load(file) or {}
+        fcntl.flock(file.fileno(), fcntl.LOCK_SH)
+        try:
+            return yaml.safe_load(file) or {}
+        finally:
+            fcntl.flock(file.fileno(), fcntl.LOCK_UN)
 
 
 def _locked_update_yaml(
@@ -484,21 +490,30 @@ def _locked_update_yaml(
 
 
 def _flocked_inplace_write(config_path: str, file_config: dict[str, Any]) -> None:
-    """flocked 原地写回退(用于 os.replace 不可用的 bind-mount 场景)。
-
-    排它锁保证 Watchdog 的 _load_yaml(共享锁)不会读到半截 YAML。
-    """
+    """Update a bind-mounted YAML file without truncating before the lock."""
     import fcntl
+    import os
 
     import yaml
 
-    with open(config_path, "w", encoding="utf-8") as f:
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+    # Opening with ``w`` truncates before flock() is acquired.  Use r+ so every
+    # cooperating reader sees either the old complete document or the new one.
+    with open(config_path, "r+", encoding="utf-8") as file:
+        fcntl.flock(file.fileno(), fcntl.LOCK_EX)
         try:
-            yaml.dump(file_config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
-            f.flush()
+            file.seek(0)
+            file.truncate(0)
+            yaml.dump(
+                file_config,
+                file,
+                default_flow_style=False,
+                allow_unicode=True,
+                sort_keys=False,
+            )
+            file.flush()
+            os.fsync(file.fileno())
         finally:
-            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            fcntl.flock(file.fileno(), fcntl.LOCK_UN)
 
 
 # ------------------------------------------------------------------
@@ -859,18 +874,21 @@ async def update_api_key_quota(
     # UPDATE 会用旧快照覆盖并发的 increment_usage 写入的运行时计数器
     # (daily_tokens_used / rpm_window_count / tpm_window_count / monthly_cost_used)。
     await key_store.set_api_key(kh, updated_fields)
+    updated_data = await key_store.get_api_key(kh)
+    if not updated_data:
+        updated_data = {**data, **updated_fields}
 
     logger.info("API Key 配额已更新: key_id=%s, fields=%s", key_id, list(updated_fields.keys()))
 
     return {
         "data": {
             "id": key_id,
-            "user_id": data.get("user_id", ""),
+            "user_id": updated_data.get("user_id", ""),
             "quotas": {
-                "daily_tokens_limit": int(data.get("daily_tokens_limit", _get_auth_defaults()["daily_tokens"])),
-                "monthly_cost_limit": float(data.get("monthly_cost_limit", _get_auth_defaults()["monthly_cost"])),
-                "rate_limit_rpm": int(data.get("rate_limit_rpm", _get_auth_defaults()["rate_limit_rpm"])),
-                "rate_limit_tpm": int(data.get("rate_limit_tpm", _get_auth_defaults()["rate_limit_tpm"])),
+                "daily_tokens_limit": int(updated_data.get("daily_tokens_limit", _get_auth_defaults()["daily_tokens"])),
+                "monthly_cost_limit": float(updated_data.get("monthly_cost_limit", _get_auth_defaults()["monthly_cost"])),
+                "rate_limit_rpm": int(updated_data.get("rate_limit_rpm", _get_auth_defaults()["rate_limit_rpm"])),
+                "rate_limit_tpm": int(updated_data.get("rate_limit_tpm", _get_auth_defaults()["rate_limit_tpm"])),
             },
         },
         "message": "success",
@@ -894,30 +912,38 @@ async def get_metrics_json(
     metrics_collector = s.metrics_collector
     key_store = s.key_store
 
-    # 收集 Prometheus 指标
-    prom_samples: dict[str, Any] = {}
+    # Preserve every labelled Prometheus series.  ``prometheus`` remains a
+    # backward-compatible latest-sample view; new consumers should use
+    # ``prometheus_series`` to avoid losing all but the final label set.
+    prom_series: dict[str, list[dict[str, Any]]] = {}
     try:
+        import math
+
         from prometheus_client import generate_latest
-        # 单 worker 模式：使用 MetricsCollector 持有的 registry
+        from prometheus_client.parser import text_string_to_metric_families
+
         if metrics_collector and metrics_collector._registry is not None:
             raw = generate_latest(metrics_collector._registry).decode("utf-8")
         else:
             raw = ""
-        for line in raw.split("\n"):
-            if not line or line.startswith("#"):
-                continue
-            m = re.match(r"^(\w+)\{?([^}]*)\}?\s+(.+)$", line)
-            if m:
-                name, labels_str, value = m.groups()
-                labels = {}
-                if labels_str:
-                    for pair in labels_str.split(","):
-                        kv = pair.split("=")
-                        if len(kv) == 2:
-                            labels[kv[0]] = kv[1].strip('"')
-                prom_samples[name] = {"labels": labels, "value": float(value)}
+        for family in text_string_to_metric_families(raw):
+            for sample in family.samples:
+                value = float(sample.value)
+                if not math.isfinite(value):
+                    continue
+                prom_series.setdefault(sample.name, []).append(
+                    {
+                        "labels": dict(sample.labels),
+                        "value": value,
+                    }
+                )
     except Exception as exc:
         logger.warning("Failed to collect Prometheus metrics: %s", exc)
+    prom_samples = {
+        name: samples[-1]
+        for name, samples in prom_series.items()
+        if samples
+    }
 
     # 收集 KeyStore 聚合数据 (SQLite)
     key_stats: dict[str, Any] = {"total_keys": 0, "total_daily_tokens_used": 0, "total_monthly_cost_used": 0.0}
@@ -939,6 +965,7 @@ async def get_metrics_json(
     return {
         "data": {
             "prometheus": prom_samples,
+            "prometheus_series": prom_series,
             "keys": key_stats,
             "circuit_breakers": cb_states,
             "uptime_seconds": metrics_collector.get_uptime_seconds() if metrics_collector else 0,
@@ -1066,22 +1093,29 @@ async def update_plugins_config(
     """
     import os
 
-    from pydantic import BaseModel, Field
+    from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError
 
     class PluginToggleRequest(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
         name: str = Field(..., min_length=1)
-        enabled: bool
+        enabled: StrictBool
 
     try:
-        # 解析请求体
-        raw = await request.json()
-        name = raw.get("name", "")
-        enabled = raw.get("enabled", True)
-    except Exception:
-        raise HTTPException(status_code=400, detail={"error": {"code": "validation_error", "message": "Invalid request body"}})
+        payload = PluginToggleRequest.model_validate(await request.json())
+    except (ValidationError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": {
+                    "code": "validation_error",
+                    "message": "name must be a non-empty string and enabled must be a boolean",
+                }
+            },
+        ) from exc
 
-    if not name:
-        raise HTTPException(status_code=400, detail={"error": {"code": "validation_error", "message": "Plugin name is required"}})
+    name = payload.name
+    enabled = bool(payload.enabled)
 
     from .app_state import get_state
     s = get_state()
@@ -1275,8 +1309,26 @@ async def set_plugin_debug(
     if not config_manager:
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "ConfigManager not initialized"}})
 
-    body = await request.json()
-    enabled = bool(body.get("enabled", False))
+    from pydantic import BaseModel, ConfigDict, StrictBool, ValidationError
+
+    class PluginDebugRequest(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+        enabled: StrictBool
+
+    try:
+        payload = PluginDebugRequest.model_validate(await request.json())
+    except (ValidationError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": {
+                    "code": "validation_error",
+                    "message": "enabled must be a boolean",
+                }
+            },
+        ) from exc
+    enabled = bool(payload.enabled)
 
     config_path = config_manager.config_path
     if not config_path or not os.path.isfile(config_path):
@@ -1378,14 +1430,35 @@ async def update_global_config(
     if not config_manager:
         raise HTTPException(status_code=500, detail={"error": {"code": "internal_error", "message": "ConfigManager not initialized"}})
 
-    raw = await request.json()
+    from pydantic import BaseModel, ConfigDict, StrictBool, ValidationError
+
+    class GlobalConfigUpdate(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+        hot_reload: StrictBool | None = None
+        debug_mode: StrictBool | None = None
+        debug: dict[str, Any] | None = None
+
+    try:
+        payload = GlobalConfigUpdate.model_validate(await request.json())
+    except (ValidationError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": {
+                    "code": "validation_error",
+                    "message": "Invalid global configuration payload",
+                }
+            },
+        ) from exc
+
     # hot_reload / debug_mode 缺失时保留当前值,而非默认 False
     # (避免只传 debug 段的调用意外停掉 Watchdog 或重置日志级别)。
     cur_hot_reload = bool(config_manager.get("hot_reload", False)) if config_manager else False
     cur_debug_mode = bool(config_manager.get("debug_mode", False)) if config_manager else False
-    hot_reload = bool(raw.get("hot_reload", cur_hot_reload))
-    debug_mode = bool(raw.get("debug_mode", cur_debug_mode))
-    debug_section = raw.get("debug")  # None 表示不改;dict 表示整段覆盖
+    hot_reload = cur_hot_reload if payload.hot_reload is None else bool(payload.hot_reload)
+    debug_mode = cur_debug_mode if payload.debug_mode is None else bool(payload.debug_mode)
+    debug_section = payload.debug  # None 表示不改;dict 表示整段覆盖
 
     # 归一化 debug 段:扁平 plugins_enabled 与嵌套 plugins.enabled 双向同步。
     # DebugConfig.from_dict 优先读嵌套 plugins.enabled;若只写扁平 plugins_enabled,
