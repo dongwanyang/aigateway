@@ -40,6 +40,8 @@ def _manager(request: Request) -> Any:
 
 
 def _config_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, HTTPException):
+        return exc
     if isinstance(exc, ConfigPreconditionRequiredError):
         return HTTPException(
             428,
@@ -99,9 +101,6 @@ def _config_error(exc: Exception) -> HTTPException:
 
 
 def _expected_revision(request: Request) -> str:
-    # Browsers may use the query parameter because the existing deployment CORS
-    # contract does not permit the non-safelisted If-Match request header. Other
-    # clients should prefer the standard strong If-Match precondition.
     raw = (
         request.headers.get("if-match", "").strip()
         or request.query_params.get("revision", "").strip()
