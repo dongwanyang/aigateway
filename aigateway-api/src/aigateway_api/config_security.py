@@ -196,9 +196,6 @@ def _matching_list_item(
     if not isinstance(candidate, dict):
         return _MISSING if _contains_masked(candidate, path) else fallback
 
-    # Use only the strongest supplied stable identity. Never fall through from a
-    # missing id to a weaker editable field, and never use array position for a
-    # masked object. This permits display-name edits when an immutable id exists.
     for key in ("id", "key_id", "name", "user_id"):
         identity = candidate.get(key)
         if not isinstance(identity, str) or not identity:
@@ -394,6 +391,12 @@ def _write_bytes_atomic(path: str, payload: bytes) -> None:
             pass
 
 
+def _assert_revision_unchanged(path: str, expected: str) -> None:
+    current = config_revision(path)
+    if current != expected:
+        raise ConfigVersionConflictError(expected, current)
+
+
 def transactional_replace_config(
     path: str,
     candidate: dict[str, Any],
@@ -446,11 +449,26 @@ def transactional_replace_config(
         committed_revision = config_revision_bytes(payload)
         committed = False
         try:
+            # Internal writers honor ``.lock``; this second CAS check also catches
+            # editors or deployment agents that do not.
+            _assert_revision_unchanged(path, current_revision)
             _write_bytes_atomic(path, payload)
             committed = True
             config_manager.load()
-        except Exception:
+        except Exception as exc:
             if committed:
+                after_failure = config_revision(path)
+                if after_failure != committed_revision:
+                    # An external writer won after our commit. Never overwrite it
+                    # with stale rollback bytes; synchronize runtime best-effort.
+                    try:
+                        config_manager.load()
+                    except Exception:
+                        pass
+                    raise ConfigVersionConflictError(
+                        committed_revision,
+                        after_failure,
+                    ) from exc
                 _write_bytes_atomic(path, old_bytes)
                 try:
                     config_manager.load()
