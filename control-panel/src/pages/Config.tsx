@@ -246,7 +246,15 @@ function groupRows(rows: ConfigRow[]): Array<[string, ConfigRow[]]> {
   return Array.from(groups.entries())
 }
 
-function ConfigValueEditor({ row, onChange }: { row: ConfigRow; onChange: (path: string, input: string) => boolean }) {
+function ConfigValueEditor({
+  row,
+  onChange,
+  onValidityChange,
+}: {
+  row: ConfigRow
+  onChange: (path: string, input: string) => boolean
+  onValidityChange: (path: string, valid: boolean) => void
+}) {
   const canonicalText = valueToText(row.value)
   const [draftText, setDraftText] = useState(canonicalText)
   const [editing, setEditing] = useState(false)
@@ -261,21 +269,32 @@ function ConfigValueEditor({ row, onChange }: { row: ConfigRow; onChange: (path:
       try {
         JSON.parse(next)
       } catch {
+        onValidityChange(row.path, false)
         return
       }
+      onValidityChange(row.path, true)
       onChange(row.path, next)
       return
     }
     if (typeof row.value === 'number') {
-      if (next.trim() === '' || !Number.isFinite(Number(next))) return
+      if (next.trim() === '' || !Number.isFinite(Number(next))) {
+        onValidityChange(row.path, false)
+        return
+      }
     }
+    onValidityChange(row.path, true)
     onChange(row.path, next)
   }
 
   function commitDraft() {
     setEditing(false)
-    if (draftText === canonicalText) return
-    if (!onChange(row.path, draftText)) setDraftText(canonicalText)
+    if (draftText === canonicalText) {
+      onValidityChange(row.path, true)
+      return
+    }
+    const accepted = onChange(row.path, draftText)
+    onValidityChange(row.path, true)
+    if (!accepted) setDraftText(canonicalText)
   }
 
   if (typeof row.value === 'boolean') {
@@ -313,10 +332,6 @@ function ConfigValueEditor({ row, onChange }: { row: ConfigRow; onChange: (path:
       onBlur={commitDraft}
       onKeyDown={event => {
         if (event.key === 'Enter') event.currentTarget.blur()
-        if (event.key === 'Escape') {
-          setDraftText(canonicalText)
-          event.currentTarget.blur()
-        }
       }}
       style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: '12px' }}
     />
@@ -329,6 +344,7 @@ export default function Config() {
   const [localError, setLocalError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
   const [hasChanges, setHasChanges] = useState(false)
+  const [invalidDraftPaths, setInvalidDraftPaths] = useState<Set<string>>(() => new Set())
   const configQuery = useQuery({
     queryKey: queryKeys.config.full,
     queryFn: getVersionedConfig,
@@ -388,10 +404,20 @@ export default function Config() {
   const rows = useMemo(() => draftConfig ? flattenConfig(draftConfig, schemaMap) : [], [draftConfig, schemaMap])
   const groupedRows = useMemo(() => groupRows(rows), [rows])
 
+  function handleDraftValidity(path: string, valid: boolean) {
+    setInvalidDraftPaths(previous => {
+      const next = new Set(previous)
+      if (valid) next.delete(path)
+      else next.add(path)
+      return next
+    })
+  }
+
   async function loadConfig() {
     setLocalError(null)
     setSuccess(null)
     setHasChanges(false)
+    setInvalidDraftPaths(new Set())
     await Promise.all([
       configQuery.refetch(),
       schemaQuery.refetch(),
@@ -403,7 +429,7 @@ export default function Config() {
   async function handleSave() {
     setLocalError(null)
     setSuccess(null)
-    if (!draftConfig) return
+    if (!draftConfig || invalidDraftPaths.size > 0) return
     try {
       const result = await saveMutation.mutateAsync({
         config: draftConfig as Record<string, unknown>,
@@ -415,6 +441,7 @@ export default function Config() {
       })
       setSuccess('配置已保存并生效')
       setHasChanges(false)
+      setInvalidDraftPaths(new Set())
       setTimeout(() => setSuccess(null), 3000)
     } catch (exc) {
       setLocalError(exc instanceof Error ? exc.message : '保存失败')
@@ -445,7 +472,7 @@ export default function Config() {
           <button className="btn btn-secondary" style={{ padding: '8px 14px', fontSize: '12px' }} onClick={loadConfig} disabled={loading}>
             <RefreshCw size={14} /> 重新加载
           </button>
-          <button className="btn btn-primary" style={{ padding: '8px 14px', fontSize: '12px' }} onClick={handleSave} disabled={saving || !hasChanges || Boolean(localError)}>
+          <button className="btn btn-primary" style={{ padding: '8px 14px', fontSize: '12px' }} onClick={handleSave} disabled={saving || !hasChanges || invalidDraftPaths.size > 0 || Boolean(localError)}>
             <Save size={14} /> {saving ? '保存中...' : '保存配置'}
           </button>
         </div>
@@ -576,7 +603,9 @@ export default function Config() {
                       {groupItems.map(row => (
                         <tr key={row.path} style={{ borderBottom: '1px solid var(--color-border-subtle)' }}>
                           <td style={{ padding: '8px', fontFamily: 'var(--font-mono)', verticalAlign: 'top', wordBreak: 'break-all' }}>{row.path}</td>
-                          <td style={{ padding: '8px', verticalAlign: 'top' }}><ConfigValueEditor row={row} onChange={handleValueChange} /></td>
+                          <td style={{ padding: '8px', verticalAlign: 'top' }}>
+                            <ConfigValueEditor row={row} onChange={handleValueChange} onValidityChange={handleDraftValidity} />
+                          </td>
                           <td style={{ padding: '8px', color: 'var(--color-text-tertiary)', verticalAlign: 'top' }}>{row.description}</td>
                         </tr>
                       ))}
