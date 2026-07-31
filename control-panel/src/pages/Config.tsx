@@ -255,6 +255,23 @@ function ConfigValueEditor({ row, onChange }: { row: ConfigRow; onChange: (path:
     if (!editing) setDraftText(canonicalText)
   }, [canonicalText, editing, row.path])
 
+  function updateDraft(next: string) {
+    setDraftText(next)
+    if (Array.isArray(row.value) || isPlainObject(row.value)) {
+      try {
+        JSON.parse(next)
+      } catch {
+        return
+      }
+      onChange(row.path, next)
+      return
+    }
+    if (typeof row.value === 'number') {
+      if (next.trim() === '' || !Number.isFinite(Number(next))) return
+    }
+    onChange(row.path, next)
+  }
+
   function commitDraft() {
     setEditing(false)
     if (draftText === canonicalText) return
@@ -279,7 +296,7 @@ function ConfigValueEditor({ row, onChange }: { row: ConfigRow; onChange: (path:
       <textarea
         value={draftText}
         onFocus={() => setEditing(true)}
-        onChange={event => setDraftText(event.target.value)}
+        onChange={event => updateDraft(event.target.value)}
         onBlur={commitDraft}
         style={{ width: '100%', minHeight: 76, fontFamily: 'var(--font-mono)', fontSize: '12px' }}
         spellCheck={false}
@@ -292,7 +309,7 @@ function ConfigValueEditor({ row, onChange }: { row: ConfigRow; onChange: (path:
       type={typeof row.value === 'number' ? 'number' : 'text'}
       value={draftText}
       onFocus={() => setEditing(true)}
-      onChange={event => setDraftText(event.target.value)}
+      onChange={event => updateDraft(event.target.value)}
       onBlur={commitDraft}
       onKeyDown={event => {
         if (event.key === 'Enter') event.currentTarget.blur()
@@ -318,7 +335,10 @@ export default function Config() {
   })
   const schemaQuery = useQuery({
     queryKey: ['config-schema'],
-    queryFn: async () => (await getConfigSchema()).data.items,
+    queryFn: async () => {
+      const response = await getConfigSchema()
+      return Array.isArray(response.data?.items) ? response.data.items : []
+    },
   })
   const comfyQuery = useQuery({
     queryKey: ['comfyui', 'status'],
