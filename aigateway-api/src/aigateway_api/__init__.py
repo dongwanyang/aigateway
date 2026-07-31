@@ -22,6 +22,18 @@ def _ensure_core_src() -> None:
         sys.path.insert(0, str(core_src))
 
 
+def _allow_config_precondition_header() -> None:
+    """Extend Starlette's CORS allow-list before middleware construction."""
+    try:
+        from starlette.middleware import cors
+    except ImportError:
+        return
+    # ``main._configure_cors`` predates revisioned config writes and supplies an
+    # explicit header list. Extending this construction-time set keeps existing
+    # deployments compatible without broadening CORS to every request header.
+    cors.SAFELISTED_HEADERS.add("If-Match")
+
+
 def _dotenv_bootstrap_values() -> dict[str, Any]:
     """Read bootstrap-only values from .env without mutating ``os.environ``.
 
@@ -100,5 +112,6 @@ def _install_admin_security_routes() -> None:
 
 
 _ensure_core_src()
+_allow_config_precondition_header()
 _preload_cors_origins()
 _install_admin_security_routes()
