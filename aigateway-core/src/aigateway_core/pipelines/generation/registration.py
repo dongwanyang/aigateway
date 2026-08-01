@@ -198,6 +198,11 @@ def register_generation_optimization_plugins(
                 "allowed_checkpoints", ComfyUIConfig().allowed_checkpoints
             )
         ),
+        checkpoint_vram_gb=dict(
+            comfyui_dict.get(
+                "checkpoint_vram_gb", ComfyUIConfig().checkpoint_vram_gb
+            )
+        ),
         max_concurrency=comfyui_dict.get(
             "max_concurrency", ComfyUIConfig.max_concurrency
         ),

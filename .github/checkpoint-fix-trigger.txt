@@ -1,1 +1,0 @@
-apply trusted checkpoint policy fixes

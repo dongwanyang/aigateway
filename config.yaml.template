@@ -510,6 +510,7 @@ generation_optimization:
       workflow_version: "image-v1" # 图片工作流版本；变更图结构时递增
       checkpoint_name: "sd_xl_base_1.0.safetensors" # 默认 SDXL checkpoint
       allowed_checkpoints: ["sd_xl_base_1.0.safetensors"] # 允许加载的 checkpoint 白名单
+      checkpoint_vram_gb: {"sd_xl_base_1.0.safetensors": 8} # 每个白名单 checkpoint 的服务端最低显存预算（GB）
       max_concurrency: 1      # Gateway 同时提交到 ComfyUI 的最大任务数
       min_free_gb: 30        # 输出磁盘最小剩余空间（GB），不是 GPU 显存
       model_budget_gb: 80    # ComfyUI 模型目录最大磁盘占用（GB）

@@ -8,6 +8,7 @@ from aigateway_api.local_generation import (
     dependency_status,
     discovered_checkpoint_presets,
     load_custom_presets,
+    merge_generation_presets,
     save_custom_preset,
 )
 from aigateway_core.shared.comfyui_model_discovery import (
@@ -79,7 +80,7 @@ def test_dependency_status_surfaces_configuration_errors(tmp_path):
     }
 
 
-def test_discovers_installed_checkpoints_and_builds_selectable_presets(tmp_path):
+def test_discovers_only_trusted_profiled_checkpoints_as_selectable(tmp_path):
     checkpoints = tmp_path / "checkpoints"
     (checkpoints / "portraits").mkdir(parents=True)
     (checkpoints / "default.safetensors").write_bytes(b"default")
@@ -94,7 +95,11 @@ def test_discovers_installed_checkpoints_and_builds_selectable_presets(tmp_path)
         {
             "models_path": str(tmp_path),
             "checkpoint_name": "default.safetensors",
-            "sdxl_required_vram_gb": 9,
+            "allowed_checkpoints": [
+                "default.safetensors",
+                "portraits/cinematic.ckpt",
+            ],
+            "checkpoint_vram_gb": {"portraits/cinematic.ckpt": 11},
         }
     )
 
@@ -102,9 +107,54 @@ def test_discovers_installed_checkpoints_and_builds_selectable_presets(tmp_path)
     preset = presets[0]
     assert preset["source"] == "discovered"
     assert preset["selectable"] is True
+    assert preset["enabled"] is True
+    assert preset["workflow_family"] == "sdxl"
     assert preset["model_name"] == "portraits/cinematic.ckpt"
-    assert preset["required_vram_gb"] == 9
+    assert preset["required_vram_gb"] == 11
     assert checkpoint_name_from_preset_id(preset["id"]) == preset["model_name"]
+
+
+def test_discovered_checkpoint_without_server_trust_is_detection_only(tmp_path):
+    checkpoints = tmp_path / "checkpoints"
+    checkpoints.mkdir()
+    (checkpoints / "unknown.safetensors").write_bytes(b"model")
+
+    [preset] = discovered_checkpoint_presets(
+        {"models_path": str(tmp_path), "allowed_checkpoints": []}
+    )
+
+    assert preset["selectable"] is False
+    assert preset["enabled"] is False
+    assert preset["workflow_family"] == "unknown"
+    assert preset["required_vram_gb"] is None
+    assert preset["configuration_status"] == "configuration_error"
+    assert any(
+        error.startswith("checkpoint_not_allowlisted:")
+        for error in preset["configuration_errors"]
+    )
+    assert any(
+        error.startswith("checkpoint_vram_unconfigured:")
+        for error in preset["configuration_errors"]
+    )
+
+
+def test_custom_presets_cannot_use_checkpoint_namespace(tmp_path, monkeypatch):
+    monkeypatch.setenv("AI_GATEWAY_GENERATION_PRESETS_DIR", str(tmp_path))
+
+    with pytest.raises(ValueError, match="reserved checkpoint namespace"):
+        save_custom_preset({"id": "checkpoint.YWJj"})
+
+
+def test_preset_merge_is_globally_id_unique():
+    merged = merge_generation_presets(
+        [{"id": "same", "source": "builtin"}],
+        [{"id": "same", "source": "custom"}, {"id": "other"}],
+    )
+
+    assert merged == [
+        {"id": "same", "source": "builtin"},
+        {"id": "other"},
+    ]
 
 
 def test_checkpoint_preset_validation_fails_closed_for_unsafe_paths(tmp_path):

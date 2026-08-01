@@ -51,6 +51,10 @@ class ComfyUIConfig:
     workflow_version: str = ""
     checkpoint_name: str = ""
     allowed_checkpoints: list[str] = field(default_factory=list)
+    # Per-checkpoint server-side minimum VRAM for dynamically selectable
+    # standard-workflow checkpoints. A discovered file is not selectable
+    # unless it is both allowlisted and present in this mapping.
+    checkpoint_vram_gb: dict[str, float] = field(default_factory=dict)
     max_concurrency: int = 1
     min_free_gb: float = 30.0
     model_budget_gb: float = 80.0

@@ -210,34 +210,17 @@ class DraftGeneratorStrategy:
         media_type = "video" if is_video else "image"
         seed = int(uuid.uuid4().int % (2**32))
         uses_qwen_image = self._should_use_qwen_image(request)
-        draft_required_vram_gb = (
-            float(request.required_vram_gb)
-            if request.required_vram_gb is not None
-            else float(
-                self._comfyui_config.qwen_image_required_vram_gb
-                if uses_qwen_image
-                else self._comfyui_config.sdxl_required_vram_gb
-            )
+        draft_required_vram_gb = self._draft_required_vram_for_request(
+            request, uses_qwen_image=uses_qwen_image
         )
 
-        # generation_params 快照（后台 task 也要用，这里先建好）
-        if is_video:
-            selected_checkpoint = self._comfyui_config.video_diffusion_model
-        elif uses_qwen_image:
-            selected_checkpoint = self._comfyui_config.qwen_image_diffusion_model
-        elif request.preset_id and request.preset_id.startswith(
-            CHECKPOINT_PRESET_PREFIX
-        ):
-            try:
-                selected_checkpoint = checkpoint_name_from_preset_id(
-                    request.preset_id
-                )
-            except ValueError as exc:
-                raise DraftWorkflowError("comfyui_invalid_checkpoint_preset") from exc
-            if selected_checkpoint is None:
-                raise DraftWorkflowError("comfyui_invalid_checkpoint_preset")
-        else:
-            selected_checkpoint = self._comfyui_config.checkpoint_name
+        # generation_params 快照（后台 task 也要用，这里先建好）。视频的草稿
+        # 阶段同样运行图片工作流，因此这里记录并调度关键帧模型，而不是 Wan。
+        selected_checkpoint = (
+            self._comfyui_config.qwen_image_diffusion_model
+            if uses_qwen_image
+            else self._checkpoint_for_request(request)
+        )
         generation_params: dict[str, Any] = {
             "prompt": request.prompt,
             "target_resolution": list(request.target_resolution),
@@ -256,6 +239,8 @@ class DraftGeneratorStrategy:
             "required_vram_gb": draft_required_vram_gb,
             "required_vram_explicit": request.required_vram_gb is not None,
         }
+        if is_video:
+            generation_params["video_model"] = self._comfyui_config.video_diffusion_model
         if is_video and keyframe_count is not None:
             generation_params["explicit_keyframe_count"] = keyframe_count
         if is_video:
@@ -793,14 +778,8 @@ class DraftGeneratorStrategy:
                     "video" if is_video else "upscale",
                     confirm_on_worker,
                     preferred_worker_id=draft.worker_id,
-                    memory_requirement_gb=(
-                        float(draft.generation_params.get("required_vram_gb", 0.0))
-                        if draft.generation_params.get("required_vram_explicit")
-                        else float(self._comfyui_config.video_required_vram_gb)
-                        if is_video
-                        else float(self._comfyui_config.upscale_required_vram_gb)
-                        if str(draft.generation_params.get("quality")) == "faithful_4k"
-                        else float(draft.generation_params.get("required_vram_gb", 0.0) or 0.0)
+                    memory_requirement_gb=self._confirmation_required_vram_gb(
+                        draft
                     ),
                 )
             )
@@ -1288,17 +1267,19 @@ return {3, raw}
     async def check_local_dependencies(self, request: GenerationRequest) -> None:
         """Fail before draft creation when an explicitly selected local path is unusable."""
         await self._check_comfyui()
-        if request.media_type != "video" and self._should_use_qwen_image(request):
+        # Video preview generation first runs the selected image/keyframe model.
+        # Validate that stage before validating the Wan confirmation stage so
+        # backend=auto can fail early and fall back instead of returning a draft
+        # that later dies in a background task.
+        if self._should_use_qwen_image(request):
             diffusion, encoder, vae = self._validate_qwen_image_models()
             required: list[tuple[str, str]] = [
                 ("diffusion_models", diffusion),
                 ("text_encoders", encoder),
                 ("vae", vae),
             ]
-        elif request.media_type != "video":
-            required = [("checkpoints", self._checkpoint_for_request(request))]
         else:
-            required = []
+            required = [("checkpoints", self._checkpoint_for_request(request))]
         if request.media_type == "video":
             diffusion, encoder, vae = self._validate_video_models()
             required.extend(
@@ -1419,25 +1400,125 @@ return {3, raw}
         allowed = set(self._comfyui_config.allowed_checkpoints)
         if checkpoint not in allowed:
             raise DraftWorkflowError(
-                f"ComfyUI checkpoint is not allowlisted: {checkpoint}"
+                f"comfyui_checkpoint_not_allowed: {checkpoint}"
             )
         return checkpoint
 
+    def _checkpoint_vram_requirement(self, checkpoint_name: str) -> float:
+        """Return the server-controlled minimum VRAM for one checkpoint."""
+        if checkpoint_name == self._comfyui_config.checkpoint_name:
+            value = float(self._comfyui_config.sdxl_required_vram_gb)
+        else:
+            raw_mapping = self._comfyui_config.checkpoint_vram_gb
+            if checkpoint_name not in raw_mapping:
+                raise DraftWorkflowError(
+                    f"comfyui_checkpoint_vram_unconfigured: {checkpoint_name}"
+                )
+            try:
+                value = float(raw_mapping[checkpoint_name])
+            except (TypeError, ValueError) as exc:
+                raise DraftWorkflowError(
+                    f"comfyui_checkpoint_vram_unconfigured: {checkpoint_name}"
+                ) from exc
+        if not math.isfinite(value) or value <= 0:
+            raise DraftWorkflowError(
+                f"comfyui_checkpoint_vram_unconfigured: {checkpoint_name}"
+            )
+        return value
+
     def _checkpoint_for_request(self, request: GenerationRequest) -> str:
         preset_id = request.preset_id
-        if preset_id in {None, "sdxl-draft", "sdxl-creative-refine"}:
+        if preset_id in {
+            None,
+            "sdxl-draft",
+            "sdxl-creative-refine",
+            "wan2.2-ti2v-5b",
+        }:
             return self._validate_checkpoint()
         if preset_id and preset_id.startswith(CHECKPOINT_PRESET_PREFIX):
             try:
                 checkpoint_name = checkpoint_name_from_preset_id(preset_id)
                 if checkpoint_name is None:
                     raise ValueError("not a checkpoint preset")
-                return validate_checkpoint_file(
+                checkpoint_name = validate_checkpoint_file(
                     self._comfyui_config.models_path, checkpoint_name
                 )
             except (OSError, ValueError) as exc:
                 raise DraftWorkflowError("comfyui_invalid_checkpoint_preset") from exc
+            if checkpoint_name not in set(self._comfyui_config.allowed_checkpoints):
+                raise DraftWorkflowError(
+                    f"comfyui_checkpoint_not_allowed: {checkpoint_name}"
+                )
+            # Presence and suffix are insufficient evidence of workflow
+            # compatibility or scheduling cost. Requiring a server-side budget
+            # makes the allowlist an explicit operator trust decision.
+            self._checkpoint_vram_requirement(checkpoint_name)
+            return checkpoint_name
         raise DraftWorkflowError(f"comfyui_unknown_image_preset: {preset_id}")
+
+    def _draft_required_vram_for_request(
+        self,
+        request: GenerationRequest,
+        *,
+        uses_qwen_image: bool,
+    ) -> float:
+        server_minimum = (
+            float(self._comfyui_config.qwen_image_required_vram_gb)
+            if uses_qwen_image
+            else self._checkpoint_vram_requirement(
+                self._checkpoint_for_request(request)
+            )
+        )
+        if not math.isfinite(server_minimum) or server_minimum <= 0:
+            raise DraftWorkflowError("comfyui_invalid_required_vram")
+        if request.required_vram_gb is None:
+            return server_minimum
+        requested = float(request.required_vram_gb)
+        if not math.isfinite(requested) or requested <= 0:
+            raise DraftWorkflowError("comfyui_invalid_required_vram")
+        # Client input may request a larger reservation, but can never lower the
+        # trusted server-side minimum for the selected model.
+        return max(server_minimum, requested)
+
+    def _checkpoint_for_refine(self, draft: DraftResult) -> str | None:
+        """Pin refinement to the checkpoint persisted with the approved draft."""
+        preset_id = str(draft.generation_params.get("preset_id") or "")
+        if preset_id == "qwen-image":
+            # The current Qwen draft path intentionally uses the configured SDXL
+            # img2img refiner; Qwen diffusion weights are not CheckpointLoader
+            # inputs.
+            return None
+        checkpoint_name = str(draft.generation_params.get("checkpoint") or "")
+        if not checkpoint_name:
+            return self._validate_checkpoint()
+        if checkpoint_name not in set(self._comfyui_config.allowed_checkpoints):
+            raise DraftWorkflowError(
+                f"comfyui_checkpoint_not_allowed: {checkpoint_name}"
+            )
+        try:
+            return validate_checkpoint_file(
+                self._comfyui_config.models_path, checkpoint_name
+            )
+        except (OSError, ValueError) as exc:
+            raise DraftWorkflowError("comfyui_invalid_checkpoint_preset") from exc
+
+    def _confirmation_required_vram_gb(self, draft: DraftResult) -> float:
+        draft_requirement = float(
+            draft.generation_params.get("required_vram_gb", 0.0) or 0.0
+        )
+        if not math.isfinite(draft_requirement) or draft_requirement < 0:
+            raise DraftWorkflowError("comfyui_invalid_required_vram")
+        if draft.media_type == "video":
+            return max(
+                draft_requirement,
+                float(self._comfyui_config.video_required_vram_gb),
+            )
+        if str(draft.generation_params.get("quality")) == "faithful_4k":
+            return max(
+                draft_requirement,
+                float(self._comfyui_config.upscale_required_vram_gb),
+            )
+        return draft_requirement
 
     def _validate_qwen_image_models(self) -> tuple[str, str, str]:
         config = self._comfyui_config
@@ -2642,12 +2723,7 @@ return {3, raw}
                     target_resolution=target_resolution,
                 )
             else:
-                preset_id = str(draft.generation_params.get("preset_id") or "")
-                selected_checkpoint = (
-                    str(draft.generation_params.get("checkpoint") or "")
-                    if preset_id.startswith(CHECKPOINT_PRESET_PREFIX)
-                    else None
-                )
+                selected_checkpoint = self._checkpoint_for_refine(draft)
                 workflow = self._build_refine_workflow(
                     input_name=input_name,
                     prompt=str(draft.generation_params.get("prompt", "")),

@@ -262,6 +262,7 @@ async def get_generation_presets(
         dependency_status,
         discovered_checkpoint_presets,
         load_custom_presets,
+        merge_generation_presets,
         probe_comfyui,
     )
 
@@ -277,7 +278,7 @@ async def get_generation_presets(
         # Imported workflow execution is not part of the draft runtime yet.
         # Do not advertise it as selectable and silently run the default model.
         preset["selectable"] = False
-    presets = builtin_presets(comfy) + discovered + custom
+    presets = merge_generation_presets(builtin_presets(comfy), discovered, custom)
     for preset in presets:
         preset["validation"] = dependency_status(
             preset,
@@ -307,7 +308,13 @@ async def import_generation_preset(
             detail={"error": {"code": "conflict", "message": "preset id already exists"}},
         )
     preset = {**body.model_dump(), "builtin": False}
-    await asyncio.to_thread(save_custom_preset, preset)
+    try:
+        await asyncio.to_thread(save_custom_preset, preset)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": {"code": "validation_error", "message": str(exc)}},
+        ) from exc
     return {"data": preset, "message": "created"}
 
 
@@ -322,6 +329,7 @@ async def validate_generation_preset(
         dependency_status,
         discovered_checkpoint_presets,
         load_custom_presets,
+        merge_generation_presets,
         probe_comfyui,
     )
 
@@ -330,7 +338,7 @@ async def validate_generation_preset(
         asyncio.to_thread(discovered_checkpoint_presets, comfy),
         asyncio.to_thread(load_custom_presets),
     )
-    presets = builtin_presets(comfy) + discovered + custom
+    presets = merge_generation_presets(builtin_presets(comfy), discovered, custom)
     preset = next((item for item in presets if item.get("id") == preset_id), None)
     if preset is None:
         raise HTTPException(status_code=404, detail={"error": {"code": "not_found", "message": "preset not found"}})
@@ -359,7 +367,13 @@ async def update_generation_preset(
     if preset_id not in existing:
         raise HTTPException(status_code=404, detail={"error": {"code": "not_found", "message": "custom preset not found"}})
     preset = {**body.model_dump(), "builtin": False}
-    await asyncio.to_thread(save_custom_preset, preset)
+    try:
+        await asyncio.to_thread(save_custom_preset, preset)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": {"code": "validation_error", "message": str(exc)}},
+        ) from exc
     return {"data": preset, "message": "updated"}
 
 

@@ -537,6 +537,10 @@ generation_optimization:
       checkpoint_name: sd_xl_base_1.0.safetensors
       allowed_checkpoints:
       - sd_xl_base_1.0.safetensors
+      # Discovered checkpoints are selectable only when allowlisted above and
+      # assigned a server-side minimum VRAM budget here.
+      checkpoint_vram_gb:
+        sd_xl_base_1.0.safetensors: 8
       max_concurrency: 1
       min_free_gb: 30
       model_budget_gb: 80
