@@ -1,0 +1,44 @@
+name: Apply QA GPU policy fix
+
+on:
+  pull_request:
+    branches: [main]
+    types: [synchronize, reopened]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'agent/fix-qa-concerns'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+
+      - name: Apply GPU-safe selection policy
+        run: python scripts/apply_qa_gpu_policy_fix.py
+
+      - name: Commit product changes
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          if git diff --quiet; then
+            echo "GPU policy already applied"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            aigateway-core/src/aigateway_core/shared/integration_configs.py \
+            aigateway-core/src/aigateway_core/pipelines/generation/registration.py \
+            aigateway-core/src/aigateway_core/pipelines/generation/draft/_draft_generator_impl.py \
+            config.yaml.template \
+            tests/unit/pipeline/test_qwen_image_selection_policy.py
+          git commit -m "fix(gpu): avoid implicit Qwen image selection on T4"
+          git push origin "HEAD:${HEAD_REF}"
