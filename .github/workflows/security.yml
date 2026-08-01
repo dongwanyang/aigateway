@@ -11,32 +11,6 @@ permissions:
   contents: read
 
 jobs:
-  apply-review-fixes:
-    if: github.event_name == 'pull_request' && github.head_ref == 'agent/fix-all-audit-findings'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ github.head_ref }}
-          fetch-depth: 0
-      - name: Apply audited review fixes
-        shell: bash
-        run: |
-          if [[ ! -f scripts/apply_review_blocker_fixes.py ]]; then
-            echo "Patch driver already consumed"
-            exit 0
-          fi
-          python scripts/apply_review_blocker_fixes.py
-          rm scripts/apply_review_blocker_fixes.py
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git diff --cached --check
-          git commit -m "fix review blockers"
-          git push origin HEAD:${{ github.head_ref }}
-
   secret-scan:
     runs-on: ubuntu-latest
     steps:
