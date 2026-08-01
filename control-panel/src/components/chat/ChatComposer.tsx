@@ -1,5 +1,6 @@
-import { useState, useRef, type KeyboardEvent } from 'react'
-import { Send, Square } from 'lucide-react'
+import { useEffect, useState, useRef, type KeyboardEvent } from 'react'
+import { RefreshCw, Send, Square } from 'lucide-react'
+import type { GenerationPreset } from '@/api/client'
 import type { GenerationOptions } from '@/types'
 
 interface ChatComposerProps {
@@ -7,19 +8,49 @@ interface ChatComposerProps {
   disabled: boolean
   onSend: (text: string, opts?: { generationOptions?: GenerationOptions }) => void
   onStop: () => void
+  presets?: GenerationPreset[]
+  presetsLoading?: boolean
+  presetsError?: string | null
+  onRefreshPresets?: () => void
 }
 
-export default function ChatComposer({ streaming, disabled, onSend, onStop }: ChatComposerProps) {
+function presetIsAvailable(preset: GenerationPreset): boolean {
+  return preset.enabled
+    && preset.selectable !== false
+    && preset.validation.missing_models.length === 0
+    && preset.validation.missing_nodes.length === 0
+}
+
+export default function ChatComposer({
+  streaming,
+  disabled,
+  onSend,
+  onStop,
+  presets = [],
+  presetsLoading = false,
+  presetsError = null,
+  onRefreshPresets,
+}: ChatComposerProps) {
   const [text, setText] = useState('')
   const [backend, setBackend] = useState<GenerationOptions['backend']>('auto')
+  const [presetId, setPresetId] = useState('')
   const [quality, setQuality] = useState<NonNullable<GenerationOptions['quality']>>('standard')
   const [size, setSize] = useState('')
   const taRef = useRef<HTMLTextAreaElement>(null)
+  const imagePresets = Array.isArray(presets)
+    ? presets.filter(preset => preset.kind === 'image')
+    : []
+
+  useEffect(() => {
+    if (!presetId) return
+    const selected = imagePresets.find(preset => preset.id === presetId)
+    if (!selected || !presetIsAvailable(selected)) setPresetId('')
+  }, [imagePresets, presetId])
 
   function submit() {
     const t = text.trim()
     if (!t || streaming || disabled) return
-    if (backend === 'auto' && quality === 'standard' && !size) {
+    if (backend === 'auto' && !presetId && quality === 'standard' && !size) {
       onSend(t)
     } else {
       const [width, height] = size
@@ -28,6 +59,7 @@ export default function ChatComposer({ streaming, disabled, onSend, onStop }: Ch
       onSend(t, {
         generationOptions: {
           backend,
+          preset_id: presetId || undefined,
           quality,
           prompt_mode: 'auto',
           width,
@@ -59,15 +91,59 @@ export default function ChatComposer({ streaming, disabled, onSend, onStop }: Ch
       <div className="flex flex-wrap gap-2 mb-2">
         <label className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
           后端{' '}
-          <select value={backend} onChange={event => setBackend(event.target.value as GenerationOptions['backend'])}>
+          <select
+            value={backend}
+            disabled={streaming || disabled}
+            onChange={event => {
+              const next = event.target.value as GenerationOptions['backend']
+              setBackend(next)
+              if (next === 'cloud') setPresetId('')
+            }}
+          >
             <option value="auto">自动</option>
             <option value="local">本地</option>
             <option value="cloud">云端</option>
           </select>
         </label>
         <label className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
+          图片模型/预设{' '}
+          <select
+            aria-label="图片模型/预设"
+            value={presetId}
+            disabled={streaming || disabled || backend === 'cloud'}
+            onChange={event => {
+              setPresetId(event.target.value)
+              if (event.target.value) setBackend('local')
+            }}
+          >
+            <option value="">自动选择</option>
+            {imagePresets.map(preset => {
+              const available = presetIsAvailable(preset)
+              const suffix = preset.source === 'discovered' ? ' · 已安装' : ''
+              return (
+                <option key={preset.id} value={preset.id} disabled={!available}>
+                  {preset.name}{suffix}{available ? '' : ' · 不可用'}
+                </option>
+              )
+            })}
+          </select>
+        </label>
+        {onRefreshPresets && (
+          <button
+            type="button"
+            aria-label="刷新图片模型"
+            title="重新扫描本地图片模型"
+            disabled={presetsLoading || streaming || disabled}
+            onClick={onRefreshPresets}
+            className="inline-flex items-center p-1 rounded cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+            style={{ color: 'var(--color-text-secondary)' }}
+          >
+            <RefreshCw size={14} className={presetsLoading ? 'animate-spin' : ''} />
+          </button>
+        )}
+        <label className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
           图片质量{' '}
-          <select value={quality} onChange={event => setQuality(event.target.value as NonNullable<GenerationOptions['quality']>)}>
+          <select disabled={streaming || disabled} value={quality} onChange={event => setQuality(event.target.value as NonNullable<GenerationOptions['quality']>)}>
             <option value="standard">标准</option>
             <option value="creative_refine">创意精修</option>
             <option value="faithful_4k">4K 保真</option>
@@ -75,7 +151,7 @@ export default function ChatComposer({ streaming, disabled, onSend, onStop }: Ch
         </label>
         <label className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
           尺寸{' '}
-          <select value={size} onChange={event => setSize(event.target.value)}>
+          <select disabled={streaming || disabled} value={size} onChange={event => setSize(event.target.value)}>
             <option value="">自动</option>
             <option value="1024x1024">1024 × 1024</option>
             <option value="1344x768">1344 × 768</option>
@@ -83,6 +159,11 @@ export default function ChatComposer({ streaming, disabled, onSend, onStop }: Ch
           </select>
         </label>
       </div>
+      {presetsError && (
+        <div role="status" className="text-xs mb-2" style={{ color: 'var(--color-warning)' }}>
+          图片模型列表加载失败，仍可使用自动选择：{presetsError}
+        </div>
+      )}
       <div className="flex items-end gap-2">
       <textarea
         ref={taRef}

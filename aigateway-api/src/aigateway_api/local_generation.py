@@ -12,6 +12,10 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from aigateway_core.shared.comfyui_model_discovery import (
+    checkpoint_preset_id,
+    discover_checkpoint_models,
+)
 from aigateway_core.shared.runtime_values import configured_path
 
 _SAFE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
@@ -116,7 +120,7 @@ def builtin_presets(comfy: dict[str, Any]) -> list[dict[str, Any]]:
         feature_enabled=upscale_enabled,
     )
 
-    return [
+    presets = [
         {
             "id": "sdxl-draft",
             "name": "SDXL 图片草稿",
@@ -224,6 +228,48 @@ def builtin_presets(comfy: dict[str, Any]) -> list[dict[str, Any]]:
             },
         },
     ]
+    for preset in presets:
+        preset["source"] = "builtin"
+        preset["selectable"] = True
+    return presets
+
+
+def discovered_checkpoint_presets(comfy: dict[str, Any]) -> list[dict[str, Any]]:
+    """Expose installed checkpoint files as standard image-workflow presets."""
+    models_path = _config_text(comfy, "models_path")
+    if not models_path:
+        return []
+    configured_checkpoint = _config_text(comfy, "checkpoint_name")
+    required_vram_gb = float(comfy.get("sdxl_required_vram_gb", 8.0))
+    presets: list[dict[str, Any]] = []
+    for checkpoint_name in discover_checkpoint_models(models_path):
+        if checkpoint_name == configured_checkpoint:
+            continue
+        try:
+            preset_id = checkpoint_preset_id(checkpoint_name)
+        except ValueError:
+            continue
+        presets.append(
+            {
+                "id": preset_id,
+                "name": f"{Path(checkpoint_name).stem}（本地 Checkpoint）",
+                "kind": "image",
+                "builtin": False,
+                "source": "discovered",
+                "selectable": True,
+                "enabled": True,
+                "configuration_status": "ready",
+                "configuration_errors": [],
+                "languages": ["zh", "en"],
+                "required_vram_gb": required_vram_gb,
+                "model_name": checkpoint_name,
+                "dependencies": {
+                    "models": [f"checkpoints/{checkpoint_name}"],
+                    "nodes": list(_CORE_IMAGE_NODES),
+                },
+            }
+        )
+    return presets
 
 
 def preset_store_dir() -> Path:

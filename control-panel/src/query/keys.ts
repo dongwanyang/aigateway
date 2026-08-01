@@ -12,6 +12,9 @@ export const queryKeys = {
   config: {
     full: ['config', 'full'] as const,
   },
+  generation: {
+    presets: ['generation', 'presets'] as const,
+  },
   logs: {
     all: ['logs'] as const,
     list: (params: { page: number; pageSize: number; status: string; cacheOnly: boolean }) =>

@@ -386,7 +386,13 @@ Studio/Full 的 ComfyUI 镜像固定版本预装官方 ComfyUI-Manager，并以
 首次创建的空用户目录才会写入默认配置，后续启动不会覆盖管理员设置。
 ComfyUI 端口默认只绑定本机，节点和高级工作流继续在原生 ComfyUI 页面管理。
 
-聊天生成可选择“自动 / 本地 / 云端”与“标准 / 创意精修 / 4K 保真”。
+聊天生成可选择“自动 / 本地 / 云端”、图片模型/预设与“标准 / 创意精修 /
+4K 保真”。图片模型列表进入聊天页时从管理接口加载，也可在聊天输入框旁手动
+刷新。除 Qwen-Image 等内置工作流外，`models/checkpoints` 下新增的 `.safetensors`
+或 `.ckpt` 会自动成为本地 Checkpoint 选项；缺失模型或节点的预设显示为不可用。
+仅安装独立 UNet、文本编码器或 VAE 文件不足以推断正确工作流，这类架构需要先
+配置对应的生成预设。
+
 4K 保真使用 ComfyUI Core 节点和批准的 `RealESRGAN_x4plus.pth`，保持宽高比、
 不裁剪，最长边默认不超过 4096。模型不会在普通启动时静默下载；可显式运行：
 
@@ -396,8 +402,9 @@ bash scripts/model-manager.sh verify realesrgan-x4plus
 ```
 
 未安装 ComfyUI 的 Lite/Knowledge 版本仍可选择云端图片或视频模型。
-Qwen-Image FP8 由三个文件组成，合计约 30.1GB；安装后中文图片提示词会优先
-使用 Qwen-Image，未安装时继续由 AI Director 为 SDXL 做保真翻译和精简。
+Qwen-Image FP8 由三个文件组成，合计约 30.1GB；安装后可在聊天页明确选择
+“Qwen-Image 中文/英文图片”。只有将 `qwen_image_auto_select` 设为 `true` 时，
+未显式选择预设的中文图片提示词才会自动优先使用 Qwen-Image。
 
 ### 环境变量
 

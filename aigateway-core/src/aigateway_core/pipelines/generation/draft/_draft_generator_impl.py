@@ -47,6 +47,11 @@ from aigateway_core.pipelines.generation._common.models import (
     GenerationRequest,
     UpscaleResult,
 )
+from aigateway_core.shared.comfyui_model_discovery import (
+    CHECKPOINT_PRESET_PREFIX,
+    checkpoint_name_from_preset_id,
+    validate_checkpoint_file,
+)
 from aigateway_core.shared.integration_configs import ComfyUIConfig
 
 logger = logging.getLogger(__name__)
@@ -216,6 +221,23 @@ class DraftGeneratorStrategy:
         )
 
         # generation_params 快照（后台 task 也要用，这里先建好）
+        if is_video:
+            selected_checkpoint = self._comfyui_config.video_diffusion_model
+        elif uses_qwen_image:
+            selected_checkpoint = self._comfyui_config.qwen_image_diffusion_model
+        elif request.preset_id and request.preset_id.startswith(
+            CHECKPOINT_PRESET_PREFIX
+        ):
+            try:
+                selected_checkpoint = checkpoint_name_from_preset_id(
+                    request.preset_id
+                )
+            except ValueError as exc:
+                raise DraftWorkflowError("comfyui_invalid_checkpoint_preset") from exc
+            if selected_checkpoint is None:
+                raise DraftWorkflowError("comfyui_invalid_checkpoint_preset")
+        else:
+            selected_checkpoint = self._comfyui_config.checkpoint_name
         generation_params: dict[str, Any] = {
             "prompt": request.prompt,
             "target_resolution": list(request.target_resolution),
@@ -223,11 +245,7 @@ class DraftGeneratorStrategy:
             "draft_resolution": list(config.draft_resolution),
             "request_id": request.request_id,
             "seed": seed,
-            "checkpoint": (
-                self._comfyui_config.qwen_image_diffusion_model
-                if uses_qwen_image
-                else self._comfyui_config.checkpoint_name
-            ),
+            "checkpoint": selected_checkpoint,
             "preset_id": (
                 request.preset_id
                 or ("qwen-image" if uses_qwen_image else "sdxl-draft")
@@ -1270,15 +1288,17 @@ return {3, raw}
     async def check_local_dependencies(self, request: GenerationRequest) -> None:
         """Fail before draft creation when an explicitly selected local path is unusable."""
         await self._check_comfyui()
-        if self._should_use_qwen_image(request):
+        if request.media_type != "video" and self._should_use_qwen_image(request):
             diffusion, encoder, vae = self._validate_qwen_image_models()
             required: list[tuple[str, str]] = [
                 ("diffusion_models", diffusion),
                 ("text_encoders", encoder),
                 ("vae", vae),
             ]
+        elif request.media_type != "video":
+            required = [("checkpoints", self._checkpoint_for_request(request))]
         else:
-            required = [("checkpoints", self._validate_checkpoint())]
+            required = []
         if request.media_type == "video":
             diffusion, encoder, vae = self._validate_video_models()
             required.extend(
@@ -1402,6 +1422,22 @@ return {3, raw}
                 f"ComfyUI checkpoint is not allowlisted: {checkpoint}"
             )
         return checkpoint
+
+    def _checkpoint_for_request(self, request: GenerationRequest) -> str:
+        preset_id = request.preset_id
+        if preset_id in {None, "sdxl-draft", "sdxl-creative-refine"}:
+            return self._validate_checkpoint()
+        if preset_id and preset_id.startswith(CHECKPOINT_PRESET_PREFIX):
+            try:
+                checkpoint_name = checkpoint_name_from_preset_id(preset_id)
+                if checkpoint_name is None:
+                    raise ValueError("not a checkpoint preset")
+                return validate_checkpoint_file(
+                    self._comfyui_config.models_path, checkpoint_name
+                )
+            except (OSError, ValueError) as exc:
+                raise DraftWorkflowError("comfyui_invalid_checkpoint_preset") from exc
+        raise DraftWorkflowError(f"comfyui_unknown_image_preset: {preset_id}")
 
     def _validate_qwen_image_models(self) -> tuple[str, str, str]:
         config = self._comfyui_config
@@ -2053,7 +2089,7 @@ return {3, raw}
             "4": {
                 "class_type": "CheckpointLoaderSimple",
                 "inputs": {
-                    "ckpt_name": self._validate_checkpoint(),
+                    "ckpt_name": self._checkpoint_for_request(request),
                 },
             },
             "5": {
@@ -2186,9 +2222,19 @@ return {3, raw}
         prompt: str,
         seed: int,
         target_resolution: tuple[int, int],
+        checkpoint_name: str | None = None,
     ) -> dict:
         """Build same-checkpoint img2img refinement from the approved draft."""
         target_width, target_height = target_resolution
+        if checkpoint_name is None:
+            checkpoint_name = self._validate_checkpoint()
+        else:
+            try:
+                checkpoint_name = validate_checkpoint_file(
+                    self._comfyui_config.models_path, checkpoint_name
+                )
+            except (OSError, ValueError) as exc:
+                raise DraftWorkflowError("comfyui_invalid_checkpoint_preset") from exc
 
         workflow: dict = {
             "1": {
@@ -2207,7 +2253,7 @@ return {3, raw}
             },
             "3": {
                 "class_type": "CheckpointLoaderSimple",
-                "inputs": {"ckpt_name": self._validate_checkpoint()},
+                "inputs": {"ckpt_name": checkpoint_name},
             },
             "4": {
                 "class_type": "VAEEncode",
@@ -2596,11 +2642,18 @@ return {3, raw}
                     target_resolution=target_resolution,
                 )
             else:
+                preset_id = str(draft.generation_params.get("preset_id") or "")
+                selected_checkpoint = (
+                    str(draft.generation_params.get("checkpoint") or "")
+                    if preset_id.startswith(CHECKPOINT_PRESET_PREFIX)
+                    else None
+                )
                 workflow = self._build_refine_workflow(
                     input_name=input_name,
                     prompt=str(draft.generation_params.get("prompt", "")),
                     seed=int(draft.generation_params.get("seed", 0)),
                     target_resolution=target_resolution,
+                    checkpoint_name=selected_checkpoint,
                 )
             async with self._comfyui_semaphore:
                 client_id = self._comfy_client_id(draft.draft_id, "refine")

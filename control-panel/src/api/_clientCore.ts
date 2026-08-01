@@ -89,9 +89,12 @@ export interface GenerationPreset {
   name: string
   kind: 'image' | 'video' | 'upscale'
   builtin: boolean
+  source?: 'builtin' | 'discovered' | 'custom'
+  selectable?: boolean
   enabled: boolean
   languages: string[]
   required_vram_gb?: number
+  model_name?: string
   validation: { missing_models: string[]; missing_nodes: string[] }
 }
 export async function getComfyUIStatus(): Promise<ApiResponse<ComfyUIStatus>> { return fetchJson<ComfyUIStatus>('/admin/comfyui/status') }

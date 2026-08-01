@@ -57,7 +57,7 @@ class GenerationOptions(BaseModel):
     """Optional generation routing and quality controls."""
 
     backend: Literal["auto", "local", "cloud"] = "auto"
-    preset_id: str | None = Field(default=None, max_length=128)
+    preset_id: str | None = Field(default=None, max_length=512)
     prompt_mode: Literal["raw", "auto", "enhance"] = "auto"
     quality: Literal["standard", "creative_refine", "faithful_4k"] = "standard"
     width: int | None = Field(default=None, ge=64, le=8192)

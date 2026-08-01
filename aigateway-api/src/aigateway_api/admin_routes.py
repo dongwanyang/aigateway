@@ -260,6 +260,7 @@ async def get_generation_presets(
     from .local_generation import (
         builtin_presets,
         dependency_status,
+        discovered_checkpoint_presets,
         load_custom_presets,
         probe_comfyui,
     )
@@ -267,7 +268,16 @@ async def get_generation_presets(
     comfy = _comfy_config(request)
     probe = await probe_comfyui(comfy)
     available_nodes = set(probe.get("available_nodes", []))
-    presets = builtin_presets(comfy) + await asyncio.to_thread(load_custom_presets)
+    discovered, custom = await asyncio.gather(
+        asyncio.to_thread(discovered_checkpoint_presets, comfy),
+        asyncio.to_thread(load_custom_presets),
+    )
+    for preset in custom:
+        preset.setdefault("source", "custom")
+        # Imported workflow execution is not part of the draft runtime yet.
+        # Do not advertise it as selectable and silently run the default model.
+        preset["selectable"] = False
+    presets = builtin_presets(comfy) + discovered + custom
     for preset in presets:
         preset["validation"] = dependency_status(
             preset,
@@ -310,12 +320,17 @@ async def validate_generation_preset(
     from .local_generation import (
         builtin_presets,
         dependency_status,
+        discovered_checkpoint_presets,
         load_custom_presets,
         probe_comfyui,
     )
 
     comfy = _comfy_config(request)
-    presets = builtin_presets(comfy) + await asyncio.to_thread(load_custom_presets)
+    discovered, custom = await asyncio.gather(
+        asyncio.to_thread(discovered_checkpoint_presets, comfy),
+        asyncio.to_thread(load_custom_presets),
+    )
+    presets = builtin_presets(comfy) + discovered + custom
     preset = next((item for item in presets if item.get("id") == preset_id), None)
     if preset is None:
         raise HTTPException(status_code=404, detail={"error": {"code": "not_found", "message": "preset not found"}})

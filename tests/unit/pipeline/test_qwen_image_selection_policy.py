@@ -1,11 +1,13 @@
 from pathlib import Path
 
 import pytest
-
 from aigateway_core.pipelines.generation._common.config import DraftWorkflowConfig
 from aigateway_core.pipelines.generation._common.exceptions import DraftWorkflowError
 from aigateway_core.pipelines.generation._common.models import GenerationRequest
-from aigateway_core.pipelines.generation.draft.draft_generator import DraftGeneratorStrategy
+from aigateway_core.pipelines.generation.draft.draft_generator import (
+    DraftGeneratorStrategy,
+)
+from aigateway_core.shared.comfyui_model_discovery import checkpoint_preset_id
 from aigateway_core.shared.integration_configs import ComfyUIConfig
 
 
@@ -67,3 +69,35 @@ def test_qwen_model_validation_respects_disabled_policy(tmp_path):
 
     with pytest.raises(DraftWorkflowError, match="comfyui_qwen_image_disabled"):
         strategy._validate_qwen_image_models()
+
+
+def test_discovered_checkpoint_preset_selects_installed_model(tmp_path):
+    models = tmp_path / "models"
+    (models / "checkpoints" / "portraits").mkdir(parents=True)
+    selected = "portraits/cinematic.safetensors"
+    (models / "checkpoints" / selected).write_bytes(b"model")
+    strategy = DraftGeneratorStrategy(
+        config=DraftWorkflowConfig(store_dir=str(tmp_path / "drafts")),
+        comfyui_config=ComfyUIConfig(
+            models_path=str(models),
+            checkpoint_name="default.safetensors",
+            allowed_checkpoints=["default.safetensors"],
+        ),
+    )
+    request = GenerationRequest(
+        prompt="cinematic portrait",
+        preset_id=checkpoint_preset_id(selected),
+    )
+
+    workflow = strategy._build_image_draft_workflow(request, seed=42)
+
+    assert workflow["4"]["inputs"]["ckpt_name"] == selected
+
+
+def test_unknown_image_preset_does_not_silently_fall_back(tmp_path):
+    strategy = make_strategy(tmp_path)
+
+    with pytest.raises(DraftWorkflowError, match="comfyui_unknown_image_preset"):
+        strategy._build_image_draft_workflow(
+            GenerationRequest(prompt="test", preset_id="unregistered-model")
+        )
