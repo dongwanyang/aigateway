@@ -1,0 +1,79 @@
+--- a/aigateway-core/src/aigateway_core/dispatch/pipeline_engine.py
++++ b/aigateway-core/src/aigateway_core/dispatch/pipeline_engine.py
+@@ -85,6 +85,29 @@
+     return cloned
+ 
+ 
++def _merge_pipeline_context(
++    target: PipelineContext, source: PipelineContext
++) -> PipelineContext:
++    """Commit a successfully completed isolated plugin context to its caller."""
++    target.request = source.request
++    target.trace_id = source.trace_id
++    target.response = source.response
++    target.should_stop = source.should_stop
++    target.should_stream = source.should_stream
++    target.request_id = source.request_id
++    target.user_id = source.user_id
++    target.extra = source.extra
++    target.pipeline_kind = source.pipeline_kind
++    target.is_multimodal = source.is_multimodal
++    target.total_token_savings = source.total_token_savings
++    target.request_context = source.request_context
++    if hasattr(source, "_skip_names"):
++        target._skip_names = set(source._skip_names)
++    elif hasattr(target, "_skip_names"):
++        del target._skip_names
++    return target
++
++
+ def _plugin_timeout(plugin: Plugin, ctx: PipelineContext) -> float:
+     timeout = max(0.001, float(getattr(plugin, "timeout_seconds", 30.0)))
+     if isinstance(ctx.request_context, RequestContext):
+@@ -224,7 +247,8 @@
+                     requested_device = getattr(
+                         lifecycle_owner, "gpu_device_request", None
+                     )
+-                    plugin_ctx = _clone_pipeline_context(ctx)
++                    caller_ctx = ctx
++                    plugin_ctx = _clone_pipeline_context(caller_ctx)
+                     if (
+                         coordinator is not None
+                         and coordinator.config.enabled
+@@ -273,11 +297,16 @@
+                                 f"{ctx.trace_id or 'request'}"
+                             ),
+                         )
+-                        ctx = await _await_plugin_task(
+-                            task, _plugin_timeout(plugin, ctx)
++                        plugin_result = await _await_plugin_task(
++                            task, _plugin_timeout(plugin, caller_ctx)
+                         )
+                     else:
+-                        ctx = await execute_plugin(plugin, plugin_ctx)
++                        plugin_result = await execute_plugin(plugin, plugin_ctx)
++                    ctx = (
++                        _merge_pipeline_context(caller_ctx, plugin_result)
++                        if plugin_result is plugin_ctx
++                        else plugin_result
++                    )
+                 except Exception as exc:
+                     elapsed_ms = (time.monotonic() - plugin_start) * 1000
+                     collector = TraceCollector.current()
+--- a/aigateway-core/src/aigateway_core/pipelines/generation/draft/_draft_generator_impl.py
++++ b/aigateway-core/src/aigateway_core/pipelines/generation/draft/_draft_generator_impl.py
+@@ -2196,12 +2196,10 @@
+                         f"{base_url}/queue",
+                         json={"delete": [prompt_id]},
+                     )
+-                    cancelled.raise_for_status()
+-                    return True
++                    return cancelled.status_code < 400
+                 if prompt_id in running_ids:
+                     cancelled = await client.post(f"{base_url}/interrupt")
+-                    cancelled.raise_for_status()
+-                    return True
++                    return cancelled.status_code < 400
+                 return False
+         except (httpx.HTTPError, ValueError, TypeError) as exc:
+             logger.warning(
