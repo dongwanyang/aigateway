@@ -34,6 +34,32 @@ def test_embedding_model_release_refuses_active_inference() -> None:
     assert model.devices == ["cpu"]
 
 
+def test_invalid_idle_cache_can_be_discarded_safely() -> None:
+    runtime = EmbeddingModelRuntime()
+    invalid = object()
+    runtime.cache["model"] = invalid
+
+    assert runtime.discard_invalid_if_idle(
+        lambda model: not callable(getattr(model, "encode", None))
+    ) is True
+    assert runtime.cache == {}
+
+    valid = type("ValidModel", (), {"encode": lambda self: None})()
+    runtime.cache["model"] = valid
+    assert runtime.discard_invalid_if_idle(
+        lambda model: not callable(getattr(model, "encode", None))
+    ) is False
+    assert runtime.cache["model"] is valid
+
+
+def test_invalid_cache_is_not_discarded_during_active_lease() -> None:
+    runtime = EmbeddingModelRuntime()
+    invalid = object()
+    with runtime.lease(lambda: invalid):
+        assert runtime.discard_invalid_if_idle(lambda _model: True) is False
+        assert runtime.cache["model"] is invalid
+
+
 def test_new_inference_waits_until_release_finishes() -> None:
     runtime = EmbeddingModelRuntime()
     release_started = threading.Event()
