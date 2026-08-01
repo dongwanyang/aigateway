@@ -54,7 +54,7 @@ export async function getMetricsText(): Promise<string> { const res = await fetc
 export function parseMetrics(text: string): MetricSample[] { const samples: MetricSample[] = []; for (const line of text.split('\n')) { if (!line.startsWith('gateway_') || line.startsWith('#')) continue; const match = line.match(/^(.+?)\{(.+?)\} (.+)$/); if (match) { const [, name, labelsStr, value] = match; const labels: Record<string, string> = {}; for (const pair of labelsStr.split(',')) { const [k, v] = pair.split('=').map(s => s.replace(/"/g, '')); if (k && v !== undefined) labels[k] = v } samples.push({ name, labels, value: parseFloat(value) }) } else { const simpleMatch = line.match(/^(.+?) (.+)$/); if (simpleMatch) { const [, name, value] = simpleMatch; samples.push({ name, labels: {}, value: parseFloat(value) }) } } } return samples }
 export interface MetricsQueryResponse { status: string; data: { resultType: string; result: Array<{ metric?: Record<string, string>; values?: Array<{ timestamp: string; value: string }> }> } }
 export async function metricsQuery(params: { query: string; start?: string; end?: string; step?: string }): Promise<MetricsQueryResponse> { const qs = new URLSearchParams({ query: params.query, step: params.step || '3600' }); if (params.start) qs.set('start', params.start); if (params.end) qs.set('end', params.end); const res = await fetch(`${API_BASE}/admin/metrics/query_range?${qs}`, { credentials: 'include' }); if (!res.ok) throw new Error(`Failed to query metrics: ${res.status}`); return res.json() }
-export interface MetricsJsonData { prometheus: Record<string, { labels: Record<string, string>; value: number }>; keys: { total_keys: number; total_daily_tokens_used: number; total_monthly_cost_used: number; total_requests: number }; circuit_breakers: Record<string, unknown>; uptime_seconds: number }
+export interface MetricsJsonData { prometheus: Record<string, { labels: Record<string, string>; value: number }>; prometheus_series?: Record<string, Array<{ labels: Record<string, string>; value: number }>>; keys: { total_keys: number; total_daily_tokens_used: number; total_monthly_cost_used: number; total_requests: number }; circuit_breakers: Record<string, unknown>; uptime_seconds: number }
 export async function getMetricsJson(): Promise<ApiResponse<MetricsJsonData>> { return fetchJson<MetricsJsonData>('/admin/metrics-json') }
 export interface LedgerRow { id: number; trace_id: string; ts: string; ts_unix: number; user_id: string; group_id: string; model: string; provider: string; pipeline_kind: string; tokens_in: number; tokens_out: number; tokens_total: number; tokens_saved: number; cost_usd: number; duration_ms: number; cached: number; stream: number; status: string }
 interface AggregateRow { k: string; requests: number; tokens_in: number; tokens_out: number; tokens_total: number; tokens_saved: number; cost_usd: number; avg_latency_ms: number; cache_hits: number }
@@ -94,6 +94,16 @@ export interface GenerationPreset {
   validation: { missing_models: string[]; missing_nodes: string[] }
 }
 export async function getComfyUIStatus(): Promise<ApiResponse<ComfyUIStatus>> { return fetchJson<ComfyUIStatus>('/admin/comfyui/status') }
+export interface GpuStatusData {
+  gateway: { available: boolean; name?: string | null; allocated_bytes: number; reserved_bytes: number; device_used_bytes: number; device_free_bytes: number; device_total_bytes: number }
+  comfyui: { available: boolean; memory: { total_bytes: number | null; free_bytes: number | null; used_bytes: number | null } | null; endpoint_errors?: Record<string, string> }
+  queue: { running?: number; pending?: number } | null
+  queue_idle: boolean | null
+  shared_gpu: boolean
+  diagnosis: string[]
+}
+export async function getGpuStatus(): Promise<ApiResponse<GpuStatusData>> { return fetchJson<GpuStatusData>('/admin/gpu/status') }
+export async function releaseGpuMemory(): Promise<ApiResponse<{ gateway_models: Record<string, boolean>; comfyui: Record<string, unknown>; gateway: GpuStatusData['gateway'] }>> { return fetchJson<{ gateway_models: Record<string, boolean>; comfyui: Record<string, unknown>; gateway: GpuStatusData['gateway'] }>('/admin/gpu/release', { method: 'POST', body: JSON.stringify({}) }) }
 export async function getGenerationPresets(): Promise<ApiResponse<GenerationPreset[]>> { return fetchJson<GenerationPreset[]>('/admin/generation-presets') }
 export async function setPluginDebug(name: string, enabled: boolean): Promise<ApiResponse<{ plugin: string; debug: boolean }>> { return fetchJson<{ plugin: string; debug: boolean }>(`/admin/plugins/${encodeURIComponent(name)}/debug`, { method: 'POST', body: JSON.stringify({ enabled }) }) }
 export async function getDebugConfig(): Promise<DebugConfig> { return (await fetchJson<DebugConfig>('/admin/config/debug')).data }

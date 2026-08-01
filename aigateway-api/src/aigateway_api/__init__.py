@@ -103,13 +103,23 @@ def _preload_cors_origins() -> None:
 
 
 def _install_admin_security_guards() -> None:
-    """Install sensitive-route and draft-ownership replacements."""
+    """Install sensitive-route, transactional-config and ownership replacements."""
     from . import admin_routes
+    from .config_management_routes import install_config_management_routes
     from .draft_security import assert_draft_owner
     from .security_routes import install_security_routes
 
     install_security_routes(admin_routes.router)
+    install_config_management_routes(admin_routes.router)
     admin_routes._assert_draft_owner = assert_draft_owner
+
+
+def _install_gpu_routes() -> None:
+    """Install authenticated GPU diagnostics and memory-release endpoints."""
+    from . import admin_routes
+    from .gpu_routes import install_gpu_routes
+
+    install_gpu_routes(admin_routes.router)
 
 
 def _install_config_schema_parser() -> None:
@@ -132,4 +142,5 @@ _ensure_core_src()
 _allow_config_precondition_header()
 _preload_cors_origins()
 _install_admin_security_guards()
+_install_gpu_routes()
 _install_config_schema_parser()

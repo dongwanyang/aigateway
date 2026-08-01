@@ -208,6 +208,7 @@ embedding:
   vector_dim: 1024           # 向量维度（必须与模型输出维度一致）
   openai_model: text-embedding-3-small  # OpenAI 后端回退时使用的模型
   device: auto               # L3 向量计算设备：cpu | cuda | auto（auto=有CUDA用CUDA）
+  idle_unload_seconds: 300    # L3 模型空闲多久后卸载；0 表示常驻直到进程退出
 
 # ==========================
 # 可观测性配置

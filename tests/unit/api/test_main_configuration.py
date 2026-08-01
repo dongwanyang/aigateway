@@ -60,8 +60,11 @@ async def test_registered_exception_handlers_preserve_contract_and_redact_secret
         unknown = await client.get("/unknown")
 
     assert gateway.status_code == 500
-    assert gateway.json()["error"]["code"] == "internal_error"
-    assert "[REDACTED]" in gateway.json()["error"]["detail"]
+    assert gateway.json()["error"] == {
+        "code": "internal_error",
+        "message": "Internal Server Error",
+    }
+    assert "detail" not in gateway.json()["error"]
     assert "/home/service" not in gateway.text
     assert "sk-" + "a" * 24 not in gateway.text
     assert len(gateway.headers["x-request-id"]) == 12
@@ -75,7 +78,11 @@ async def test_registered_exception_handlers_preserve_contract_and_redact_secret
     assert plain.json()["error"] == {"code": "internal_error", "message": "missing"}
     assert unknown.status_code == 500
     assert unknown.headers["x-request-id"] == "fixed-request-id"
-    assert unknown.json()["error"]["message"] == "Internal Server Error"
+    assert unknown.json()["error"] == {
+        "code": "internal_error",
+        "message": "Internal Server Error",
+    }
+    assert "detail" not in unknown.json()["error"]
     assert "password=secret" not in unknown.text
     assert "/app/private" not in unknown.text
 

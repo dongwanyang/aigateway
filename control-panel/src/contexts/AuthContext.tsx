@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, type ReactNode } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
 import {
   clearBrowserSession,
   getBrowserSession,
@@ -28,6 +28,12 @@ export interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | null>(null)
 
+export function clearSessionScopedQueries(queryClient: QueryClient) {
+  queryClient.removeQueries({
+    predicate: query => query.queryKey[0] !== 'auth',
+  })
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient()
   const isAuthenticated = useAuthStore(state => state.isAuthenticated)
@@ -42,30 +48,50 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     retry: false,
     staleTime: 30_000,
   })
+  const sessionKeyPrefix = sessionQuery.data?.authenticated
+    ? sessionQuery.data.key_prefix ?? ''
+    : null
   const sessionStatePending = sessionQuery.data !== undefined && (
     Boolean(sessionQuery.data.authenticated) !== isAuthenticated
     || (
       sessionQuery.data.authenticated
-      && Boolean(sessionQuery.data.force_reset) !== forceReset
+      && (
+        Boolean(sessionQuery.data.force_reset) !== forceReset
+        || sessionKeyPrefix !== keyPrefix
+      )
     )
   )
 
   useEffect(() => {
     if (sessionQuery.data?.authenticated) {
+      const nextKeyPrefix = sessionQuery.data.key_prefix ?? ''
+      if (isAuthenticated && keyPrefix !== nextKeyPrefix) {
+        clearSessionScopedQueries(queryClient)
+      }
       setAuthenticated(
-        sessionQuery.data.key_prefix ?? '',
+        nextKeyPrefix,
         Boolean(sessionQuery.data.force_reset),
       )
       if (!getSavedSessionMarker()) localStorage.setItem('aigateway_session_active', '1')
     } else if (sessionQuery.data || sessionQuery.isError) {
+      if (isAuthenticated) clearSessionScopedQueries(queryClient)
       localStorage.removeItem('aigateway_session_active')
       clear()
     }
-  }, [clear, sessionQuery.data, sessionQuery.isError, setAuthenticated])
+  }, [
+    clear,
+    isAuthenticated,
+    keyPrefix,
+    queryClient,
+    sessionQuery.data,
+    sessionQuery.isError,
+    setAuthenticated,
+  ])
 
   const login = async (username: string, password: string) => {
     const result = await loginWithPassword(username, password)
     const requiresReset = Boolean(result.force_reset)
+    clearSessionScopedQueries(queryClient)
     setAuthenticated(result.key_prefix, requiresReset)
     queryClient.setQueryData(queryKeys.auth.session, {
       authenticated: true,
@@ -82,8 +108,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       await clearBrowserSession()
     } finally {
       clear()
-      queryClient.removeQueries({ queryKey: queryKeys.auth.session })
-      queryClient.removeQueries({ queryKey: queryKeys.runtime.capabilities })
+      clearSessionScopedQueries(queryClient)
+      queryClient.setQueryData(queryKeys.auth.session, {
+        authenticated: false,
+        key_prefix: null,
+        scopes: [],
+        force_reset: false,
+      })
     }
   }
 
