@@ -1258,8 +1258,13 @@ return {3, raw}
         )
 
     def _should_use_qwen_image(self, request: GenerationRequest) -> bool:
-        if request.preset_id == "qwen-image":
-            return True
+        # Qwen-Image is substantially heavier than the default SDXL draft path.
+        # Never select it solely from prompt language unless the deployment has
+        # explicitly opted into that policy. An explicit preset always wins.
+        if request.preset_id:
+            return request.preset_id == "qwen-image"
+        if not self._comfyui_config.qwen_image_auto_select:
+            return False
         source_prompt = request.source_prompt or request.prompt
         return bool(re.search(r"[\u3400-\u9fff]", source_prompt)) and (
             self._qwen_image_models_installed()
