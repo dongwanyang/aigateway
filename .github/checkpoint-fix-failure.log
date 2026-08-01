@@ -1,0 +1,6 @@
+Traceback (most recent call last):
+  File "/tmp/apply_checkpoint_policy_fixes.py", line 72, in <module>
+    replace_once(
+  File "/tmp/apply_checkpoint_policy_fixes.py", line 11, in replace_once
+    raise RuntimeError(f"expected exactly one match in {path}, found {count}: {old[:120]!r}")
+RuntimeError: expected exactly one match in config.yaml.template, found 0: '      allowed_checkpoints:\n      - sd_xl_base_1.0.safetensors\n      max_concurrency: 1\n'
