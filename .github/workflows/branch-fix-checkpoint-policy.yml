@@ -35,7 +35,7 @@ jobs:
           if [ "$status" -eq 0 ]; then
             pip install -e aigateway-core >> /tmp/checkpoint-fix.log 2>&1
             pip install -e aigateway-api >> /tmp/checkpoint-fix.log 2>&1
-            pip install pytest pytest-asyncio pyyaml >> /tmp/checkpoint-fix.log 2>&1
+            pip install pytest pytest-asyncio pyyaml pillow >> /tmp/checkpoint-fix.log 2>&1
             python -m pytest \
               tests/unit/api/test_local_generation.py \
               tests/unit/pipeline/test_qwen_image_selection_policy.py \
