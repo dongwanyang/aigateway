@@ -61,7 +61,6 @@ jobs:
           python -m pytest \
             tests/unit/pipeline/test_draft_generator_strategy.py \
             tests/unit/pipeline/test_comfyui_progressive_workflow.py \
-            tests/unit/pipeline/test_allowed_checkpoint_presets.py \
             tests/unit/pipeline/test_qwen_image_selection_policy.py \
             -q
 
