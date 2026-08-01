@@ -1,1 +1,307 @@
-SyntaxError: Non-UTF-8 code starting with '\xbd' in file /tmp/apply_checkpoint_policy_fixes.py on line 738, but no encoding declared; see https://peps.python.org/pep-0263/ for details
+checkpoint policy fixes applied
+Defaulting to user installation because normal site-packages is not writeable
+Obtaining file:///home/runner/work/aigateway/aigateway/aigateway-core
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Checking if build backend supports build_editable: started
+  Checking if build backend supports build_editable: finished with status 'done'
+  Getting requirements to build editable: started
+  Getting requirements to build editable: finished with status 'done'
+  Installing backend dependencies: started
+  Installing backend dependencies: finished with status 'done'
+  Preparing editable metadata (pyproject.toml): started
+  Preparing editable metadata (pyproject.toml): finished with status 'done'
+Collecting cachetools>=5.0.0 (from aigateway-core==0.1.1.0)
+  Downloading cachetools-7.1.6-py3-none-any.whl.metadata (5.5 kB)
+Collecting httpx>=0.24.0 (from aigateway-core==0.1.1.0)
+  Downloading httpx-0.28.1-py3-none-any.whl.metadata (7.1 kB)
+Collecting lz4>=4.0.0 (from aigateway-core==0.1.1.0)
+  Downloading lz4-4.4.5-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (3.8 kB)
+Collecting prometheus-client>=0.20.0 (from aigateway-core==0.1.1.0)
+  Downloading prometheus_client-0.26.0-py3-none-any.whl.metadata (2.1 kB)
+Requirement already satisfied: pyyaml>=6.0 in /usr/lib/python3/dist-packages (from aigateway-core==0.1.1.0) (6.0.1)
+Collecting redis>=5.0.0 (from aigateway-core==0.1.1.0)
+  Downloading redis-8.1.0-py3-none-any.whl.metadata (16 kB)
+Collecting structlog>=23.1.0 (from aigateway-core==0.1.1.0)
+  Downloading structlog-26.1.0-py3-none-any.whl.metadata (9.7 kB)
+Collecting watchdog>=3.0.0 (from aigateway-core==0.1.1.0)
+  Downloading watchdog-6.0.0-py3-none-manylinux2014_x86_64.whl.metadata (44 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 44.3/44.3 kB 10.4 MB/s eta 0:00:00
+Collecting websockets>=12.0 (from aigateway-core==0.1.1.0)
+  Downloading websockets-17.0.1-cp312-cp312-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl.metadata (6.3 kB)
+Collecting anyio (from httpx>=0.24.0->aigateway-core==0.1.1.0)
+  Downloading anyio-4.14.2-py3-none-any.whl.metadata (4.6 kB)
+Requirement already satisfied: certifi in /usr/lib/python3/dist-packages (from httpx>=0.24.0->aigateway-core==0.1.1.0) (2023.11.17)
+Collecting httpcore==1.* (from httpx>=0.24.0->aigateway-core==0.1.1.0)
+  Downloading httpcore-1.0.9-py3-none-any.whl.metadata (21 kB)
+Requirement already satisfied: idna in /usr/lib/python3/dist-packages (from httpx>=0.24.0->aigateway-core==0.1.1.0) (3.6)
+Collecting h11>=0.16 (from httpcore==1.*->httpx>=0.24.0->aigateway-core==0.1.1.0)
+  Downloading h11-0.16.0-py3-none-any.whl.metadata (8.3 kB)
+Requirement already satisfied: typing_extensions>=4.5 in /usr/lib/python3/dist-packages (from anyio->httpx>=0.24.0->aigateway-core==0.1.1.0) (4.10.0)
+Downloading cachetools-7.1.6-py3-none-any.whl (16 kB)
+Downloading httpx-0.28.1-py3-none-any.whl (73 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 73.5/73.5 kB 23.5 MB/s eta 0:00:00
+Downloading httpcore-1.0.9-py3-none-any.whl (78 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 78.8/78.8 kB 13.7 MB/s eta 0:00:00
+Downloading lz4-4.4.5-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (1.4 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.4/1.4 MB 120.2 MB/s eta 0:00:00
+Downloading prometheus_client-0.26.0-py3-none-any.whl (64 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 64.5/64.5 kB 22.7 MB/s eta 0:00:00
+Downloading redis-8.1.0-py3-none-any.whl (560 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 560.6/560.6 kB 115.3 MB/s eta 0:00:00
+Downloading structlog-26.1.0-py3-none-any.whl (73 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 73.8/73.8 kB 26.1 MB/s eta 0:00:00
+Downloading watchdog-6.0.0-py3-none-manylinux2014_x86_64.whl (79 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 79.1/79.1 kB 26.5 MB/s eta 0:00:00
+Downloading websockets-17.0.1-cp312-cp312-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl (220 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 220.2/220.2 kB 61.9 MB/s eta 0:00:00
+Downloading anyio-4.14.2-py3-none-any.whl (125 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 125.8/125.8 kB 45.5 MB/s eta 0:00:00
+Downloading h11-0.16.0-py3-none-any.whl (37 kB)
+Building wheels for collected packages: aigateway-core
+  Building editable for aigateway-core (pyproject.toml): started
+  Building editable for aigateway-core (pyproject.toml): finished with status 'done'
+  Created wheel for aigateway-core: filename=aigateway_core-0.1.1.0-py3-none-any.whl size=1691 sha256=851089543e6124dc739fe3402a551e979566be275f37651003eef772714925e1
+  Stored in directory: /tmp/pip-ephem-wheel-cache-mppqeydt/wheels/f2/31/96/16e5f03f36103a78e0ec62126d24e8ada2caa9d34a4dac99fe
+Successfully built aigateway-core
+Installing collected packages: websockets, watchdog, structlog, redis, prometheus-client, lz4, h11, cachetools, anyio, httpcore, httpx, aigateway-core
+Successfully installed aigateway-core-0.1.1.0 anyio-4.14.2 cachetools-7.1.6 h11-0.16.0 httpcore-1.0.9 httpx-0.28.1 lz4-4.4.5 prometheus-client-0.26.0 redis-8.1.0 structlog-26.1.0 watchdog-6.0.0 websockets-17.0.1
+Defaulting to user installation because normal site-packages is not writeable
+Obtaining file:///home/runner/work/aigateway/aigateway/aigateway-api
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Checking if build backend supports build_editable: started
+  Checking if build backend supports build_editable: finished with status 'done'
+  Getting requirements to build editable: started
+  Getting requirements to build editable: finished with status 'done'
+  Installing backend dependencies: started
+  Installing backend dependencies: finished with status 'done'
+  Preparing editable metadata (pyproject.toml): started
+  Preparing editable metadata (pyproject.toml): finished with status 'done'
+Requirement already satisfied: aigateway-core>=0.1.1.0 in /home/runner/.local/lib/python3.12/site-packages (from aigateway-api==0.1.1.0) (0.1.1.0)
+Collecting fastapi>=0.110.0 (from aigateway-api==0.1.1.0)
+  Downloading fastapi-0.141.1-py3-none-any.whl.metadata (27 kB)
+Collecting gunicorn>=22.0.0 (from aigateway-api==0.1.1.0)
+  Downloading gunicorn-26.0.0-py3-none-any.whl.metadata (5.4 kB)
+Collecting hiredis>=2.3.0 (from aigateway-api==0.1.1.0)
+  Downloading hiredis-3.4.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (7.5 kB)
+Requirement already satisfied: httpx>=0.24.0 in /home/runner/.local/lib/python3.12/site-packages (from aigateway-api==0.1.1.0) (0.28.1)
+Collecting litellm>=1.30.0 (from aigateway-api==0.1.1.0)
+  Downloading litellm-1.94.1-cp312-cp312-manylinux_2_28_x86_64.whl.metadata (40 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 40.9/40.9 kB 12.3 MB/s eta 0:00:00
+Collecting pydantic>=2.5.0 (from aigateway-api==0.1.1.0)
+  Downloading pydantic-2.13.4-py3-none-any.whl.metadata (109 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 109.4/109.4 kB 19.5 MB/s eta 0:00:00
+Collecting python-dotenv>=1.0.0 (from aigateway-api==0.1.1.0)
+  Downloading python_dotenv-1.2.2-py3-none-any.whl.metadata (27 kB)
+Collecting python-multipart>=0.0.9 (from aigateway-api==0.1.1.0)
+  Downloading python_multipart-0.0.32-py3-none-any.whl.metadata (2.1 kB)
+Collecting uvicorn>=0.27.0 (from uvicorn[standard]>=0.27.0->aigateway-api==0.1.1.0)
+  Downloading uvicorn-0.52.1-py3-none-any.whl.metadata (6.6 kB)
+Requirement already satisfied: cachetools>=5.0.0 in /home/runner/.local/lib/python3.12/site-packages (from aigateway-core>=0.1.1.0->aigateway-api==0.1.1.0) (7.1.6)
+Requirement already satisfied: lz4>=4.0.0 in /home/runner/.local/lib/python3.12/site-packages (from aigateway-core>=0.1.1.0->aigateway-api==0.1.1.0) (4.4.5)
+Requirement already satisfied: prometheus-client>=0.20.0 in /home/runner/.local/lib/python3.12/site-packages (from aigateway-core>=0.1.1.0->aigateway-api==0.1.1.0) (0.26.0)
+Requirement already satisfied: pyyaml>=6.0 in /usr/lib/python3/dist-packages (from aigateway-core>=0.1.1.0->aigateway-api==0.1.1.0) (6.0.1)
+Requirement already satisfied: redis>=5.0.0 in /home/runner/.local/lib/python3.12/site-packages (from aigateway-core>=0.1.1.0->aigateway-api==0.1.1.0) (8.1.0)
+Requirement already satisfied: structlog>=23.1.0 in /home/runner/.local/lib/python3.12/site-packages (from aigateway-core>=0.1.1.0->aigateway-api==0.1.1.0) (26.1.0)
+Requirement already satisfied: watchdog>=3.0.0 in /home/runner/.local/lib/python3.12/site-packages (from aigateway-core>=0.1.1.0->aigateway-api==0.1.1.0) (6.0.0)
+Requirement already satisfied: websockets>=12.0 in /home/runner/.local/lib/python3.12/site-packages (from aigateway-core>=0.1.1.0->aigateway-api==0.1.1.0) (17.0.1)
+Collecting starlette>=0.46.0 (from fastapi>=0.110.0->aigateway-api==0.1.1.0)
+  Downloading starlette-1.3.1-py3-none-any.whl.metadata (6.4 kB)
+Requirement already satisfied: typing-extensions>=4.8.0 in /usr/lib/python3/dist-packages (from fastapi>=0.110.0->aigateway-api==0.1.1.0) (4.10.0)
+Collecting typing-inspection>=0.4.2 (from fastapi>=0.110.0->aigateway-api==0.1.1.0)
+  Downloading typing_inspection-0.4.2-py3-none-any.whl.metadata (2.6 kB)
+Collecting annotated-doc>=0.0.2 (from fastapi>=0.110.0->aigateway-api==0.1.1.0)
+  Downloading annotated_doc-0.0.5-py3-none-any.whl.metadata (6.5 kB)
+Requirement already satisfied: packaging in /usr/lib/python3/dist-packages (from gunicorn>=22.0.0->aigateway-api==0.1.1.0) (24.0)
+Requirement already satisfied: anyio in /home/runner/.local/lib/python3.12/site-packages (from httpx>=0.24.0->aigateway-api==0.1.1.0) (4.14.2)
+Requirement already satisfied: certifi in /usr/lib/python3/dist-packages (from httpx>=0.24.0->aigateway-api==0.1.1.0) (2023.11.17)
+Requirement already satisfied: httpcore==1.* in /home/runner/.local/lib/python3.12/site-packages (from httpx>=0.24.0->aigateway-api==0.1.1.0) (1.0.9)
+Requirement already satisfied: idna in /usr/lib/python3/dist-packages (from httpx>=0.24.0->aigateway-api==0.1.1.0) (3.6)
+Requirement already satisfied: h11>=0.16 in /home/runner/.local/lib/python3.12/site-packages (from httpcore==1.*->httpx>=0.24.0->aigateway-api==0.1.1.0) (0.16.0)
+Collecting fastuuid<1.0,>=0.14.0 (from litellm>=1.30.0->aigateway-api==0.1.1.0)
+  Downloading fastuuid-0.14.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (1.1 kB)
+Collecting openai<3.0.0,>=2.20.0 (from litellm>=1.30.0->aigateway-api==0.1.1.0)
+  Downloading openai-2.52.0-py3-none-any.whl.metadata (40 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 40.9/40.9 kB 12.8 MB/s eta 0:00:00
+Collecting tiktoken<1.0,>=0.8.0 (from litellm>=1.30.0->aigateway-api==0.1.1.0)
+  Downloading tiktoken-0.13.0-cp312-cp312-manylinux_2_28_x86_64.whl.metadata (6.7 kB)
+Collecting importlib-metadata<9.0,>=8.0.0 (from litellm>=1.30.0->aigateway-api==0.1.1.0)
+  Downloading importlib_metadata-8.9.0-py3-none-any.whl.metadata (4.5 kB)
+Collecting tokenizers<1.0,>=0.21.0 (from litellm>=1.30.0->aigateway-api==0.1.1.0)
+  Downloading tokenizers-0.23.1-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (9.8 kB)
+Requirement already satisfied: click<9.0,>=8.0.0 in /usr/lib/python3/dist-packages (from litellm>=1.30.0->aigateway-api==0.1.1.0) (8.1.6)
+Collecting jinja2<4.0,>=3.1.6 (from litellm>=1.30.0->aigateway-api==0.1.1.0)
+  Downloading jinja2-3.1.6-py3-none-any.whl.metadata (2.9 kB)
+Collecting aiohttp<4.0,>=3.10 (from litellm>=1.30.0->aigateway-api==0.1.1.0)
+  Downloading aiohttp-3.14.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (8.3 kB)
+Requirement already satisfied: jsonschema<5.0,>=4.0.0 in /usr/lib/python3/dist-packages (from litellm>=1.30.0->aigateway-api==0.1.1.0) (4.10.3)
+Collecting annotated-types>=0.6.0 (from pydantic>=2.5.0->aigateway-api==0.1.1.0)
+  Downloading annotated_types-0.8.0-py3-none-any.whl.metadata (15 kB)
+Collecting pydantic-core==2.46.4 (from pydantic>=2.5.0->aigateway-api==0.1.1.0)
+  Downloading pydantic_core-2.46.4-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (6.6 kB)
+Collecting typing-extensions>=4.8.0 (from fastapi>=0.110.0->aigateway-api==0.1.1.0)
+  Downloading typing_extensions-4.16.0-py3-none-any.whl.metadata (3.3 kB)
+Collecting httptools>=0.8.0 (from uvicorn[standard]>=0.27.0->aigateway-api==0.1.1.0)
+  Downloading httptools-0.8.0-cp312-cp312-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl.metadata (3.5 kB)
+Collecting uvloop>=0.15.1 (from uvicorn[standard]>=0.27.0->aigateway-api==0.1.1.0)
+  Downloading uvloop-0.22.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (4.9 kB)
+Collecting watchfiles>=0.20 (from uvicorn[standard]>=0.27.0->aigateway-api==0.1.1.0)
+  Downloading watchfiles-1.2.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (4.9 kB)
+Collecting aiohappyeyeballs>=2.5.0 (from aiohttp<4.0,>=3.10->litellm>=1.30.0->aigateway-api==0.1.1.0)
+  Downloading aiohappyeyeballs-2.7.1-py3-none-any.whl.metadata (5.9 kB)
+Collecting aiosignal>=1.4.0 (from aiohttp<4.0,>=3.10->litellm>=1.30.0->aigateway-api==0.1.1.0)
+  Downloading aiosignal-1.4.0-py3-none-any.whl.metadata (3.7 kB)
+Requirement already satisfied: attrs>=17.3.0 in /usr/lib/python3/dist-packages (from aiohttp<4.0,>=3.10->litellm>=1.30.0->aigateway-api==0.1.1.0) (23.2.0)
+Collecting frozenlist>=1.1.1 (from aiohttp<4.0,>=3.10->litellm>=1.30.0->aigateway-api==0.1.1.0)
+  Downloading frozenlist-1.8.0-cp312-cp312-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl.metadata (20 kB)
+Collecting multidict<7.0,>=4.5 (from aiohttp<4.0,>=3.10->litellm>=1.30.0->aigateway-api==0.1.1.0)
+  Downloading multidict-6.7.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (5.3 kB)
+Collecting propcache>=0.2.0 (from aiohttp<4.0,>=3.10->litellm>=1.30.0->aigateway-api==0.1.1.0)
+  Downloading propcache-0.5.2-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (16 kB)
+Collecting yarl<2.0,>=1.17.0 (from aiohttp<4.0,>=3.10->litellm>=1.30.0->aigateway-api==0.1.1.0)
+  Downloading yarl-1.24.5-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (103 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 104.0/104.0 kB 16.8 MB/s eta 0:00:00
+Collecting zipp>=3.20 (from importlib-metadata<9.0,>=8.0.0->litellm>=1.30.0->aigateway-api==0.1.1.0)
+  Downloading zipp-4.1.0-py3-none-any.whl.metadata (3.6 kB)
+Requirement already satisfied: MarkupSafe>=2.0 in /usr/lib/python3/dist-packages (from jinja2<4.0,>=3.1.6->litellm>=1.30.0->aigateway-api==0.1.1.0) (2.1.5)
+Requirement already satisfied: pyrsistent!=0.17.0,!=0.17.1,!=0.17.2,>=0.14.0 in /usr/lib/python3/dist-packages (from jsonschema<5.0,>=4.0.0->litellm>=1.30.0->aigateway-api==0.1.1.0) (0.20.0)
+Requirement already satisfied: distro<2,>=1.7.0 in /usr/lib/python3/dist-packages (from openai<3.0.0,>=2.20.0->litellm>=1.30.0->aigateway-api==0.1.1.0) (1.9.0)
+Collecting jiter<1,>=0.10.0 (from openai<3.0.0,>=2.20.0->litellm>=1.30.0->aigateway-api==0.1.1.0)
+  Downloading jiter-0.16.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (5.2 kB)
+Collecting sniffio (from openai<3.0.0,>=2.20.0->litellm>=1.30.0->aigateway-api==0.1.1.0)
+  Downloading sniffio-1.3.1-py3-none-any.whl.metadata (3.9 kB)
+Collecting tqdm>4 (from openai<3.0.0,>=2.20.0->litellm>=1.30.0->aigateway-api==0.1.1.0)
+  Downloading tqdm-4.70.0-py3-none-any.whl.metadata (57 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 57.3/57.3 kB 21.2 MB/s eta 0:00:00
+Collecting regex (from tiktoken<1.0,>=0.8.0->litellm>=1.30.0->aigateway-api==0.1.1.0)
+  Downloading regex-2026.7.19-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (40 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 40.5/40.5 kB 13.4 MB/s eta 0:00:00
+Requirement already satisfied: requests in /usr/lib/python3/dist-packages (from tiktoken<1.0,>=0.8.0->litellm>=1.30.0->aigateway-api==0.1.1.0) (2.31.0)
+Collecting huggingface-hub<2.0,>=0.16.4 (from tokenizers<1.0,>=0.21.0->litellm>=1.30.0->aigateway-api==0.1.1.0)
+  Downloading huggingface_hub-1.26.0-py3-none-any.whl.metadata (16 kB)
+Collecting click<9.0,>=8.0.0 (from litellm>=1.30.0->aigateway-api==0.1.1.0)
+  Downloading click-8.4.2-py3-none-any.whl.metadata (2.6 kB)
+Requirement already satisfied: filelock>=3.10.0 in /usr/local/lib/python3.12/dist-packages (from huggingface-hub<2.0,>=0.16.4->tokenizers<1.0,>=0.21.0->litellm>=1.30.0->aigateway-api==0.1.1.0) (3.31.1)
+Collecting fsspec>=2023.5.0 (from huggingface-hub<2.0,>=0.16.4->tokenizers<1.0,>=0.21.0->litellm>=1.30.0->aigateway-api==0.1.1.0)
+  Downloading fsspec-2026.7.0-py3-none-any.whl.metadata (10 kB)
+Collecting hf-xet<2.0.0,>=1.5.1 (from huggingface-hub<2.0,>=0.16.4->tokenizers<1.0,>=0.21.0->litellm>=1.30.0->aigateway-api==0.1.1.0)
+  Downloading hf_xet-1.5.2-cp38-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl.metadata (4.9 kB)
+Downloading fastapi-0.141.1-py3-none-any.whl (131 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 132.0/132.0 kB 40.0 MB/s eta 0:00:00
+Downloading gunicorn-26.0.0-py3-none-any.whl (212 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 212.0/212.0 kB 61.6 MB/s eta 0:00:00
+Downloading hiredis-3.4.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (313 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 313.1/313.1 kB 52.5 MB/s eta 0:00:00
+Downloading litellm-1.94.1-cp312-cp312-manylinux_2_28_x86_64.whl (20.7 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 20.7/20.7 MB 133.6 MB/s eta 0:00:00
+Downloading pydantic-2.13.4-py3-none-any.whl (472 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 472.3/472.3 kB 107.2 MB/s eta 0:00:00
+Downloading pydantic_core-2.46.4-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (2.1 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 2.1/2.1 MB 159.8 MB/s eta 0:00:00
+Downloading python_dotenv-1.2.2-py3-none-any.whl (22 kB)
+Downloading python_multipart-0.0.32-py3-none-any.whl (30 kB)
+Downloading uvicorn-0.52.1-py3-none-any.whl (79 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 79.9/79.9 kB 31.9 MB/s eta 0:00:00
+Downloading aiohttp-3.14.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (1.8 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.8/1.8 MB 116.3 MB/s eta 0:00:00
+Downloading annotated_doc-0.0.5-py3-none-any.whl (5.3 kB)
+Downloading annotated_types-0.8.0-py3-none-any.whl (13 kB)
+Downloading fastuuid-0.14.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (278 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 278.1/278.1 kB 87.0 MB/s eta 0:00:00
+Downloading httptools-0.8.0-cp312-cp312-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl (523 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 523.9/523.9 kB 75.1 MB/s eta 0:00:00
+Downloading importlib_metadata-8.9.0-py3-none-any.whl (27 kB)
+Downloading jinja2-3.1.6-py3-none-any.whl (134 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 134.9/134.9 kB 52.7 MB/s eta 0:00:00
+Downloading openai-2.52.0-py3-none-any.whl (1.7 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.7/1.7 MB 154.7 MB/s eta 0:00:00
+Downloading starlette-1.3.1-py3-none-any.whl (73 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 73.6/73.6 kB 27.9 MB/s eta 0:00:00
+Downloading tiktoken-0.13.0-cp312-cp312-manylinux_2_28_x86_64.whl (1.1 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.1/1.1 MB 136.2 MB/s eta 0:00:00
+Downloading tokenizers-0.23.1-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (3.3 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.3/3.3 MB 175.3 MB/s eta 0:00:00
+Downloading typing_extensions-4.16.0-py3-none-any.whl (45 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 45.6/45.6 kB 17.0 MB/s eta 0:00:00
+Downloading typing_inspection-0.4.2-py3-none-any.whl (14 kB)
+Downloading uvloop-0.22.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (4.4 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 4.4/4.4 MB 178.1 MB/s eta 0:00:00
+Downloading watchfiles-1.2.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (456 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 456.4/456.4 kB 111.1 MB/s eta 0:00:00
+Downloading aiohappyeyeballs-2.7.1-py3-none-any.whl (15 kB)
+Downloading aiosignal-1.4.0-py3-none-any.whl (7.5 kB)
+Downloading frozenlist-1.8.0-cp312-cp312-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl (242 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 242.4/242.4 kB 84.2 MB/s eta 0:00:00
+Downloading huggingface_hub-1.26.0-py3-none-any.whl (780 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 780.4/780.4 kB 128.6 MB/s eta 0:00:00
+Downloading click-8.4.2-py3-none-any.whl (119 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 119.2/119.2 kB 49.3 MB/s eta 0:00:00
+Downloading jiter-0.16.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (343 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 343.8/343.8 kB 98.2 MB/s eta 0:00:00
+Downloading multidict-6.7.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (256 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 256.3/256.3 kB 83.0 MB/s eta 0:00:00
+Downloading propcache-0.5.2-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (61 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 61.6/61.6 kB 25.6 MB/s eta 0:00:00
+Downloading tqdm-4.70.0-py3-none-any.whl (80 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 80.2/80.2 kB 30.1 MB/s eta 0:00:00
+Downloading yarl-1.24.5-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (109 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 109.8/109.8 kB 41.1 MB/s eta 0:00:00
+Downloading zipp-4.1.0-py3-none-any.whl (10 kB)
+Downloading regex-2026.7.19-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (801 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 801.8/801.8 kB 131.1 MB/s eta 0:00:00
+Downloading sniffio-1.3.1-py3-none-any.whl (10 kB)
+Downloading fsspec-2026.7.0-py3-none-any.whl (206 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 206.6/206.6 kB 61.4 MB/s eta 0:00:00
+Downloading hf_xet-1.5.2-cp38-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (4.4 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 4.4/4.4 MB 154.8 MB/s eta 0:00:00
+Building wheels for collected packages: aigateway-api
+  Building editable for aigateway-api (pyproject.toml): started
+  Building editable for aigateway-api (pyproject.toml): finished with status 'done'
+  Created wheel for aigateway-api: filename=aigateway_api-0.1.1.0-py3-none-any.whl size=1387 sha256=ac7b9259c79b8da1d0c97c235258bd2f10d6265423357376387d48338bcb4803
+  Stored in directory: /tmp/pip-ephem-wheel-cache-1xepmrdf/wheels/0f/b5/45/d3c8fec10afdad2b50bda4d3d1073f05dc881d7d1473772251
+Successfully built aigateway-api
+Installing collected packages: zipp, uvloop, typing-extensions, tqdm, sniffio, regex, python-multipart, python-dotenv, propcache, multidict, jiter, jinja2, httptools, hiredis, hf-xet, gunicorn, fsspec, frozenlist, fastuuid, click, annotated-types, annotated-doc, aiohappyeyeballs, yarl, uvicorn, typing-inspection, tiktoken, pydantic-core, importlib-metadata, aiosignal, watchfiles, starlette, pydantic, aiohttp, openai, huggingface-hub, fastapi, tokenizers, litellm, aigateway-api
+Successfully installed aigateway-api-0.1.1.0 aiohappyeyeballs-2.7.1 aiohttp-3.14.3 aiosignal-1.4.0 annotated-doc-0.0.5 annotated-types-0.8.0 click-8.4.2 fastapi-0.141.1 fastuuid-0.14.0 frozenlist-1.8.0 fsspec-2026.7.0 gunicorn-26.0.0 hf-xet-1.5.2 hiredis-3.4.0 httptools-0.8.0 huggingface-hub-1.26.0 importlib-metadata-8.9.0 jinja2-3.1.6 jiter-0.16.0 litellm-1.94.1 multidict-6.7.1 openai-2.52.0 propcache-0.5.2 pydantic-2.13.4 pydantic-core-2.46.4 python-dotenv-1.2.2 python-multipart-0.0.32 regex-2026.7.19 sniffio-1.3.1 starlette-1.3.1 tiktoken-0.13.0 tokenizers-0.23.1 tqdm-4.70.0 typing-extensions-4.16.0 typing-inspection-0.4.2 uvicorn-0.52.1 uvloop-0.22.1 watchfiles-1.2.0 yarl-1.24.5 zipp-4.1.0
+Defaulting to user installation because normal site-packages is not writeable
+Collecting pytest
+  Downloading pytest-9.1.1-py3-none-any.whl.metadata (7.6 kB)
+Collecting pytest-asyncio
+  Downloading pytest_asyncio-1.4.0-py3-none-any.whl.metadata (4.1 kB)
+Requirement already satisfied: pyyaml in /usr/lib/python3/dist-packages (6.0.1)
+Collecting iniconfig>=1.0.1 (from pytest)
+  Downloading iniconfig-2.3.0-py3-none-any.whl.metadata (2.5 kB)
+Requirement already satisfied: packaging>=22 in /usr/lib/python3/dist-packages (from pytest) (24.0)
+Collecting pluggy<2,>=1.5 (from pytest)
+  Using cached pluggy-1.6.0-py3-none-any.whl.metadata (4.8 kB)
+Requirement already satisfied: pygments>=2.7.2 in /usr/lib/python3/dist-packages (from pytest) (2.17.2)
+Requirement already satisfied: typing-extensions>=4.12 in /home/runner/.local/lib/python3.12/site-packages (from pytest-asyncio) (4.16.0)
+Downloading pytest-9.1.1-py3-none-any.whl (386 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 386.5/386.5 kB 18.8 MB/s eta 0:00:00
+Downloading pytest_asyncio-1.4.0-py3-none-any.whl (16 kB)
+Downloading iniconfig-2.3.0-py3-none-any.whl (7.5 kB)
+Using cached pluggy-1.6.0-py3-none-any.whl (20 kB)
+Installing collected packages: pluggy, iniconfig, pytest, pytest-asyncio
+Successfully installed iniconfig-2.3.0 pluggy-1.6.0 pytest-9.1.1 pytest-asyncio-1.4.0
+
+==================================== ERRORS ====================================
+___ ERROR collecting tests/unit/pipeline/test_qwen_image_selection_policy.py ___
+ImportError while importing test module '/home/runner/work/aigateway/aigateway/tests/unit/pipeline/test_qwen_image_selection_policy.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/unit/pipeline/test_qwen_image_selection_policy.py:8: in <module>
+    from aigateway_core.pipelines.generation.draft.draft_generator import (
+aigateway-core/src/aigateway_core/pipelines/generation/draft/__init__.py:3: in <module>
+    from . import draft_generator as _strategy
+aigateway-core/src/aigateway_core/pipelines/generation/draft/draft_generator.py:6: in <module>
+    from . import _draft_generator_impl as _impl
+aigateway-core/src/aigateway_core/pipelines/generation/draft/_draft_generator_impl.py:32: in <module>
+    from PIL import Image
+E   ModuleNotFoundError: No module named 'PIL'
+=========================== short test summary info ============================
+ERROR tests/unit/pipeline/test_qwen_image_selection_policy.py
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+1 error in 0.67s
