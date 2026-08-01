@@ -72,8 +72,6 @@ export async function getPluginsConfig(): Promise<ApiResponse<PluginsConfigData>
 export async function togglePlugin(name: string, enabled: boolean): Promise<ApiResponse<{ name: string; enabled: boolean }>> { return fetchJson<{ name: string; enabled: boolean }>('/admin/plugins-config', { method: 'PUT', body: JSON.stringify({ name, enabled }) }) }
 export async function getGlobalConfig(): Promise<ApiResponse<GlobalConfigData>> { return fetchJson<GlobalConfigData>('/admin/global-config') }
 export async function updateGlobalConfig(config: { hot_reload: boolean; debug_mode?: boolean }): Promise<ApiResponse<GlobalConfigData>> { return fetchJson<GlobalConfigData>('/admin/global-config', { method: 'PUT', body: JSON.stringify(config) }) }
-export async function getFullConfig(): Promise<ApiResponse<Record<string, unknown>>> { return fetchJson<Record<string, unknown>>('/admin/config') }
-export async function updateFullConfig(config: Record<string, unknown>): Promise<ApiResponse<{ updated: boolean }>> { return fetchJson<{ updated: boolean }>('/admin/config', { method: 'PUT', body: JSON.stringify(config) }) }
 export interface ComfyUIStatus {
   available: boolean
   manager_enabled: boolean
