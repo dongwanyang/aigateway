@@ -36,8 +36,8 @@ jobs:
           old_dynamic = 'f"comfyui_checkpoint_not_allowed: {checkpoint_name}"'
           new_dynamic = 'f"comfyui_checkpoint_not_allowed: checkpoint not allowlisted: {checkpoint_name}"'
           count_dynamic = text.count(old_dynamic)
-          if count_dynamic != 1:
-              raise RuntimeError(f"expected one dynamic checkpoint message, found {count_dynamic}")
+          if count_dynamic != 2:
+              raise RuntimeError(f"expected two dynamic checkpoint messages, found {count_dynamic}")
           impl.write_text(text.replace(old, new).replace(old_dynamic, new_dynamic))
 
           test_file = Path("tests/unit/pipeline/test_draft_generator_strategy.py")
