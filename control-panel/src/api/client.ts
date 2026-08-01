@@ -1,7 +1,7 @@
 import type { ApiError, ApiResponse } from '@/types'
 
-// Keep the existing resource API behind one public module. Explicit exports
-// below override the legacy config helpers from the internal implementation.
+// Public API entry point. Configuration writes are defined here so every
+// caller receives the same strong-revision and error-mapping behavior.
 export * from './_clientCore'
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? ''
