@@ -154,11 +154,9 @@ def _register_exception_handlers(app_instance: "FastAPI") -> None:
         # topology that a generic regular expression does not recognize.
         if status >= 500:
             logger.error(
-                "GatewayError (request_id=%s, type=%s): %s",
+                "GatewayError (request_id=%s, type=%s)",
                 request_id,
                 type(exc).__name__,
-                _redact_5xx_msg(msg),
-                exc_info=(type(exc), exc, exc.__traceback__),
             )
             body = {
                 "error": {
@@ -190,10 +188,10 @@ def _register_exception_handlers(app_instance: "FastAPI") -> None:
                     if isinstance(candidate, str) and candidate:
                         error_code = candidate
             logger.error(
-                "HTTPException (request_id=%s, status=%s): %r",
+                "HTTPException (request_id=%s, status=%s, code=%s)",
                 request_id,
                 exc.status_code,
-                detail,
+                error_code,
             )
             body = {
                 "error": {
@@ -224,12 +222,10 @@ def _register_exception_handlers(app_instance: "FastAPI") -> None:
         traceback，客户端只回显脱敏后的 type+msg。
         """
         request_id = _get_request_id(request)
-        redacted_msg = _redact_5xx_msg(str(exc))
-        logger.exception(
-            "Unhandled exception (request_id=%s, type=%s): %s",
+        logger.error(
+            "Unhandled exception (request_id=%s, type=%s)",
             request_id,
             type(exc).__name__,
-            exc,
         )
         return JSONResponse(
             status_code=500,

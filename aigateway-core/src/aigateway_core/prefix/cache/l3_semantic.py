@@ -155,7 +155,7 @@ def _schedule_idle_release() -> None:
             _release_l3_model_if_generation,
             generation,
         )
-        if released is not None:
+        if released:
             logger.info(
                 "L3 embedding model idle cleanup completed after %.0fs",
                 _l3_idle_unload_seconds,
@@ -181,14 +181,16 @@ async def _compute_l3_vector(text: str, *, load_if_missing: bool = True) -> list
     if not load_if_missing and "model" not in _l3_model_cache:
         return None
     _invalidate_idle_release()
-    result = await asyncio.to_thread(
-        _compute_l3_vector_sync,
-        text,
-        load_if_missing,
-    )
-    if result is not None:
+    try:
+        return await asyncio.to_thread(
+            _compute_l3_vector_sync,
+            text,
+            load_if_missing,
+        )
+    finally:
+        # A failed inference may still leave a successfully loaded model in the
+        # cache. Re-arm the timer regardless of the vector result.
         _schedule_idle_release()
-    return result
 
 
 def _compute_l3_vector_sync(

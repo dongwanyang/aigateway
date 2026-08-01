@@ -111,6 +111,33 @@ describe('AuthProvider browser-session contract', () => {
     expect(client.getQueryData(['auth', 'session'])).toMatchObject({ authenticated: false })
   })
 
+  it('clears business queries when the backend session changes principal', async () => {
+    let session = {
+      authenticated: true,
+      key_prefix: 'admin-a',
+      force_reset: false,
+    }
+    api.getBrowserSession.mockImplementation(async () => session)
+    const { client } = renderProvider()
+
+    expect(await screen.findByText('authenticated:admin-a')).toBeInTheDocument()
+    client.setQueryData(['config', 'full'], { owner: 'admin-a' })
+    client.setQueryData(['logs', 'list'], { owner: 'admin-a' })
+
+    session = {
+      authenticated: true,
+      key_prefix: 'admin-b',
+      force_reset: false,
+    }
+    await client.invalidateQueries({ queryKey: ['auth', 'session'] })
+
+    expect(await screen.findByText('authenticated:admin-b')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(client.getQueryData(['config', 'full'])).toBeUndefined()
+      expect(client.getQueryData(['logs', 'list'])).toBeUndefined()
+    })
+  })
+
   it('throws a useful error when consumed outside its provider', () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
     expect(() => render(<Consumer />)).toThrow('useAuth must be used within AuthProvider')

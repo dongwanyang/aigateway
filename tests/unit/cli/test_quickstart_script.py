@@ -189,3 +189,53 @@ def test_quickstart_rejects_removed_profile_interface(tmp_path):
     )
     assert result.returncode != 0
     assert "--edition" in result.stderr
+
+def test_quickstart_keeps_gateway_cuda_for_remote_comfyui(tmp_path):
+    script = _fixture_repo(tmp_path)
+    fake_bin = tmp_path / "fake-bin-remote"
+    fake_bin.mkdir()
+    nvidia_smi = fake_bin / "nvidia-smi"
+    nvidia_smi.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "-L" ]]; then
+  echo 'GPU 0: Test GPU (UUID: GPU-test)'
+  exit 0
+fi
+if [[ " $* " == *" --query-gpu=memory.total "* ]]; then
+  echo '24576'
+  exit 0
+fi
+exit 0
+""",
+        encoding="utf-8",
+    )
+    nvidia_smi.chmod(0o755)
+
+    _run(
+        script,
+        "--non-interactive",
+        "--edition",
+        "full",
+        "--distribution",
+        "source",
+        "--comfyui",
+        "remote",
+        "--comfyui-url",
+        "https://comfy.example.test",
+        "--no-start",
+        env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
+    )
+
+    state = (tmp_path / ".aigateway-install.env").read_text(encoding="utf-8")
+    assert "AIGATEWAY_SHARED_GPU=false" in state
+    assert "GATEWAY_CUDA_VISIBLE_DEVICES=0" in state
+    assert "GATEWAY_CUDA_MEMORY_FRACTION=0.90" in state
+
+    runtime = yaml.safe_load(
+        (tmp_path / ".aigateway/runtime/config.yaml").read_text(encoding="utf-8")
+    )
+    assert runtime["deployment"]["shared_gpu"] is False
+    assert runtime["embedding"]["device"] == "cuda"
+    clip = runtime["generation_optimization"]["token_compressor"]["clip"]
+    assert clip["device"] == "cuda"

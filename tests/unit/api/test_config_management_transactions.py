@@ -297,3 +297,29 @@ def test_install_replaces_conflicting_routes_and_is_idempotent() -> None:
     ]
     assert len(matches) == 1
     assert any(getattr(route, "path", None) == "/other" for route in target.routes)
+
+@pytest.mark.asyncio
+async def test_disabling_generation_plugin_preserves_disabled_global_gate(manager) -> None:
+    with open(manager.config_path, encoding="utf-8") as file:
+        persisted = yaml.safe_load(file)
+    persisted["generation_optimization"] = {
+        "enabled": False,
+        "draft_workflow": {"enabled": True},
+    }
+    with open(manager.config_path, "w", encoding="utf-8") as file:
+        yaml.safe_dump(persisted, file, sort_keys=False)
+    manager.load()
+
+    await config_management_routes.update_plugins_config_transactional(
+        _request(
+            manager,
+            "/admin/plugins-config",
+            {"name": "draft_generator", "enabled": False},
+        ),
+        {},
+    )
+
+    with open(manager.config_path, encoding="utf-8") as file:
+        updated = yaml.safe_load(file)
+    assert updated["generation_optimization"]["enabled"] is False
+    assert updated["generation_optimization"]["draft_workflow"]["enabled"] is False

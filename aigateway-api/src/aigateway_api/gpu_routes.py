@@ -94,17 +94,26 @@ async def get_gpu_status(
 async def _release_gateway_models() -> dict[str, bool]:
     from aigateway_core.prefix.cache.l3_semantic import release_l3_model
 
-    l3_released = await asyncio.to_thread(release_l3_model)
-    from . import admin_routes
+    from .embedding_model_runtime import embedding_model_runtime
 
-    local_model = admin_routes._embedding_model_cache.pop("model", None)
-    local_released = local_model is not None
-    if local_model is not None:
-        try:
-            local_model.to("cpu")
-        except Exception:
-            pass
-        del local_model
+    rag_release = await asyncio.to_thread(
+        embedding_model_runtime.release_if_idle
+    )
+    if rag_release["busy"]:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": {
+                    "code": "gateway_gpu_busy",
+                    "message": (
+                        "Gateway embedding memory cannot be released while "
+                        "local embedding inference is active"
+                    ),
+                }
+            },
+        )
+
+    l3_released = await asyncio.to_thread(release_l3_model)
     await asyncio.to_thread(gc.collect)
     try:
         import torch
@@ -115,7 +124,7 @@ async def _release_gateway_models() -> dict[str, bool]:
         pass
     return {
         "l3_embedding": bool(l3_released),
-        "rag_embedding": local_released,
+        "rag_embedding": bool(rag_release["released"]),
     }
 
 

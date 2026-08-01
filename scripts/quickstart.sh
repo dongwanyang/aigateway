@@ -172,17 +172,6 @@ case "$edition" in
   studio) needs_studio="true" ;;
   full) needs_knowledge="true"; needs_studio="true" ;;
 esac
-shared_gpu="false"
-if [[ "$accelerator" == "cuda" && "$gpu_count" == "1" \
-      && "$needs_studio" == "true" ]]; then
-  shared_gpu="true"
-  # A fractional PyTorch limit still initializes a CUDA context during Gateway
-  # startup.  On a one-GPU Studio/Full installation the GPU belongs exclusively
-  # to ComfyUI; Gateway helper models are rendered onto CPU and CUDA is hidden.
-  gateway_gpu_device=-1
-  gateway_memory_fraction=""
-fi
-
 if [[ -z "$comfyui_mode" ]]; then
   if [[ "$needs_studio" != "true" ]]; then
     comfyui_mode="remote"
@@ -203,6 +192,21 @@ if [[ -z "$embedding_mode" ]]; then
 fi
 case "$comfyui_mode" in container|native|remote) ;; *) fail "不支持的 comfyui 模式" ;; esac
 case "$embedding_mode" in container|native|remote) ;; *) fail "不支持的 embedding 模式" ;; esac
+
+shared_gpu="false"
+if [[ "$accelerator" == "cuda" && "$gpu_count" == "1" \
+      && "$needs_studio" == "true" && "$comfyui_mode" == "container" ]]; then
+  shared_gpu="true"
+  # A fractional PyTorch limit still initializes a CUDA context during Gateway
+  # startup.  When local container ComfyUI shares the only GPU, reserve it for
+  # ComfyUI and keep Gateway helper models on CPU.
+  gateway_gpu_device=-1
+  gateway_memory_fraction=""
+elif [[ "$accelerator" == "cuda" && "$gpu_count" == "1" \
+      && "$comfyui_mode" == "remote" ]]; then
+  # Remote ComfyUI does not consume the host GPU. Keep CUDA available to Gateway.
+  gateway_memory_fraction="0.90"
+fi
 
 if [[ "$platform" == "apple" && "$comfyui_mode" == "container" && "$needs_studio" == "true" ]]; then
   fail "Apple Silicon 的 Docker 容器无法使用 MPS；请选择 --comfyui native 或 remote"

@@ -122,7 +122,8 @@ async def update_plugins_config_transactional(
                     candidate.setdefault("generation_optimization", {}),
                     "generation_optimization",
                 )
-                generation["enabled"] = True
+                if enabled:
+                    generation["enabled"] = True
                 current = generation
                 for index, segment in enumerate(generation_path[:-1], start=1):
                     current = _mapping(

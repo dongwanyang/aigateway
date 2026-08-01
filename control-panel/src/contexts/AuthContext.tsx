@@ -48,26 +48,45 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     retry: false,
     staleTime: 30_000,
   })
+  const sessionKeyPrefix = sessionQuery.data?.authenticated
+    ? sessionQuery.data.key_prefix ?? ''
+    : null
   const sessionStatePending = sessionQuery.data !== undefined && (
     Boolean(sessionQuery.data.authenticated) !== isAuthenticated
     || (
       sessionQuery.data.authenticated
-      && Boolean(sessionQuery.data.force_reset) !== forceReset
+      && (
+        Boolean(sessionQuery.data.force_reset) !== forceReset
+        || sessionKeyPrefix !== keyPrefix
+      )
     )
   )
 
   useEffect(() => {
     if (sessionQuery.data?.authenticated) {
+      const nextKeyPrefix = sessionQuery.data.key_prefix ?? ''
+      if (isAuthenticated && keyPrefix !== nextKeyPrefix) {
+        clearSessionScopedQueries(queryClient)
+      }
       setAuthenticated(
-        sessionQuery.data.key_prefix ?? '',
+        nextKeyPrefix,
         Boolean(sessionQuery.data.force_reset),
       )
       if (!getSavedSessionMarker()) localStorage.setItem('aigateway_session_active', '1')
     } else if (sessionQuery.data || sessionQuery.isError) {
+      if (isAuthenticated) clearSessionScopedQueries(queryClient)
       localStorage.removeItem('aigateway_session_active')
       clear()
     }
-  }, [clear, sessionQuery.data, sessionQuery.isError, setAuthenticated])
+  }, [
+    clear,
+    isAuthenticated,
+    keyPrefix,
+    queryClient,
+    sessionQuery.data,
+    sessionQuery.isError,
+    setAuthenticated,
+  ])
 
   const login = async (username: string, password: string) => {
     const result = await loginWithPassword(username, password)

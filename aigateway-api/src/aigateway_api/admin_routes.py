@@ -28,9 +28,10 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger(__name__)
 
 from .auth_middleware import authenticate_admin
+from .embedding_model_runtime import embedding_model_runtime
 
-# 模块级 Embedding 模型缓存（避免每次请求重新加载）
-_embedding_model_cache: dict = {}
+# Backward-compatible alias used by a few tests and diagnostics.
+_embedding_model_cache = embedding_model_runtime.cache
 RAG_INGESTION_VERSION = "1"
 
 
@@ -2021,25 +2022,33 @@ async def import_rag_document(
             logger.warning("确认 rag_documents 集合时出错（可能已存在）: %s", coll_exc)
 
         if use_local_embedding:
-            # 使用本地 sentence-transformers 模型 (Qwen3-Embedding-0.6B)
-            st_model = _get_embedding_model()
-            if st_model is None:
+            def _load_local_embedding_model():
                 # 从配置读取模型名，默认使用 Qwen3-Embedding-0.6B
                 from .app_state import get_state
+
                 _cfg_mgr = getattr(get_state(), "config_manager", None)
                 _emb_cfg = _cfg_mgr.get("embedding", {}) if _cfg_mgr else {}
                 _model_name = _emb_cfg.get("model", "Qwen/Qwen3-Embedding-0.6B")
                 _device = _emb_cfg.get("device", "auto")
                 _model_kwargs = {} if _device == "auto" else {"device": _device}
-                st_model = SentenceTransformer(_model_name, **_model_kwargs)
-                _set_embedding_model(st_model)
+                return SentenceTransformer(_model_name, **_model_kwargs)
+
+            def _encode_local_embeddings():
+                with embedding_model_runtime.lease(
+                    _load_local_embedding_model
+                ) as st_model:
+                    return st_model.encode(
+                        chunks,
+                        normalize_embeddings=True,
+                        show_progress_bar=False,
+                    )
 
             # 批量 encode — 注意：encode() 是同步 CPU 密集型操作，
             # 必须在线程池中执行，避免阻塞 Uvicorn 事件循环（其他页面请求会排队）
             _loop = asyncio.get_running_loop()
             vectors = await _loop.run_in_executor(
                 None,
-                lambda: st_model.encode(chunks, normalize_embeddings=True, show_progress_bar=False),
+                _encode_local_embeddings,
             )
             vectors_list = [v.tolist() for v in vectors]
         else:

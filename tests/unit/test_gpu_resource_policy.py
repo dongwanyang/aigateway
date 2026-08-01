@@ -385,3 +385,23 @@ def test_gpu_routes_install_once() -> None:
     assert first_count == len(gpu_routes.router.routes)
     gpu_routes.install_gpu_routes(target)
     assert len(target.routes) == first_count
+
+@pytest.mark.asyncio
+async def test_failed_l3_inference_rearms_idle_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduled: list[bool] = []
+    monkeypatch.setattr(
+        l3_semantic,
+        "_compute_l3_vector_sync",
+        lambda text, load_if_missing=True: None,
+    )
+    monkeypatch.setattr(
+        l3_semantic,
+        "_schedule_idle_release",
+        lambda: scheduled.append(True),
+    )
+    monkeypatch.setattr(l3_semantic, "_invalidate_idle_release", lambda: None)
+
+    assert await l3_semantic._compute_l3_vector("broken inference") is None
+    assert scheduled == [True]
