@@ -2022,7 +2022,18 @@ async def import_rag_document(
             logger.warning("确认 rag_documents 集合时出错（可能已存在）: %s", coll_exc)
 
         if use_local_embedding:
+            # Preserve the legacy test/integration injection point while rejecting
+            # stale non-model objects left in the process cache. Cache cleanup is
+            # allowed only while no load, release, or inference lease is active.
+            embedding_model_runtime.discard_invalid_if_idle(
+                lambda model: not callable(getattr(model, "encode", None))
+            )
+
             def _load_local_embedding_model():
+                existing_model = _get_embedding_model()
+                if existing_model is not None:
+                    return existing_model
+
                 # 从配置读取模型名，默认使用 Qwen3-Embedding-0.6B
                 from .app_state import get_state
 
