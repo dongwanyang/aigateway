@@ -296,3 +296,12 @@ exit 0
     assert runtime["embedding"]["device"] == "auto"
     clip = runtime["generation_optimization"]["token_compressor"]["clip"]
     assert clip["device"] == "auto"
+
+def test_compose_loads_project_env_before_generated_state() -> None:
+    script = (REPO_ROOT / "scripts/quickstart.sh").read_text(encoding="utf-8")
+    project_env = '--env-file "$ROOT_DIR/.env"'
+    state_env = '--env-file "$STATE_FILE"'
+
+    assert project_env in script
+    assert state_env in script
+    assert script.index(project_env) < script.index(state_env)

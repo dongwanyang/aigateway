@@ -88,3 +88,46 @@ def test_render_topology_can_enable_dynamic_vram_from_config() -> None:
         ]
         == "${COMFYUI_DISABLE_DYNAMIC_VRAM:-false}"
     )
+
+def test_main_preserves_disabled_scheduler(tmp_path, monkeypatch) -> None:
+    import sys
+
+    import yaml
+
+    inventory = tmp_path / "inventory.yaml"
+    runtime = tmp_path / "config.yaml"
+    output = tmp_path / "compose.yaml"
+    inventory.write_text(
+        yaml.safe_dump(
+            [
+                {
+                    "index": 0,
+                    "uuid": "GPU-a",
+                    "name": "GPU A",
+                    "memory_total_mb": 16384,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    runtime.write_text(
+        yaml.safe_dump({"gpu_scheduler": {"enabled": False}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(SCRIPT),
+            "--output-compose",
+            str(output),
+            "--runtime-config",
+            str(runtime),
+            "--inventory",
+            str(inventory),
+        ],
+    )
+
+    assert _module().main() == 0
+    rendered = yaml.safe_load(runtime.read_text(encoding="utf-8"))
+    assert rendered["gpu_scheduler"]["enabled"] is False

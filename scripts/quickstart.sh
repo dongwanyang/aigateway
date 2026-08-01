@@ -456,7 +456,12 @@ if [[ "$platform" == "apple" && "$start" == "true" \
     --comfyui "$comfyui_mode" --embedding "$embedding_mode"
 fi
 
-compose=(docker compose --env-file "$STATE_FILE" -f docker-compose.yml)
+compose=(
+  docker compose
+  --env-file "$ROOT_DIR/.env"
+  --env-file "$STATE_FILE"
+  -f docker-compose.yml
+)
 [[ "$accelerator" == "cuda" ]] && compose+=(-f docker-compose.cuda.yml)
 [[ -f "$GPU_COMPOSE_FILE" ]] && compose+=(-f "$GPU_COMPOSE_FILE")
 [[ "$production" == "true" ]] && compose+=(-f docker-compose.prod.yml)

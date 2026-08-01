@@ -587,7 +587,7 @@ class RAGRetrieverPlugin:
             vectors = encode_texts(
                 model_name,
                 [query],
-                device=getattr(self._config, "embedding_device", "auto"),
+                device=self._runtime_embedding_device,
             )
             return list(vectors[0]) if vectors else None
         except Exception as exc:

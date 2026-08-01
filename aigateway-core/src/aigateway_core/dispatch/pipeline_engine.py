@@ -50,8 +50,13 @@ class Plugin(Protocol):
 
 
 async def execute_plugin(plugin: Plugin, ctx: PipelineContext) -> PipelineContext:
-    """Execute one plugin within both its own timeout and the request deadline."""
+    """Execute one plugin without releasing resources before sync work stops.
 
+    ``asyncio.to_thread`` cannot stop its worker thread when the awaiting task is
+    cancelled. Shield the plugin task from timeout/cancellation and wait for it
+    to finish before propagating the caller's exception; an enclosing GPU lease
+    therefore remains held until the underlying CUDA operation really ends.
+    """
     plugin_timeout = max(
         0.001, float(getattr(plugin, "timeout_seconds", 30.0))
     )
@@ -62,8 +67,18 @@ async def execute_plugin(plugin: Plugin, ctx: PipelineContext) -> PipelineContex
         )
     if plugin_timeout <= 0:
         raise TimeoutError("request deadline exceeded before plugin execution")
-    async with asyncio.timeout(plugin_timeout):
-        return await plugin.execute(ctx)
+
+    task = asyncio.create_task(plugin.execute(ctx))
+    try:
+        async with asyncio.timeout(plugin_timeout):
+            return await asyncio.shield(task)
+    except (TimeoutError, asyncio.CancelledError):
+        if not task.done():
+            try:
+                await task
+            except (Exception, asyncio.CancelledError):
+                pass
+        raise
 
 
 class PipelineEngine:

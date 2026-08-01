@@ -2074,9 +2074,13 @@ async def import_rag_document(
                     cached = embedding_model_runtime.cache.get("model")
                     cached_device = str(getattr(cached, "device", ""))
                     if cached is not None and cached_device != configured_device:
-                        await asyncio.to_thread(
+                        release_result = await asyncio.to_thread(
                             embedding_model_runtime.release_if_idle
                         )
+                        if release_result.get("busy"):
+                            raise RuntimeError(
+                                "embedding_model_busy_on_different_device"
+                            )
                     vectors = await _loop.run_in_executor(
                         None, _encode_local_embeddings
                     )

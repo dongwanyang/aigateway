@@ -228,7 +228,7 @@ def main() -> int:
     compose, workers = render_topology(devices, scheduler)
     scheduler.update(
         {
-            "enabled": True,
+            "enabled": scheduler.get("enabled", True),
             "policy": scheduler.get("policy", "auto"),
             "gateway_devices": scheduler.get("gateway_devices", "auto"),
             "comfyui_devices": scheduler.get("comfyui_devices", "auto"),

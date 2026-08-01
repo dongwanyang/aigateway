@@ -33,3 +33,12 @@ async def test_execute_lazy_initializes_compressor_off_event_loop() -> None:
     to_thread.assert_awaited_once()
     assert result is ctx
     assert plugin._initialized is True
+
+def test_auto_device_request_is_not_pinned_after_runtime_assignment() -> None:
+    from aigateway_core.shared.integration_configs import PromptCompressConfig
+
+    plugin = PromptCompressPlugin(PromptCompressConfig(device="auto"))
+    plugin.set_runtime_device("cuda:1")
+
+    assert plugin.gpu_device_request == "auto"
+    assert plugin._runtime_device == "cuda:1"

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import subprocess
 import time
 import uuid
@@ -39,6 +40,8 @@ def _positive_number(value: Any, name: str, *, allow_zero: bool = False) -> floa
         parsed = float(value)
     except (TypeError, ValueError) as exc:
         raise GpuSchedulerConfigError(f"{name} must be a number") from exc
+    if not math.isfinite(parsed):
+        raise GpuSchedulerConfigError(f"{name} must be finite")
     invalid = parsed < 0 if allow_zero else parsed <= 0
     if invalid:
         qualifier = "non-negative" if allow_zero else "positive"
@@ -88,12 +91,14 @@ class GpuSchedulerConfig:
             raise GpuSchedulerConfigError("policy must be auto or manual")
         if fallback not in {"cpu", "wait", "fail"}:
             raise GpuSchedulerConfigError("gateway_fallback must be cpu, wait, or fail")
-        if type(raw.get("topology_auto_apply", True)) is not bool:
-            raise GpuSchedulerConfigError("topology_auto_apply must be a boolean")
-        if type(raw.get("comfyui_dynamic_vram_enabled", False)) is not bool:
-            raise GpuSchedulerConfigError(
-                "comfyui_dynamic_vram_enabled must be a boolean"
-            )
+        for field_name, default in (
+            ("enabled", True),
+            ("generation_priority", True),
+            ("topology_auto_apply", True),
+            ("comfyui_dynamic_vram_enabled", False),
+        ):
+            if type(raw.get(field_name, default)) is not bool:
+                raise GpuSchedulerConfigError(f"{field_name} must be a boolean")
         ttl = _positive_number(raw.get("lease_ttl_seconds", 15), "lease_ttl_seconds")
         heartbeat = _positive_number(
             raw.get("lease_heartbeat_seconds", 5), "lease_heartbeat_seconds"
@@ -138,9 +143,9 @@ class GpuSchedulerConfig:
         if failovers < 0:
             raise GpuSchedulerConfigError("max_worker_failover_attempts must be non-negative")
         return cls(
-            enabled=bool(raw.get("enabled", True)),
+            enabled=raw.get("enabled", True),
             policy=policy,  # type: ignore[arg-type]
-            generation_priority=bool(raw.get("generation_priority", True)),
+            generation_priority=raw.get("generation_priority", True),
             gateway_devices=_device_selector(raw.get("gateway_devices", "auto"), "gateway_devices"),
             comfyui_devices=_device_selector(raw.get("comfyui_devices", "auto"), "comfyui_devices"),
             gateway_fallback=fallback,  # type: ignore[arg-type]
@@ -235,6 +240,7 @@ class GatewayLease:
     device_uuid: str | None
     logical_index: int | None
     expires_at_monotonic: float | None
+    lost_event: asyncio.Event | None = field(default=None, compare=False, repr=False)
 
 
 def discover_nvidia_devices() -> list[GpuDevice]:
@@ -293,6 +299,7 @@ class GpuResourceCoordinator:
         self._worker_probe_hook: WorkerProbeHook | None = None
         self._heartbeat_tasks: dict[str, asyncio.Task[None]] = {}
         self._background_tasks: set[asyncio.Task[Any]] = set()
+        self._started = False
         self._closed = False
 
     @property
@@ -369,7 +376,12 @@ class GpuResourceCoordinator:
     async def start(self) -> None:
         if self._closed:
             raise RuntimeError("GPU coordinator is closed")
-        task = asyncio.create_task(self._idle_release_loop(), name="gpu-worker-idle-release")
+        if self._started:
+            return
+        self._started = True
+        task = asyncio.create_task(
+            self._idle_release_loop(), name="gpu-worker-idle-release"
+        )
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
 
@@ -382,6 +394,7 @@ class GpuResourceCoordinator:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._heartbeat_tasks.clear()
         self._background_tasks.clear()
+        self._started = False
 
     def _allowed(self, device: GpuDevice, selector: DeviceSelector) -> bool:
         if selector != "auto" and device.uuid not in selector:
@@ -439,21 +452,47 @@ class GpuResourceCoordinator:
             return False
         return bool(result)
 
-    async def _heartbeat(self, lease_id: str, device_uuid: str, ttl: float, interval: float) -> None:
+    async def _heartbeat(
+        self,
+        lease_id: str,
+        device_uuid: str,
+        ttl: float,
+        interval: float,
+        lost_event: asyncio.Event,
+        owner_task: asyncio.Task[Any] | None,
+    ) -> None:
         key = f"{self._redis_prefix}:lease:{lease_id}"
-        try:
-            while True:
+        membership_key = f"{self._redis_prefix}:leases:{device_uuid}"
+        while True:
+            try:
                 await asyncio.sleep(interval)
-                if self._redis is not None:
-                    await self._redis.expire(key, max(1, int(ttl)))
-                    await self._redis.expire(
-                        f"{self._redis_prefix}:leases:{device_uuid}",
-                        max(1, int(ttl)),
+                if self._redis is None:
+                    continue
+                renewed = await self._redis.expire(key, max(1, int(ttl)))
+                await self._redis.expire(membership_key, max(1, int(ttl)))
+                if renewed is False or renewed == 0:
+                    lost_event.set()
+                    self.record_event(
+                        "gateway_lease_lost",
+                        device_uuid=device_uuid,
                     )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.warning("GPU lease heartbeat stopped: %s", type(exc).__name__)
+                    if (
+                        owner_task is not None
+                        and owner_task is not asyncio.current_task()
+                        and not owner_task.done()
+                    ):
+                        owner_task.cancel()
+                    return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # Redis claims fail closed while Redis is unavailable. Keep
+                # retrying so a transient outage does not silently stop lease
+                # renewal forever.
+                logger.warning(
+                    "GPU lease heartbeat retrying after Redis error: %s",
+                    type(exc).__name__,
+                )
 
     @contextlib.asynccontextmanager
     async def gateway_lease(
@@ -479,6 +518,8 @@ class GpuResourceCoordinator:
                         continue
                     device.gateway_leases.add(lease_id)
                     device.resident_components.add(component)
+                    lost_event = asyncio.Event()
+                    owner_task = asyncio.current_task()
                     lease = GatewayLease(
                         lease_id,
                         component,
@@ -487,6 +528,7 @@ class GpuResourceCoordinator:
                         device.uuid,
                         device.logical_index,
                         self._clock() + config.lease_ttl_seconds,
+                        lost_event,
                     )
                     task = asyncio.create_task(
                         self._heartbeat(
@@ -494,6 +536,8 @@ class GpuResourceCoordinator:
                             device.uuid,
                             config.lease_ttl_seconds,
                             config.lease_heartbeat_seconds,
+                            lost_event,
+                            owner_task,
                         ),
                         name=f"gpu-lease-heartbeat-{lease_id}",
                     )
@@ -630,19 +674,32 @@ class GpuResourceCoordinator:
             await asyncio.sleep(min(0.1, remaining))
 
     async def _redis_claim_generation(
-        self, device_uuid: str, ticket: str, timeout_seconds: float
-    ) -> bool:
+        self, device_uuid: str, ticket: str, ttl_seconds: float
+    ) -> int:
+        """Acquire/renew a generation drain.
+
+        Returns 0 when another generation owns the device, 1 when the drain is
+        owned and no live Gateway leases remain, and 2 while existing leases are
+        still draining. The drain is installed before checking leases so new
+        Gateway claims cannot continuously starve generation.
+        """
+        device = self._devices.get(device_uuid)
         if self._redis is None:
-            return True
+            return 2 if device is not None and device.gateway_leases else 1
         script = """
-        local lease_ids = redis.call('smembers', KEYS[1])
-        for _, lease_id in ipairs(lease_ids) do
-          if redis.call('exists', ARGV[1] .. lease_id) == 1 then return 0 end
-          redis.call('srem', KEYS[1], lease_id)
-        end
         local owner = redis.call('get', KEYS[2])
         if owner and owner ~= ARGV[2] then return 0 end
         redis.call('set', KEYS[2], ARGV[2], 'EX', ARGV[3])
+        local active = 0
+        local lease_ids = redis.call('smembers', KEYS[1])
+        for _, lease_id in ipairs(lease_ids) do
+          if redis.call('exists', ARGV[1] .. lease_id) == 1 then
+            active = 1
+          else
+            redis.call('srem', KEYS[1], lease_id)
+          end
+        end
+        if active == 1 then return 2 end
         return 1
         """
         leases = f"{self._redis_prefix}:leases:{device_uuid}"
@@ -655,26 +712,103 @@ class GpuResourceCoordinator:
                 drain,
                 f"{self._redis_prefix}:lease:",
                 ticket,
-                max(1, int(timeout_seconds + self._config.lease_ttl_seconds)),
+                max(1, int(ttl_seconds)),
             )
         except Exception as exc:
-            logger.warning("GPU Redis generation claim failed closed: %s", type(exc).__name__)
+            logger.warning(
+                "GPU Redis generation claim failed closed: %s",
+                type(exc).__name__,
+            )
+            return 0
+        try:
+            return int(result or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    async def _redis_release_generation_claim(
+        self, device_uuid: str, ticket: str
+    ) -> bool:
+        if self._redis is None:
+            return True
+        key = f"{self._redis_prefix}:drain:{device_uuid}"
+        script = """
+        if redis.call('get', KEYS[1]) ~= ARGV[1] then return 0 end
+        redis.call('del', KEYS[1])
+        return 1
+        """
+        try:
+            return bool(await self._redis.eval(script, 1, key, ticket))
+        except Exception as exc:
+            logger.warning(
+                "GPU Redis generation release failed: %s", type(exc).__name__
+            )
             return False
-        return bool(result)
+
+    async def _generation_heartbeat(
+        self,
+        device_uuid: str,
+        ticket: str,
+        ttl: float,
+        interval: float,
+        owner_task: asyncio.Task[Any] | None,
+    ) -> None:
+        key = f"{self._redis_prefix}:drain:{device_uuid}"
+        script = """
+        if redis.call('get', KEYS[1]) ~= ARGV[1] then return 0 end
+        return redis.call('expire', KEYS[1], ARGV[2])
+        """
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                if self._redis is None:
+                    continue
+                renewed = await self._redis.eval(
+                    script, 1, key, ticket, max(1, int(ttl))
+                )
+                if renewed is False or renewed == 0:
+                    self.record_event(
+                        "generation_lease_lost",
+                        device_uuid=device_uuid,
+                    )
+                    if (
+                        owner_task is not None
+                        and owner_task is not asyncio.current_task()
+                        and not owner_task.done()
+                    ):
+                        owner_task.cancel()
+                    return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "GPU generation heartbeat retrying after Redis error: %s",
+                    type(exc).__name__,
+                )
 
     async def _redis_reserve_after_generation(
-        self, device_uuid: str, seconds: float
-    ) -> None:
+        self, device_uuid: str, ticket: str, seconds: float
+    ) -> bool:
         if self._redis is None:
-            return
+            return True
         key = f"{self._redis_prefix}:drain:{device_uuid}"
+        if seconds <= 0:
+            return await self._redis_release_generation_claim(device_uuid, ticket)
+        script = """
+        if redis.call('get', KEYS[1]) ~= ARGV[1] then return 0 end
+        redis.call('set', KEYS[1], 'comfyui_idle', 'EX', ARGV[2])
+        return 1
+        """
         try:
-            if seconds <= 0:
-                await self._redis.delete(key)
-            else:
-                await self._redis.set(key, "comfyui_idle", ex=max(1, int(seconds)))
+            return bool(
+                await self._redis.eval(
+                    script, 1, key, ticket, max(1, int(seconds))
+                )
+            )
         except Exception as exc:
-            logger.warning("GPU Redis idle reservation failed: %s", type(exc).__name__)
+            logger.warning(
+                "GPU Redis idle reservation failed: %s", type(exc).__name__
+            )
+            return False
 
     @contextlib.asynccontextmanager
     async def generation_lease(
@@ -695,45 +829,119 @@ class GpuResourceCoordinator:
         selected: tuple[ComfyWorker, GpuDevice] | None = None
         draining_device: GpuDevice | None = None
         generation_started = False
+        generation_heartbeat: asyncio.Task[None] | None = None
+        owner_task = asyncio.current_task()
         try:
             async with self._condition:
                 while selected is None:
+                    config = self._config
                     candidates = self._worker_candidates(
                         capability,
                         memory_requirement_gb,
                         excluded,
                         preferred_worker_id,
                     )
-                    if self._generation_queue and self._generation_queue[0] == ticket and candidates:
-                        _, worker, device = candidates[0]
-                        device.draining = self._config.generation_priority
-                        draining_device = device
-                        if (
-                            not device.gateway_leases
-                            and await self._redis_claim_generation(
-                                device.uuid, ticket, max(0.0, deadline - self._clock())
-                            )
+                    if self._generation_queue and self._generation_queue[0] == ticket:
+                        pending: tuple[ComfyWorker, GpuDevice] | None = None
+                        claim_ttl = max(
+                            config.lease_ttl_seconds,
+                            config.lease_heartbeat_seconds * 3,
+                        )
+                        for _, worker, device in sorted(
+                            candidates,
+                            key=lambda item: (
+                                bool(item[2].gateway_leases),
+                                -item[0],
+                                item[1].worker_id,
+                            ),
                         ):
-                            selected = (worker, device)
+                            claim = await self._redis_claim_generation(
+                                device.uuid, ticket, claim_ttl
+                            )
+                            if claim == 1 and not device.gateway_leases:
+                                selected = (worker, device)
+                                break
+                            if claim in {1, 2}:
+                                if pending is None:
+                                    pending = (worker, device)
+                                else:
+                                    await self._redis_release_generation_claim(
+                                        device.uuid, ticket
+                                    )
+
+                        if selected is not None:
+                            _, selected_device = selected
+                            if (
+                                pending is not None
+                                and pending[1].uuid != selected_device.uuid
+                            ):
+                                await self._redis_release_generation_claim(
+                                    pending[1].uuid, ticket
+                                )
+                                pending[1].draining = False
+                            if (
+                                draining_device is not None
+                                and draining_device.uuid != selected_device.uuid
+                            ):
+                                await self._redis_release_generation_claim(
+                                    draining_device.uuid, ticket
+                                )
+                                draining_device.draining = False
+                            draining_device = selected_device
+                            selected_device.draining = config.generation_priority
                             self._generation_queue.popleft()
                             self._set_queue_metric()
                             break
+
+                        if pending is not None:
+                            _, pending_device = pending
+                            if (
+                                draining_device is not None
+                                and draining_device.uuid != pending_device.uuid
+                            ):
+                                await self._redis_release_generation_claim(
+                                    draining_device.uuid, ticket
+                                )
+                                draining_device.draining = False
+                            draining_device = pending_device
+                            pending_device.draining = config.generation_priority
+
                     remaining = deadline - self._clock()
                     if remaining <= 0:
                         raise GpuQueueTimeoutError(
-                            f"generation did not acquire a GPU within {self._config.generation_wait_timeout_seconds:g}s"
+                            "generation did not acquire a GPU within "
+                            f"{self._config.generation_wait_timeout_seconds:g}s"
                         )
                     try:
                         await asyncio.wait_for(
                             self._condition.wait(),
-                            timeout=min(remaining, self._config.lease_heartbeat_seconds),
+                            timeout=min(
+                                remaining,
+                                self._config.lease_heartbeat_seconds,
+                            ),
                         )
                     except TimeoutError as exc:
                         if self._clock() >= deadline:
                             raise GpuQueueTimeoutError(
-                                f"generation did not acquire a GPU within {self._config.generation_wait_timeout_seconds:g}s"
+                                "generation did not acquire a GPU within "
+                                f"{self._config.generation_wait_timeout_seconds:g}s"
                             ) from exc
+
             worker, device = selected
+            if self._redis is not None:
+                generation_heartbeat = asyncio.create_task(
+                    self._generation_heartbeat(
+                        device.uuid,
+                        ticket,
+                        max(
+                            self._config.lease_ttl_seconds,
+                            self._config.lease_heartbeat_seconds * 3,
+                        ),
+                        self._config.lease_heartbeat_seconds,
+                        owner_task,
+                    ),
+                    name=f"gpu-generation-heartbeat-{ticket}",
+                )
             await self._release_gateway_residents(device, deadline)
             async with self._condition:
                 device.generation_active += 1
@@ -760,31 +968,40 @@ class GpuResourceCoordinator:
             )
             yield worker
         finally:
+            if generation_heartbeat is not None:
+                generation_heartbeat.cancel()
+                await asyncio.gather(generation_heartbeat, return_exceptions=True)
+            queue_changed = False
             if ticket in self._generation_queue:
                 self._generation_queue.remove(ticket)
                 self._set_queue_metric()
-            if (selected is None or not generation_started) and draining_device is not None:
+                queue_changed = True
+            if not generation_started and draining_device is not None:
                 draining_device.draining = False
-                if self._redis is not None:
-                    try:
-                        drain_key = f"{self._redis_prefix}:drain:{draining_device.uuid}"
-                        owner = await self._redis.get(drain_key)
-                        if owner in {ticket, ticket.encode()}:
-                            await self._redis.delete(drain_key)
-                    except Exception:
-                        pass
+                await self._redis_release_generation_claim(
+                    draining_device.uuid, ticket
+                )
+                queue_changed = True
             if selected is not None and generation_started:
                 worker, device = selected
                 async with self._condition:
                     worker.queue_running = max(0, worker.queue_running - 1)
                     device.generation_active = max(0, device.generation_active - 1)
                     device.draining = False
-                    device.reserved_until = self._clock() + self._config.comfyui_idle_reservation_seconds
+                    device.reserved_until = (
+                        self._clock()
+                        + self._config.comfyui_idle_reservation_seconds
+                    )
                     device.comfy_resident = True
                     self._condition.notify_all()
                 await self._redis_reserve_after_generation(
-                    device.uuid, self._config.comfyui_idle_reservation_seconds
+                    device.uuid,
+                    ticket,
+                    self._config.comfyui_idle_reservation_seconds,
                 )
+            elif queue_changed:
+                async with self._condition:
+                    self._condition.notify_all()
 
     async def quarantine_oom(self, worker_id: str) -> None:
         worker = self._workers.get(worker_id)
@@ -824,8 +1041,26 @@ class GpuResourceCoordinator:
             ):
                 results[worker.worker_id] = False
                 continue
-            hook_result = self._worker_release_hook(worker)
-            released = await hook_result if isinstance(hook_result, Awaitable) else hook_result
+            try:
+                hook_result = self._worker_release_hook(worker)
+                released = (
+                    await hook_result
+                    if isinstance(hook_result, Awaitable)
+                    else hook_result
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "ComfyUI worker release failed",
+                    extra={
+                        "worker_id": worker.worker_id,
+                        "device_uuid": worker.device_uuid,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                results[worker.worker_id] = False
+                continue
             results[worker.worker_id] = bool(released)
             if released:
                 device.reserved_until = 0.0
@@ -853,8 +1088,8 @@ class GpuResourceCoordinator:
                 now = self._clock()
                 for worker in tuple(self._workers.values()):
                     device = self._devices.get(worker.device_uuid)
-                    if self._worker_probe_hook is not None:
-                        try:
+                    try:
+                        if self._worker_probe_hook is not None:
                             probe = await self._worker_probe_hook(worker)
                             worker.healthy = bool(probe.get("healthy", False))
                             worker.last_probe_at = now
@@ -865,8 +1100,12 @@ class GpuResourceCoordinator:
                                     now
                                     + self._config.worker_unhealthy_cooldown_seconds
                                 )
-                            worker.queue_running = int(probe.get("running", 0) or 0)
-                            worker.queue_pending = int(probe.get("pending", 0) or 0)
+                            worker.queue_running = int(
+                                probe.get("running", 0) or 0
+                            )
+                            worker.queue_pending = int(
+                                probe.get("pending", 0) or 0
+                            )
                             free_memory_gb = probe.get("free_memory_gb")
                             if device is not None and free_memory_gb is not None:
                                 device.free_memory_gb = float(free_memory_gb)
@@ -880,32 +1119,24 @@ class GpuResourceCoordinator:
                                 device.worker_reserved_memory_gb = max(
                                     0.0, float(worker_reserved_memory_gb)
                                 )
-                        except asyncio.CancelledError:
-                            raise
-                        except Exception as exc:
-                            worker.healthy = False
-                            worker.unhealthy_until = (
-                                now + self._config.worker_unhealthy_cooldown_seconds
-                            )
-                            logger.warning(
-                                "ComfyUI worker probe failed",
-                                extra={
-                                    "worker_id": worker.worker_id,
-                                    "device_uuid": worker.device_uuid,
-                                    "error_type": type(exc).__name__,
-                                },
-                            )
-                    if (
-                        device is None
-                        or device.generation_active
-                        or device.reserved_until <= 0
-                        or device.reserved_until > now
-                        or self._worker_release_hook is None
-                    ):
-                        continue
-                    hook_result = self._worker_release_hook(worker)
-                    released = await hook_result if isinstance(hook_result, Awaitable) else hook_result
-                    if released:
+                        if (
+                            device is None
+                            or device.generation_active
+                            or worker.queue_running
+                            or worker.queue_pending
+                            or device.reserved_until <= 0
+                            or device.reserved_until > now
+                            or self._worker_release_hook is None
+                        ):
+                            continue
+                        hook_result = self._worker_release_hook(worker)
+                        released = (
+                            await hook_result
+                            if isinstance(hook_result, Awaitable)
+                            else hook_result
+                        )
+                        if not released:
+                            continue
                         device.reserved_until = 0.0
                         device.comfy_resident = False
                         self.record_event(
@@ -925,6 +1156,21 @@ class GpuResourceCoordinator:
                                 )
                         async with self._condition:
                             self._condition.notify_all()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        worker.healthy = False
+                        worker.unhealthy_until = (
+                            now + self._config.worker_unhealthy_cooldown_seconds
+                        )
+                        logger.warning(
+                            "ComfyUI worker maintenance failed",
+                            extra={
+                                "worker_id": worker.worker_id,
+                                "device_uuid": worker.device_uuid,
+                                "error_type": type(exc).__name__,
+                            },
+                        )
         except asyncio.CancelledError:  # noqa: TRY203 - preserve task cancellation explicitly
             raise
 

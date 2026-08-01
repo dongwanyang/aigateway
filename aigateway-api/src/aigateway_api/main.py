@@ -53,6 +53,7 @@ def _configure_cuda_memory_limit(gpu_scheduler: dict[str, Any] | None = None) ->
     """Apply the configured PyTorch safety ceiling to every visible device."""
     global _cuda_memory_limit_applied
     raw_fraction = os.getenv("AI_GATEWAY_CUDA_MEMORY_FRACTION", "").strip()
+    clearing_limit = False
     if raw_fraction:
         try:
             fraction = float(raw_fraction)
@@ -64,28 +65,34 @@ def _configure_cuda_memory_limit(gpu_scheduler: dict[str, Any] | None = None) ->
             if not _cuda_memory_limit_applied:
                 return
             fraction = 1.0
-            _cuda_memory_limit_applied = False
+            clearing_limit = True
         else:
             try:
                 fraction = float(percentage) / 100.0
             except (TypeError, ValueError) as exc:
-                raise RuntimeError("invalid gpu_scheduler.gateway_memory_limit_percent") from exc
-            _cuda_memory_limit_applied = True
-    if raw_fraction:
-        _cuda_memory_limit_applied = True
+                raise RuntimeError(
+                    "invalid gpu_scheduler.gateway_memory_limit_percent"
+                ) from exc
     if not 0.0 < fraction <= 1.0:
         raise RuntimeError("Gateway CUDA memory limit must be in (0, 100]")
 
     import torch
 
     if not torch.cuda.is_available():
+        if clearing_limit:
+            _cuda_memory_limit_applied = False
+            return
         raise RuntimeError("gateway_cuda_unavailable")
-    for device_index in range(torch.cuda.device_count()):
-        torch.cuda.set_per_process_memory_fraction(fraction, device=device_index)
+    device_count = int(torch.cuda.device_count())
+    for device_index in range(device_count):
+        torch.cuda.set_per_process_memory_fraction(
+            fraction, device=device_index
+        )
+    _cuda_memory_limit_applied = fraction < 1.0
     logger.info(
         "Gateway CUDA memory safety limit set to %.1f%% on %d visible device(s)",
         fraction * 100,
-        torch.cuda.device_count(),
+        device_count,
     )
 
 

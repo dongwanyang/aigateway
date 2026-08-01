@@ -30,6 +30,7 @@ def test_cuda_memory_limit_is_applied(monkeypatch):
     torch = SimpleNamespace(
         cuda=SimpleNamespace(
             is_available=Mock(return_value=True),
+            device_count=Mock(return_value=1),
             set_per_process_memory_fraction=setter,
         )
     )

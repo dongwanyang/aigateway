@@ -48,11 +48,14 @@ class PromptCompressPlugin:
         self._condition = threading.Condition(threading.RLock())
         self._active = 0
         self._releasing = False
-        self._runtime_device = (self._config.device or "cpu").strip().lower()
+        self._configured_device_request = (
+            self._config.device or "cpu"
+        ).strip().lower()
+        self._runtime_device = self._configured_device_request
 
     @property
     def gpu_device_request(self) -> str:
-        return self._runtime_device
+        return self._configured_device_request
 
     def set_runtime_device(self, device: str) -> None:
         if device == self._runtime_device:

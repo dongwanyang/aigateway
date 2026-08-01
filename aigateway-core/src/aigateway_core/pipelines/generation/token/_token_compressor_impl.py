@@ -75,7 +75,8 @@ class TokenCompressorStrategy:
         self._clip_processor: Any | None = None
         self._clip_available: bool = False
         self._clip_loaded: bool = False
-        self._device: str = self._clip_config.device
+        self._configured_device_request = self._clip_config.device
+        self._device: str = self._configured_device_request
         self._clip_lock = threading.Lock()
         self._clip_condition = threading.Condition(threading.RLock())
         self._clip_active = 0
@@ -83,7 +84,7 @@ class TokenCompressorStrategy:
 
     @property
     def gpu_device_request(self) -> str:
-        return self._device
+        return self._configured_device_request
 
     def set_runtime_device(self, device: str) -> None:
         if device == self._device:
