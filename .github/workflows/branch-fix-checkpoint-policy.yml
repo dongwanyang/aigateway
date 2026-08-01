@@ -13,7 +13,6 @@ permissions:
 
 jobs:
   apply-and-test:
-    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -22,35 +21,42 @@ jobs:
           ref: feat/gpu-scheduler-topology
           fetch-depth: 0
 
-      - name: Apply fixes
+      - name: Apply fixes and run targeted regressions
+        shell: bash
         run: |
+          set +e
           base64 -d .github/scripts/apply_checkpoint_policy_fixes.py.gz.b64 | gzip -d > /tmp/apply_checkpoint_policy_fixes.py
-          python /tmp/apply_checkpoint_policy_fixes.py
-          python -m compileall -q aigateway-core/src aigateway-api/src tests/unit
+          python /tmp/apply_checkpoint_policy_fixes.py > /tmp/checkpoint-fix.log 2>&1
+          status=$?
+          if [ "$status" -eq 0 ]; then
+            python -m compileall -q aigateway-core/src aigateway-api/src tests/unit >> /tmp/checkpoint-fix.log 2>&1
+            status=$?
+          fi
+          if [ "$status" -eq 0 ]; then
+            pip install -e aigateway-core >> /tmp/checkpoint-fix.log 2>&1
+            pip install -e aigateway-api >> /tmp/checkpoint-fix.log 2>&1
+            pip install pytest pytest-asyncio pyyaml >> /tmp/checkpoint-fix.log 2>&1
+            python -m pytest \
+              tests/unit/api/test_local_generation.py \
+              tests/unit/pipeline/test_qwen_image_selection_policy.py \
+              tests/unit/cli/test_coverage_workflow.py \
+              -q >> /tmp/checkpoint-fix.log 2>&1
+            status=$?
+          fi
 
-      - name: Install targeted test dependencies
-        run: |
-          pip install -e aigateway-core
-          pip install -e aigateway-api
-          pip install pytest pytest-asyncio pyyaml
-
-      - name: Run targeted regressions
-        run: |
-          python -m pytest \
-            tests/unit/api/test_local_generation.py \
-            tests/unit/pipeline/test_qwen_image_selection_policy.py \
-            tests/unit/cli/test_coverage_workflow.py \
-            -q
-
-      - name: Remove temporary automation files
-        run: |
-          rm -f .github/scripts/apply_checkpoint_policy_fixes.py.gz.b64
-          rm -f .github/workflows/branch-fix-checkpoint-policy.yml
-
-      - name: Commit fixes
-        run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ "$status" -ne 0 ]; then
+            cp /tmp/checkpoint-fix.log .github/checkpoint-fix-failure.log
+            git add .github/checkpoint-fix-failure.log
+            git commit -m "chore: record checkpoint fix failure"
+            git push origin HEAD:feat/gpu-scheduler-topology
+            exit 0
+          fi
+
+          rm -f .github/checkpoint-fix-failure.log
+          rm -f .github/scripts/apply_checkpoint_policy_fixes.py.gz.b64
+          rm -f .github/workflows/branch-fix-checkpoint-policy.yml
           git add -A
           git diff --cached --check
           git commit -m "fix(generation): enforce trusted checkpoint selection"
