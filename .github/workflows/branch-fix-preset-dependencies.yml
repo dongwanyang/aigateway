@@ -1,0 +1,169 @@
+name: Branch Fix Preset Dependencies
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/branch-fix-preset-dependencies.yml
+
+permissions:
+  contents: write
+
+jobs:
+  fix-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/gpu-scheduler-topology
+          fetch-depth: 0
+
+      - name: Align multistage preset dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          source = Path("aigateway-api/src/aigateway_api/local_generation.py")
+          text = source.read_text()
+
+          qwen_anchor = '''    qwen_models, qwen_errors = _preset_model_requirements(
+              [
+                  ("diffusion_models", "qwen_image_diffusion_model", qwen_diffusion),
+                  ("text_encoders", "qwen_image_text_encoder", qwen_encoder),
+                  ("vae", "qwen_image_vae", qwen_vae),
+              ],
+              feature_enabled=qwen_enabled,
+          )
+          '''
+          qwen_replacement = qwen_anchor + '''    # Standard confirmation refines the approved Qwen draft with the
+              # configured SDXL checkpoint, so availability must cover both stages.
+              qwen_models = list(dict.fromkeys([*qwen_models, *sdxl_models]))
+              qwen_errors = list(dict.fromkeys([*qwen_errors, *sdxl_errors]))
+          '''
+          if text.count(qwen_anchor) != 1:
+              raise RuntimeError("qwen dependency block mismatch")
+          text = text.replace(qwen_anchor, qwen_replacement)
+
+          video_anchor = '''    video_models, video_errors = _preset_model_requirements(
+              [
+                  ("diffusion_models", "video_diffusion_model", video_diffusion),
+                  ("text_encoders", "video_text_encoder", video_encoder),
+                  ("vae", "video_vae", video_vae),
+              ],
+              feature_enabled=video_enabled,
+          )
+          '''
+          video_replacement = video_anchor + '''    # Video generation first creates an SDXL keyframe, then runs Wan.
+              # Do not advertise the preset unless both stages are configured.
+              video_models = list(dict.fromkeys([*video_models, *sdxl_models]))
+              video_errors = list(dict.fromkeys([*video_errors, *sdxl_errors]))
+          '''
+          if text.count(video_anchor) != 1:
+              raise RuntimeError("video dependency block mismatch")
+          text = text.replace(video_anchor, video_replacement)
+
+          qwen_nodes = '''                "nodes": [
+                      "UNETLoader",
+                      "CLIPLoader",
+                      "VAELoader",
+          '''
+          qwen_nodes_new = '''                "nodes": [
+                      "LoadImage",
+                      "ImageScale",
+                      "CheckpointLoaderSimple",
+                      "VAEEncode",
+                      "UNETLoader",
+                      "CLIPLoader",
+                      "VAELoader",
+          '''
+          if text.count(qwen_nodes) != 1:
+              raise RuntimeError("qwen node list mismatch")
+          text = text.replace(qwen_nodes, qwen_nodes_new)
+
+          video_nodes = '''                "nodes": [
+                      "UNETLoader",
+                      "CLIPLoader",
+          '''
+          video_nodes_new = '''                "nodes": [
+                      *_CORE_IMAGE_NODES,
+                      "UNETLoader",
+                      "CLIPLoader",
+          '''
+          if text.count(video_nodes) != 1:
+              raise RuntimeError("video node list mismatch")
+          text = text.replace(video_nodes, video_nodes_new)
+
+          old_name = '"name": f"{Path(checkpoint_name).stem}（本地 Checkpoint）",'
+          new_name = '"name": f"{Path(checkpoint_name).with_suffix(\"\").as_posix()}（本地 Checkpoint）",'
+          if text.count(old_name) != 1:
+              raise RuntimeError("checkpoint display name mismatch")
+          text = text.replace(old_name, new_name)
+          source.write_text(text)
+
+          tests = Path("tests/unit/api/test_local_generation.py")
+          test_text = tests.read_text()
+          import_anchor = '''from aigateway_api.local_generation import (
+              delete_custom_preset,
+          '''
+          import_new = '''from aigateway_api.local_generation import (
+              builtin_presets,
+              delete_custom_preset,
+          '''
+          if test_text.count(import_anchor) != 1:
+              raise RuntimeError("test import block mismatch")
+          test_text = test_text.replace(import_anchor, import_new)
+          test_text = test_text.replace(
+              'assert preset["source"] == "discovered"\n',
+              'assert preset["source"] == "discovered"\n    assert preset["name"] == "portraits/cinematic（本地 Checkpoint）"\n',
+              1,
+          )
+          test_text += '''
+
+          def test_multistage_presets_require_the_sdxl_stage():
+              presets = {
+                  preset["id"]: preset
+                  for preset in builtin_presets(
+                      {
+                          "checkpoint_name": "default.safetensors",
+                          "allowed_checkpoints": [],
+                          "qwen_image_enabled": True,
+                          "qwen_image_diffusion_model": "qwen.safetensors",
+                          "qwen_image_text_encoder": "qwen-clip.safetensors",
+                          "qwen_image_vae": "qwen-vae.safetensors",
+                          "video_enabled": True,
+                          "video_diffusion_model": "wan.safetensors",
+                          "video_text_encoder": "wan-clip.safetensors",
+                          "video_vae": "wan-vae.safetensors",
+                      }
+                  )
+              }
+
+              for preset_id in ("qwen-image", "wan2.2-ti2v-5b"):
+                  preset = presets[preset_id]
+                  assert preset["enabled"] is False
+                  assert "checkpoints/default.safetensors" in preset["dependencies"]["models"]
+                  assert "CheckpointLoaderSimple" in preset["dependencies"]["nodes"]
+                  assert (
+                      "checkpoint_not_allowlisted:default.safetensors"
+                      in preset["configuration_errors"]
+                  )
+          '''
+          tests.write_text(test_text)
+          PY
+
+          python -m compileall -q aigateway-api/src tests/unit/api
+          pip install -e aigateway-core
+          pip install -e aigateway-api
+          pip install pytest pytest-asyncio
+          python -m pytest tests/unit/api/test_local_generation.py -q
+
+          rm -f .github/workflows/branch-fix-preset-dependencies.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "fix(generation): declare multistage preset dependencies"
+          git push origin HEAD:feat/gpu-scheduler-topology
