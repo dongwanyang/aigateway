@@ -5,7 +5,6 @@ import threading
 import time
 
 import yaml
-
 from aigateway_core.shared import runtime_values
 
 

@@ -3,18 +3,19 @@ from __future__ import annotations
 import threading
 
 import pytest
-from fastapi import HTTPException
-
 from aigateway_api import gpu_routes
-from aigateway_api.embedding_model_runtime import EmbeddingModelRuntime
-from aigateway_api.embedding_model_runtime import embedding_model_runtime
+from aigateway_api.embedding_model_runtime import (
+    EmbeddingModelRuntime,
+    embedding_model_runtime,
+)
+from fastapi import HTTPException
 
 
 class Model:
     def __init__(self) -> None:
         self.devices: list[str] = []
 
-    def to(self, device: str) -> "Model":
+    def to(self, device: str) -> Model:
         self.devices.append(device)
         return self
 
@@ -67,7 +68,7 @@ def test_new_inference_waits_until_release_finishes() -> None:
     lease_acquired = threading.Event()
 
     class SlowModel(Model):
-        def to(self, device: str) -> "SlowModel":
+        def to(self, device: str) -> SlowModel:
             release_started.set()
             assert allow_release.wait(timeout=2)
             super().to(device)

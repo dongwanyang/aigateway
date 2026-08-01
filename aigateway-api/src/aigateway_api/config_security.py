@@ -483,12 +483,12 @@ def transactional_replace_config(
 
 
 __all__ = [
+    "MASKED_SECRET",
     "ConfigCommit",
     "ConfigPreconditionRequiredError",
     "ConfigUpdateBusyError",
     "ConfigValidationError",
     "ConfigVersionConflictError",
-    "MASKED_SECRET",
     "config_revision",
     "config_revision_bytes",
     "read_versioned_yaml_config",

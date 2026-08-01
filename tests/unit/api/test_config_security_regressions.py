@@ -8,15 +8,13 @@ from types import SimpleNamespace
 import httpx
 import pytest
 import yaml
-from fastapi import APIRouter, HTTPException, Request
-
 from aigateway_api import admin_routes, safe_http, security_routes
 from aigateway_api.config_security import (
+    MASKED_SECRET,
     ConfigPreconditionRequiredError,
     ConfigUpdateBusyError,
     ConfigValidationError,
     ConfigVersionConflictError,
-    MASKED_SECRET,
     config_revision,
     redact_config,
     restore_masked_values,
@@ -25,6 +23,7 @@ from aigateway_api.config_security import (
 from aigateway_api.security_routes import _validate_public_url
 from aigateway_core.shared.config import ConfigManager
 from aigateway_core.shared.configured_config import ConfigReloadCallbackError
+from fastapi import APIRouter, HTTPException, Request
 
 
 def _config() -> dict:

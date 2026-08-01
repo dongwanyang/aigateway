@@ -106,7 +106,7 @@ __all__ = [
     "CostEstimate",
     "PricingCost",
     "PricingStatus",
+    "_estimate_cost",
     "estimate_model_cost",
     "numeric_cost",
-    "_estimate_cost",
 ]

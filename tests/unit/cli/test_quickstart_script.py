@@ -12,6 +12,15 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
+def _path_with_unavailable_nvidia_smi(tmp_path: Path) -> str:
+    fake_bin = tmp_path / "no-nvidia-bin"
+    fake_bin.mkdir()
+    nvidia_smi = fake_bin / "nvidia-smi"
+    nvidia_smi.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    nvidia_smi.chmod(0o755)
+    return f"{fake_bin}:/usr/bin:/bin"
+
+
 def _fixture_repo(tmp_path: Path) -> Path:
     scripts = tmp_path / "scripts"
     scripts.mkdir()
@@ -52,7 +61,7 @@ def test_quickstart_generates_full_cpu_source_state_without_nvidia(tmp_path):
         "source",
         "--monitoring",
         "--no-start",
-        env={"PATH": "/usr/bin:/bin"},
+        env={"PATH": _path_with_unavailable_nvidia_smi(tmp_path)},
     )
 
     state = (tmp_path / ".aigateway-install.env").read_text(encoding="utf-8")
@@ -96,7 +105,7 @@ def test_quickstart_refuses_to_start_local_comfyui_without_nvidia(tmp_path):
         "--distribution",
         "source",
         check=False,
-        env={"PATH": "/usr/bin:/bin"},
+        env={"PATH": _path_with_unavailable_nvidia_smi(tmp_path)},
     )
     assert result.returncode != 0
     assert "未检测到可用 NVIDIA GPU" in result.stderr

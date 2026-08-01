@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import yaml
-
 from aigateway_api.config_security import transactional_replace_config
 from aigateway_core.shared.config import ConfigManager
 

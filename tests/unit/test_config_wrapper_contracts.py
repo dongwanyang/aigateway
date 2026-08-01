@@ -8,7 +8,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import yaml
-
 from aigateway_core.pipelines.generation._common.config import (
     DraftWorkflowConfig,
     parse_generation_optimization_config,

@@ -3,7 +3,6 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-
 from aigateway_api import auth_routes, browser_auth
 
 

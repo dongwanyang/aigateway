@@ -5,7 +5,13 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+from aigateway_api import main
 from aigateway_api.main import _configure_cuda_memory_limit
+
+
+@pytest.fixture(autouse=True)
+def _reset_cuda_memory_limit_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(main, "_cuda_memory_limit_applied", False)
 
 
 def test_cuda_memory_limit_is_noop_when_unset(monkeypatch):

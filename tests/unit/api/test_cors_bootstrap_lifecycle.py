@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import yaml
-
 import aigateway_api
+import yaml
 from aigateway_core.shared.config import ConfigManager
 
 
@@ -32,7 +31,7 @@ def test_yaml_cors_bootstrap_does_not_become_runtime_env_override(
         "AI_GATEWAY_CORS_ORIGINS_BOOTSTRAPPED_FROM_YAML",
         raising=False,
     )
-    monkeypatch.setattr(aigateway_api, "_dotenv_bootstrap_values", lambda: {})
+    monkeypatch.setattr(aigateway_api, "_dotenv_bootstrap_values", dict)
 
     aigateway_api._preload_cors_origins()
 
