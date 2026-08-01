@@ -1400,7 +1400,7 @@ return {3, raw}
         allowed = set(self._comfyui_config.allowed_checkpoints)
         if checkpoint not in allowed:
             raise DraftWorkflowError(
-                f"comfyui_checkpoint_not_allowed: {checkpoint}"
+                f"comfyui_checkpoint_not_allowed: checkpoint not allowlisted: {checkpoint}"
             )
         return checkpoint
 
@@ -1447,7 +1447,7 @@ return {3, raw}
                 raise DraftWorkflowError("comfyui_invalid_checkpoint_preset") from exc
             if checkpoint_name not in set(self._comfyui_config.allowed_checkpoints):
                 raise DraftWorkflowError(
-                    f"comfyui_checkpoint_not_allowed: {checkpoint_name}"
+                    f"comfyui_checkpoint_not_allowed: checkpoint not allowlisted: {checkpoint_name}"
                 )
             # Presence and suffix are insufficient evidence of workflow
             # compatibility or scheduling cost. Requiring a server-side budget
@@ -1493,7 +1493,7 @@ return {3, raw}
             return self._validate_checkpoint()
         if checkpoint_name not in set(self._comfyui_config.allowed_checkpoints):
             raise DraftWorkflowError(
-                f"comfyui_checkpoint_not_allowed: {checkpoint_name}"
+                f"comfyui_checkpoint_not_allowed: checkpoint not allowlisted: {checkpoint_name}"
             )
         try:
             return validate_checkpoint_file(

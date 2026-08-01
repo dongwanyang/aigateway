@@ -70,7 +70,13 @@ def strategy(default_config, monkeypatch):
     instance = DraftGeneratorStrategy(
         config=default_config,
         redis_client=None,
-        comfyui_config=ComfyUIConfig(workflow_version="image-v1"),
+        comfyui_config=ComfyUIConfig(
+          workflow_version="image-v1",
+          checkpoint_name="test-model.safetensors",
+          allowed_checkpoints=["test-model.safetensors"],
+          checkpoint_vram_gb={"test-model.safetensors": 8.0},
+          sdxl_required_vram_gb=8.0,
+      ),
     )
     monkeypatch.setattr(instance, "_check_comfyui", AsyncMock(return_value=None))
     monkeypatch.setattr(
