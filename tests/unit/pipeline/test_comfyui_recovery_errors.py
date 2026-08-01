@@ -63,15 +63,43 @@ async def test_runtime_recovery_preserves_comfyui_oom_root_cause(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_runtime_recovery_uses_generic_code_for_unknown_failures(tmp_path):
+async def test_runtime_recovery_retries_unknown_failures_before_failing_closed(tmp_path):
     strategy = make_strategy(tmp_path)
     draft = make_running_draft("unknown")
     await strategy._store_draft(draft, ttl_seconds=3600)
     strategy._get_comfy_prompt_state = AsyncMock(return_value="completed")
     strategy._poll_results = AsyncMock(side_effect=ValueError("invalid output"))
 
+    first = await strategy.sync_draft_runtime_state(draft.draft_id)
+    second = await strategy.sync_draft_runtime_state(draft.draft_id)
+    third = await strategy.sync_draft_runtime_state(draft.draft_id)
+
+    assert first is not None and first.status == DRAFT_STATUS_RUNNING
+    assert second is not None and second.status == DRAFT_STATUS_RUNNING
+    assert first.generation_params["recovery_attempts"] == 1
+    assert second.generation_params["recovery_attempts"] == 2
+    assert third is not None
+    assert third.status == DRAFT_STATUS_FAILED
+    assert third.error == "comfyui_recovery_failed"
+    assert third.generation_params["recovery_attempts"] == 3
+
+
+@pytest.mark.asyncio
+async def test_completed_job_download_timeout_is_not_execution_timeout(tmp_path):
+    strategy = make_strategy(tmp_path)
+    draft = make_running_draft("download-timeout")
+    await strategy._store_draft(draft, ttl_seconds=3600)
+    strategy._get_comfy_prompt_state = AsyncMock(return_value="completed")
+    strategy._poll_results = AsyncMock(
+        side_effect=DraftWorkflowError(
+            "ComfyUI 工作流执行超时 (1s): prompt_id=prompt-download-timeout"
+        )
+    )
+
     synced = await strategy.sync_draft_runtime_state(draft.draft_id)
 
     assert synced is not None
-    assert synced.status == DRAFT_STATUS_FAILED
-    assert synced.error == "comfyui_recovery_failed"
+    assert synced.status == DRAFT_STATUS_RUNNING
+    assert synced.error is None
+    assert synced.generation_params["recovery_error"] == "comfyui_recovery_failed"
+    assert synced.generation_params["recovery_attempts"] == 1

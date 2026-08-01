@@ -926,12 +926,49 @@ return {3, raw}
                 public_error = self._public_comfyui_error_code(
                     exc, fallback=recovery_error
                 )
+                terminal_errors = {
+                    "comfyui_gpu_out_of_memory",
+                    "comfyui_storage_low",
+                    "comfyui_workflow_execution_failed",
+                    "comfyui_missing_dependencies",
+                    "comfyui_model_budget_exceeded",
+                    "comfyui_output_budget_exceeded",
+                }
                 draft.generation_params["recovery_error"] = recovery_error
-                return await self._mark_in_progress_draft_lost(
-                    draft,
-                    public_error,
-                    f"Completed ComfyUI job could not be recovered: {type(exc).__name__}",
+                if public_error in terminal_errors:
+                    return await self._mark_in_progress_draft_lost(
+                        draft,
+                        public_error,
+                        f"Completed ComfyUI job reported a terminal error: {type(exc).__name__}",
+                    )
+
+                recovery_attempts = int(
+                    draft.generation_params.get("recovery_attempts", 0) or 0
+                ) + 1
+                draft.generation_params["recovery_attempts"] = recovery_attempts
+                draft.generation_params["last_recovery_error_type"] = type(exc).__name__
+                reason = (
+                    "Completed ComfyUI job output could not be recovered: "
+                    f"{type(exc).__name__}"
                 )
+                if recovery_attempts >= 3:
+                    return await self._mark_in_progress_draft_lost(
+                        draft, recovery_error, reason
+                    )
+
+                await self._store_draft(
+                    draft, max(1, int(draft.expires_at - time.time()))
+                )
+                logger.warning(
+                    "generation_optimization.draft_generator.runtime_recovery_retry",
+                    extra={
+                        "draft_id": draft_id,
+                        "prompt_id": prompt_id,
+                        "recovery_attempt": recovery_attempts,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                return draft
             draft.previews = previews
             draft.status = DRAFT_STATUS_PENDING
             draft.stage = "pending"
@@ -1210,6 +1247,8 @@ return {3, raw}
 
     def _validate_qwen_image_models(self) -> tuple[str, str, str]:
         config = self._comfyui_config
+        if not config.qwen_image_enabled:
+            raise DraftWorkflowError("comfyui_qwen_image_disabled")
         approved = (
             (
                 config.qwen_image_diffusion_model,
@@ -1262,7 +1301,11 @@ return {3, raw}
         # Never select it solely from prompt language unless the deployment has
         # explicitly opted into that policy. An explicit preset always wins.
         if request.preset_id:
-            return request.preset_id == "qwen-image"
+            if request.preset_id != "qwen-image":
+                return False
+            if not self._comfyui_config.qwen_image_enabled:
+                raise DraftWorkflowError("comfyui_qwen_image_disabled")
+            return True
         if not self._comfyui_config.qwen_image_auto_select:
             return False
         source_prompt = request.source_prompt or request.prompt

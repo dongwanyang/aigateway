@@ -36,6 +36,14 @@ interface ComfyStatusView {
   error?: string | null
 }
 
+interface GatewayGpuStatusView {
+  available?: boolean
+  torch_initialized?: boolean
+  allocated_bytes?: number
+  reserved_bytes?: number
+  error?: string | null
+}
+
 interface GenerationPresetView {
   configuration_status?: 'ready' | 'disabled' | 'configuration_error'
   configuration_errors?: unknown
@@ -309,6 +317,7 @@ export default function Config() {
   const remoteError = configQuery.error ?? schemaQuery.error ?? saveMutation.error
   const error = localError ?? (remoteError instanceof Error ? remoteError.message : null)
   const comfyStatus = comfyQuery.data as ComfyStatusView | undefined
+  const gatewayStatus = gpuQuery.data?.gateway as GatewayGpuStatusView | undefined
   const comfyConfigurationErrors = stringList(comfyStatus?.configuration_errors)
   const comfyHasConfigurationError = comfyConfigurationErrors.length > 0
   const comfyStatusText = comfyQuery.isLoading
@@ -495,15 +504,22 @@ export default function Config() {
           <div className="grid grid-cols-1 gap-3 mb-4 md:grid-cols-2">
             <div className="rounded-lg border p-3" style={{ borderColor: 'var(--color-border)' }}>
               <div className="text-xs font-semibold mb-2">Gateway / PyTorch</div>
-              {gpuQuery.data.gateway.available ? (
+              {gatewayStatus?.torch_initialized ? (
                 <div className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>
-                  allocated {formatBytes(gpuQuery.data.gateway.allocated_bytes)} · reserved {formatBytes(gpuQuery.data.gateway.reserved_bytes)}
+                  allocated {formatBytes(gatewayStatus.allocated_bytes)} · reserved {formatBytes(gatewayStatus.reserved_bytes)}
                 </div>
-              ) : (
+              ) : gatewayStatus?.available ? (
                 <div role="status" className="space-y-1">
                   <div className="text-xs font-medium" style={{ color: 'var(--color-text-secondary)' }}>未初始化 CUDA</div>
                   <div className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>
-                    Gateway 当前未建立 CUDA 上下文，以避免空闲占用 ComfyUI 显存；这不表示 GPU 或驱动不可用。
+                    GPU 设备可用，但 Gateway 尚未建立 CUDA 上下文，以避免空闲占用 ComfyUI 显存。
+                  </div>
+                </div>
+              ) : (
+                <div role="alert" className="space-y-1">
+                  <div className="text-xs font-medium" style={{ color: 'var(--color-danger)' }}>GPU 状态不可用</div>
+                  <div className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>
+                    无法通过 nvidia-smi 或 PyTorch 获取设备状态{gatewayStatus?.error ? `：${gatewayStatus.error}` : '。'}
                   </div>
                 </div>
               )}
