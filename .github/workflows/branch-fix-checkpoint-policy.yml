@@ -1,11 +1,11 @@
 name: Branch Fix Checkpoint Policy
 
 on:
-  push:
-    branches:
-      - feat/gpu-scheduler-topology
+  pull_request:
+    branches: [main]
     paths:
       - .github/checkpoint-fix-trigger.txt
+      - .github/workflows/branch-fix-checkpoint-policy.yml
 
 permissions:
   contents: write
