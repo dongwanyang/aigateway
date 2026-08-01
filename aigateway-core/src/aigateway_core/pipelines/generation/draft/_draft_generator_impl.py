@@ -345,6 +345,32 @@ class DraftGeneratorStrategy:
                 },
             )
 
+    @staticmethod
+    def _public_comfyui_error_code(
+        exc: BaseException, *, fallback: str
+    ) -> str:
+        """Return a stable public error code without discarding the root cause."""
+        error_text = str(exc).lower()
+        known_codes = (
+            "comfyui_gpu_out_of_memory",
+            "comfyui_execution_timeout",
+            "comfyui_storage_low",
+            "comfyui_workflow_execution_failed",
+            "comfyui_missing_dependencies",
+            "comfyui_model_budget_exceeded",
+            "comfyui_output_budget_exceeded",
+        )
+        for code in known_codes:
+            if code in error_text:
+                return code
+        if "out of memory" in error_text or "cuda error: memory" in error_text:
+            return "comfyui_gpu_out_of_memory"
+        if "执行超时" in error_text or "timeout" in error_text:
+            return "comfyui_execution_timeout"
+        if "storage" in error_text:
+            return "comfyui_storage_low"
+        return fallback
+
     async def _generate_draft_async(
         self,
         draft_id: str,
@@ -483,15 +509,9 @@ class DraftGeneratorStrategy:
             try:
                 draft_dir = self._ensure_draft_dir(chat_session_id, draft_id)
                 meta = self._read_meta(draft_dir) or {}
-                error_text = str(exc).lower()
-                if "gpu_out_of_memory" in error_text or "out of memory" in error_text:
-                    public_error = "comfyui_gpu_out_of_memory"
-                elif "执行超时" in error_text or "timeout" in error_text:
-                    public_error = "comfyui_execution_timeout"
-                elif "storage" in error_text:
-                    public_error = "comfyui_storage_low"
-                else:
-                    public_error = "comfyui_generation_failed"
+                public_error = self._public_comfyui_error_code(
+                    exc, fallback="comfyui_generation_failed"
+                )
                 meta.update({
                     "draft_id": draft_id,
                     "session_id": chat_session_id,
@@ -902,9 +922,14 @@ return {3, raw}
             except Exception as exc:
                 if isinstance(exc, asyncio.CancelledError):
                     raise
+                recovery_error = "comfyui_recovery_failed"
+                public_error = self._public_comfyui_error_code(
+                    exc, fallback=recovery_error
+                )
+                draft.generation_params["recovery_error"] = recovery_error
                 return await self._mark_in_progress_draft_lost(
                     draft,
-                    "comfyui_recovery_failed",
+                    public_error,
                     f"Completed ComfyUI job could not be recovered: {type(exc).__name__}",
                 )
             draft.previews = previews
