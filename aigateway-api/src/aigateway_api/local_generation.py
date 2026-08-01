@@ -137,6 +137,10 @@ def builtin_presets(comfy: dict[str, Any]) -> list[dict[str, Any]]:
         ],
         feature_enabled=qwen_enabled,
     )
+    # Standard confirmation refines the approved Qwen draft with the
+    # configured SDXL checkpoint, so availability covers both stages.
+    qwen_models = list(dict.fromkeys([*qwen_models, *sdxl_models]))
+    qwen_errors = list(dict.fromkeys([*qwen_errors, *sdxl_errors]))
     video_enabled = bool(comfy.get("video_enabled", False))
     video_models, video_errors = _preset_model_requirements(
         [
@@ -146,6 +150,10 @@ def builtin_presets(comfy: dict[str, Any]) -> list[dict[str, Any]]:
         ],
         feature_enabled=video_enabled,
     )
+    # Video generation first creates an SDXL keyframe, then runs Wan.
+    # Do not advertise the preset unless both stages are configured.
+    video_models = list(dict.fromkeys([*video_models, *sdxl_models]))
+    video_errors = list(dict.fromkeys([*video_errors, *sdxl_errors]))
     upscale_enabled = bool(comfy.get("upscale_enabled", False))
     upscale_models, upscale_errors = _preset_model_requirements(
         [("upscale_models", "upscale_model", upscale)],
@@ -203,6 +211,10 @@ def builtin_presets(comfy: dict[str, Any]) -> list[dict[str, Any]]:
             "dependencies": {
                 "models": qwen_models,
                 "nodes": [
+                    "LoadImage",
+                    "ImageScale",
+                    "CheckpointLoaderSimple",
+                    "VAEEncode",
                     "UNETLoader",
                     "CLIPLoader",
                     "VAELoader",
@@ -228,6 +240,11 @@ def builtin_presets(comfy: dict[str, Any]) -> list[dict[str, Any]]:
             "dependencies": {
                 "models": video_models,
                 "nodes": [
+                    "CheckpointLoaderSimple",
+                    "CLIPTextEncode",
+                    "KSampler",
+                    "VAEDecode",
+                    "SaveImage",
                     "UNETLoader",
                     "CLIPLoader",
                     "VAELoader",
@@ -302,7 +319,7 @@ def discovered_checkpoint_presets(comfy: dict[str, Any]) -> list[dict[str, Any]]
         presets.append(
             {
                 "id": preset_id,
-                "name": f"{Path(checkpoint_name).stem}（本地 Checkpoint）",
+                "name": f"{Path(checkpoint_name).with_suffix("").as_posix()}（本地 Checkpoint）",
                 "kind": "image",
                 "builtin": False,
                 "source": "discovered",

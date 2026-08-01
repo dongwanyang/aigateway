@@ -4,6 +4,7 @@ import json
 
 import pytest
 from aigateway_api.local_generation import (
+    builtin_presets,
     delete_custom_preset,
     dependency_status,
     discovered_checkpoint_presets,
@@ -106,6 +107,7 @@ def test_discovers_only_trusted_profiled_checkpoints_as_selectable(tmp_path):
     assert len(presets) == 1
     preset = presets[0]
     assert preset["source"] == "discovered"
+    assert preset["name"] == "portraits/cinematic（本地 Checkpoint）"
     assert preset["selectable"] is True
     assert preset["enabled"] is True
     assert preset["workflow_family"] == "sdxl"
@@ -173,3 +175,33 @@ def test_checkpoint_preset_validation_fails_closed_for_unsafe_paths(tmp_path):
         checkpoint_name_from_preset_id("checkpoint.not-valid-base64!")
     with pytest.raises(ValueError):
         validate_checkpoint_file(str(tmp_path), "missing.safetensors")
+
+
+def test_multistage_presets_require_the_sdxl_stage():
+    presets = {
+        preset["id"]: preset
+        for preset in builtin_presets(
+            {
+                "checkpoint_name": "default.safetensors",
+                "allowed_checkpoints": [],
+                "qwen_image_enabled": True,
+                "qwen_image_diffusion_model": "qwen.safetensors",
+                "qwen_image_text_encoder": "qwen-clip.safetensors",
+                "qwen_image_vae": "qwen-vae.safetensors",
+                "video_enabled": True,
+                "video_diffusion_model": "wan.safetensors",
+                "video_text_encoder": "wan-clip.safetensors",
+                "video_vae": "wan-vae.safetensors",
+            }
+        )
+    }
+
+    for preset_id in ("qwen-image", "wan2.2-ti2v-5b"):
+        preset = presets[preset_id]
+        assert preset["enabled"] is False
+        assert "checkpoints/default.safetensors" in preset["dependencies"]["models"]
+        assert "CheckpointLoaderSimple" in preset["dependencies"]["nodes"]
+        assert (
+            "checkpoint_not_allowlisted:default.safetensors"
+            in preset["configuration_errors"]
+        )
