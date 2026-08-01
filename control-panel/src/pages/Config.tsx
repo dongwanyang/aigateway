@@ -104,8 +104,16 @@ async function fetchPanelJson<T>(path: string, options: RequestInit = {}): Promi
 
 async function getVersionedConfig(): Promise<VersionedConfig> {
   const response = await fetchPanelJson<ConfigObject>('/admin/config')
+  const config = toConfigValue(response.data) as ConfigObject
+  const gpuScheduler = config.gpu_scheduler
+  if (
+    isPlainObject(gpuScheduler)
+    && !('comfyui_dynamic_vram_enabled' in gpuScheduler)
+  ) {
+    gpuScheduler.comfyui_dynamic_vram_enabled = false
+  }
   return {
-    config: toConfigValue(response.data) as ConfigObject,
+    config,
     revision: response.revision ?? '',
   }
 }
@@ -419,6 +427,7 @@ export default function Config() {
         'gateway_devices',
         'comfyui_devices',
         'device_overrides',
+        'comfyui_dynamic_vram_enabled',
       ].some(key => JSON.stringify(
         (config.gpu_scheduler as ConfigObject | undefined)?.[key],
       ) !== JSON.stringify(

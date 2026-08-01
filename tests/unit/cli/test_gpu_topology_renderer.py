@@ -37,6 +37,12 @@ def test_render_topology_creates_one_uuid_bound_worker_per_gpu(count: int) -> No
     for index, worker in enumerate(workers):
         service = "comfyui" if index == 0 else f"comfyui-gpu-{index}"
         assert compose["services"][service]["environment"]["CUDA_VISIBLE_DEVICES"] == worker["device_uuid"]
+        assert (
+            compose["services"][service]["environment"][
+                "COMFYUI_DISABLE_DYNAMIC_VRAM"
+            ]
+            == "${COMFYUI_DISABLE_DYNAMIC_VRAM:-true}"
+        )
         volumes = compose["services"][service]["volumes"]
         assert any(value.endswith("/models:ro") for value in volumes)
         expected_output = (
@@ -61,3 +67,24 @@ def test_select_comfyui_devices_uses_uuid_pool_and_disabled_overrides() -> None:
         },
     )
     assert selected == [{"index": 0, "uuid": "GPU-a"}]
+
+
+def test_render_topology_can_enable_dynamic_vram_from_config() -> None:
+    compose, _ = _module().render_topology(
+        [
+            {
+                "index": 0,
+                "uuid": "GPU-a",
+                "name": "GPU A",
+                "memory_total_mb": 16384,
+            }
+        ],
+        {"comfyui_dynamic_vram_enabled": True},
+    )
+
+    assert (
+        compose["services"]["comfyui"]["environment"][
+            "COMFYUI_DISABLE_DYNAMIC_VRAM"
+        ]
+        == "${COMFYUI_DISABLE_DYNAMIC_VRAM:-false}"
+    )

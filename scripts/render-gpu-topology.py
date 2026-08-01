@@ -100,7 +100,17 @@ def _atomic_yaml(path: Path, value: dict[str, Any]) -> None:
         raise
 
 
-def render_topology(devices: list[dict[str, Any]]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def render_topology(
+    devices: list[dict[str, Any]],
+    scheduler: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    scheduler = scheduler or {}
+    dynamic_vram_enabled = scheduler.get(
+        "comfyui_dynamic_vram_enabled", False
+    )
+    if type(dynamic_vram_enabled) is not bool:
+        raise ValueError("comfyui_dynamic_vram_enabled must be a boolean")
+    disable_dynamic_vram = "false" if dynamic_vram_enabled else "true"
     services: dict[str, Any] = {
         "gateway": {"environment": {"CUDA_VISIBLE_DEVICES": "all"}}
     }
@@ -126,6 +136,10 @@ def render_topology(devices: list[dict[str, Any]]) -> tuple[dict[str, Any], list
             "environment": {
                 "CUDA_VISIBLE_DEVICES": device["uuid"],
                 "COMFYUI_VRAM_FLAG": "${COMFYUI_VRAM_FLAG:-}",
+                "COMFYUI_DISABLE_DYNAMIC_VRAM": (
+                    "${COMFYUI_DISABLE_DYNAMIC_VRAM:-"
+                    f"{disable_dynamic_vram}}}"
+                ),
                 "COMFYUI_CORS_ENABLED": "${COMFYUI_CORS_ENABLED:-true}",
                 "COMFYUI_CORS_ORIGIN": "${COMFYUI_CORS_ORIGIN:-}",
                 "PYTORCH_CUDA_ALLOC_CONF": "${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}",
@@ -211,7 +225,7 @@ def main() -> int:
     devices = select_comfyui_devices(devices, scheduler)
     if not devices:
         raise SystemExit("configured ComfyUI GPU UUID pool has no available devices")
-    compose, workers = render_topology(devices)
+    compose, workers = render_topology(devices, scheduler)
     scheduler.update(
         {
             "enabled": True,

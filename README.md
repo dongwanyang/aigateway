@@ -346,6 +346,12 @@ Compose overlay，然后只重建 Gateway 和受影响的 ComfyUI worker；无�
 挂载 Docker Socket。`gateway_memory_limit_percent` 只是可选的
 PyTorch 进程安全上限，不是严格显存预留，也不参与静态切分。
 
+固定的 ComfyUI 0.28 镜像默认关闭 Dynamic VRAM，规避部分 NVIDIA
+`cudaMallocAsync` 组合在显存仍充足时拒绝极小分配并误报 OOM。确认升级后的
+ComfyUI 与当前硬件稳定后，可在“系统配置 → GPU 动态资源池”把
+`comfyui_dynamic_vram_enabled` 设为 `true`；这是启动参数，保存后需要重建
+ComfyUI worker。环境变量 `COMFYUI_DISABLE_DYNAMIC_VRAM` 的优先级更高。
+
 本机可打开 `http://127.0.0.1:8188`。如果 Docker 运行在远程服务器，
 先从你的电脑建立 SSH 隧道，再打开同一地址：
 

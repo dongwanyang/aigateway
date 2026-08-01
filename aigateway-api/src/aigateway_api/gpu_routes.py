@@ -141,10 +141,16 @@ _GPU_CONFIG_FIELDS = {
     "device_safety_margin_gb",
     "gateway_memory_limit_percent",
     "device_overrides",
+    "comfyui_dynamic_vram_enabled",
     "topology_auto_apply",
     "topology_reconcile_interval_seconds",
 }
-_GPU_RESTART_FIELDS = {"gateway_devices", "comfyui_devices", "device_overrides"}
+_GPU_RESTART_FIELDS = {
+    "gateway_devices",
+    "comfyui_devices",
+    "device_overrides",
+    "comfyui_dynamic_vram_enabled",
+}
 
 
 @router.put("/gpu/config")

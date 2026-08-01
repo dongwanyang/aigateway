@@ -595,6 +595,42 @@ async def test_sync_marks_stale_running_draft_without_prompt_failed(strategy, im
 
 
 @pytest.mark.asyncio
+async def test_sync_keeps_stale_draft_while_owned_worker_is_waiting(strategy):
+    """A live local task waiting for a GPU lease must not be reported as lost."""
+    draft = DraftResult(
+        draft_id="queued-with-live-worker",
+        previews=[],
+        generation_params={"trace_id": "trace-queued"},
+        created_at=time.time() - 120,
+        expires_at=time.time() + 3600,
+        attempt_number=1,
+        max_attempts=5,
+        status=DRAFT_STATUS_RUNNING,
+        media_type="image",
+        session_id="sess-queued",
+        progress=0.1,
+        stage="running",
+    )
+    await strategy._store_draft(draft, ttl_seconds=3600)
+    task = asyncio.create_task(
+        asyncio.Event().wait(),
+        name=f"draft-generate-{draft.draft_id}",
+    )
+    strategy._bg_tasks.add(task)
+    task.add_done_callback(strategy._bg_tasks.discard)
+
+    try:
+        synced = await strategy.sync_draft_runtime_state(draft.draft_id)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert synced is not None
+    assert synced.status == DRAFT_STATUS_RUNNING
+    assert synced.error is None
+
+
+@pytest.mark.asyncio
 async def test_sync_keeps_running_draft_when_comfyui_state_check_is_transient(
     strategy,
 ):

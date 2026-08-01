@@ -75,6 +75,7 @@ class GpuSchedulerConfig:
     device_safety_margin_gb: float = 2.0
     gateway_memory_limit_percent: float | None = None
     device_overrides: tuple[Mapping[str, Any], ...] = ()
+    comfyui_dynamic_vram_enabled: bool = False
     topology_auto_apply: bool = True
     topology_reconcile_interval_seconds: float = 10.0
 
@@ -89,6 +90,10 @@ class GpuSchedulerConfig:
             raise GpuSchedulerConfigError("gateway_fallback must be cpu, wait, or fail")
         if type(raw.get("topology_auto_apply", True)) is not bool:
             raise GpuSchedulerConfigError("topology_auto_apply must be a boolean")
+        if type(raw.get("comfyui_dynamic_vram_enabled", False)) is not bool:
+            raise GpuSchedulerConfigError(
+                "comfyui_dynamic_vram_enabled must be a boolean"
+            )
         ttl = _positive_number(raw.get("lease_ttl_seconds", 15), "lease_ttl_seconds")
         heartbeat = _positive_number(
             raw.get("lease_heartbeat_seconds", 5), "lease_heartbeat_seconds"
@@ -172,6 +177,9 @@ class GpuSchedulerConfig:
             ),
             gateway_memory_limit_percent=percentage,
             device_overrides=tuple(dict(item) for item in overrides),
+            comfyui_dynamic_vram_enabled=raw.get(
+                "comfyui_dynamic_vram_enabled", False
+            ),
             topology_auto_apply=raw.get("topology_auto_apply", True),
             topology_reconcile_interval_seconds=_positive_number(
                 raw.get("topology_reconcile_interval_seconds", 10),
@@ -195,6 +203,7 @@ class GpuDevice:
     name: str = "GPU"
     total_memory_gb: float = 0.0
     free_memory_gb: float = 0.0
+    worker_reserved_memory_gb: float = 0.0
     gateway_leases: set[str] = field(default_factory=set)
     resident_components: set[str] = field(default_factory=set)
     draining: bool = False
@@ -343,6 +352,9 @@ class GpuResourceCoordinator:
             gateway_devices=self._config.gateway_devices,
             comfyui_devices=self._config.comfyui_devices,
             device_overrides=self._config.device_overrides,
+            comfyui_dynamic_vram_enabled=(
+                self._config.comfyui_dynamic_vram_enabled
+            ),
         )
 
     def register_release_hook(self, component: str, hook: ReleaseHook) -> None:
@@ -566,7 +578,20 @@ class GpuResourceCoordinator:
                 margin_gb = max(0.0, float(margin))
             except (TypeError, ValueError):
                 margin_gb = self._config.device_safety_margin_gb
-            usable = device.free_memory_gb - margin_gb
+            # ComfyUI's torch allocator keeps model weights reserved after a
+            # prompt finishes. That memory is not reported as device-free, but
+            # it is reusable by the same worker for its next workflow. Treating
+            # only raw free VRAM as capacity makes a successfully loaded model
+            # permanently disqualify its worker from subsequent generations.
+            reported_capacity = (
+                device.free_memory_gb + device.worker_reserved_memory_gb
+            )
+            reusable_capacity = (
+                min(device.total_memory_gb, reported_capacity)
+                if device.total_memory_gb > 0
+                else reported_capacity
+            )
+            usable = reusable_capacity - margin_gb
             if usable < memory_requirement_gb:
                 continue
             score = usable - memory_requirement_gb - worker.queue_running * 4 - worker.queue_pending * 2
@@ -845,6 +870,16 @@ class GpuResourceCoordinator:
                             free_memory_gb = probe.get("free_memory_gb")
                             if device is not None and free_memory_gb is not None:
                                 device.free_memory_gb = float(free_memory_gb)
+                            worker_reserved_memory_gb = probe.get(
+                                "worker_reserved_memory_gb"
+                            )
+                            if (
+                                device is not None
+                                and worker_reserved_memory_gb is not None
+                            ):
+                                device.worker_reserved_memory_gb = max(
+                                    0.0, float(worker_reserved_memory_gb)
+                                )
                         except asyncio.CancelledError:
                             raise
                         except Exception as exc:
@@ -917,6 +952,9 @@ class GpuResourceCoordinator:
                 "name": device.name,
                 "total_memory_gb": round(device.total_memory_gb, 3),
                 "free_memory_gb": round(device.free_memory_gb, 3),
+                "worker_reserved_memory_gb": round(
+                    device.worker_reserved_memory_gb, 3
+                ),
                 "state": state,
                 "gateway_leases": len(device.gateway_leases),
                 "resident_components": sorted(device.resident_components),

@@ -128,6 +128,7 @@ def test_gpu_scheduler_parameters_have_user_facing_descriptions(
         "device_safety_margin_gb",
         "gateway_memory_limit_percent",
         "device_overrides",
+        "comfyui_dynamic_vram_enabled",
         "topology_auto_apply",
         "topology_reconcile_interval_seconds",
     }

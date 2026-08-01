@@ -74,9 +74,14 @@ def test_scheduler_config_validates_heartbeat_and_exposes_defaults() -> None:
     assert config.generation_wait_timeout_seconds == 120
     assert config.comfyui_idle_reservation_seconds == 60
     assert config.gateway_memory_limit_percent is None
+    assert config.comfyui_dynamic_vram_enabled is False
     with pytest.raises(GpuSchedulerConfigError, match="less than"):
         GpuSchedulerConfig.from_mapping(
             {"lease_ttl_seconds": 5, "lease_heartbeat_seconds": 5}
+        )
+    with pytest.raises(GpuSchedulerConfigError, match="must be a boolean"):
+        GpuSchedulerConfig.from_mapping(
+            {"comfyui_dynamic_vram_enabled": "false"}
         )
 
 
@@ -141,6 +146,36 @@ async def test_generation_timeout_is_configurable() -> None:
 
 
 @pytest.mark.asyncio
+async def test_generation_reuses_memory_reserved_by_comfy_worker() -> None:
+    device = GpuDevice(
+        "GPU-a",
+        0,
+        "resident-model",
+        total_memory_gb=16,
+        free_memory_gb=7.5,
+        worker_reserved_memory_gb=6.5,
+    )
+    coordinator = GpuResourceCoordinator(
+        GpuSchedulerConfig.from_mapping(
+            {
+                "device_safety_margin_gb": 2,
+                "generation_wait_timeout_seconds": 0.01,
+                "comfyui_idle_reservation_seconds": 0,
+            }
+        ),
+        devices=[device],
+        workers=[ComfyWorker("worker-a", "GPU-a", "http://worker")],
+    )
+
+    async with coordinator.generation_lease(
+        "image", memory_requirement_gb=8
+    ) as worker:
+        assert worker.worker_id == "worker-a"
+
+    await coordinator.close()
+
+
+@pytest.mark.asyncio
 async def test_oom_quarantine_and_hot_update_preserve_restart_topology() -> None:
     coordinator = _coordinator(
         gateway_devices=["GPU-a"],
@@ -153,12 +188,14 @@ async def test_oom_quarantine_and_hot_update_preserve_restart_topology() -> None
             {
                 "gateway_devices": ["GPU-b"],
                 "comfyui_devices": ["GPU-b"],
+                "comfyui_dynamic_vram_enabled": True,
                 "generation_wait_timeout_seconds": 0.01,
             }
         )
         async with coordinator.generation_lease("video"):
             pass
     assert coordinator.config.gateway_devices == ("GPU-a",)
+    assert coordinator.config.comfyui_dynamic_vram_enabled is False
     assert coordinator.config.generation_wait_timeout_seconds == 0.01
     await coordinator.close()
 

@@ -1023,6 +1023,15 @@ return {3, raw}
         if not prompt_id:
             if age_seconds < _DRAFT_RUNTIME_STALE_GRACE_SECONDS:
                 return draft
+            active_task_names = {
+                f"draft-generate-{draft_id}",
+                f"draft-regenerate-{draft_id}",
+            }
+            if any(
+                not task.done() and task.get_name() in active_task_names
+                for task in self._bg_tasks
+            ):
+                return draft
             return await self._mark_in_progress_draft_lost(
                 draft,
                 "draft_worker_lost",

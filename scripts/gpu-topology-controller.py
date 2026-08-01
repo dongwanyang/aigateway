@@ -24,7 +24,15 @@ TOPOLOGY_FIELDS = (
     "gateway_devices",
     "comfyui_devices",
     "device_overrides",
+    "comfyui_dynamic_vram_enabled",
 )
+
+TOPOLOGY_DEFAULTS: dict[str, Any] = {
+    "gateway_devices": "auto",
+    "comfyui_devices": "auto",
+    "device_overrides": [],
+    "comfyui_dynamic_vram_enabled": False,
+}
 
 
 def _load_renderer(repo_root: Path) -> ModuleType:
@@ -58,7 +66,10 @@ def _fingerprint(
     scheduler: dict[str, Any], inventory: list[dict[str, Any]]
 ) -> str:
     value = {
-        "config": {field: scheduler.get(field, "auto") for field in TOPOLOGY_FIELDS},
+        "config": {
+            field: scheduler.get(field, TOPOLOGY_DEFAULTS[field])
+            for field in TOPOLOGY_FIELDS
+        },
         "inventory": [
             {
                 "index": item.get("index"),
@@ -138,7 +149,7 @@ def reconcile(repo_root: Path, *, apply: bool = True) -> bool:
     if not selected:
         raise RuntimeError("configured ComfyUI GPU UUID pool has no available devices")
     fingerprint = _fingerprint(scheduler, inventory)
-    compose, workers = renderer.render_topology(selected)
+    compose, workers = renderer.render_topology(selected, scheduler)
     desired_compose = yaml.safe_dump(compose, sort_keys=False, allow_unicode=True)
     current_compose = (
         generated_compose.read_text(encoding="utf-8")

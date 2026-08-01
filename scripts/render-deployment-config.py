@@ -120,6 +120,7 @@ def render(
     scheduler.setdefault("gateway_devices", "auto")
     scheduler.setdefault("comfyui_devices", "auto")
     scheduler.setdefault("gateway_fallback", "cpu")
+    scheduler.setdefault("comfyui_dynamic_vram_enabled", False)
 
     config["deployment"] = {
         "edition": edition,

@@ -147,3 +147,64 @@ def test_controller_retries_after_compose_apply_failure(
     assert sum("up" in command for command in calls) == 2
     applied = json.loads(state_path.read_text(encoding="utf-8"))
     assert set(applied) == {"fingerprint"}
+
+
+def test_dynamic_vram_config_change_recreates_worker(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runtime = tmp_path / ".aigateway" / "runtime"
+    runtime.mkdir(parents=True)
+    renderer = _module(
+        REPO_ROOT / "scripts" / "render-gpu-topology.py", "dynamic_renderer"
+    )
+    controller = _module(
+        REPO_ROOT / "scripts" / "gpu-topology-controller.py",
+        "dynamic_controller",
+    )
+    inventory = [
+        {"index": 0, "uuid": "GPU-a", "name": "GPU A", "memory_total_mb": 16384}
+    ]
+    monkeypatch.setattr(renderer, "discover_devices", lambda: inventory)
+    monkeypatch.setattr(controller, "_load_renderer", lambda _root: renderer)
+    (tmp_path / ".aigateway-install.env").write_text(
+        "AIGATEWAY_ACCELERATOR=cuda\nAIGATEWAY_PRODUCTION=false\n",
+        encoding="utf-8",
+    )
+    config = {
+        "gpu_scheduler": {
+            "comfyui_devices": "auto",
+            "comfyui_dynamic_vram_enabled": False,
+            "topology_auto_apply": True,
+        }
+    }
+    initial_compose, workers = renderer.render_topology(
+        inventory, config["gpu_scheduler"]
+    )
+    config["gpu_scheduler"]["workers"] = workers
+    renderer._atomic_yaml(runtime / "config.yaml", config)
+    renderer._atomic_yaml(
+        runtime / "docker-compose.gpu.generated.yml", initial_compose
+    )
+    assert controller.reconcile(tmp_path, apply=True) is False
+
+    config["gpu_scheduler"]["comfyui_dynamic_vram_enabled"] = True
+    renderer._atomic_yaml(runtime / "config.yaml", config)
+    calls: list[list[str]] = []
+
+    def _run(command, **_kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(controller.subprocess, "run", _run)
+    assert controller.reconcile(tmp_path, apply=True) is True
+
+    generated = yaml.safe_load(
+        (runtime / "docker-compose.gpu.generated.yml").read_text()
+    )
+    assert (
+        generated["services"]["comfyui"]["environment"][
+            "COMFYUI_DISABLE_DYNAMIC_VRAM"
+        ]
+        == "${COMFYUI_DISABLE_DYNAMIC_VRAM:-false}"
+    )
+    assert any("--force-recreate" in command for command in calls)

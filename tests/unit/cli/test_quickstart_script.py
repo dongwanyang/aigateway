@@ -149,6 +149,7 @@ exit 0
     assert runtime["deployment"]["shared_gpu"] is True
     clip = runtime["generation_optimization"]["token_compressor"]["clip"]
     assert clip["device"] == "auto"
+    assert runtime["gpu_scheduler"]["comfyui_dynamic_vram_enabled"] is False
     assert runtime["gpu_scheduler"]["workers"][0]["device_uuid"] == "GPU-test"
     assert (tmp_path / ".aigateway/runtime/docker-compose.gpu.generated.yml").exists()
 

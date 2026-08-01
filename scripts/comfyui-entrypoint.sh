@@ -30,6 +30,21 @@ case "${COMFYUI_VRAM_FLAG:-}" in
     ;;
 esac
 
+# ComfyUI 0.28 enables Dynamic VRAM by default.  On some NVIDIA/CUDA allocator
+# combinations (observed on T4 + cudaMallocAsync), its allocator accounting can
+# reject even a four-byte model allocation while almost all VRAM is free.  Keep
+# the mature allocator path as the product default until the upstream path is
+# reliable for the pinned image.  Operators can explicitly opt back in.
+dynamic_vram_args=()
+case "${COMFYUI_DISABLE_DYNAMIC_VRAM:-true}" in
+  true) dynamic_vram_args=(--disable-dynamic-vram) ;;
+  false) ;;
+  *)
+    echo "Unsupported COMFYUI_DISABLE_DYNAMIC_VRAM: $COMFYUI_DISABLE_DYNAMIC_VRAM" >&2
+    exit 2
+    ;;
+esac
+
 # CORS: the control panel (e.g. localhost:3000) opens ComfyUI (localhost:8188) in
 # a new tab — different port = cross-site, so ComfyUI's origin_only_middleware
 # would 403 the link-click. --enable-cors-header replaces that middleware with a
@@ -51,5 +66,6 @@ exec "$python_bin" "$comfy_root/main.py" \
   --output-directory "$comfy_root/output" \
   --input-directory "$comfy_root/input" \
   "${cors_args[@]}" \
+  "${dynamic_vram_args[@]}" \
   "${vram_args[@]}" \
   "$@"

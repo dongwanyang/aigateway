@@ -426,12 +426,18 @@ async def lifespan(app: "FastAPI"):
         devices = stats.get("devices", []) if isinstance(stats, dict) else []
         device_stats = devices[0] if devices and isinstance(devices[0], dict) else {}
         free_bytes = device_stats.get("vram_free")
+        worker_reserved_bytes = device_stats.get("torch_vram_total")
         return {
             "healthy": True,
             "running": len(queue.get("queue_running", [])),
             "pending": len(queue.get("queue_pending", [])),
             "free_memory_gb": (
                 float(free_bytes) / (1024**3) if free_bytes is not None else None
+            ),
+            "worker_reserved_memory_gb": (
+                float(worker_reserved_bytes) / (1024**3)
+                if worker_reserved_bytes is not None
+                else None
             ),
         }
 

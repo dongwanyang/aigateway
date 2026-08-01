@@ -58,6 +58,7 @@ async def test_gpu_config_is_transactional_and_classifies_restart_fields(
                 "gateway_fallback": "wait",
                 "generation_wait_timeout_seconds": 42,
                 "gateway_devices": ["GPU-test"],
+                "comfyui_dynamic_vram_enabled": True,
             },
         )
     assert response.status_code == 200, response.text
@@ -66,7 +67,10 @@ async def test_gpu_config_is_transactional_and_classifies_restart_fields(
         "gateway_fallback",
         "generation_wait_timeout_seconds",
     ]
-    assert body["data"]["restart_required_fields"] == ["gateway_devices"]
+    assert body["data"]["restart_required_fields"] == [
+        "comfyui_dynamic_vram_enabled",
+        "gateway_devices",
+    ]
     assert body["data"]["restart_required"] is True
     assert body["revision"] != revision
 
