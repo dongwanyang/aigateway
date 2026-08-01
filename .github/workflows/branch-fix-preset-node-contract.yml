@@ -1,0 +1,79 @@
+name: Branch Fix Preset Node Contract
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/branch-fix-preset-node-contract.yml
+
+permissions:
+  contents: write
+
+jobs:
+  fix-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/gpu-scheduler-topology
+          fetch-depth: 0
+
+      - name: Align preset node contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          source = Path("aigateway-api/src/aigateway_api/local_generation.py")
+          text = source.read_text()
+          old_nodes = '''                    "WanImageToVideo",
+                              "SaveAnimatedWEBP",
+          '''
+          new_nodes = '''                    "ModelSamplingSD3",
+                              "Wan22ImageToVideoLatent",
+                              "CreateVideo",
+                              "SaveVideo",
+          '''
+          if text.count(old_nodes) != 1:
+              raise RuntimeError("video node contract mismatch")
+          text = text.replace(old_nodes, new_nodes)
+          old_name = '"name": f"{Path(checkpoint_name).with_suffix(\"\").as_posix()}（本地 Checkpoint）",'
+          new_name = '"name": f"{Path(checkpoint_name).with_suffix(\'\').as_posix()}（本地 Checkpoint）",'
+          if text.count(old_name) != 1:
+              raise RuntimeError("checkpoint display expression mismatch")
+          source.write_text(text.replace(old_name, new_name))
+
+          tests = Path("tests/unit/api/test_local_generation.py")
+          test_text = tests.read_text()
+          anchor = '''        assert "CheckpointLoaderSimple" in preset["dependencies"]["nodes"]
+                  assert (
+          '''
+          replacement = '''        assert "CheckpointLoaderSimple" in preset["dependencies"]["nodes"]
+                  if preset_id == "wan2.2-ti2v-5b":
+                      assert "Wan22ImageToVideoLatent" in preset["dependencies"]["nodes"]
+                      assert "CreateVideo" in preset["dependencies"]["nodes"]
+                      assert "SaveVideo" in preset["dependencies"]["nodes"]
+                      assert "WanImageToVideo" not in preset["dependencies"]["nodes"]
+                      assert "SaveAnimatedWEBP" not in preset["dependencies"]["nodes"]
+                  assert (
+          '''
+          if test_text.count(anchor) != 1:
+              raise RuntimeError("multistage node assertion mismatch")
+          tests.write_text(test_text.replace(anchor, replacement))
+          PY
+
+          python -m compileall -q aigateway-api/src tests/unit/api
+          pip install -e aigateway-core
+          pip install -e aigateway-api
+          pip install pytest pytest-asyncio
+          python -m pytest tests/unit/api/test_local_generation.py -q
+
+          rm -f .github/workflows/branch-fix-preset-node-contract.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "fix(generation): align video preset node contract"
+          git push origin HEAD:feat/gpu-scheduler-topology
