@@ -29,6 +29,33 @@ jobs:
           python /tmp/apply_checkpoint_policy_fixes.py > /tmp/checkpoint-fix.log 2>&1
           status=$?
           if [ "$status" -eq 0 ]; then
+            python - <<'PY' >> /tmp/checkpoint-fix.log 2>&1
+          from pathlib import Path
+          path = Path("aigateway-api/src/aigateway_api/local_generation.py")
+          text = path.read_text()
+          old = '''def validate_custom_preset_id(preset_id: str) -> str:
+              """Validate custom IDs and keep runtime-generated namespaces reserved."""
+              if not isinstance(preset_id, str) or not _SAFE_ID.fullmatch(preset_id):
+                  raise ValueError("preset id must be a safe lowercase identifier")
+              if preset_id.startswith(CHECKPOINT_PRESET_PREFIX):
+                  raise ValueError("preset id uses reserved checkpoint namespace")
+              return preset_id
+          '''
+          new = '''def validate_custom_preset_id(preset_id: str) -> str:
+              """Validate custom IDs and keep runtime-generated namespaces reserved."""
+              if isinstance(preset_id, str) and preset_id.startswith(CHECKPOINT_PRESET_PREFIX):
+                  raise ValueError("preset id uses reserved checkpoint namespace")
+              if not isinstance(preset_id, str) or not _SAFE_ID.fullmatch(preset_id):
+                  raise ValueError("preset id must be a safe lowercase identifier")
+              return preset_id
+          '''
+          if text.count(old) != 1:
+              raise RuntimeError("custom preset validator patch mismatch")
+          path.write_text(text.replace(old, new))
+          PY
+            status=$?
+          fi
+          if [ "$status" -eq 0 ]; then
             python -m compileall -q aigateway-core/src aigateway-api/src tests/unit >> /tmp/checkpoint-fix.log 2>&1
             status=$?
           fi
