@@ -495,9 +495,18 @@ export default function Config() {
           <div className="grid grid-cols-1 gap-3 mb-4 md:grid-cols-2">
             <div className="rounded-lg border p-3" style={{ borderColor: 'var(--color-border)' }}>
               <div className="text-xs font-semibold mb-2">Gateway / PyTorch</div>
-              <div className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>
-                allocated {formatBytes(gpuQuery.data.gateway.allocated_bytes)} · reserved {formatBytes(gpuQuery.data.gateway.reserved_bytes)}
-              </div>
+              {gpuQuery.data.gateway.available ? (
+                <div className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>
+                  allocated {formatBytes(gpuQuery.data.gateway.allocated_bytes)} · reserved {formatBytes(gpuQuery.data.gateway.reserved_bytes)}
+                </div>
+              ) : (
+                <div role="status" className="space-y-1">
+                  <div className="text-xs font-medium" style={{ color: 'var(--color-text-secondary)' }}>未初始化 CUDA</div>
+                  <div className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>
+                    Gateway 当前未建立 CUDA 上下文，以避免空闲占用 ComfyUI 显存；这不表示 GPU 或驱动不可用。
+                  </div>
+                </div>
+              )}
             </div>
             <div className="rounded-lg border p-3" style={{ borderColor: 'var(--color-border)' }}>
               <div className="text-xs font-semibold mb-2">ComfyUI / Device</div>

@@ -39,6 +39,17 @@ export type DraftPollResult =
   | { kind: 'expired'; message: string }
   | { kind: 'error'; message: string }
 
+export function describeDraftFailure(message: string): string {
+  const normalized = message.toLowerCase()
+  if (normalized.includes('comfyui_gpu_out_of_memory')) {
+    return 'ComfyUI 显存不足，无法完成当前图片工作流。请降低分辨率或批量大小，释放显存后重试。（comfyui_gpu_out_of_memory）'
+  }
+  if (normalized.includes('comfyui_recovery_failed')) {
+    return 'ComfyUI 任务已结束，但结果恢复失败。请重试；若持续发生，请检查 ComfyUI 历史记录。（comfyui_recovery_failed）'
+  }
+  return message
+}
+
 export interface DraftPollProgress {
   status?: string
   stage?: string
@@ -84,7 +95,7 @@ export async function pollDraftUntilSettled(
           || message.includes('comfyui_')
           || message.includes('draft_cancelled')
         ) {
-          return { kind: 'error', message }
+          return { kind: 'error', message: describeDraftFailure(message) }
         }
         if (message.includes('forbidden') || message.includes('unauthorized')) {
           return { kind: 'error', message }

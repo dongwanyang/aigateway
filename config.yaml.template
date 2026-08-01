@@ -481,6 +481,7 @@ generation_optimization:
       allowed_upscale_models: ["RealESRGAN_x4plus.pth"]
       max_upscale_long_edge: 4096
       qwen_image_enabled: true
+      qwen_image_auto_select: false  # T4 默认走 SDXL；仅显式选择 Qwen 或主动开启自动选择
       qwen_image_diffusion_model: "qwen_image_fp8_e4m3fn.safetensors"
       qwen_image_text_encoder: "qwen_2.5_vl_7b_fp8_scaled.safetensors"
       qwen_image_vae: "qwen_image_vae.safetensors"

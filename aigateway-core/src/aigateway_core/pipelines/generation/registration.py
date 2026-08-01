@@ -233,6 +233,9 @@ def register_generation_optimization_plugins(
         qwen_image_enabled=comfyui_dict.get(
             "qwen_image_enabled", ComfyUIConfig.qwen_image_enabled
         ),
+        qwen_image_auto_select=comfyui_dict.get(
+            "qwen_image_auto_select", ComfyUIConfig.qwen_image_auto_select
+        ),
         qwen_image_diffusion_model=comfyui_dict.get(
             "qwen_image_diffusion_model", ComfyUIConfig.qwen_image_diffusion_model
         ),

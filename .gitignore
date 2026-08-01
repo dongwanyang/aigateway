@@ -40,6 +40,13 @@ grafana-data/
 
 # QA evidence
 docs/qa-evidence-*
+qa-report/
+qa-reports/
+reports/qa/
+tests/qa-report/
+test-results/
+playwright-report/
+screenshots/
 
 # Local tooling / generated artifacts
 .claude/

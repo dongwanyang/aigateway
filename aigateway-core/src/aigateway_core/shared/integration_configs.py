@@ -64,6 +64,7 @@ class ComfyUIConfig:
     allowed_upscale_models: list[str] = field(default_factory=list)
     max_upscale_long_edge: int = 4096
     qwen_image_enabled: bool = True
+    qwen_image_auto_select: bool = False
     qwen_image_diffusion_model: str = "qwen_image_fp8_e4m3fn.safetensors"
     qwen_image_text_encoder: str = "qwen_2.5_vl_7b_fp8_scaled.safetensors"
     qwen_image_vae: str = "qwen_image_vae.safetensors"

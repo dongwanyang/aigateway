@@ -993,13 +993,16 @@ export default function Models() {
               </div>
               <div className="flex items-center gap-2" onClick={e => e.stopPropagation()}>
                 <button
-                  className="p-1.5 rounded cursor-pointer"
-                  style={{ color: 'var(--color-primary)', border: '1px solid var(--color-border)' }}
+                  className="btn btn-secondary"
+                  style={{ padding: '6px 10px', fontSize: '12px' }}
                   onClick={() => handleTestConnectivity(providerName)}
+                  aria-label={`测试 ${providerName} 连通性`}
                   title="测试连通性"
+                  aria-busy={testResults[providerName]?.loading ?? false}
                   disabled={testResults[providerName]?.loading}
                 >
                   {testResults[providerName]?.loading ? <RefreshCw size={14} className="animate-spin" /> : <Wifi size={14} />}
+                  {testResults[providerName]?.loading ? '测试中...' : '测试连通性'}
                 </button>
                 <button
                   className="p-1.5 rounded cursor-pointer"
@@ -1020,6 +1023,32 @@ export default function Models() {
                 </button>
               </div>
             </div>
+
+            {testResults[providerName] && (
+              <div
+                role="status"
+                aria-live="polite"
+                className="mt-3 rounded-lg px-3 py-2 text-xs"
+                style={{
+                  backgroundColor: testResults[providerName].loading
+                    ? 'var(--color-bg-elevated)'
+                    : testResults[providerName].success
+                      ? 'rgba(16, 185, 129, 0.08)'
+                      : 'rgba(239, 68, 68, 0.08)',
+                  color: testResults[providerName].loading
+                    ? 'var(--color-text-secondary)'
+                    : testResults[providerName].success
+                      ? 'var(--color-success)'
+                      : 'var(--color-danger)',
+                }}
+              >
+                {testResults[providerName].loading
+                  ? `正在测试 ${providerName} 连通性…`
+                  : testResults[providerName].success
+                    ? `连接成功，延迟 ${testResults[providerName].latency_ms} ms`
+                    : `连接失败：${testResults[providerName].error || '提供商不可达'}`}
+              </div>
+            )}
 
             {/* Provider 展开内容 */}
             {expandedProviders.has(providerName) && (
