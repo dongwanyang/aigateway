@@ -115,7 +115,7 @@ def test_upscale_model_must_be_allowlisted_basename(tmp_path, model):
         strategy._build_faithful_upscale_workflow("input.png", (4096, 4096))
 
 
-def test_chinese_prompt_prefers_installed_qwen_image(tmp_path):
+def test_chinese_prompt_prefers_installed_qwen_image_when_opted_in(tmp_path):
     models = tmp_path / "models"
     for folder, name in (
         ("diffusion_models", "qwen_image_fp8_e4m3fn.safetensors"),
@@ -126,7 +126,10 @@ def test_chinese_prompt_prefers_installed_qwen_image(tmp_path):
         (models / folder / name).write_bytes(b"model")
     strategy = DraftGeneratorStrategy(
         DraftWorkflowConfig(store_dir=str(tmp_path / "drafts")),
-        comfyui_config=_comfy_config(models_path=str(models)),
+        comfyui_config=_comfy_config(
+            models_path=str(models),
+            qwen_image_auto_select=True,
+        ),
     )
     request = GenerationRequest(
         prompt="a red sign",
