@@ -357,6 +357,11 @@ class DraftGeneratorPlugin:
             if isinstance(generation_options, dict)
             else None
         )
+        required_vram_gb = (
+            generation_options.get("required_vram_gb")
+            if isinstance(generation_options, dict)
+            else None
+        )
 
         return GenerationRequest(
             prompt=prompt,
@@ -366,6 +371,9 @@ class DraftGeneratorPlugin:
             media_type=media_type,
             quality=quality,
             preset_id=preset_id,
+            required_vram_gb=(
+                float(required_vram_gb) if required_vram_gb is not None else None
+            ),
             api_key_id=api_key_id or "",
             request_id=ctx.request_id,
             trace_id=ctx.trace_id,

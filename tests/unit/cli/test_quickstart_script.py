@@ -15,7 +15,11 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 def _fixture_repo(tmp_path: Path) -> Path:
     scripts = tmp_path / "scripts"
     scripts.mkdir()
-    for name in ("quickstart.sh", "render-deployment-config.py"):
+    for name in (
+        "quickstart.sh",
+        "render-deployment-config.py",
+        "render-gpu-topology.py",
+    ):
         shutil.copy2(REPO_ROOT / "scripts" / name, scripts / name)
     shutil.copy2(REPO_ROOT / "config.yaml", tmp_path / "config.yaml")
     shutil.copy2(REPO_ROOT / ".env.example", tmp_path / ".env.example")
@@ -135,7 +139,7 @@ exit 0
     state = (tmp_path / ".aigateway-install.env").read_text(encoding="utf-8")
     assert "GATEWAY_IMAGE_TARGET=gateway-vision" in state
     assert "AIGATEWAY_SHARED_GPU=true" in state
-    assert "GATEWAY_CUDA_VISIBLE_DEVICES=-1" in state
+    assert "GATEWAY_CUDA_VISIBLE_DEVICES=all" in state
     assert "GATEWAY_CUDA_MEMORY_FRACTION=" in state
     assert "GATEWAY_CUDA_MEMORY_FRACTION=0.20" not in state
 
@@ -144,7 +148,59 @@ exit 0
     )
     assert runtime["deployment"]["shared_gpu"] is True
     clip = runtime["generation_optimization"]["token_compressor"]["clip"]
-    assert clip["device"] == "cpu"
+    assert clip["device"] == "auto"
+    assert runtime["gpu_scheduler"]["workers"][0]["device_uuid"] == "GPU-test"
+    assert (tmp_path / ".aigateway/runtime/docker-compose.gpu.generated.yml").exists()
+
+
+def test_quickstart_migrates_legacy_single_gpu_full_state(tmp_path):
+    script = _fixture_repo(tmp_path)
+    (tmp_path / ".aigateway-install.env").write_text(
+        "AIGATEWAY_EDITION=full\n"
+        "AIGATEWAY_DISTRIBUTION=source\n"
+        "AIGATEWAY_COMFYUI_MODE=container\n"
+        "AIGATEWAY_EMBEDDING_MODE=container\n"
+        "GATEWAY_CUDA_VISIBLE_DEVICES=0\n"
+        "COMFYUI_CUDA_VISIBLE_DEVICES=0\n"
+        "GATEWAY_CUDA_MEMORY_FRACTION=0.40\n",
+        encoding="utf-8",
+    )
+    fake_bin = tmp_path / "fake-bin-legacy"
+    fake_bin.mkdir()
+    nvidia_smi = fake_bin / "nvidia-smi"
+    nvidia_smi.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "-L" ]]; then
+  echo 'GPU 0: Test GPU (UUID: GPU-test)'
+  exit 0
+fi
+if [[ " $* " == *" --query-gpu=memory.total "* ]]; then
+  echo '24576'
+  exit 0
+fi
+exit 0
+""",
+        encoding="utf-8",
+    )
+    nvidia_smi.chmod(0o755)
+
+    _run(
+        script,
+        "--non-interactive",
+        "--no-start",
+        env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
+    )
+
+    state = (tmp_path / ".aigateway-install.env").read_text(encoding="utf-8")
+    assert "AIGATEWAY_SHARED_GPU=true" in state
+    assert "GATEWAY_CUDA_VISIBLE_DEVICES=all" in state
+    assert "GATEWAY_CUDA_MEMORY_FRACTION=\n" in state
+    runtime = yaml.safe_load(
+        (tmp_path / ".aigateway/runtime/config.yaml").read_text(encoding="utf-8")
+    )
+    assert runtime["deployment"]["shared_gpu"] is True
+    assert runtime["embedding"]["device"] == "auto"
 
 
 def test_quickstart_show_plan_does_not_create_state(tmp_path):
@@ -229,13 +285,13 @@ exit 0
 
     state = (tmp_path / ".aigateway-install.env").read_text(encoding="utf-8")
     assert "AIGATEWAY_SHARED_GPU=false" in state
-    assert "GATEWAY_CUDA_VISIBLE_DEVICES=0" in state
-    assert "GATEWAY_CUDA_MEMORY_FRACTION=0.90" in state
+    assert "GATEWAY_CUDA_VISIBLE_DEVICES=all" in state
+    assert "GATEWAY_CUDA_MEMORY_FRACTION=\n" in state
 
     runtime = yaml.safe_load(
         (tmp_path / ".aigateway/runtime/config.yaml").read_text(encoding="utf-8")
     )
     assert runtime["deployment"]["shared_gpu"] is False
-    assert runtime["embedding"]["device"] == "cuda"
+    assert runtime["embedding"]["device"] == "auto"
     clip = runtime["generation_optimization"]["token_compressor"]["clip"]
-    assert clip["device"] == "cuda"
+    assert clip["device"] == "auto"

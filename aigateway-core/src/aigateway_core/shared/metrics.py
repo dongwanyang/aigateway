@@ -17,6 +17,9 @@ Metrics — Prometheus 指标采集
 | gateway_circuit_breaker_state | gauge | 各提供商熔断器状态 (0=CLOSED, 1=OPEN, 2=HALF-OPEN) |
 | gateway_active_requests | gauge | 当前活跃请求数 |
 | gateway_up | gauge | 服务健康状态 (1=up, 0=down) |
+| gateway_gpu_scheduler_events_total | counter | GPU 借用、驱逐、分配、故障转移和 OOM 事件 |
+| gateway_gpu_generation_queue_depth | gauge | 当前生成任务排队深度 |
+| gateway_gpu_generation_wait_seconds | histogram | 生成任务取得 GPU 前的等待时间 |
 
 根据 TECH_SPEC.md:
 - Prometheus Client 0.20+
@@ -103,6 +106,9 @@ class MetricsCollector:
         self._circuit_breaker_gauge: Any = None
         self._active_requests_gauge: Any = None
         self._up_gauge: Any = None
+        self._gpu_scheduler_events_counter: Any = None
+        self._gpu_generation_queue_gauge: Any = None
+        self._gpu_generation_wait_histogram: Any = None
         self._registry: Any = None  # prometheus_client.CollectorRegistry
 
     # ------------------------------------------------------------------
@@ -230,6 +236,24 @@ class MetricsCollector:
             registry=registry,
         )
         self._up_gauge.set(1)
+
+        self._gpu_scheduler_events_counter = Counter(
+            "gateway_gpu_scheduler_events_total",
+            "GPU scheduler events by type, worker, and physical device",
+            labelnames=["event", "worker_id", "device_uuid"],
+            registry=registry,
+        )
+        self._gpu_generation_queue_gauge = Gauge(
+            "gateway_gpu_generation_queue_depth",
+            "Generation tasks currently waiting for a GPU worker",
+            registry=registry,
+        )
+        self._gpu_generation_wait_histogram = Histogram(
+            "gateway_gpu_generation_wait_seconds",
+            "Time spent waiting to acquire a generation GPU worker",
+            buckets=[0.01, 0.1, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300],
+            registry=registry,
+        )
 
         logger.info("Prometheus 指标初始化完成")
 
@@ -414,6 +438,31 @@ class MetricsCollector:
 
         if self._up_gauge:
             self._up_gauge.set(1 if healthy else 0)
+
+    def record_gpu_scheduler_event(
+        self,
+        event: str,
+        *,
+        worker_id: str = "",
+        device_uuid: str = "",
+    ) -> None:
+        """Record a bounded-cardinality GPU scheduling lifecycle event."""
+        if self.enabled and self._gpu_scheduler_events_counter:
+            self._gpu_scheduler_events_counter.labels(
+                event=event,
+                worker_id=worker_id,
+                device_uuid=device_uuid,
+            ).inc()
+
+    def set_gpu_generation_queue_depth(self, depth: int) -> None:
+        """Expose the current FIFO generation queue depth."""
+        if self.enabled and self._gpu_generation_queue_gauge:
+            self._gpu_generation_queue_gauge.set(max(0, depth))
+
+    def record_gpu_generation_wait(self, duration_seconds: float) -> None:
+        """Observe how long a generation task waited for worker allocation."""
+        if self.enabled and self._gpu_generation_wait_histogram:
+            self._gpu_generation_wait_histogram.observe(max(0.0, duration_seconds))
 
     def get_uptime_seconds(self) -> int:
         """获取服务运行时间（秒）。

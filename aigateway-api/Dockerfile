@@ -23,6 +23,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# The admin configuration table reads parameter descriptions from the template
+# at runtime.  Keep it in every Gateway image instead of relying on the source
+# checkout being mounted into the container.
+COPY config.yaml.template /app/config.yaml.template
+
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     apt-get update \

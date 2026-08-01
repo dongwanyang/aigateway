@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-
 from aigateway_core.shared.runtime_values import configured_path
 
 _SAFE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
@@ -127,6 +126,7 @@ def builtin_presets(comfy: dict[str, Any]) -> list[dict[str, Any]]:
             "configuration_status": _preset_status(True, sdxl_errors),
             "configuration_errors": sdxl_errors,
             "languages": ["en"],
+            "required_vram_gb": float(comfy.get("sdxl_required_vram_gb", 8.0)),
             "dependencies": {
                 "models": sdxl_models,
                 "nodes": _CORE_IMAGE_NODES,
@@ -141,6 +141,7 @@ def builtin_presets(comfy: dict[str, Any]) -> list[dict[str, Any]]:
             "configuration_status": _preset_status(True, sdxl_errors),
             "configuration_errors": list(sdxl_errors),
             "languages": ["en"],
+            "required_vram_gb": float(comfy.get("sdxl_required_vram_gb", 8.0)),
             "dependencies": {
                 "models": list(sdxl_models),
                 "nodes": [
@@ -160,6 +161,9 @@ def builtin_presets(comfy: dict[str, Any]) -> list[dict[str, Any]]:
             "configuration_status": _preset_status(qwen_enabled, qwen_errors),
             "configuration_errors": qwen_errors,
             "languages": ["zh", "en"],
+            "required_vram_gb": float(
+                comfy.get("qwen_image_required_vram_gb", 12.0)
+            ),
             "dependencies": {
                 "models": qwen_models,
                 "nodes": [
@@ -184,6 +188,7 @@ def builtin_presets(comfy: dict[str, Any]) -> list[dict[str, Any]]:
             "configuration_status": _preset_status(video_enabled, video_errors),
             "configuration_errors": video_errors,
             "languages": ["en"],
+            "required_vram_gb": float(comfy.get("video_required_vram_gb", 12.0)),
             "dependencies": {
                 "models": video_models,
                 "nodes": [
@@ -204,6 +209,9 @@ def builtin_presets(comfy: dict[str, Any]) -> list[dict[str, Any]]:
             "configuration_status": _preset_status(upscale_enabled, upscale_errors),
             "configuration_errors": upscale_errors,
             "languages": ["zh", "en"],
+            "required_vram_gb": float(
+                comfy.get("upscale_required_vram_gb", 4.0)
+            ),
             "dependencies": {
                 "models": upscale_models,
                 "nodes": [

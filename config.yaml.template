@@ -76,6 +76,13 @@ auth:
 
   budget_alert_threshold: 0.8  # 配额预警阈值（0.8 = 使用达 80% 时触发告警）
 
+  groups:                    # 用户组级配额；API Key 可通过 group 关联
+    - name: admin-team       # 用户组名称
+      daily_tokens: 1000000  # 用户组每日 token 上限
+      monthly_cost: 50.0     # 用户组每月成本上限（美元）
+      rate_limit_rpm: 60     # 用户组每分钟请求数上限
+      rate_limit_tpm: 100000 # 用户组每分钟 token 上限
+
 # ==========================
 # 插件配置
 # ==========================
@@ -148,6 +155,8 @@ plugins:
       summary_model: gpt-4o-mini  # 摘要生成使用的模型
       max_token_limit: 4000  # 摘要最大 token 数
       summary_interval: 5    # 每 N 条消息触发一次摘要
+      api_base: http://localhost:8000/v1  # 摘要模型的 OpenAI 兼容 API 地址
+      api_key: ${CONV_COMPRESSOR_API_KEY:-} # 摘要模型 API Key（建议环境变量）
 
 # ==========================
 # 模型提供商配置
@@ -338,6 +347,7 @@ debug:
   entry: false                # auth + dispatcher + 共用前置(PII/media) + quota + prompt_compress 内联
   cache: false                # L1/L2/L3 CacheManager 全路径
   bridge: false               # LiteLLMBridge + circuit breaker + auto 解析
+  plugins_enabled: false      # 插件调试日志总开关（兼容扁平管理接口）
   plugins:
     enabled: false            # 插件层总开关(必须与下面某个 per_plugin 同时开才生效)
     per_plugin:
@@ -439,74 +449,109 @@ media_optimization:
   max_concurrent_processors: 4  # 最大并发媒体处理器数（限制 CPU/内存占用）
 
 # ==========================
+# 动态 GPU 资源池（单机）
+# ==========================
+gpu_scheduler:
+  enabled: true              # 是否启用动态 GPU 协调；关闭时 Gateway 按原设备配置运行（热生效）
+  policy: auto               # 调度模式：auto 自动使用全部合格设备；manual 仅使用指定 UUID（热生效）
+  generation_priority: true  # 是否让图片/视频生成优先；开启后先停止新 Gateway GPU 租约再排空在途任务（热生效）
+  gateway_devices: auto      # Gateway 可借用的设备：auto 或 GPU UUID 列表；修改设备拓扑后需重建
+  comfyui_devices: auto      # ComfyUI worker 使用的设备：auto 或 GPU UUID 列表；修改设备拓扑后需重建
+  gateway_fallback: cpu      # 无可用 GPU 时 Gateway 的行为：cpu 回退 | wait 等待 | fail 立即失败（热生效）
+  generation_wait_timeout_seconds: 120 # 生成任务等待 Gateway 释放 GPU 的最长秒数，超时返回 gpu_queue_timeout（热生效）
+  comfyui_idle_reservation_seconds: 60 # 生成结束后为 ComfyUI 保留已加载模型的空闲秒数，之后 /free 并允许借用（热生效）
+  lease_ttl_seconds: 15      # Gateway GPU 租约在 Redis 中的有效秒数，防止进程异常后永久占用（热生效；旧租约不变）
+  lease_heartbeat_seconds: 5 # GPU 租约续期心跳间隔秒数，必须小于 lease_ttl_seconds（热生效；旧租约不变）
+  worker_probe_interval_seconds: 10 # 探测 worker 健康和执行空闲释放的间隔秒数（热生效）
+  worker_unhealthy_cooldown_seconds: 30 # worker 探测失败后暂停调度的秒数（热生效）
+  oom_quarantine_seconds: 300 # worker 明确发生 GPU OOM 后隔离该 worker 的秒数（热生效）
+  max_worker_failover_attempts: 1 # 提交前失败或明确 OOM 后最多换到其他 worker 的次数；0 表示不换卡（热生效）
+  device_safety_margin_gb: 2 # 选卡时必须额外保留的显存安全余量（GB），不做静态显存切分（热生效）
+  gateway_memory_limit_percent: null # 可选 PyTorch 进程显存上限百分比（0-100）；null 表示关闭，不等于显存预留（热生效）
+  device_overrides: []       # 高级设备覆盖列表，可按 UUID 设置 enabled/capabilities；UUID 或设备池变化需重建
+  topology_auto_apply: true  # 设备池或 GPU UUID 改变后，是否由宿主机控制器自动校验、生成 Compose 并重建拓扑
+  topology_reconcile_interval_seconds: 10 # 宿主机控制器检查配置和物理 GPU 变化的间隔秒数；修改后自动生效
+
+# ==========================
 # 生成优化层配置 (Generation Optimization)
 # ==========================
 # 6 大策略降低图片/视频生成成本
 generation_optimization:
   enabled: true                # 是否启用生成优化插件链
   preset_store_dir: /app/data/generation-presets  # 控制台自定义生成预设目录
-  ai_director: {}              # Prompt 结构化改写
-  model_router: {}             # 生成模型路由策略
+  ai_director:
+    enabled: true              # 是否启用 Prompt 结构化改写
+  model_router:
+    enabled: true              # 是否启用生成模型路由策略
+    model_capabilities:        # 模型生成能力评分（数值越大越优先）
+      agnes-2.0-flash: 60      # 单个模型的生成能力评分
   feature_cache: {}            # 特征向量缓存
-  cost_tracking: {}            # 成本追踪配置
+  cost_tracking:
+    enabled: true              # 是否启用生成成本追踪
   prompt_templates: {}         # Prompt 模板管理
   token_compressor:          # 视觉 Token 压缩（CLIP 特征提取）
+    enabled: true            # 是否启用视觉 Token 压缩
     clip:
       model_name: "openai/clip-vit-large-patch14"  # CLIP 模型
       device: cpu            # 运行设备：cpu | cuda
       batch_size: 1          # 批量处理大小
   draft_workflow:             # Draft-to-HiRes 草图工作流
+    enabled: true             # 是否启用本地草图生成工作流
     store_dir: /app/data/drafts       # 草稿、预览和确认结果的持久化根目录
     retention_period_hours: 24        # 草稿会话保留时长（小时）
     comfyui:
       server_url: "http://comfyui:8188"  # Compose 内网地址；不直接暴露公网
       public_url: "http://localhost:8188" # 浏览器打开 ComfyUI/Manager 的地址
-      manager_enabled: true
+      manager_enabled: true   # 是否启用 ComfyUI Manager
       connect_timeout: 10    # 连接超时（秒）
       execution_timeout: 1200 # T4 上的大模型工作流可达数分钟；超时会主动取消 ComfyUI 任务
       required: true         # 不可用时 fail-closed，不静默改走外部媒体 API
-      workflow_version: "image-v1"
-      checkpoint_name: "sd_xl_base_1.0.safetensors"
-      allowed_checkpoints: ["sd_xl_base_1.0.safetensors"]
-      max_concurrency: 1
-      min_free_gb: 30
-      model_budget_gb: 80
-      output_budget_gb: 10
-      output_retention_hours: 24
-      models_path: "/comfyui/models"
-      output_path: "/comfyui/output"
-      workflow_path: "/comfyui/workflows"
-      upscale_enabled: true
-      upscale_model: "RealESRGAN_x4plus.pth"
-      allowed_upscale_models: ["RealESRGAN_x4plus.pth"]
-      max_upscale_long_edge: 4096
-      qwen_image_enabled: true
+      workflow_version: "image-v1" # 图片工作流版本；变更图结构时递增
+      checkpoint_name: "sd_xl_base_1.0.safetensors" # 默认 SDXL checkpoint
+      allowed_checkpoints: ["sd_xl_base_1.0.safetensors"] # 允许加载的 checkpoint 白名单
+      max_concurrency: 1      # Gateway 同时提交到 ComfyUI 的最大任务数
+      min_free_gb: 30        # 输出磁盘最小剩余空间（GB），不是 GPU 显存
+      model_budget_gb: 80    # ComfyUI 模型目录最大磁盘占用（GB）
+      output_budget_gb: 10   # ComfyUI 输出目录最大磁盘占用（GB）
+      output_retention_hours: 24 # ComfyUI 输出文件保留时长（小时）
+      models_path: "/comfyui/models" # Gateway 容器内的 ComfyUI 模型目录
+      output_path: "/comfyui/output" # Gateway 容器内的 ComfyUI 输出目录
+      workflow_path: "/comfyui/workflows" # Gateway 容器内的工作流目录
+      upscale_enabled: true  # 是否启用图片高清放大
+      upscale_model: "RealESRGAN_x4plus.pth" # 高清放大模型文件名
+      allowed_upscale_models: ["RealESRGAN_x4plus.pth"] # 允许加载的放大模型白名单
+      max_upscale_long_edge: 4096 # 高清放大结果的最长边上限（像素）
+      sdxl_required_vram_gb: 8 # SDXL 预设声明的最低可用显存（GB），用于异构 GPU 选卡
+      upscale_required_vram_gb: 4 # RealESRGAN 放大预设声明的最低可用显存（GB）
+      qwen_image_enabled: true # 是否启用 Qwen-Image 工作流
       qwen_image_auto_select: false  # T4 默认走 SDXL；仅显式选择 Qwen 或主动开启自动选择
-      qwen_image_diffusion_model: "qwen_image_fp8_e4m3fn.safetensors"
-      qwen_image_text_encoder: "qwen_2.5_vl_7b_fp8_scaled.safetensors"
-      qwen_image_vae: "qwen_image_vae.safetensors"
+      qwen_image_diffusion_model: "qwen_image_fp8_e4m3fn.safetensors" # Qwen-Image 扩散模型
+      qwen_image_text_encoder: "qwen_2.5_vl_7b_fp8_scaled.safetensors" # Qwen-Image 文本编码器
+      qwen_image_vae: "qwen_image_vae.safetensors" # Qwen-Image VAE
       qwen_image_draft_steps: 12       # 草稿优先速度；确认后再做高清处理
       qwen_image_max_draft_edge: 768   # T4 15GB 安全上限，保持宽高比并对齐 16
-      allowed_qwen_image_diffusion_models: ["qwen_image_fp8_e4m3fn.safetensors"]
-      allowed_qwen_image_text_encoders: ["qwen_2.5_vl_7b_fp8_scaled.safetensors"]
-      allowed_qwen_image_vaes: ["qwen_image_vae.safetensors"]
+      qwen_image_required_vram_gb: 12 # Qwen-Image 预设声明的最低可用显存（GB）
+      allowed_qwen_image_diffusion_models: ["qwen_image_fp8_e4m3fn.safetensors"] # Qwen 扩散模型白名单
+      allowed_qwen_image_text_encoders: ["qwen_2.5_vl_7b_fp8_scaled.safetensors"] # Qwen 文本编码器白名单
+      allowed_qwen_image_vaes: ["qwen_image_vae.safetensors"] # Qwen VAE 白名单
       # 视频确认使用已批准的图片草稿作为首帧，原生 Wan2.2 TI2V 输出 MP4。
       video_enabled: true
-      video_workflow_version: "wan2.2-ti2v-5b-v1"
-      video_diffusion_model: "wan2.2_ti2v_5B_fp16.safetensors"
-      video_text_encoder: "umt5_xxl_fp8_e4m3fn_scaled.safetensors"
-      video_vae: "wan2.2_vae.safetensors"
-      allowed_video_diffusion_models: ["wan2.2_ti2v_5B_fp16.safetensors"]
-      allowed_video_text_encoders: ["umt5_xxl_fp8_e4m3fn_scaled.safetensors"]
-      allowed_video_vaes: ["wan2.2_vae.safetensors"]
+      video_workflow_version: "wan2.2-ti2v-5b-v1" # 视频工作流版本
+      video_diffusion_model: "wan2.2_ti2v_5B_fp16.safetensors" # 视频扩散模型
+      video_text_encoder: "umt5_xxl_fp8_e4m3fn_scaled.safetensors" # 视频文本编码器
+      video_vae: "wan2.2_vae.safetensors" # 视频 VAE
+      allowed_video_diffusion_models: ["wan2.2_ti2v_5B_fp16.safetensors"] # 视频扩散模型白名单
+      allowed_video_text_encoders: ["umt5_xxl_fp8_e4m3fn_scaled.safetensors"] # 视频文本编码器白名单
+      allowed_video_vaes: ["wan2.2_vae.safetensors"] # 视频 VAE 白名单
       video_width: 512       # T4 低显存安全默认值；必须是 16 的倍数
-      video_height: 288
+      video_height: 288      # 视频高度；必须是 16 的倍数
       video_frames: 17       # 约 2 秒草稿视频（8 fps）
-      video_fps: 8
-      video_steps: 20
+      video_fps: 8           # 视频帧率
+      video_steps: 20        # 视频采样步数
       video_cfg: 5
-      video_shift: 8
-      video_execution_timeout: 1200
+      video_shift: 8         # Wan 模型采样 shift
+      video_execution_timeout: 1200 # 视频任务执行超时（秒）
+      video_required_vram_gb: 12 # Wan 视频预设声明的最低可用显存（GB）
 
 # ==========================
 # 意图驱动路由（intent-driven routing）
@@ -536,11 +581,11 @@ task_routing:
   model_selection_mode: policy # strict=尊重显式模型 | policy=策略优先 | auto=忽略 hint
   expose_debug_metadata: false # 完整候选集仅写 trace，不默认暴露给客户端
   model_preferences:
-    coding: [deepseek-v4-flash]
-    reasoning: [deepseek-v4-flash]
-    summary: [agnes-2.0-flash]
-    vision: [agnes-2.0-flash]
-    general: [agnes-2.0-flash]
+    coding: [deepseek-v4-flash]    # 编码任务偏好模型，按顺序尝试
+    reasoning: [deepseek-v4-flash] # 推理任务偏好模型，按顺序尝试
+    summary: [agnes-2.0-flash]     # 摘要任务偏好模型，按顺序尝试
+    vision: [agnes-2.0-flash]      # 视觉理解任务偏好模型，按顺序尝试
+    general: [agnes-2.0-flash]     # 通用任务偏好模型，按顺序尝试
 
 # 生成参数默认值（图片/视频生成路径）
 generation:
@@ -550,3 +595,6 @@ generation:
     quality: "auto"           # 质量：auto | high | medium | low
   video:
     poll_endpoint: /v1/videos/{id}  # 视频生成轮询端点（{id} 替换为任务 ID）
+
+# 旧版单调试开关，仅为兼容已有配置保留；新部署应使用上方 debug 五维开关。
+debug_mode: false             # 兼容旧配置的全局调试开关

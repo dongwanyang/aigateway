@@ -4,6 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import Config from './Config'
 
 const state = vi.hoisted(() => ({
+  sharedGpu: false,
   gateway: {
     available: true,
     torch_initialized: false,
@@ -25,7 +26,7 @@ const api = vi.hoisted(() => ({
       comfyui: { available: true, memory: { total_bytes: 16_000, free_bytes: 15_500, used_bytes: 500 } },
       queue: { running: 0, pending: 0 },
       queue_idle: true,
-      shared_gpu: true,
+      shared_gpu: state.sharedGpu,
       diagnosis: [],
     },
     message: 'success',
@@ -40,6 +41,7 @@ function renderConfig() {
 }
 
 beforeEach(() => {
+  state.sharedGpu = false
   state.gateway = {
     available: true,
     torch_initialized: false,
@@ -71,6 +73,7 @@ it('shows an uninitialized CUDA context when the GPU device is healthy', async (
 })
 
 it('shows a real GPU status failure separately from an uninitialized context', async () => {
+  state.sharedGpu = false
   state.gateway.available = false
   state.gateway.error = 'gpu_status_unavailable'
   renderConfig()
@@ -86,4 +89,14 @@ it('shows allocator counters after Torch initializes CUDA', async () => {
   renderConfig()
   expect(await screen.findByText(/allocated 1 KiB · reserved 2 KiB/)).toBeInTheDocument()
   expect(screen.queryByText('未初始化 CUDA')).not.toBeInTheDocument()
+})
+
+it('explains when a shared GPU is intentionally reserved for ComfyUI', async () => {
+  state.sharedGpu = true
+  state.gateway.available = false
+  state.gateway.error = 'gpu_status_unavailable'
+  renderConfig()
+  expect(await screen.findByText('GPU 已保留给 ComfyUI')).toBeInTheDocument()
+  expect(screen.getByText(/显存完整留给本地图片和视频生成/)).toBeInTheDocument()
+  expect(screen.queryByText('GPU 状态不可用')).not.toBeInTheDocument()
 })

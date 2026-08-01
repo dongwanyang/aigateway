@@ -478,6 +478,26 @@ media_optimization:
     retry_delay_ms: 1000
   media_cache_ttl: 604800
   max_concurrent_processors: 4
+gpu_scheduler:
+  enabled: true
+  policy: auto
+  generation_priority: true
+  gateway_devices: auto
+  comfyui_devices: auto
+  gateway_fallback: cpu
+  generation_wait_timeout_seconds: 120
+  comfyui_idle_reservation_seconds: 60
+  lease_ttl_seconds: 15
+  lease_heartbeat_seconds: 5
+  worker_probe_interval_seconds: 10
+  worker_unhealthy_cooldown_seconds: 30
+  oom_quarantine_seconds: 300
+  max_worker_failover_attempts: 1
+  device_safety_margin_gb: 2
+  gateway_memory_limit_percent: null
+  device_overrides: []
+  topology_auto_apply: true
+  topology_reconcile_interval_seconds: 10
 generation_optimization:
   enabled: true
   preset_store_dir: /app/data/generation-presets
@@ -530,12 +550,15 @@ generation_optimization:
       allowed_upscale_models:
       - RealESRGAN_x4plus.pth
       max_upscale_long_edge: 4096
+      sdxl_required_vram_gb: 8
+      upscale_required_vram_gb: 4
       qwen_image_enabled: true
       qwen_image_diffusion_model: qwen_image_fp8_e4m3fn.safetensors
       qwen_image_text_encoder: qwen_2.5_vl_7b_fp8_scaled.safetensors
       qwen_image_vae: qwen_image_vae.safetensors
       qwen_image_draft_steps: 12
       qwen_image_max_draft_edge: 768
+      qwen_image_required_vram_gb: 12
       allowed_qwen_image_diffusion_models:
       - qwen_image_fp8_e4m3fn.safetensors
       allowed_qwen_image_text_encoders:
@@ -561,5 +584,6 @@ generation_optimization:
       video_cfg: 5
       video_shift: 8
       video_execution_timeout: 1200
+      video_required_vram_gb: 12
     enabled: true
 debug_mode: false

@@ -141,7 +141,23 @@ class PipelineEngine:
                 plugin_start = time.monotonic()
 
                 try:
-                    ctx = await execute_plugin(plugin, ctx)
+                    lifecycle_owner = getattr(plugin, "_strategy", plugin)
+                    coordinator = getattr(self, "gpu_coordinator", None)
+                    requested_device = getattr(
+                        lifecycle_owner, "gpu_device_request", None
+                    )
+                    if coordinator is not None and requested_device is not None:
+                        async with coordinator.gateway_lease(
+                            plugin_name, str(requested_device)
+                        ) as gpu_lease:
+                            set_device = getattr(
+                                lifecycle_owner, "set_runtime_device", None
+                            )
+                            if callable(set_device):
+                                set_device(gpu_lease.device)
+                            ctx = await execute_plugin(plugin, ctx)
+                    else:
+                        ctx = await execute_plugin(plugin, ctx)
                 except Exception as exc:
                     elapsed_ms = (time.monotonic() - plugin_start) * 1000
                     collector = TraceCollector.current()

@@ -63,6 +63,8 @@ class ComfyUIConfig:
     upscale_model: str = ""
     allowed_upscale_models: list[str] = field(default_factory=list)
     max_upscale_long_edge: int = 4096
+    sdxl_required_vram_gb: float = 8.0
+    upscale_required_vram_gb: float = 4.0
     qwen_image_enabled: bool = True
     qwen_image_auto_select: bool = False
     qwen_image_diffusion_model: str = "qwen_image_fp8_e4m3fn.safetensors"
@@ -70,6 +72,7 @@ class ComfyUIConfig:
     qwen_image_vae: str = "qwen_image_vae.safetensors"
     qwen_image_draft_steps: int = 12
     qwen_image_max_draft_edge: int = 768
+    qwen_image_required_vram_gb: float = 12.0
     allowed_qwen_image_diffusion_models: list[str] = field(
         default_factory=lambda: ["qwen_image_fp8_e4m3fn.safetensors"]
     )
@@ -101,6 +104,7 @@ class ComfyUIConfig:
     video_cfg: float = 5.0
     video_shift: float = 8.0
     video_execution_timeout: int = 1200
+    video_required_vram_gb: float = 12.0
 
 
 @dataclass

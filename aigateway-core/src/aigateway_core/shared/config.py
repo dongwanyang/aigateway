@@ -235,6 +235,7 @@ class ConfigManager:
             "streaming", "generation_optimization", "code_rag",
             "plugin_runtime", "retry_budget",
             "intent_classifier", "model_selector", "task_routing", "generation",
+            "gpu_scheduler",
         }
 
         # 环境变量覆盖产生的扁平键（AI_GATEWAY_* 去前缀后的小写形式）
@@ -831,6 +832,22 @@ class ConfigManager:
                         issues.append({"level": "ERROR", "message": f"server.port 必须在 1024-65535 之间，当前值: {port}"})
                 except (TypeError, ValueError):
                     issues.append({"level": "ERROR", "message": f"server.port 必须为整数，当前值: {port}"})
+
+        gpu_scheduler = config.get("gpu_scheduler", {})
+        if gpu_scheduler is not None:
+            try:
+                from .gpu_scheduler import GpuSchedulerConfig
+
+                if not isinstance(gpu_scheduler, dict):
+                    raise ValueError("gpu_scheduler must be an object")
+                GpuSchedulerConfig.from_mapping(gpu_scheduler)
+            except (TypeError, ValueError) as exc:
+                issues.append(
+                    {
+                        "level": "ERROR",
+                        "message": f"gpu_scheduler 配置无效: {exc}",
+                    }
+                )
 
         # 检查 provider api_key
         providers = config.get("providers", {})

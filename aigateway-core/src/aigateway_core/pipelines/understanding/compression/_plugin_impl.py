@@ -7,7 +7,9 @@ passthrough.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import threading
 from typing import Any
 
 from aigateway_core.dispatch.context import PipelineContext
@@ -43,6 +45,38 @@ class PromptCompressPlugin:
         self._compressor: Any = None
         self._is_available: bool = False
         self._initialized: bool = False
+        self._condition = threading.Condition(threading.RLock())
+        self._active = 0
+        self._releasing = False
+        self._runtime_device = (self._config.device or "cpu").strip().lower()
+
+    @property
+    def gpu_device_request(self) -> str:
+        return self._runtime_device
+
+    def set_runtime_device(self, device: str) -> None:
+        if device == self._runtime_device:
+            return
+        released = self.release_if_idle()
+        if released["busy"]:
+            raise RuntimeError("prompt_compressor_busy")
+        self._runtime_device = device
+
+    def release_if_idle(self) -> dict[str, bool]:
+        """Delete the local compressor only when no inference is active."""
+        with self._condition:
+            if self._active or self._releasing:
+                return {"released": False, "busy": True}
+            if self._compressor is None:
+                self._initialized = False
+                return {"released": False, "busy": False}
+            self._releasing = True
+            self._compressor = None
+            self._is_available = False
+            self._initialized = False
+            self._releasing = False
+            self._condition.notify_all()
+        return {"released": True, "busy": False}
 
     def _ensure_compressor_loaded(self, *, load_if_missing: bool = True) -> None:
         """Initialize LLMLingua-2 when explicitly allowed.
@@ -62,8 +96,10 @@ class PromptCompressPlugin:
         try:
             from llmlingua import PromptCompressor
 
-            device_map = (self._config.device or "cpu").strip().lower()
-            if device_map not in ("cpu", "cuda", "auto"):
+            device_map = self._runtime_device
+            if device_map not in ("cpu", "cuda", "auto") and not (
+                device_map.startswith("cuda:") and device_map[5:].isdigit()
+            ):
                 logger.warning(
                     "PromptCompressConfig.device=%r 不识别，回落到 cpu",
                     self._config.device,
@@ -125,7 +161,9 @@ class PromptCompressPlugin:
         if not messages:
             return ctx
 
-        self._ensure_compressor_loaded(load_if_missing=False)
+        await asyncio.to_thread(
+            self._ensure_compressor_loaded, load_if_missing=True
+        )
 
         if not self._is_available:
             return ctx
@@ -144,12 +182,27 @@ class PromptCompressPlugin:
         )
 
         try:
-            result = self._compressor.compress_prompt(
-                prompt_text,
-                rate=self._config.compression_ratio,
-                target_token=self._config.target_token if self._config.target_token > 0 else -1,
-                force_tokens=self._config.force_tokens,
-            )
+            with self._condition:
+                while self._releasing:
+                    self._condition.wait()
+                compressor = self._compressor
+                self._active += 1
+            try:
+                result = await asyncio.to_thread(
+                    compressor.compress_prompt,
+                    prompt_text,
+                    rate=self._config.compression_ratio,
+                    target_token=(
+                        self._config.target_token
+                        if self._config.target_token > 0
+                        else -1
+                    ),
+                    force_tokens=self._config.force_tokens,
+                )
+            finally:
+                with self._condition:
+                    self._active -= 1
+                    self._condition.notify_all()
             compressed_text = result["compressed_prompt"]
             compressed_tokens = len(compressed_text.split())
 

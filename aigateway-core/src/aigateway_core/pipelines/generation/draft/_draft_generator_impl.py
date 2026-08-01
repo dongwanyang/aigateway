@@ -24,6 +24,7 @@ import re
 import shutil
 import time
 import uuid
+from contextvars import ContextVar
 from io import BytesIO
 from typing import Any
 from urllib.parse import quote, urlparse, urlunparse
@@ -111,6 +112,10 @@ class DraftGeneratorStrategy:
         self._task_tracker = task_tracker
         self._comfyui_config = comfyui_config or ComfyUIConfig()
         self._comfyui_available: bool = False
+        self._gpu_coordinator: Any = None
+        self._active_worker_url: ContextVar[str | None] = ContextVar(
+            "comfyui_worker_url", default=None
+        )
         self._comfyui_semaphore = asyncio.Semaphore(
             max(1, int(self._comfyui_config.max_concurrency))
         )
@@ -132,6 +137,10 @@ class DraftGeneratorStrategy:
     @property
     def checkpoint_name(self) -> str:
         return self._comfyui_config.checkpoint_name
+
+    def _server_url(self) -> str:
+        """Return the task-bound worker URL, falling back to legacy single URL."""
+        return (self._active_worker_url.get() or self._comfyui_config.server_url).rstrip("/")
 
     async def shutdown(self) -> None:
         """Cancel and await every owned background generation task."""
@@ -196,6 +205,15 @@ class DraftGeneratorStrategy:
         media_type = "video" if is_video else "image"
         seed = int(uuid.uuid4().int % (2**32))
         uses_qwen_image = self._should_use_qwen_image(request)
+        draft_required_vram_gb = (
+            float(request.required_vram_gb)
+            if request.required_vram_gb is not None
+            else float(
+                self._comfyui_config.qwen_image_required_vram_gb
+                if uses_qwen_image
+                else self._comfyui_config.sdxl_required_vram_gb
+            )
+        )
 
         # generation_params 快照（后台 task 也要用，这里先建好）
         generation_params: dict[str, Any] = {
@@ -217,6 +235,8 @@ class DraftGeneratorStrategy:
             "workflow_version": self._comfyui_config.workflow_version,
             "quality": request.quality,
             "trace_id": request.trace_id,
+            "required_vram_gb": draft_required_vram_gb,
+            "required_vram_explicit": request.required_vram_gb is not None,
         }
         if is_video and keyframe_count is not None:
             generation_params["explicit_keyframe_count"] = keyframe_count
@@ -352,6 +372,7 @@ class DraftGeneratorStrategy:
         """Return a stable public error code without discarding the root cause."""
         error_text = str(exc).lower()
         known_codes = (
+            "gpu_queue_timeout",
             "comfyui_gpu_out_of_memory",
             "comfyui_execution_timeout",
             "comfyui_storage_low",
@@ -370,6 +391,88 @@ class DraftGeneratorStrategy:
         if "storage" in error_text:
             return "comfyui_storage_low"
         return fallback
+
+    async def _run_on_comfy_worker(
+        self,
+        draft_id: str,
+        capability: str,
+        operation: Any,
+        *,
+        preferred_worker_id: str | None = None,
+        memory_requirement_gb: float = 0.0,
+    ) -> tuple[Any, Any | None]:
+        """Run one ComfyUI operation on a leased worker with bounded failover."""
+        coordinator = self._gpu_coordinator
+        if coordinator is None or not coordinator.config.enabled:
+            return await operation(), None
+
+        from aigateway_core.shared.gpu_scheduler import GpuQueueTimeoutError
+
+        excluded: set[str] = set()
+        failovers = coordinator.config.max_worker_failover_attempts
+        for attempt in range(failovers + 1):
+            try:
+                async with coordinator.generation_lease(
+                    capability,
+                    memory_requirement_gb=memory_requirement_gb,
+                    excluded_workers=excluded,
+                    preferred_worker_id=preferred_worker_id,
+                ) as worker:
+                    existing = await self._load_draft(draft_id)
+                    previous_prompt_id = existing.comfy_prompt_id if existing else None
+                    if existing is not None:
+                        existing.worker_id = worker.worker_id
+                        existing.device_uuid = worker.device_uuid
+                        await self._store_draft(
+                            existing,
+                            max(1, int(existing.expires_at - time.time())),
+                        )
+                    token = self._active_worker_url.set(worker.server_url)
+                    try:
+                        result = await operation()
+                        return result, worker
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        code = self._public_comfyui_error_code(
+                            exc, fallback="comfyui_workflow_execution_failed"
+                        )
+                        is_oom = code == "comfyui_gpu_out_of_memory"
+                        if is_oom:
+                            await coordinator.quarantine_oom(worker.worker_id)
+                        current = await self._load_draft(draft_id)
+                        accepted_here = bool(
+                            current
+                            and current.comfy_prompt_id
+                            and current.comfy_prompt_id != previous_prompt_id
+                        )
+                        # A transport failure after /prompt was accepted is
+                        # ambiguous: do not blindly duplicate expensive work.
+                        may_failover = is_oom or not accepted_here
+                        if attempt >= failovers or not may_failover:
+                            raise
+                        excluded.add(worker.worker_id)
+                        preferred_worker_id = None
+                        coordinator.record_event(
+                            "worker_failover",
+                            worker_id=worker.worker_id,
+                            device_uuid=worker.device_uuid,
+                        )
+                        logger.warning(
+                            "ComfyUI worker failover",
+                            extra={
+                                "draft_id": draft_id,
+                                "worker_id": worker.worker_id,
+                                "device_uuid": worker.device_uuid,
+                                "attempt": attempt + 1,
+                                "reason": code,
+                            },
+                        )
+                    finally:
+                        self._active_worker_url.reset(token)
+            except GpuQueueTimeoutError as exc:
+                raise DraftWorkflowError("gpu_queue_timeout") from exc
+        raise DraftWorkflowError("comfyui_worker_unavailable")
 
     async def _generate_draft_async(
         self,
@@ -411,15 +514,15 @@ class DraftGeneratorStrategy:
                     payload={"draft_id": draft_id, "media_type": media_type},
                 )
 
-            if is_video:
-                previews = await self._generate_video_previews_with_comfyui(
-                    request,
-                    config,
-                    seed=int(generation_params["seed"]),
-                    draft_id=draft_id,
-                )
-            else:
-                previews = [
+            async def generate_preview() -> list[bytes]:
+                if is_video:
+                    return await self._generate_video_previews_with_comfyui(
+                        request,
+                        config,
+                        seed=int(generation_params["seed"]),
+                        draft_id=draft_id,
+                    )
+                return [
                     await self._generate_image_preview_with_comfyui(
                         request,
                         config,
@@ -427,6 +530,16 @@ class DraftGeneratorStrategy:
                         draft_id=draft_id,
                     )
                 ]
+
+            memory_requirement = float(
+                generation_params.get("required_vram_gb", 0.0) or 0.0
+            )
+            previews, allocated_worker = await self._run_on_comfy_worker(
+                draft_id,
+                "video" if is_video else "image",
+                generate_preview,
+                memory_requirement_gb=memory_requirement,
+            )
 
             gpu_seconds = max(0.0, time.monotonic() - start_time)
             draft = DraftResult(
@@ -445,6 +558,12 @@ class DraftGeneratorStrategy:
                 progress=1.0,
                 stage="pending",
                 workflow_version=self._comfyui_config.workflow_version,
+                worker_id=(
+                    allocated_worker.worker_id if allocated_worker is not None else None
+                ),
+                device_uuid=(
+                    allocated_worker.device_uuid if allocated_worker is not None else None
+                ),
                 gpu_seconds=gpu_seconds,
             )
             draft.generation_params["progress_source"] = "complete"
@@ -628,29 +747,48 @@ class DraftGeneratorStrategy:
         start_time = time.monotonic()
 
         try:
-            await self._check_comfyui()
-            if is_video:
-                output_data = await self._generate_video_with_comfyui(draft)
-                algorithm_used = (
-                    f"comfyui:{self._comfyui_config.video_workflow_version}"
+            async def confirm_on_worker() -> tuple[bytes, str, tuple[int, int]]:
+                await self._check_comfyui()
+                if is_video:
+                    output = await self._generate_video_with_comfyui(draft)
+                    algorithm = f"comfyui:{self._comfyui_config.video_workflow_version}"
+                else:
+                    output = await self._upscale_with_comfyui(draft, target_resolution)
+                    quality = str(draft.generation_params.get("quality", "standard"))
+                    algorithm = (
+                        f"comfyui:realesrgan:{self._comfyui_config.upscale_model}"
+                        if quality == "faithful_4k"
+                        else f"comfyui:{self._comfyui_config.workflow_version}"
+                    )
+                if output is None:
+                    raise DraftWorkflowError("ComfyUI returned no confirmed media")
+                resolution = (
+                    target_resolution
+                    if is_video
+                    else self._reported_image_resolution(output, target_resolution)
                 )
-            else:
-                output_data = await self._upscale_with_comfyui(
-                    draft, target_resolution
+                return output, algorithm, resolution
+
+            (output_data, algorithm_used, actual_resolution), allocated_worker = (
+                await self._run_on_comfy_worker(
+                    draft_id,
+                    "video" if is_video else "upscale",
+                    confirm_on_worker,
+                    preferred_worker_id=draft.worker_id,
+                    memory_requirement_gb=(
+                        float(draft.generation_params.get("required_vram_gb", 0.0))
+                        if draft.generation_params.get("required_vram_explicit")
+                        else float(self._comfyui_config.video_required_vram_gb)
+                        if is_video
+                        else float(self._comfyui_config.upscale_required_vram_gb)
+                        if str(draft.generation_params.get("quality")) == "faithful_4k"
+                        else float(draft.generation_params.get("required_vram_gb", 0.0) or 0.0)
+                    ),
                 )
-                quality = str(draft.generation_params.get("quality", "standard"))
-                algorithm_used = (
-                    f"comfyui:realesrgan:{self._comfyui_config.upscale_model}"
-                    if quality == "faithful_4k"
-                    else f"comfyui:{self._comfyui_config.workflow_version}"
-                )
-            if output_data is None:
-                raise DraftWorkflowError("ComfyUI returned no confirmed media")
-            actual_resolution = (
-                target_resolution
-                if is_video
-                else self._reported_image_resolution(output_data, target_resolution)
             )
+            if allocated_worker is not None:
+                draft.worker_id = allocated_worker.worker_id
+                draft.device_uuid = allocated_worker.device_uuid
         except Exception:
             await self._mark_draft_confirmation_failed(
                 draft, f"{draft.media_type} confirmation failed"
@@ -891,8 +1029,16 @@ return {3, raw}
                 "Draft background worker disappeared before submitting ComfyUI job",
             )
 
+        bound_worker = (
+            self._gpu_coordinator.get_worker(draft.worker_id)
+            if self._gpu_coordinator is not None
+            else None
+        )
+        worker_url = bound_worker.server_url if bound_worker is not None else None
         try:
-            prompt_state = await self._get_comfy_prompt_state(prompt_id)
+            prompt_state = await self._get_comfy_prompt_state(
+                prompt_id, server_url=worker_url
+            )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -918,6 +1064,7 @@ return {3, raw}
                     timeout=1,
                     trace_id=trace_id,
                     draft_id=draft_id,
+                    server_url=worker_url,
                 )
             except Exception as exc:
                 if isinstance(exc, asyncio.CancelledError):
@@ -1003,11 +1150,13 @@ return {3, raw}
             "ComfyUI job is no longer queued, running, or present in history",
         )
 
-    async def _get_comfy_prompt_state(self, prompt_id: str) -> str:
+    async def _get_comfy_prompt_state(
+        self, prompt_id: str, *, server_url: str | None = None
+    ) -> str:
         """Return queued/running/completed/missing/unknown for a ComfyUI prompt."""
         import httpx
 
-        base_url = self._comfyui_config.server_url
+        base_url = (server_url or self._server_url()).rstrip("/")
         try:
             async with httpx.AsyncClient(
                 timeout=self._comfyui_config.connect_timeout
@@ -1086,7 +1235,7 @@ return {3, raw}
         """
         import httpx
 
-        url = f"{self._comfyui_config.server_url}/system_stats"
+        url = f"{self._server_url()}/system_stats"
         try:
             async with httpx.AsyncClient(
                 timeout=self._comfyui_config.connect_timeout
@@ -1096,7 +1245,7 @@ return {3, raw}
                     self._comfyui_available = True
                     logger.info(
                         "generation_optimization.draft_generator.comfyui_connected",
-                        extra={"server_url": self._comfyui_config.server_url},
+                        extra={"server_url": self._server_url()},
                     )
                 else:
                     self._comfyui_available = False
@@ -1316,7 +1465,7 @@ return {3, raw}
     async def _upload_image(self, image_data: bytes, filename: str) -> str:
         import httpx
 
-        url = f"{self._comfyui_config.server_url}/upload/image"
+        url = f"{self._server_url()}/upload/image"
         async with httpx.AsyncClient(
             timeout=self._comfyui_config.connect_timeout
         ) as client:
@@ -1353,7 +1502,7 @@ return {3, raw}
         """
         import httpx
 
-        url = f"{self._comfyui_config.server_url}/prompt"
+        url = f"{self._server_url()}/prompt"
         payload: dict[str, Any] = {"prompt": workflow_json}
         if client_id:
             payload["client_id"] = client_id
@@ -1412,7 +1561,7 @@ return {3, raw}
         return f"aigateway-{safe_draft}-{stage}-{uuid.uuid4().hex[:8]}"
 
     def _comfy_ws_url(self, client_id: str) -> str:
-        parsed = urlparse(self._comfyui_config.server_url)
+        parsed = urlparse(self._server_url())
         scheme = "wss" if parsed.scheme == "https" else "ws"
         path = parsed.path.rstrip("/") + "/ws"
         return urlunparse(
@@ -1558,6 +1707,7 @@ return {3, raw}
         draft_id: str | None = None,
         progress_client_id: str | None = None,
         progress_stage: str = "running",
+        server_url: str | None = None,
     ) -> list[bytes]:
         """轮询 ComfyUI 获取工作流执行结果.
 
@@ -1579,7 +1729,10 @@ return {3, raw}
         if timeout is None:
             timeout = self._comfyui_config.execution_timeout
 
-        history_url = f"{self._comfyui_config.server_url}/history/{prompt_id}"
+        worker_token = (
+            self._active_worker_url.set(server_url) if server_url is not None else None
+        )
+        history_url = f"{self._server_url()}/history/{prompt_id}"
         poll_interval = 1.0  # seconds
         deadline = time.monotonic() + timeout
         transient_errors = 0
@@ -1685,7 +1838,7 @@ return {3, raw}
                                     subfolder = media_info.get("subfolder", "")
                                     media_type = media_info.get("type", "output")
                                     view_url = (
-                                        f"{self._comfyui_config.server_url}/view"
+                                        f"{self._server_url()}/view"
                                         f"?filename={filename}"
                                         f"&subfolder={subfolder}"
                                         f"&type={media_type}"
@@ -1766,17 +1919,21 @@ return {3, raw}
             if progress_task is not None and not progress_task.done():
                 progress_task.cancel()
                 await asyncio.gather(progress_task, return_exceptions=True)
+            if worker_token is not None:
+                self._active_worker_url.reset(worker_token)
 
-        await self._cancel_comfyui_workflow(prompt_id)
+        await self._cancel_comfyui_workflow(prompt_id, server_url=server_url)
         raise DraftWorkflowError(
             f"ComfyUI 工作流执行超时 ({timeout}s): prompt_id={prompt_id}"
         )
 
-    async def _cancel_comfyui_workflow(self, prompt_id: str) -> None:
+    async def _cancel_comfyui_workflow(
+        self, prompt_id: str, *, server_url: str | None = None
+    ) -> None:
         """Cancel only the matching pending/running ComfyUI workflow."""
         import httpx
 
-        base_url = self._comfyui_config.server_url
+        base_url = (server_url or self._server_url()).rstrip("/")
         try:
             async with httpx.AsyncClient(
                 timeout=self._comfyui_config.connect_timeout
@@ -2903,6 +3060,8 @@ return {3, raw}
             "stage": draft.stage,
             "workflow_version": draft.workflow_version,
             "comfy_prompt_id": draft.comfy_prompt_id,
+            "worker_id": draft.worker_id,
+            "device_uuid": draft.device_uuid,
             "gpu_seconds": draft.gpu_seconds,
         }
         self._write_meta_dict(draft_dir, meta)
@@ -3027,6 +3186,8 @@ return {3, raw}
             "stage": draft.stage,
             "workflow_version": draft.workflow_version,
             "comfy_prompt_id": draft.comfy_prompt_id,
+            "worker_id": draft.worker_id,
+            "device_uuid": draft.device_uuid,
             "gpu_seconds": draft.gpu_seconds,
             "error": draft.error,
             "store_dir": draft_dir,  # 供 _load_draft 定位文件
@@ -3114,6 +3275,8 @@ return {3, raw}
             stage=data.get("stage", data.get("status", "pending")),
             workflow_version=data.get("workflow_version", ""),
             comfy_prompt_id=data.get("comfy_prompt_id"),
+            worker_id=data.get("worker_id"),
+            device_uuid=data.get("device_uuid"),
             gpu_seconds=float(data.get("gpu_seconds", 0.0)),
             error=data.get("error"),
         )

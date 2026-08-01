@@ -101,6 +101,13 @@ NVIDIA ComfyUI 容器；Apple Silicon 的核心栈仍在 Docker 中，ComfyUI �
 Embedding 以用户级 MPS 服务运行，Gateway 通过 `host.docker.internal`
 访问。
 
+Linux/Windows 的本地 NVIDIA GPU 不再静态切成“Gateway 卡”和“ComfyUI
+卡”。安装器按 GPU UUID 生成
+`.aigateway/runtime/docker-compose.gpu.generated.yml`，每张生成卡运行一个
+ComfyUI worker，Gateway 可看到动态池中的全部设备。空闲时 Gateway 可以借卡；
+图片或视频任务到达后，调度器停止该卡的新 Gateway 租约，等待在途推理完成并
+安全卸载模型，再把卡交给 ComfyUI。单卡和多卡使用同一套机制。
+
 源码模式会从对应版本的 GHCR 镜像导入 BuildKit inline cache。Python
 依赖、PyTorch/CUDA 和系统包位于源码层之前，因此日常代码修改只会重新
 复制并安装本地 Gateway 包；Gateway 与 ComfyUI 也会复用同一 CUDA/PyTorch
@@ -327,6 +334,17 @@ bash scripts/quickstart.sh --edition studio --install-models
 # 3. ComfyUI 管理界面仅绑定宿主机回环地址，不直接暴露公网
 docker compose --profile comfy-container ps
 ```
+
+调度参数集中在 `gpu_scheduler`。默认生成等待上限 120 秒、ComfyUI 空闲保留
+60 秒、显存安全余量 2GB；这些值都可在“系统配置 → GPU 动态资源池”修改。
+等待、心跳、冷却、重试和安全余量热生效，现有租约保持原期限；GPU UUID、
+设备池和 `device_overrides` 变更会在 API/控制台标记为“需重建”。本地 CUDA
+安装默认启用宿主机 `aigateway-gpu-topology.service`：它会自动验证并原子生成
+Compose overlay，然后只重建 Gateway 和受影响的 ComfyUI worker；无需再次运行
+安装器。可用 `topology_auto_apply` 开关和
+`topology_reconcile_interval_seconds` 检查间隔控制该行为。Gateway 容器本身不会
+挂载 Docker Socket。`gateway_memory_limit_percent` 只是可选的
+PyTorch 进程安全上限，不是严格显存预留，也不参与静态切分。
 
 本机可打开 `http://127.0.0.1:8188`。如果 Docker 运行在远程服务器，
 先从你的电脑建立 SSH 隧道，再打开同一地址：

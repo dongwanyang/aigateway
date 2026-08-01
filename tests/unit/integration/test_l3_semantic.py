@@ -41,6 +41,10 @@ class TestSetL3Device:
         l3_semantic.set_l3_device("cuda")
         assert l3_semantic._l3_device == "cuda"
 
+    def test_set_fixed_cuda_index(self):
+        l3_semantic.set_l3_device("cuda:2")
+        assert l3_semantic._l3_device == "cuda:2"
+
     def test_set_invalid_falls_back_to_auto(self):
         l3_semantic.set_l3_device("invalid_device")
         assert l3_semantic._l3_device == "auto"

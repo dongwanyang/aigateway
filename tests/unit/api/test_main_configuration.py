@@ -289,6 +289,12 @@ async def test_lifespan_wires_runtime_services_reload_and_shutdown(monkeypatch):
         stack.enter_context(patch.object(main, "ConfigManager", return_value=config))
         stack.enter_context(patch.object(main, "RedisClientManager", return_value=redis))
         stack.enter_context(patch.object(main, "QdrantClientManager", return_value=qdrant))
+        stack.enter_context(
+            patch(
+                "aigateway_core.shared.gpu_scheduler.discover_nvidia_devices",
+                return_value=[],
+            )
+        )
         stack.enter_context(patch.object(main, "SQLiteStore", return_value=sqlite))
         cache_factory = stack.enter_context(
             patch.object(main, "CacheManager", return_value=cache)

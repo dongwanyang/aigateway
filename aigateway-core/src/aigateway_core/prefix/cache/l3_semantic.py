@@ -42,6 +42,8 @@ _l3_model_lock = threading.Lock()
 # late-bind：由 main.py 启动时按 config embedding.device 调用 set_l3_device() 注入，
 # 避免在本 core 层反向依赖 shared.config（参照 LiteLLMBridge.set_auto_resolver 模式）。
 _l3_device: str = "auto"
+_l3_runtime_device: str = "auto"
+_l3_gpu_coordinator: Any = None
 _l3_model_name: str = "Qwen/Qwen3-Embedding-0.6B"
 _l3_idle_unload_seconds: float = 300.0
 _l3_idle_generation: int = 0
@@ -54,13 +56,22 @@ def set_l3_device(device: str) -> None:
     必须在首次 _compute_l3_vector 调用前设置；模型一旦加载，device 即固化。
     无效值回落 auto。
     """
-    global _l3_device
+    global _l3_device, _l3_runtime_device
     dev = (device or "auto").strip().lower()
-    if dev not in ("cpu", "cuda", "auto"):
+    if dev not in ("cpu", "cuda", "auto") and not (
+        dev.startswith("cuda:") and dev[5:].isdigit()
+    ):
         logger.warning("set_l3_device(%r) 不识别，回落 auto", device)
         dev = "auto"
     _l3_device = dev
+    _l3_runtime_device = dev
     logger.info("L3 embedding device 设为: %s", dev)
+
+
+def set_l3_gpu_coordinator(coordinator: Any) -> None:
+    """Bind the lifespan-owned dynamic GPU coordinator."""
+    global _l3_gpu_coordinator
+    _l3_gpu_coordinator = coordinator
 
 
 def set_l3_model(model_name: str) -> None:
@@ -182,11 +193,19 @@ async def _compute_l3_vector(text: str, *, load_if_missing: bool = True) -> list
         return None
     _invalidate_idle_release()
     try:
-        return await asyncio.to_thread(
-            _compute_l3_vector_sync,
-            text,
-            load_if_missing,
-        )
+        if _l3_gpu_coordinator is None:
+            return await asyncio.to_thread(
+                _compute_l3_vector_sync, text, load_if_missing
+            )
+        async with _l3_gpu_coordinator.gateway_lease("l3", _l3_device) as lease:
+            global _l3_runtime_device
+            cached_device = _l3_model_cache.get("device")
+            if cached_device is not None and cached_device != lease.device:
+                await asyncio.to_thread(release_l3_model)
+            _l3_runtime_device = lease.device
+            return await asyncio.to_thread(
+                _compute_l3_vector_sync, text, load_if_missing
+            )
     finally:
         # A failed inference may still leave a successfully loaded model in the
         # cache. Re-arm the timer regardless of the vector result.
@@ -218,7 +237,7 @@ def _compute_l3_vector_sync(
                     trust_remote_code=True,
                     local_files_only=local_only,
                 )
-                device = _l3_device
+                device = _l3_runtime_device
                 if device == "cuda" and not torch.cuda.is_available():
                     raise RuntimeError("semantic_cache_cuda_unavailable")
                 if device == "auto":

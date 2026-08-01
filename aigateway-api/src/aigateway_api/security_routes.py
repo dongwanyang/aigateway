@@ -193,6 +193,7 @@ async def update_secure_full_config(
             "rate_limiter",
             "streaming",
             "generation_optimization",
+            "gpu_scheduler",
             "code_rag",
             "plugin_runtime",
             "retry_budget",
@@ -324,4 +325,4 @@ def install_security_routes(admin_router: APIRouter) -> None:
 
 
 _validate_public_url = validate_public_url
-__all__ = ["install_security_routes", "router", "_validate_public_url"]
+__all__ = ["_validate_public_url", "install_security_routes", "router"]

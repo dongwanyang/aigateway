@@ -10,6 +10,7 @@ aigateway-api 应用入口
 - 子路径部署: 通过环境变量 AI_GATEWAY_BASE_PATH 传入basePath
 """
 
+import asyncio
 import logging
 import os
 import sys
@@ -45,26 +46,47 @@ from aigateway_core.shared.qdrant_client import QdrantClientManager
 from aigateway_core.shared.redis_client import RedisClientManager
 
 logger = logging.getLogger(__name__)
+_cuda_memory_limit_applied = False
 
 
-def _configure_cuda_memory_limit() -> None:
-    """Apply the installer-selected CUDA memory fraction before model loading."""
+def _configure_cuda_memory_limit(gpu_scheduler: dict[str, Any] | None = None) -> None:
+    """Apply the configured PyTorch safety ceiling to every visible device."""
+    global _cuda_memory_limit_applied
     raw_fraction = os.getenv("AI_GATEWAY_CUDA_MEMORY_FRACTION", "").strip()
-    if not raw_fraction:
-        return
-    try:
-        fraction = float(raw_fraction)
-    except ValueError as exc:
-        raise RuntimeError("invalid AI_GATEWAY_CUDA_MEMORY_FRACTION") from exc
+    if raw_fraction:
+        try:
+            fraction = float(raw_fraction)
+        except ValueError as exc:
+            raise RuntimeError("invalid AI_GATEWAY_CUDA_MEMORY_FRACTION") from exc
+    else:
+        percentage = (gpu_scheduler or {}).get("gateway_memory_limit_percent")
+        if percentage is None:
+            if not _cuda_memory_limit_applied:
+                return
+            fraction = 1.0
+            _cuda_memory_limit_applied = False
+        else:
+            try:
+                fraction = float(percentage) / 100.0
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("invalid gpu_scheduler.gateway_memory_limit_percent") from exc
+            _cuda_memory_limit_applied = True
+    if raw_fraction:
+        _cuda_memory_limit_applied = True
     if not 0.0 < fraction <= 1.0:
-        raise RuntimeError("AI_GATEWAY_CUDA_MEMORY_FRACTION must be in (0, 1]")
+        raise RuntimeError("Gateway CUDA memory limit must be in (0, 100]")
 
     import torch
 
     if not torch.cuda.is_available():
         raise RuntimeError("gateway_cuda_unavailable")
-    torch.cuda.set_per_process_memory_fraction(fraction, device=0)
-    logger.info("Gateway CUDA memory fraction limited to %.2f", fraction)
+    for device_index in range(torch.cuda.device_count()):
+        torch.cuda.set_per_process_memory_fraction(fraction, device=device_index)
+    logger.info(
+        "Gateway CUDA memory safety limit set to %.1f%% on %d visible device(s)",
+        fraction * 100,
+        torch.cuda.device_count(),
+    )
 
 
 @asynccontextmanager
@@ -310,11 +332,11 @@ async def lifespan(app: "FastAPI"):
     关闭时:
     1. 关闭 Redis 和 Qdrant 连接
     """
-    _configure_cuda_memory_limit()
-
     # 初始化 ConfigManager
     config_path = os.environ.get("AI_GATEWAY_CONFIG_PATH", "./config.yaml")
     config_manager = ConfigManager(config_path=config_path)
+    gpu_scheduler_raw = config_manager.get("gpu_scheduler", {}) or {}
+    _configure_cuda_memory_limit(gpu_scheduler_raw)
 
     # 日志级别决策优先级：环境变量 > config.yaml observability.log_level > "INFO"
     # （debug_mode 不再强制 DEBUG；AI_GATEWAY_ENV=production 在 config.py 里强制 ≥INFO）
@@ -349,6 +371,75 @@ async def lifespan(app: "FastAPI"):
     except Exception as exc:
         logger.warning("Redis 连接失败，部分功能不可用: %s", exc)
         redis_mgr = None  # type: ignore[assignment]
+
+    # Dynamic GPU pool.  Inventory is discovered without importing CUDA, and
+    # all background tasks are owned by the lifespan for deterministic shutdown.
+    from aigateway_core.shared.gpu_scheduler import (
+        GpuResourceCoordinator,
+        GpuSchedulerConfig,
+        discover_nvidia_devices,
+        workers_from_config,
+    )
+
+    gpu_devices = await asyncio.to_thread(discover_nvidia_devices)
+    logger.info("GPU inventory discovered: %d device(s)", len(gpu_devices))
+    metrics_collector = get_metrics_collector()
+    gpu_coordinator = GpuResourceCoordinator(
+        GpuSchedulerConfig.from_mapping(gpu_scheduler_raw),
+        devices=gpu_devices,
+        workers=workers_from_config(config_manager.snapshot(), gpu_devices),
+        redis=getattr(redis_mgr, "redis", None),
+        metrics_collector=metrics_collector,
+    )
+
+    async def _release_idle_comfy_worker(worker: Any) -> bool:
+        import httpx
+
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, read=15.0)) as client:
+                response = await client.post(
+                    f"{worker.server_url.rstrip('/')}/free",
+                    json={"unload_models": True, "free_memory": True},
+                )
+            response.raise_for_status()
+            return True
+        except (httpx.HTTPError, ValueError, TypeError) as exc:
+            logger.warning(
+                "ComfyUI idle release failed",
+                extra={"worker_id": worker.worker_id, "device_uuid": worker.device_uuid,
+                       "error_type": type(exc).__name__},
+            )
+            return False
+
+    async def _probe_comfy_worker(worker: Any) -> dict[str, Any]:
+        import httpx
+
+        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, read=10.0)) as client:
+            queue_response, stats_response = await asyncio.gather(
+                client.get(f"{worker.server_url.rstrip('/')}/queue"),
+                client.get(f"{worker.server_url.rstrip('/')}/system_stats"),
+            )
+        queue_response.raise_for_status()
+        stats_response.raise_for_status()
+        queue = queue_response.json()
+        stats = stats_response.json()
+        devices = stats.get("devices", []) if isinstance(stats, dict) else []
+        device_stats = devices[0] if devices and isinstance(devices[0], dict) else {}
+        free_bytes = device_stats.get("vram_free")
+        return {
+            "healthy": True,
+            "running": len(queue.get("queue_running", [])),
+            "pending": len(queue.get("queue_pending", [])),
+            "free_memory_gb": (
+                float(free_bytes) / (1024**3) if free_bytes is not None else None
+            ),
+        }
+
+    gpu_coordinator.set_worker_release_hook(_release_idle_comfy_worker)
+    gpu_coordinator.set_worker_probe_hook(_probe_comfy_worker)
+    await gpu_coordinator.start()
+    app.state.gpu_coordinator = gpu_coordinator
+    logger.info("GpuResourceCoordinator started: %d worker(s)", len(gpu_coordinator.status()["workers"]))
 
     # 初始化 Qdrant 连接
     qdrant_cfg = infra_cfg.get("qdrant", {}) if isinstance(infra_cfg, dict) else {}
@@ -592,12 +683,14 @@ async def lifespan(app: "FastAPI"):
     try:
         from aigateway_core.prefix.cache.l3_semantic import (
             set_l3_device,
+            set_l3_gpu_coordinator,
             set_l3_idle_unload_seconds,
             set_l3_model,
         )
         l3_dev = config_manager.get("embedding.device", "auto")
         set_l3_model(config_manager.get("embedding.model", "Qwen/Qwen3-Embedding-0.6B"))
         set_l3_device(l3_dev)
+        set_l3_gpu_coordinator(gpu_coordinator)
         set_l3_idle_unload_seconds(
             float(config_manager.get("embedding.idle_unload_seconds", 300))
         )
@@ -688,6 +781,7 @@ async def lifespan(app: "FastAPI"):
                 if litellm_bridge is not None and hasattr(draft_strategy, "_litellm_bridge"):
                     draft_strategy._litellm_bridge = litellm_bridge
                     logger.info("DraftGeneratorStrategy 已绑定 litellm_bridge")
+                draft_strategy._gpu_coordinator = gpu_coordinator
                 # 两个路由文件用不同的属性名读取 strategy，都挂上以保持兼容：
                 # - admin_routes._get_draft_strategy 读 app.state.draft_strategy
                 # - draft_routes._get_draft_strategy 读 app.state.draft_generator_strategy
@@ -800,7 +894,7 @@ async def lifespan(app: "FastAPI"):
     app.state.plugin_registry = plugin_registry
     app.state.l3_cleanup_scheduler = l3_scheduler
 
-    app.state.metrics_collector = get_metrics_collector()
+    app.state.metrics_collector = metrics_collector
     app.state.litellm_bridge = litellm_bridge
     app.state.redis_manager = redis_mgr
     app.state.qdrant_manager = qdrant_mgr
@@ -813,6 +907,25 @@ async def lifespan(app: "FastAPI"):
     app.state.model_router_resolver = model_router_resolver
     app.state.prompt_compress_plugin = prompt_compress_plugin
 
+    # Gateway residents are released only after their own busy counters reach
+    # zero.  The hooks are intentionally lazy: a subsequent request reloads the
+    # model on whichever lease/device the scheduler returns.
+    from aigateway_core.prefix.cache.l3_semantic import release_l3_model
+
+    from .embedding_model_runtime import embedding_model_runtime
+
+    async def _release_embedding(_device_uuid: str) -> bool:
+        result = await asyncio.to_thread(embedding_model_runtime.release_if_idle)
+        return bool(result["released"] or not result["busy"])
+
+    async def _release_l3(_device_uuid: str) -> bool:
+        await asyncio.to_thread(release_l3_model)
+        return True
+
+    gpu_coordinator.register_release_hook("embedding", _release_embedding)
+    gpu_coordinator.register_release_hook("rag_embedding", _release_embedding)
+    gpu_coordinator.register_release_hook("l3", _release_l3)
+
     # Intent-driven routing (Task 9): RequestDispatcher.__init__ 通过
     # state.get("intent_classifier") 取用,做 understanding|generation:image|generation:video 分流。
     app.state.intent_classifier = intent_classifier
@@ -824,11 +937,29 @@ async def lifespan(app: "FastAPI"):
     from aigateway_core.dispatch.pipeline_engine import PipelineEngine
 
     understanding_engine = PipelineEngine(plugin_registry, pipeline_kind="understanding")
+    understanding_engine.gpu_coordinator = gpu_coordinator
     understanding_engine.initialize()
     generation_engine = PipelineEngine(plugin_registry, pipeline_kind="generation")
+    generation_engine.gpu_coordinator = gpu_coordinator
     generation_engine.initialize()
     app.state.understanding_engine = understanding_engine
     app.state.generation_engine = generation_engine
+
+    for engine in (understanding_engine, generation_engine):
+        for plugin in getattr(engine, "_ordered_plugins", []):
+            lifecycle_owner = getattr(plugin, "_strategy", plugin)
+            release_if_idle = getattr(lifecycle_owner, "release_if_idle", None)
+            if not callable(release_if_idle):
+                continue
+
+            async def _release_plugin(
+                _device_uuid: str,
+                release: Any = release_if_idle,
+            ) -> bool:
+                result = await asyncio.to_thread(release)
+                return bool(result.get("released") or not result.get("busy"))
+
+            gpu_coordinator.register_release_hook(plugin.name, _release_plugin)
 
     # 注册热重载回调：admin 改 config.yaml 后（经 atomic_swap → _notify_reload）
     # 重建受影响的运行时组件。同步 plugins.enabled 到 registry 并重建两个 Engine。
@@ -853,6 +984,9 @@ async def lifespan(app: "FastAPI"):
 
     def _on_config_reload(new_config: dict) -> None:
         try:
+            scheduler_config = new_config.get("gpu_scheduler", {}) or {}
+            gpu_coordinator.update_hot_config(scheduler_config)
+            _configure_cuda_memory_limit(scheduler_config)
             registry = getattr(app.state, "plugin_registry", None)
             if registry is None:
                 return
@@ -875,6 +1009,7 @@ async def lifespan(app: "FastAPI"):
             for kind, attr in (("understanding", "understanding_engine"),
                                ("generation", "generation_engine")):
                 eng = PipelineEngine(registry, pipeline_kind=kind)
+                eng.gpu_coordinator = gpu_coordinator
                 eng.initialize()
                 setattr(app.state, attr, eng)
             logger.info("热重载回调完成：已同步 plugins.enabled 并重建两条管道 Engine")
@@ -912,6 +1047,12 @@ async def lifespan(app: "FastAPI"):
             logger.info("DraftGeneratorStrategy 后台任务已停止")
         except Exception as exc:
             logger.warning("停止 DraftGeneratorStrategy 后台任务出错: %s", exc)
+
+    try:
+        await gpu_coordinator.close()
+        logger.info("GpuResourceCoordinator 已停止")
+    except Exception as exc:
+        logger.warning("停止 GpuResourceCoordinator 出错: %s", exc)
 
     if redis_mgr is not None:
         try:

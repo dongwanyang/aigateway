@@ -1,0 +1,240 @@
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+from aigateway_core.shared.gpu_scheduler import (
+    ComfyWorker,
+    GpuDevice,
+    GpuLeaseUnavailableError,
+    GpuQueueTimeoutError,
+    GpuResourceCoordinator,
+    GpuSchedulerConfig,
+    GpuSchedulerConfigError,
+)
+
+
+class _LeaseRedis:
+    def __init__(self) -> None:
+        self.heartbeat = asyncio.Event()
+        self.expired_keys: list[str] = []
+        self.deleted_keys: list[str] = []
+
+    async def eval(self, *_args: object) -> int:
+        return 1
+
+    async def expire(self, key: str, _seconds: int) -> None:
+        self.expired_keys.append(key)
+        if ":leases:" in key:
+            self.heartbeat.set()
+
+    async def delete(self, key: str) -> None:
+        self.deleted_keys.append(key)
+
+    async def srem(self, *_args: object) -> None:
+        return None
+
+
+class _Metrics:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, str, str]] = []
+        self.queue_depths: list[int] = []
+        self.waits: list[float] = []
+
+    def record_gpu_scheduler_event(
+        self, event: str, *, worker_id: str, device_uuid: str
+    ) -> None:
+        self.events.append((event, worker_id, device_uuid))
+
+    def set_gpu_generation_queue_depth(self, depth: int) -> None:
+        self.queue_depths.append(depth)
+
+    def record_gpu_generation_wait(self, duration_seconds: float) -> None:
+        self.waits.append(duration_seconds)
+
+
+def _coordinator(**config: object) -> GpuResourceCoordinator:
+    devices = [
+        GpuDevice("GPU-a", 0, "small", 16, 14),
+        GpuDevice("GPU-b", 1, "large", 48, 44),
+    ]
+    workers = [
+        ComfyWorker("worker-a", "GPU-a", "http://a", frozenset({"image"})),
+        ComfyWorker(
+            "worker-b", "GPU-b", "http://b", frozenset({"image", "video", "upscale"})
+        ),
+    ]
+    return GpuResourceCoordinator(
+        GpuSchedulerConfig.from_mapping(config), devices=devices, workers=workers
+    )
+
+
+def test_scheduler_config_validates_heartbeat_and_exposes_defaults() -> None:
+    config = GpuSchedulerConfig.from_mapping({})
+    assert config.generation_wait_timeout_seconds == 120
+    assert config.comfyui_idle_reservation_seconds == 60
+    assert config.gateway_memory_limit_percent is None
+    with pytest.raises(GpuSchedulerConfigError, match="less than"):
+        GpuSchedulerConfig.from_mapping(
+            {"lease_ttl_seconds": 5, "lease_heartbeat_seconds": 5}
+        )
+
+
+@pytest.mark.asyncio
+async def test_generation_drain_rejects_new_gpu_lease_and_uses_cpu_fallback() -> None:
+    coordinator = _coordinator(device_safety_margin_gb=0)
+    first_lease = coordinator.gateway_lease("embedding", "cuda:1")
+    active = await first_lease.__aenter__()
+    assert active.device_uuid == "GPU-b"
+
+    generation_entered = asyncio.Event()
+
+    async def generation() -> None:
+        async with coordinator.generation_lease(
+            "video", memory_requirement_gb=20
+        ) as worker:
+            assert worker.worker_id == "worker-b"
+            generation_entered.set()
+
+    task = asyncio.create_task(generation())
+    for _ in range(100):
+        if coordinator.status()["devices"][1]["state"] == "draining":
+            break
+        await asyncio.sleep(0)
+    async with coordinator.gateway_lease("clip", "auto") as fallback:
+        assert fallback.device_uuid == "GPU-a"
+
+    await first_lease.__aexit__(None, None, None)
+    await asyncio.wait_for(generation_entered.wait(), timeout=1)
+    await task
+    await coordinator.close()
+
+
+@pytest.mark.asyncio
+async def test_cuda_index_is_strict_and_worker_selection_uses_capability_and_memory() -> None:
+    coordinator = _coordinator(device_safety_margin_gb=2)
+    async with coordinator.gateway_lease("clip", "cuda:0") as lease:
+        assert lease.device_uuid == "GPU-a"
+    async with coordinator.generation_lease(
+        "video", memory_requirement_gb=30
+    ) as worker:
+        assert worker.worker_id == "worker-b"
+    with pytest.raises(GpuLeaseUnavailableError):
+        async with coordinator.gateway_lease("clip", "cuda:9"):
+            pass
+    await coordinator.close()
+
+
+@pytest.mark.asyncio
+async def test_generation_timeout_is_configurable() -> None:
+    coordinator = _coordinator(
+        generation_wait_timeout_seconds=0.01,
+        device_safety_margin_gb=0,
+    )
+    lease = coordinator.gateway_lease("embedding", "cuda:1")
+    await lease.__aenter__()
+    with pytest.raises(GpuQueueTimeoutError):
+        async with coordinator.generation_lease("video"):
+            pass
+    await lease.__aexit__(None, None, None)
+    await coordinator.close()
+
+
+@pytest.mark.asyncio
+async def test_oom_quarantine_and_hot_update_preserve_restart_topology() -> None:
+    coordinator = _coordinator(
+        gateway_devices=["GPU-a"],
+        comfyui_devices=["GPU-a", "GPU-b"],
+        oom_quarantine_seconds=10,
+    )
+    await coordinator.quarantine_oom("worker-b")
+    with pytest.raises(GpuQueueTimeoutError):
+        coordinator.update_hot_config(
+            {
+                "gateway_devices": ["GPU-b"],
+                "comfyui_devices": ["GPU-b"],
+                "generation_wait_timeout_seconds": 0.01,
+            }
+        )
+        async with coordinator.generation_lease("video"):
+            pass
+    assert coordinator.config.gateway_devices == ("GPU-a",)
+    assert coordinator.config.generation_wait_timeout_seconds == 0.01
+    await coordinator.close()
+
+
+@pytest.mark.asyncio
+async def test_single_gpu_generation_drain_falls_back_to_cpu_and_cancellation_cleans_state() -> None:
+    device = GpuDevice("GPU-only", 0, "single", 24, 22)
+    coordinator = GpuResourceCoordinator(
+        GpuSchedulerConfig.from_mapping(
+            {"device_safety_margin_gb": 0, "gateway_fallback": "cpu"}
+        ),
+        devices=[device],
+        workers=[ComfyWorker("worker-only", "GPU-only", "http://only")],
+    )
+    lease = coordinator.gateway_lease("embedding", "cuda:0")
+    await lease.__aenter__()
+    waiting = asyncio.create_task(
+        coordinator.generation_lease("image").__aenter__()
+    )
+    for _ in range(100):
+        if device.draining:
+            break
+        await asyncio.sleep(0)
+    async with coordinator.gateway_lease("clip", "auto") as fallback:
+        assert fallback.device == "cpu"
+    waiting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+    await asyncio.sleep(0)
+    assert device.draining is False
+    assert coordinator.status()["generation_queue_depth"] == 0
+    await lease.__aexit__(None, None, None)
+    await coordinator.close()
+
+
+@pytest.mark.asyncio
+async def test_redis_lease_heartbeat_renews_lease_and_membership_ttls() -> None:
+    redis = _LeaseRedis()
+    coordinator = GpuResourceCoordinator(
+        GpuSchedulerConfig.from_mapping(
+            {"lease_ttl_seconds": 0.05, "lease_heartbeat_seconds": 0.01}
+        ),
+        devices=[GpuDevice("GPU-a", 0, free_memory_gb=20)],
+        redis=redis,
+    )
+    async with coordinator.gateway_lease("embedding", "cuda") as lease:
+        await asyncio.wait_for(redis.heartbeat.wait(), timeout=1)
+        assert any(key.endswith(lease.lease_id) for key in redis.expired_keys)
+        assert any(key.endswith("leases:GPU-a") for key in redis.expired_keys)
+    assert any(key.endswith(lease.lease_id) for key in redis.deleted_keys)
+    await coordinator.close()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_records_borrow_allocation_queue_wait_and_oom_metrics() -> None:
+    metrics = _Metrics()
+    coordinator = GpuResourceCoordinator(
+        GpuSchedulerConfig.from_mapping(
+            {
+                "device_safety_margin_gb": 0,
+                "comfyui_idle_reservation_seconds": 0,
+            }
+        ),
+        devices=[GpuDevice("GPU-a", 0, free_memory_gb=20)],
+        workers=[ComfyWorker("worker-a", "GPU-a", "http://worker")],
+        metrics_collector=metrics,
+    )
+    async with coordinator.gateway_lease("embedding", "cuda"):
+        pass
+    async with coordinator.generation_lease("image") as worker:
+        assert worker.worker_id == "worker-a"
+    await coordinator.quarantine_oom("worker-a")
+
+    assert ("gateway_borrow", "", "GPU-a") in metrics.events
+    assert ("worker_allocation", "worker-a", "GPU-a") in metrics.events
+    assert ("oom_quarantine", "worker-a", "GPU-a") in metrics.events
+    assert metrics.queue_depths[-1] == 0
+    assert len(metrics.waits) == 1
+    await coordinator.close()
