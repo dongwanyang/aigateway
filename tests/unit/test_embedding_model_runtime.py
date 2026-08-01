@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+
 import pytest
 from fastapi import HTTPException
 
@@ -30,6 +32,53 @@ def test_embedding_model_release_refuses_active_inference() -> None:
     assert runtime.release_if_idle() == {"released": True, "busy": False}
     assert runtime.cache == {}
     assert model.devices == ["cpu"]
+
+
+def test_new_inference_waits_until_release_finishes() -> None:
+    runtime = EmbeddingModelRuntime()
+    release_started = threading.Event()
+    allow_release = threading.Event()
+    lease_acquired = threading.Event()
+
+    class SlowModel(Model):
+        def to(self, device: str) -> "SlowModel":
+            release_started.set()
+            assert allow_release.wait(timeout=2)
+            super().to(device)
+            return self
+
+    first = SlowModel()
+    replacement = Model()
+    with runtime.lease(lambda: first):
+        pass
+
+    release_result: dict[str, bool] = {}
+
+    def release() -> None:
+        release_result.update(runtime.release_if_idle())
+
+    def acquire_replacement() -> None:
+        with runtime.lease(lambda: replacement):
+            lease_acquired.set()
+
+    release_thread = threading.Thread(target=release)
+    release_thread.start()
+    assert release_started.wait(timeout=1)
+
+    lease_thread = threading.Thread(target=acquire_replacement)
+    lease_thread.start()
+    assert not lease_acquired.wait(timeout=0.05)
+
+    allow_release.set()
+    release_thread.join(timeout=2)
+    lease_thread.join(timeout=2)
+
+    assert not release_thread.is_alive()
+    assert not lease_thread.is_alive()
+    assert release_result == {"released": True, "busy": False}
+    assert lease_acquired.is_set()
+    assert first.devices == ["cpu"]
+    assert runtime.cache["model"] is replacement
 
 
 @pytest.mark.asyncio
