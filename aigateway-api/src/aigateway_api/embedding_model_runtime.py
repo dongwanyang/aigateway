@@ -51,6 +51,17 @@ class EmbeddingModelRuntime:
                 self._active -= 1
                 self._condition.notify_all()
 
+    def discard_invalid_if_idle(self, predicate: Callable[[Any], bool]) -> bool:
+        """Discard an invalid cached object without racing active model work."""
+        with self._condition:
+            if self._loading or self._releasing or self._active:
+                return False
+            model = self.cache.get("model")
+            if model is None or not predicate(model):
+                return False
+            self.cache.pop("model", None)
+            return True
+
     def release_if_idle(self) -> dict[str, bool]:
         """Move the cached model to CPU only when no load or inference is active."""
         with self._condition:
