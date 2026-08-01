@@ -5,7 +5,7 @@ on:
     branches:
       - feat/gpu-scheduler-topology
     paths:
-      - .github/workflows/branch-fix-checkpoint-policy.yml
+      - .github/checkpoint-fix-trigger.txt
 
 permissions:
   contents: write
@@ -50,6 +50,7 @@ jobs:
             exit 0
           fi
 
+          rm -f .github/checkpoint-fix-trigger.txt
           rm -f .github/checkpoint-fix-failure.log
           rm -f .github/scripts/apply_checkpoint_policy_fixes.py.gz.b64
           rm -f .github/scripts/checkpoint-fix.part*
