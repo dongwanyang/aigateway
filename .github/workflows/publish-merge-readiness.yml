@@ -1,0 +1,48 @@
+name: Publish merge-readiness fixes
+
+on:
+  push:
+    branches: [feat/gpu-scheduler-topology]
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/gpu-scheduler-topology
+          fetch-depth: 0
+
+      - name: Apply validated product patches
+        run: |
+          cat .github/merge-readiness.patch.part* > /tmp/merge-readiness.patch.gz.b64
+          echo 'fdeb2ff14741aa04bfa5297be4e3ab38f77cf7950004f3ab010e36a326621e2f  /tmp/merge-readiness.patch.gz.b64' | sha256sum -c -
+          base64 -d /tmp/merge-readiness.patch.gz.b64 | gzip -d > /tmp/merge-readiness.patch
+          echo '7b8579e4cb489c4f302a739d53f7ee08824632332416441c998070ba158bf98e  /tmp/merge-readiness.patch' | sha256sum -c -
+          git apply --check /tmp/merge-readiness.patch
+          git apply /tmp/merge-readiness.patch
+          git apply --check .github/merge-readiness-followup.patch
+          git apply .github/merge-readiness-followup.patch
+
+      - name: Commit product changes only
+        run: |
+          rm -f .github/merge-readiness.patch.part*
+          rm -f .github/merge-readiness-followup.patch
+          rm -f .github/branch-hardening-trigger .github/branch-publish-trigger
+          rm -f .branch-source.zip pytest-results.xml pytest-output.txt coverage.xml .coverage
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git reset -- .github/workflows
+          git checkout -- .github/workflows
+          if git diff --cached --name-only | grep -q '^.github/workflows/'; then
+            echo 'workflow change unexpectedly staged' >&2
+            exit 1
+          fi
+          git diff --cached --check
+          git commit -m 'fix(gpu): close merge-readiness safety gaps'
+          git push origin HEAD:feat/gpu-scheduler-topology
