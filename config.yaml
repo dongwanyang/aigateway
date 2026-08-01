@@ -496,7 +496,7 @@ gpu_scheduler:
   device_safety_margin_gb: 2
   gateway_memory_limit_percent: null
   device_overrides: []
-  topology_auto_apply: true
+  topology_auto_apply: false
   topology_reconcile_interval_seconds: 10
 generation_optimization:
   enabled: true

@@ -192,7 +192,7 @@ describe('Config revision writes', () => {
         JSON.parse(String(call?.[1]?.body)).gpu_scheduler
           .comfyui_dynamic_vram_enabled,
       ).toBe(true)
-      expect(screen.getByText(/将自动校验并重建 GPU\/ComfyUI 拓扑/)).toBeInTheDocument()
+      expect(screen.getByText(/已允许外部拓扑控制器自动应用/)).toBeInTheDocument()
     })
   })
 })

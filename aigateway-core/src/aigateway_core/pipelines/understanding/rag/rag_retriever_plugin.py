@@ -154,28 +154,57 @@ class RAGRetrieverPlugin:
         self._runtime_rerank_device = getattr(self._config, "rerank_device", "auto")
         self._configured_rerank_device = self._runtime_rerank_device
 
+    def _gpu_bound_components(self) -> list[tuple[str, str]]:
+        components: list[tuple[str, str]] = []
+        if getattr(self._config, "embedding_backend", "local") == "local":
+            if self._configured_embedding_device != "cpu":
+                components.append(("embedding", self._configured_embedding_device))
+        if (
+            getattr(self._config, "rerank_enabled", False)
+            and getattr(self._config, "rerank_backend", "local") == "local"
+        ):
+            if self._configured_rerank_device != "cpu":
+                components.append(("rerank", self._configured_rerank_device))
+        return components
+
     @property
     def gpu_device_request(self) -> str:
-        local_embedding = getattr(self._config, "embedding_backend", "local") == "local"
-        local_rerank = getattr(self._config, "rerank_backend", "local") == "local"
-        candidates = []
-        if local_embedding:
-            candidates.append(self._configured_embedding_device)
-        if local_rerank:
-            candidates.append(self._configured_rerank_device)
-        return next((item for item in candidates if item != "cpu"), "cpu")
+        components = self._gpu_bound_components()
+        if not components:
+            return "cpu"
+        explicit = {
+            device
+            for _, device in components
+            if device not in {"auto", "cuda"}
+        }
+        if len(explicit) > 1:
+            raise RuntimeError("rag_multiple_gpu_devices_not_supported")
+        if explicit:
+            return next(iter(explicit))
+        return "cuda" if any(device == "cuda" for _, device in components) else "auto"
 
     def set_runtime_device(self, device: str) -> None:
-        if device == self._runtime_embedding_device:
+        components = self._gpu_bound_components()
+        next_embedding = (
+            device
+            if any(name == "embedding" for name, _ in components)
+            else self._configured_embedding_device
+        )
+        next_rerank = (
+            device
+            if any(name == "rerank" for name, _ in components)
+            else self._configured_rerank_device
+        )
+        if (
+            next_embedding == self._runtime_embedding_device
+            and next_rerank == self._runtime_rerank_device
+        ):
             return
         released = self.release_if_idle()
         if released["busy"]:
             raise RuntimeError("rag_embedding_busy")
-        self._runtime_embedding_device = device
-        if self._configured_rerank_device in {"auto", "cuda"} or str(
-            self._configured_rerank_device
-        ).startswith("cuda:"):
-            self._runtime_rerank_device = device
+        self._runtime_embedding_device = next_embedding
+        self._runtime_rerank_device = next_rerank
 
     def release_if_idle(self) -> dict[str, bool]:
         """Release the local index/embedding without racing retrieval."""

@@ -470,7 +470,7 @@ gpu_scheduler:
   gateway_memory_limit_percent: null # 可选 PyTorch 进程显存上限百分比（0-100）；null 表示关闭，不等于显存预留（热生效）
   device_overrides: []       # 高级设备覆盖列表，可按 UUID 设置 enabled/capabilities；UUID 或设备池变化需重建
   comfyui_dynamic_vram_enabled: false # 是否启用 ComfyUI Dynamic VRAM；部分 CUDA 分配器可能误报 OOM，修改后需重建 ComfyUI worker
-  topology_auto_apply: true  # 设备池或 GPU UUID 改变后，是否由宿主机控制器自动校验、生成 Compose 并重建拓扑
+  topology_auto_apply: false # 仅在管理员单独运行控制器 --watch 时允许自动校验并重建拓扑
   topology_reconcile_interval_seconds: 10 # 宿主机控制器检查配置和物理 GPU 变化的间隔秒数；修改后自动生效
 
 # ==========================

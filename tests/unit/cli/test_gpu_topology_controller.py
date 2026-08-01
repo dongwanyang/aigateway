@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -208,3 +209,166 @@ def test_dynamic_vram_config_change_recreates_worker(
         == "${COMFYUI_DISABLE_DYNAMIC_VRAM:-false}"
     )
     assert any("--force-recreate" in command for command in calls)
+
+
+def test_controller_preserves_concurrent_non_gpu_config_update(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runtime = tmp_path / ".aigateway" / "runtime"
+    runtime.mkdir(parents=True)
+    renderer = _module(
+        REPO_ROOT / "scripts" / "render-gpu-topology.py", "merge_renderer"
+    )
+    controller = _module(
+        REPO_ROOT / "scripts" / "gpu-topology-controller.py", "merge_controller"
+    )
+    inventory = [
+        {"index": 0, "uuid": "GPU-a", "name": "GPU A", "memory_total_mb": 16384}
+    ]
+    monkeypatch.setattr(renderer, "discover_devices", lambda: inventory)
+    monkeypatch.setattr(controller, "_load_renderer", lambda _root: renderer)
+    (tmp_path / ".env").write_text("CUSTOM_IMAGE=example\n", encoding="utf-8")
+    (tmp_path / ".aigateway-install.env").write_text(
+        "AIGATEWAY_ACCELERATOR=cuda\nAIGATEWAY_PRODUCTION=false\n",
+        encoding="utf-8",
+    )
+    renderer._atomic_yaml(
+        runtime / "config.yaml",
+        {
+            "providers": {"before": {"enabled": True}},
+            "gpu_scheduler": {
+                "comfyui_devices": "auto",
+                "gateway_devices": "auto",
+                "topology_auto_apply": True,
+            },
+        },
+    )
+    validation_seen = False
+
+    def _run(command, **_kwargs):
+        nonlocal validation_seen
+        if "config" in command and not validation_seen:
+            validation_seen = True
+            latest = yaml.safe_load((runtime / "config.yaml").read_text())
+            latest["providers"] = {"concurrent": {"enabled": True}}
+            renderer._atomic_yaml(runtime / "config.yaml", latest)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(controller.subprocess, "run", _run)
+
+    assert controller.reconcile(tmp_path, apply=True) is True
+    updated = yaml.safe_load((runtime / "config.yaml").read_text())
+    assert updated["providers"] == {"concurrent": {"enabled": True}}
+    assert updated["gpu_scheduler"]["workers"][0]["device_uuid"] == "GPU-a"
+
+
+def test_compose_command_uses_project_env_before_install_state(tmp_path: Path) -> None:
+    controller = _module(
+        REPO_ROOT / "scripts" / "gpu-topology-controller.py", "env_controller"
+    )
+    install_state = tmp_path / ".aigateway-install.env"
+    generated = tmp_path / "runtime" / "gpu.yml"
+    command = controller._compose_command(
+        tmp_path,
+        install_state,
+        generated,
+        {"AIGATEWAY_ACCELERATOR": "cuda"},
+    )
+
+    assert command.index(str(tmp_path / ".env")) < command.index(str(install_state))
+
+
+def test_manual_reconcile_ignores_disabled_auto_watch_flag(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runtime = tmp_path / ".aigateway" / "runtime"
+    runtime.mkdir(parents=True)
+    renderer = _module(
+        REPO_ROOT / "scripts" / "render-gpu-topology.py", "manual_renderer"
+    )
+    controller = _module(
+        REPO_ROOT / "scripts" / "gpu-topology-controller.py", "manual_controller"
+    )
+    inventory = [
+        {"index": 0, "uuid": "GPU-a", "name": "GPU A", "memory_total_mb": 16384}
+    ]
+    monkeypatch.setattr(renderer, "discover_devices", lambda: inventory)
+    monkeypatch.setattr(controller, "_load_renderer", lambda _root: renderer)
+    monkeypatch.setattr(
+        controller.subprocess,
+        "run",
+        lambda command, **_kwargs: SimpleNamespace(
+            returncode=0, stdout="", stderr=""
+        ),
+    )
+    (tmp_path / ".env").write_text("\n", encoding="utf-8")
+    (tmp_path / ".aigateway-install.env").write_text(
+        "AIGATEWAY_ACCELERATOR=cuda\nAIGATEWAY_PRODUCTION=false\n",
+        encoding="utf-8",
+    )
+    renderer._atomic_yaml(
+        runtime / "config.yaml",
+        {
+            "gpu_scheduler": {
+                "topology_auto_apply": False,
+                "gateway_devices": "auto",
+                "comfyui_devices": "auto",
+            }
+        },
+    )
+
+    assert controller.reconcile(tmp_path, apply=False) is True
+
+
+def test_controller_detects_topology_change_during_compose_apply(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runtime = tmp_path / ".aigateway" / "runtime"
+    runtime.mkdir(parents=True)
+    renderer = _module(
+        REPO_ROOT / "scripts" / "render-gpu-topology.py", "race_renderer"
+    )
+    controller = _module(
+        REPO_ROOT / "scripts" / "gpu-topology-controller.py", "race_controller"
+    )
+    inventory = [
+        {"index": 0, "uuid": "GPU-a", "name": "GPU A", "memory_total_mb": 16384}
+    ]
+    monkeypatch.setattr(renderer, "discover_devices", lambda: inventory)
+    monkeypatch.setattr(controller, "_load_renderer", lambda _root: renderer)
+    (tmp_path / ".env").write_text("\n", encoding="utf-8")
+    (tmp_path / ".aigateway-install.env").write_text(
+        "AIGATEWAY_ACCELERATOR=cuda\nAIGATEWAY_PRODUCTION=false\n",
+        encoding="utf-8",
+    )
+    renderer._atomic_yaml(
+        runtime / "config.yaml",
+        {
+            "gpu_scheduler": {
+                "gateway_devices": "auto",
+                "comfyui_devices": "auto",
+                "comfyui_dynamic_vram_enabled": False,
+            }
+        },
+    )
+    calls = 0
+
+    def _run(command, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if "up" in command:
+            latest = yaml.safe_load((runtime / "config.yaml").read_text())
+            latest["gpu_scheduler"]["comfyui_dynamic_vram_enabled"] = True
+            renderer._atomic_yaml(runtime / "config.yaml", latest)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(controller.subprocess, "run", _run)
+
+    with pytest.raises(RuntimeError, match="changed during apply"):
+        controller.reconcile(tmp_path, apply=True)
+
+    assert calls == 2
+    state = json.loads(
+        (runtime / ".gpu-topology-controller.json").read_text(encoding="utf-8")
+    )
+    assert set(state) == {"pending_fingerprint"}

@@ -148,7 +148,7 @@ exit 0
     state = (tmp_path / ".aigateway-install.env").read_text(encoding="utf-8")
     assert "GATEWAY_IMAGE_TARGET=gateway-vision" in state
     assert "AIGATEWAY_SHARED_GPU=true" in state
-    assert "GATEWAY_CUDA_VISIBLE_DEVICES=all" in state
+    assert "GATEWAY_CUDA_VISIBLE_DEVICES=GPU-test" in state
     assert "GATEWAY_CUDA_MEMORY_FRACTION=" in state
     assert "GATEWAY_CUDA_MEMORY_FRACTION=0.20" not in state
 
@@ -204,7 +204,7 @@ exit 0
 
     state = (tmp_path / ".aigateway-install.env").read_text(encoding="utf-8")
     assert "AIGATEWAY_SHARED_GPU=true" in state
-    assert "GATEWAY_CUDA_VISIBLE_DEVICES=all" in state
+    assert "GATEWAY_CUDA_VISIBLE_DEVICES=GPU-test" in state
     assert "GATEWAY_CUDA_MEMORY_FRACTION=\n" in state
     runtime = yaml.safe_load(
         (tmp_path / ".aigateway/runtime/config.yaml").read_text(encoding="utf-8")
@@ -295,7 +295,7 @@ exit 0
 
     state = (tmp_path / ".aigateway-install.env").read_text(encoding="utf-8")
     assert "AIGATEWAY_SHARED_GPU=false" in state
-    assert "GATEWAY_CUDA_VISIBLE_DEVICES=all" in state
+    assert "GATEWAY_CUDA_VISIBLE_DEVICES=GPU-test" in state
     assert "GATEWAY_CUDA_MEMORY_FRACTION=\n" in state
 
     runtime = yaml.safe_load(
@@ -314,3 +314,41 @@ def test_compose_loads_project_env_before_generated_state() -> None:
     assert project_env in script
     assert state_env in script
     assert script.index(project_env) < script.index(state_env)
+
+
+def test_quickstart_serializes_all_gpu_uuids_for_gateway(tmp_path):
+    script = _fixture_repo(tmp_path)
+    fake_bin = tmp_path / "fake-bin-multi-gpu"
+    fake_bin.mkdir()
+    nvidia_smi = fake_bin / "nvidia-smi"
+    nvidia_smi.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "-L" ]]; then
+  echo 'GPU 0: Test GPU A (UUID: GPU-a)'
+  echo 'GPU 1: Test GPU B (UUID: GPU-b)'
+  exit 0
+fi
+if [[ " $* " == *" --query-gpu=memory.total "* ]]; then
+  printf '16384\n24576\n'
+  exit 0
+fi
+exit 0
+""",
+        encoding="utf-8",
+    )
+    nvidia_smi.chmod(0o755)
+
+    _run(
+        script,
+        "--non-interactive",
+        "--edition",
+        "studio",
+        "--distribution",
+        "source",
+        "--no-start",
+        env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
+    )
+
+    state = (tmp_path / ".aigateway-install.env").read_text(encoding="utf-8")
+    assert "GATEWAY_CUDA_VISIBLE_DEVICES=GPU-a,GPU-b" in state

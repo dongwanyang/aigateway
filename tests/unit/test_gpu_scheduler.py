@@ -17,22 +17,15 @@ from aigateway_core.shared.gpu_scheduler import (
 class _LeaseRedis:
     def __init__(self) -> None:
         self.heartbeat = asyncio.Event()
-        self.expired_keys: list[str] = []
-        self.deleted_keys: list[str] = []
+        self.eval_calls: list[tuple[str, int, tuple[object, ...]]] = []
 
-    async def eval(self, *_args: object) -> int:
-        return 1
-
-    async def expire(self, key: str, _seconds: int) -> None:
-        self.expired_keys.append(key)
-        if ":leases:" in key:
+    async def eval(
+        self, script: str, numkeys: int, *args: object
+    ) -> int:
+        self.eval_calls.append((script, numkeys, args))
+        if numkeys == 2 and "sadd" in script and "expire" in script:
             self.heartbeat.set()
-
-    async def delete(self, key: str) -> None:
-        self.deleted_keys.append(key)
-
-    async def srem(self, *_args: object) -> None:
-        return None
+        return 1
 
 
 class _Metrics:
@@ -243,9 +236,18 @@ async def test_redis_lease_heartbeat_renews_lease_and_membership_ttls() -> None:
     )
     async with coordinator.gateway_lease("embedding", "cuda") as lease:
         await asyncio.wait_for(redis.heartbeat.wait(), timeout=1)
-        assert any(key.endswith(lease.lease_id) for key in redis.expired_keys)
-        assert any(key.endswith("leases:GPU-a") for key in redis.expired_keys)
-    assert any(key.endswith(lease.lease_id) for key in redis.deleted_keys)
+        heartbeat_calls = [
+            call
+            for call in redis.eval_calls
+            if call[1] == 2 and "sadd" in call[0] and "expire" in call[0]
+        ]
+        assert heartbeat_calls
+        _, _, args = heartbeat_calls[-1]
+        assert args[0].endswith(lease.lease_id)
+        assert args[1].endswith("leases:GPU-a")
+        assert args[2] == lease.lease_id
+    cleanup_calls = [call for call in redis.eval_calls if "srem" in call[0]]
+    assert cleanup_calls
     await coordinator.close()
 
 

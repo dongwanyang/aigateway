@@ -395,6 +395,30 @@ class DraftGeneratorStrategy:
             return "comfyui_storage_low"
         return fallback
 
+    async def _wait_for_prompt_release_after_cancel(
+        self,
+        prompt_id: str,
+        *,
+        server_url: str,
+        timeout: float = 30.0,
+    ) -> bool:
+        deadline = time.monotonic() + max(1.0, timeout)
+        while True:
+            try:
+                state = await self._get_comfy_prompt_state(
+                    prompt_id, server_url=server_url
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                state = "unknown"
+            if state in {"completed", "missing"}:
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            await asyncio.sleep(min(0.5, remaining))
+
     async def _run_on_comfy_worker(
         self,
         draft_id: str,
@@ -435,6 +459,31 @@ class DraftGeneratorStrategy:
                         result = await operation()
                         return result, worker
                     except asyncio.CancelledError:
+                        current = await self._load_draft(draft_id)
+                        prompt_id = str(
+                            current.comfy_prompt_id if current is not None else ""
+                        )
+                        if prompt_id:
+                            wait_task = asyncio.create_task(
+                                self._wait_for_prompt_release_after_cancel(
+                                    prompt_id,
+                                    server_url=worker.server_url,
+                                )
+                            )
+                            while True:
+                                try:
+                                    released = await asyncio.shield(wait_task)
+                                    break
+                                except asyncio.CancelledError:
+                                    current_task = asyncio.current_task()
+                                    if current_task is not None:
+                                        current_task.uncancel()
+                            if not released:
+                                # Fail closed locally. Other Gateway processes
+                                # perform the same startup/periodic queue probe.
+                                await coordinator.mark_worker_health(
+                                    worker.worker_id, False
+                                )
                         raise
                     except Exception as exc:
                         code = self._public_comfyui_error_code(
@@ -679,6 +728,29 @@ class DraftGeneratorStrategy:
 
 
     async def confirm_draft(self, draft_id: str) -> UpscaleResult:
+        """Run confirmation independently from the requesting connection.
+
+        Client disconnects and request cancellation must not release a GPU lease
+        while ComfyUI is still executing.  The tracked task owns the full claim,
+        worker lease, upstream workflow, and result persistence lifecycle.
+        """
+        task = asyncio.create_task(
+            self._confirm_draft_impl(draft_id),
+            name=f"draft-confirm-{draft_id}",
+        )
+        self._bg_tasks.add(task)
+
+        def _confirmation_done(completed: asyncio.Task[UpscaleResult]) -> None:
+            self._bg_tasks.discard(completed)
+            try:
+                completed.exception()
+            except (Exception, asyncio.CancelledError):
+                pass
+
+        task.add_done_callback(_confirmation_done)
+        return await asyncio.shield(task)
+
+    async def _confirm_draft_impl(self, draft_id: str) -> UpscaleResult:
         """确认草图并执行高清放大.
 
         验证草图状态为 pending，然后触发 Upscaler 放大到目标分辨率。
@@ -786,6 +858,47 @@ class DraftGeneratorStrategy:
             if allocated_worker is not None:
                 draft.worker_id = allocated_worker.worker_id
                 draft.device_uuid = allocated_worker.device_uuid
+        except asyncio.CancelledError:
+            current = await self._load_draft(draft_id) or draft
+            prompt_id = str(current.comfy_prompt_id or "")
+            bound_worker = (
+                self._gpu_coordinator.get_worker(current.worker_id)
+                if self._gpu_coordinator is not None
+                else None
+            )
+            cancelled = not prompt_id
+            if prompt_id:
+                cleanup = asyncio.create_task(
+                    self._cancel_comfyui_workflow(
+                        prompt_id,
+                        server_url=(
+                            bound_worker.server_url
+                            if bound_worker is not None
+                            else None
+                        ),
+                    )
+                )
+                try:
+                    cancelled = await asyncio.wait_for(
+                        asyncio.shield(cleanup), timeout=5.0
+                    )
+                except (Exception, asyncio.CancelledError):
+                    cancelled = False
+            if cancelled:
+                current.comfy_prompt_id = None
+                await self._mark_draft_confirmation_failed(
+                    current, f"{current.media_type} confirmation cancelled"
+                )
+            else:
+                # The upstream state is ambiguous. Keep the prompt binding so
+                # status reconciliation can recover completion without allowing
+                # a duplicate confirmation submission.
+                current.generation_params["last_confirm_error"] = (
+                    f"{current.media_type} confirmation cancellation unconfirmed"
+                )
+                ttl_remaining = max(1, int(current.expires_at - time.time()))
+                await self._store_draft(current, ttl_remaining)
+            raise
         except Exception:
             await self._mark_draft_confirmation_failed(
                 draft, f"{draft.media_type} confirmation failed"
@@ -2055,8 +2168,8 @@ return {3, raw}
 
     async def _cancel_comfyui_workflow(
         self, prompt_id: str, *, server_url: str | None = None
-    ) -> None:
-        """Cancel only the matching pending/running ComfyUI workflow."""
+    ) -> bool:
+        """Cancel the matching workflow and report whether cancellation was accepted."""
         import httpx
 
         base_url = (server_url or self._server_url()).rstrip("/")
@@ -2066,7 +2179,7 @@ return {3, raw}
             ) as client:
                 response = await client.get(f"{base_url}/queue")
                 if response.status_code != 200:
-                    return
+                    return False
                 queue = response.json()
                 running_ids = {
                     item[1]
@@ -2079,18 +2192,22 @@ return {3, raw}
                     if isinstance(item, list) and len(item) > 1
                 }
                 if prompt_id in pending_ids:
-                    await client.post(
+                    cancelled = await client.post(
                         f"{base_url}/queue",
                         json={"delete": [prompt_id]},
                     )
-                elif prompt_id in running_ids:
-                    await client.post(f"{base_url}/interrupt")
+                    return cancelled.status_code < 400
+                if prompt_id in running_ids:
+                    cancelled = await client.post(f"{base_url}/interrupt")
+                    return cancelled.status_code < 400
+                return False
         except (httpx.HTTPError, ValueError, TypeError) as exc:
             logger.warning(
                 "Failed to cancel ComfyUI workflow %s: %s",
                 prompt_id,
                 type(exc).__name__,
             )
+            return False
 
     async def _poll_result(
         self,

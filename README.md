@@ -338,12 +338,11 @@ docker compose --profile comfy-container ps
 调度参数集中在 `gpu_scheduler`。默认生成等待上限 120 秒、ComfyUI 空闲保留
 60 秒、显存安全余量 2GB；这些值都可在“系统配置 → GPU 动态资源池”修改。
 等待、心跳、冷却、重试和安全余量热生效，现有租约保持原期限；GPU UUID、
-设备池和 `device_overrides` 变更会在 API/控制台标记为“需重建”。本地 CUDA
-安装默认启用宿主机 `aigateway-gpu-topology.service`：它会自动验证并原子生成
-Compose overlay，然后只重建 Gateway 和受影响的 ComfyUI worker；无需再次运行
-安装器。可用 `topology_auto_apply` 开关和
-`topology_reconcile_interval_seconds` 检查间隔控制该行为。Gateway 容器本身不会
-挂载 Docker Socket。`gateway_memory_limit_percent` 只是可选的
+设备池和 `device_overrides` 变更会在 API/控制台标记为“需重建”。出于 Docker
+权限边界考虑，安装器不会自动创建拥有 Docker Socket 权限的后台服务；拓扑变化后
+请重新运行 `quickstart.sh`，或由受信任的管理员手动运行
+`scripts/gpu-topology-controller.py` 完成校验和重建。`topology_auto_apply` 默认关闭。
+Gateway 容器本身不会挂载 Docker Socket。`gateway_memory_limit_percent` 只是可选的
 PyTorch 进程安全上限，不是严格显存预留，也不参与静态切分。
 
 固定的 ComfyUI 0.28 镜像默认关闭 Dynamic VRAM，规避部分 NVIDIA

@@ -33,7 +33,9 @@ def test_render_topology_creates_one_uuid_bound_worker_per_gpu(count: int) -> No
     assert [item["device_uuid"] for item in workers] == [
         f"GPU-{index}" for index in range(count)
     ]
-    assert compose["services"]["gateway"]["environment"]["CUDA_VISIBLE_DEVICES"] == "all"
+    assert compose["services"]["gateway"]["environment"]["CUDA_VISIBLE_DEVICES"] == ",".join(
+        f"GPU-{index}" for index in range(count)
+    )
     for index, worker in enumerate(workers):
         service = "comfyui" if index == 0 else f"comfyui-gpu-{index}"
         assert compose["services"][service]["environment"]["CUDA_VISIBLE_DEVICES"] == worker["device_uuid"]
@@ -131,3 +133,28 @@ def test_main_preserves_disabled_scheduler(tmp_path, monkeypatch) -> None:
     assert _module().main() == 0
     rendered = yaml.safe_load(runtime.read_text(encoding="utf-8"))
     assert rendered["gpu_scheduler"]["enabled"] is False
+
+
+def test_gateway_visibility_includes_inventory_for_worker_coordination() -> None:
+    module = _module()
+    inventory = [
+        {"index": 0, "uuid": "GPU-a", "memory_total_mb": 16384},
+        {"index": 1, "uuid": "GPU-b", "memory_total_mb": 24576},
+    ]
+    scheduler = {
+        "gateway_devices": ["GPU-a"],
+        "comfyui_devices": ["GPU-b"],
+    }
+    comfy_devices = module.select_comfyui_devices(inventory, scheduler)
+
+    compose, workers = module.render_topology(
+        comfy_devices,
+        scheduler,
+        gateway_devices=inventory,
+    )
+
+    assert [item["device_uuid"] for item in workers] == ["GPU-b"]
+    assert (
+        compose["services"]["gateway"]["environment"]["CUDA_VISIBLE_DEVICES"]
+        == "GPU-a,GPU-b"
+    )

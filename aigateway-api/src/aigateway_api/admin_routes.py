@@ -2095,7 +2095,7 @@ async def import_rag_document(
             requested_device = _emb_cfg.get("device", "auto")
             coordinator = getattr(request.app.state, "gpu_coordinator", None)
             _loop = asyncio.get_running_loop()
-            if coordinator is not None:
+            if coordinator is not None and coordinator.config.enabled:
                 async with coordinator.gateway_lease(
                     "embedding", requested_device
                 ) as gpu_lease:

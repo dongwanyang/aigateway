@@ -11,6 +11,7 @@ PipelineEngine — 异步插件管线引擎
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import re
 import time
@@ -49,36 +50,121 @@ class Plugin(Protocol):
         ...
 
 
-async def execute_plugin(plugin: Plugin, ctx: PipelineContext) -> PipelineContext:
-    """Execute one plugin without releasing resources before sync work stops.
+_ORPHANED_PLUGIN_TASKS: set[asyncio.Task[PipelineContext]] = set()
 
-    ``asyncio.to_thread`` cannot stop its worker thread when the awaiting task is
-    cancelled. Shield the plugin task from timeout/cancellation and wait for it
-    to finish before propagating the caller's exception; an enclosing GPU lease
-    therefore remains held until the underlying CUDA operation really ends.
-    """
-    plugin_timeout = max(
-        0.001, float(getattr(plugin, "timeout_seconds", 30.0))
-    )
-    if isinstance(ctx.request_context, RequestContext):
-        plugin_timeout = min(
-            plugin_timeout,
-            ctx.request_context.remaining_seconds,
-        )
-    if plugin_timeout <= 0:
-        raise TimeoutError("request deadline exceeded before plugin execution")
 
-    task = asyncio.create_task(plugin.execute(ctx))
+def _safe_context_copy(value: Any) -> Any:
     try:
-        async with asyncio.timeout(plugin_timeout):
+        return copy.deepcopy(value)
+    except Exception:
+        if isinstance(value, dict):
+            return dict(value)
+        if isinstance(value, list):
+            return list(value)
+        return value
+
+
+def _clone_pipeline_context(ctx: PipelineContext) -> PipelineContext:
+    """Isolate a timed-out plugin from the response context returned to callers."""
+    cloned = PipelineContext(
+        request=_safe_context_copy(ctx.request),
+        trace_id=ctx.trace_id,
+        response=ctx.response,
+        should_stop=ctx.should_stop,
+        should_stream=ctx.should_stream,
+        request_id=ctx.request_id,
+        user_id=ctx.user_id,
+        extra=_safe_context_copy(ctx.extra),
+        pipeline_kind=ctx.pipeline_kind,
+        is_multimodal=ctx.is_multimodal,
+        total_token_savings=ctx.total_token_savings,
+        request_context=ctx.request_context,
+    )
+    if hasattr(ctx, "_skip_names"):
+        cloned._skip_names = set(ctx._skip_names)
+    return cloned
+
+
+def _merge_pipeline_context(
+    target: PipelineContext, source: PipelineContext
+) -> PipelineContext:
+    """Commit a successfully completed isolated plugin context to its caller."""
+    target.request = source.request
+    target.trace_id = source.trace_id
+    target.response = source.response
+    target.should_stop = source.should_stop
+    target.should_stream = source.should_stream
+    target.request_id = source.request_id
+    target.user_id = source.user_id
+    target.extra = source.extra
+    target.pipeline_kind = source.pipeline_kind
+    target.is_multimodal = source.is_multimodal
+    target.total_token_savings = source.total_token_savings
+    target.request_context = source.request_context
+    if hasattr(source, "_skip_names"):
+        target._skip_names = set(source._skip_names)
+    elif hasattr(target, "_skip_names"):
+        del target._skip_names
+    return target
+
+
+def _plugin_timeout(plugin: Plugin, ctx: PipelineContext) -> float:
+    timeout = max(0.001, float(getattr(plugin, "timeout_seconds", 30.0)))
+    if isinstance(ctx.request_context, RequestContext):
+        timeout = min(timeout, ctx.request_context.remaining_seconds)
+    if timeout <= 0:
+        raise TimeoutError("request deadline exceeded before plugin execution")
+    return timeout
+
+
+def _track_orphaned_plugin_task(task: asyncio.Task[PipelineContext]) -> None:
+    _ORPHANED_PLUGIN_TASKS.add(task)
+
+    def _done(completed: asyncio.Task[PipelineContext]) -> None:
+        _ORPHANED_PLUGIN_TASKS.discard(completed)
+        try:
+            completed.exception()
+        except (Exception, asyncio.CancelledError):
+            pass
+
+    task.add_done_callback(_done)
+
+
+async def _await_plugin_task(
+    task: asyncio.Task[PipelineContext], timeout: float
+) -> PipelineContext:
+    try:
+        async with asyncio.timeout(timeout):
             return await asyncio.shield(task)
     except (TimeoutError, asyncio.CancelledError):
-        if not task.done():
-            try:
-                await task
-            except (Exception, asyncio.CancelledError):
-                pass
+        # Register even if completion raced with the deadline; the callback
+        # consumes a terminal exception and prevents an unobserved-task warning.
+        _track_orphaned_plugin_task(task)
         raise
+
+
+async def _finish_task_before_resource_release(
+    task: asyncio.Task[PipelineContext],
+) -> PipelineContext:
+    """Wait through repeated owner cancellation before releasing a GPU lease."""
+    current = asyncio.current_task()
+    while True:
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.done():
+                return task.result()
+            if current is not None:
+                current.uncancel()
+
+
+async def execute_plugin(plugin: Plugin, ctx: PipelineContext) -> PipelineContext:
+    """Execute one plugin and detach non-cancellable work at its deadline."""
+    task = asyncio.create_task(
+        plugin.execute(ctx),
+        name=f"plugin-{plugin.name}-{ctx.trace_id or 'request'}",
+    )
+    return await _await_plugin_task(task, _plugin_timeout(plugin, ctx))
 
 
 class PipelineEngine:
@@ -161,18 +247,66 @@ class PipelineEngine:
                     requested_device = getattr(
                         lifecycle_owner, "gpu_device_request", None
                     )
-                    if coordinator is not None and requested_device is not None:
-                        async with coordinator.gateway_lease(
-                            plugin_name, str(requested_device)
-                        ) as gpu_lease:
-                            set_device = getattr(
-                                lifecycle_owner, "set_runtime_device", None
-                            )
-                            if callable(set_device):
-                                set_device(gpu_lease.device)
-                            ctx = await execute_plugin(plugin, ctx)
+                    caller_ctx = ctx
+                    plugin_ctx = _clone_pipeline_context(caller_ctx)
+                    if (
+                        coordinator is not None
+                        and coordinator.config.enabled
+                        and requested_device is not None
+                    ):
+                        async def _execute_with_gpu_lease(
+                            *,
+                            bound_coordinator: Any = coordinator,
+                            component_name: str = plugin_name,
+                            device_request: str = str(requested_device),
+                            owner: Any = lifecycle_owner,
+                            plugin_instance: Plugin = plugin,
+                            context: PipelineContext = plugin_ctx,
+                        ) -> PipelineContext:
+                            async with bound_coordinator.gateway_lease(
+                                component_name, device_request
+                            ) as gpu_lease:
+                                set_device = getattr(
+                                    owner, "set_runtime_device", None
+                                )
+                                if callable(set_device):
+                                    set_device(gpu_lease.device)
+                                plugin_task = asyncio.create_task(
+                                    plugin_instance.execute(context),
+                                    name=(
+                                        f"plugin-work-{component_name}-"
+                                        f"{context.trace_id or 'request'}"
+                                    ),
+                                )
+                                try:
+                                    return await asyncio.shield(plugin_task)
+                                except asyncio.CancelledError:
+                                    # A lost distributed lease cancels this owner.
+                                    # Repeated shutdown/heartbeat cancellation must
+                                    # not release local GPU state while an
+                                    # uncancellable worker thread is still active.
+                                    await _finish_task_before_resource_release(
+                                        plugin_task
+                                    )
+                                    raise
+
+                        task = asyncio.create_task(
+                            _execute_with_gpu_lease(),
+                            name=(
+                                f"plugin-gpu-{plugin_name}-"
+                                f"{ctx.trace_id or 'request'}"
+                            ),
+                        )
+                        plugin_result = await _await_plugin_task(
+                            task, _plugin_timeout(plugin, caller_ctx)
+                        )
                     else:
-                        ctx = await execute_plugin(plugin, ctx)
+                        plugin_result = await execute_plugin(plugin, plugin_ctx)
+                    ctx = (
+                        _merge_pipeline_context(caller_ctx, plugin_result)
+                        if plugin_result is plugin_ctx
+                        else plugin_result
+                    )
                 except Exception as exc:
                     elapsed_ms = (time.monotonic() - plugin_start) * 1000
                     collector = TraceCollector.current()

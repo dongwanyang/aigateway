@@ -137,7 +137,7 @@ fi
 
 gpu_count=0
 gpu_vram_mb=0
-gateway_gpu_device=all
+gateway_gpu_device=0
 comfyui_gpu_device=0
 gateway_memory_fraction=""
 comfyui_vram_flag=""
@@ -148,9 +148,16 @@ if [[ "$accelerator" == "cuda" ]] && command -v nvidia-smi >/dev/null 2>&1; then
     nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null \
       | awk '/^[[:space:]]*[0-9]+[[:space:]]*$/{gsub(/[[:space:]]/,""); print}'
   )
+  mapfile -t gpu_uuids < <(
+    nvidia-smi -L 2>/dev/null \
+      | sed -n 's/.*UUID:[[:space:]]*\([^)]*\)).*/\1/p'
+  )
   gpu_count="${#gpu_memory[@]}"
   if (( gpu_count > 0 )); then
     gpu_vram_mb="${gpu_memory[0]}"
+    (( ${#gpu_uuids[@]} == gpu_count )) \
+      || fail "无法解析完整 NVIDIA GPU UUID 清单"
+    gateway_gpu_device="$(IFS=,; echo "${gpu_uuids[*]}")"
     if (( gpu_vram_mb < 12288 )); then
       comfyui_vram_flag="--lowvram"
     fi
@@ -310,7 +317,6 @@ trap 'rm -f "$tmp_state"' EXIT
   echo "COMFYUI_CUDA_VISIBLE_DEVICES=$comfyui_gpu_device"
   echo "GATEWAY_CUDA_MEMORY_FRACTION=$gateway_memory_fraction"
   echo "AIGATEWAY_SHARED_GPU=$shared_gpu"
-  echo "AIGATEWAY_GPU_TOPOLOGY_AUTO_APPLY=true"
   echo "COMFYUI_VRAM_FLAG=$comfyui_vram_flag"
   echo "COMPOSE_PROFILES=$compose_profiles"
 } > "$tmp_state"
@@ -467,13 +473,6 @@ compose=(
 [[ "$production" == "true" ]] && compose+=(-f docker-compose.prod.yml)
 
 if [[ "$action" == "down" ]]; then
-  if command -v systemctl >/dev/null 2>&1; then
-    if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
-      systemctl stop aigateway-gpu-topology.service 2>/dev/null || true
-    elif command -v sudo >/dev/null 2>&1; then
-      sudo systemctl stop aigateway-gpu-topology.service 2>/dev/null || true
-    fi
-  fi
   "${compose[@]}" down
   info "服务已停止；数据卷和模型均保留"
   exit 0
@@ -520,15 +519,7 @@ fi
 
 if [[ "$accelerator" == "cuda" && "$needs_studio" == "true" \
       && "$comfyui_mode" == "container" ]]; then
-  controller_installer="$ROOT_DIR/scripts/install-gpu-topology-controller.sh"
-  if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
-    "$controller_installer" --repo-root "$ROOT_DIR"
-  elif command -v sudo >/dev/null 2>&1 \
-      && { [[ "$interactive" == "true" ]] || sudo -n true >/dev/null 2>&1; }; then
-    sudo "$controller_installer" --repo-root "$ROOT_DIR"
-  else
-    warn "未能自动安装 GPU 拓扑控制器；请运行: sudo $controller_installer --repo-root $ROOT_DIR"
-  fi
+  info "GPU 拓扑变化后请重新运行 quickstart；不会自动安装 Docker 特权后台服务"
 fi
 
 if [[ "$production" == "true" ]]; then

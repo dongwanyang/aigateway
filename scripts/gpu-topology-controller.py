@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fcntl
 import hashlib
 import importlib.util
@@ -111,6 +112,8 @@ def _compose_command(
         "docker",
         "compose",
         "--env-file",
+        str(repo_root / ".env"),
+        "--env-file",
         str(install_state),
         "-f",
         str(repo_root / "docker-compose.yml"),
@@ -123,7 +126,24 @@ def _compose_command(
     return command
 
 
-def reconcile(repo_root: Path, *, apply: bool = True) -> bool:
+@contextlib.contextmanager
+def _config_write_lock(path: Path):
+    lock_path = Path(str(path) + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def reconcile(
+    repo_root: Path,
+    *,
+    apply: bool = True,
+    respect_auto_apply: bool = False,
+) -> bool:
     """Apply one topology revision; return True only when files changed."""
     runtime_dir = repo_root / ".aigateway" / "runtime"
     runtime_config = runtime_dir / "config.yaml"
@@ -137,7 +157,7 @@ def reconcile(repo_root: Path, *, apply: bool = True) -> bool:
     scheduler = config.get("gpu_scheduler", {})
     if not isinstance(scheduler, dict):
         raise RuntimeError("gpu_scheduler must be an object")
-    if scheduler.get("topology_auto_apply", True) is False:
+    if respect_auto_apply and scheduler.get("topology_auto_apply", False) is False:
         logger.info("automatic GPU topology apply is disabled")
         return False
 
@@ -149,7 +169,11 @@ def reconcile(repo_root: Path, *, apply: bool = True) -> bool:
     if not selected:
         raise RuntimeError("configured ComfyUI GPU UUID pool has no available devices")
     fingerprint = _fingerprint(scheduler, inventory)
-    compose, workers = renderer.render_topology(selected, scheduler)
+    compose, workers = renderer.render_topology(
+        selected,
+        scheduler,
+        gateway_devices=inventory,
+    )
     desired_compose = yaml.safe_dump(compose, sort_keys=False, allow_unicode=True)
     current_compose = (
         generated_compose.read_text(encoding="utf-8")
@@ -173,11 +197,6 @@ def reconcile(repo_root: Path, *, apply: bool = True) -> bool:
         if recorded.get("fingerprint") == fingerprint:
             return False
 
-    candidate_config = dict(config)
-    candidate_scheduler = dict(scheduler)
-    candidate_scheduler["workers"] = workers
-    candidate_config["gpu_scheduler"] = candidate_scheduler
-
     descriptor, candidate_name = tempfile.mkstemp(
         prefix=".docker-compose.gpu.candidate.", suffix=".yml", dir=runtime_dir
     )
@@ -197,22 +216,29 @@ def reconcile(repo_root: Path, *, apply: bool = True) -> bool:
             detail = (validation.stderr or validation.stdout).strip()
             raise RuntimeError(f"generated Compose topology is invalid: {detail}")
 
-        latest = _read_yaml(runtime_config)
-        latest_scheduler = latest.get("gpu_scheduler", {})
-        if not isinstance(latest_scheduler, dict) or _fingerprint(
-            latest_scheduler, inventory
-        ) != fingerprint:
-            raise RuntimeError("GPU topology configuration changed during reconcile; retrying")
+        with _config_write_lock(runtime_config):
+            latest = _read_yaml(runtime_config)
+            latest_scheduler = latest.get("gpu_scheduler", {})
+            if not isinstance(latest_scheduler, dict) or _fingerprint(
+                latest_scheduler, inventory
+            ) != fingerprint:
+                raise RuntimeError(
+                    "GPU topology configuration changed during reconcile; retrying"
+                )
+            candidate_config = dict(latest)
+            candidate_scheduler = dict(latest_scheduler)
+            candidate_scheduler["workers"] = workers
+            candidate_config["gpu_scheduler"] = candidate_scheduler
 
-        # Persist a pending marker before publishing the generated files. If
-        # Compose fails or the process is interrupted, the next pass must not
-        # mistake matching files for an already-applied initial topology.
-        _atomic_text(
-            controller_state,
-            json.dumps({"pending_fingerprint": fingerprint}) + "\n",
-        )
-        renderer._atomic_yaml(generated_compose, compose)
-        renderer._atomic_yaml(runtime_config, candidate_config)
+            # The API and this controller share the same .lock file. Build the
+            # candidate from the latest full document while holding that lock,
+            # so unrelated provider/auth edits cannot be overwritten.
+            _atomic_text(
+                controller_state,
+                json.dumps({"pending_fingerprint": fingerprint}) + "\n",
+            )
+            renderer._atomic_yaml(generated_compose, compose)
+            renderer._atomic_yaml(runtime_config, candidate_config)
         if apply:
             services = ["gateway", *compose["services"].keys()]
             services = list(dict.fromkeys(services))
@@ -233,7 +259,19 @@ def reconcile(repo_root: Path, *, apply: bool = True) -> bool:
             )
             if completed.returncode != 0:
                 raise RuntimeError("docker compose topology apply failed")
-        _atomic_text(controller_state, json.dumps({"fingerprint": fingerprint}) + "\n")
+        with _config_write_lock(runtime_config):
+            applied = _read_yaml(runtime_config)
+            applied_scheduler = applied.get("gpu_scheduler", {})
+            if not isinstance(applied_scheduler, dict) or _fingerprint(
+                applied_scheduler, inventory
+            ) != fingerprint:
+                raise RuntimeError(
+                    "GPU topology configuration changed during apply; retrying"
+                )
+            _atomic_text(
+                controller_state,
+                json.dumps({"fingerprint": fingerprint}) + "\n",
+            )
         logger.info("GPU topology applied: %d ComfyUI worker(s)", len(workers))
         return True
     finally:
@@ -256,7 +294,11 @@ def watch(repo_root: Path, *, apply: bool) -> int:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         while not stopping:
             try:
-                reconcile(repo_root, apply=apply)
+                reconcile(
+                    repo_root,
+                    apply=apply,
+                    respect_auto_apply=True,
+                )
             except Exception as exc:
                 logger.error("GPU topology reconcile failed: %s", exc)
             try:

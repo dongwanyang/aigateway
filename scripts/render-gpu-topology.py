@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import os
 import re
 import subprocess
@@ -81,6 +83,18 @@ def discover_devices() -> list[dict[str, Any]]:
     return devices
 
 
+@contextlib.contextmanager
+def _config_write_lock(path: Path):
+    lock_path = Path(str(path) + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def _atomic_yaml(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(
@@ -103,6 +117,8 @@ def _atomic_yaml(path: Path, value: dict[str, Any]) -> None:
 def render_topology(
     devices: list[dict[str, Any]],
     scheduler: dict[str, Any] | None = None,
+    *,
+    gateway_devices: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     scheduler = scheduler or {}
     dynamic_vram_enabled = scheduler.get(
@@ -111,8 +127,14 @@ def render_topology(
     if type(dynamic_vram_enabled) is not bool:
         raise ValueError("comfyui_dynamic_vram_enabled must be a boolean")
     disable_dynamic_vram = "false" if dynamic_vram_enabled else "true"
+    visible_gateway_devices = devices if gateway_devices is None else gateway_devices
+    gateway_visible_devices = ",".join(
+        str(device["uuid"]) for device in visible_gateway_devices
+    )
     services: dict[str, Any] = {
-        "gateway": {"environment": {"CUDA_VISIBLE_DEVICES": "all"}}
+        "gateway": {
+            "environment": {"CUDA_VISIBLE_DEVICES": gateway_visible_devices}
+        }
     }
     workers: list[dict[str, Any]] = []
     for position, device in enumerate(devices):
@@ -183,11 +205,12 @@ def render_topology(
     return {"services": services}, workers
 
 
-def select_comfyui_devices(
-    devices: list[dict[str, Any]], scheduler: dict[str, Any]
+def _select_devices(
+    devices: list[dict[str, Any]],
+    scheduler: dict[str, Any],
+    selector_name: str,
 ) -> list[dict[str, Any]]:
-    """Apply the configured UUID pool and enabled overrides to inventory."""
-    selector = scheduler.get("comfyui_devices", "auto")
+    selector = scheduler.get(selector_name, "auto")
     selected_uuids = (
         {str(item) for item in selector}
         if isinstance(selector, list)
@@ -206,6 +229,20 @@ def select_comfyui_devices(
     ]
 
 
+def select_comfyui_devices(
+    devices: list[dict[str, Any]], scheduler: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Apply the configured ComfyUI UUID pool and enabled overrides."""
+    return _select_devices(devices, scheduler, "comfyui_devices")
+
+
+def select_gateway_devices(
+    devices: list[dict[str, Any]], scheduler: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Apply the configured Gateway UUID pool and enabled overrides."""
+    return _select_devices(devices, scheduler, "gateway_devices")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-compose", type=Path, required=True)
@@ -220,23 +257,33 @@ def main() -> int:
     if not devices:
         raise SystemExit("no NVIDIA GPU UUIDs discovered")
 
-    runtime = yaml.safe_load(args.runtime_config.read_text(encoding="utf-8")) or {}
-    scheduler = runtime.setdefault("gpu_scheduler", {})
-    devices = select_comfyui_devices(devices, scheduler)
-    if not devices:
-        raise SystemExit("configured ComfyUI GPU UUID pool has no available devices")
-    compose, workers = render_topology(devices, scheduler)
-    scheduler.update(
-        {
-            "enabled": scheduler.get("enabled", True),
-            "policy": scheduler.get("policy", "auto"),
-            "gateway_devices": scheduler.get("gateway_devices", "auto"),
-            "comfyui_devices": scheduler.get("comfyui_devices", "auto"),
-            "workers": workers,
-        }
-    )
-    _atomic_yaml(args.output_compose, compose)
-    _atomic_yaml(args.runtime_config, runtime)
+    inventory = devices
+    with _config_write_lock(args.runtime_config):
+        runtime = yaml.safe_load(
+            args.runtime_config.read_text(encoding="utf-8")
+        ) or {}
+        scheduler = runtime.setdefault("gpu_scheduler", {})
+        devices = select_comfyui_devices(inventory, scheduler)
+        if not devices:
+            raise SystemExit(
+                "configured ComfyUI GPU UUID pool has no available devices"
+            )
+        compose, workers = render_topology(
+            devices,
+            scheduler,
+            gateway_devices=inventory,
+        )
+        scheduler.update(
+            {
+                "enabled": scheduler.get("enabled", True),
+                "policy": scheduler.get("policy", "auto"),
+                "gateway_devices": scheduler.get("gateway_devices", "auto"),
+                "comfyui_devices": scheduler.get("comfyui_devices", "auto"),
+                "workers": workers,
+            }
+        )
+        _atomic_yaml(args.output_compose, compose)
+        _atomic_yaml(args.runtime_config, runtime)
     return 0
 
 

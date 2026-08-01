@@ -178,6 +178,40 @@ def _validate_dataclass_values(
     return issues
 
 
+def _validate_rag_device_policy(
+    path: str,
+    values: dict[str, Any],
+) -> list[dict[str, str]]:
+    """Reject a RAG topology that one request-scoped lease cannot represent."""
+    if values.get("embedding_backend", "local") != "local":
+        embedding_device = "cpu"
+    else:
+        embedding_device = str(values.get("embedding_device", "auto")).strip().lower()
+
+    if not values.get("rerank_enabled", False) or values.get(
+        "rerank_backend", "local"
+    ) != "local":
+        rerank_device = "cpu"
+    else:
+        rerank_device = str(values.get("rerank_device", "auto")).strip().lower()
+
+    gpu_devices = [
+        device
+        for device in (embedding_device, rerank_device)
+        if device not in {"cpu", "auto", "cuda"}
+    ]
+    explicit_devices = set(gpu_devices)
+    if len(explicit_devices) > 1:
+        return [
+            _error(
+                path,
+                "embedding_device and rerank_device cannot target different "
+                "explicit accelerator devices in one RAG plugin",
+            )
+        ]
+    return []
+
+
 def _validate_integrations(
     config: dict[str, Any],
     *,
@@ -216,6 +250,8 @@ def _validate_integrations(
         issues.extend(
             _validate_dataclass_values(display_path, config_class, effective)
         )
+        if config_class is RAGRetrieverConfig:
+            issues.extend(_validate_rag_device_policy(display_path, effective))
     return issues
 
 

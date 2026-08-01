@@ -193,7 +193,10 @@ async def _compute_l3_vector(text: str, *, load_if_missing: bool = True) -> list
         return None
     _invalidate_idle_release()
     try:
-        if _l3_gpu_coordinator is None:
+        if (
+            _l3_gpu_coordinator is None
+            or not _l3_gpu_coordinator.config.enabled
+        ):
             return await asyncio.to_thread(
                 _compute_l3_vector_sync, text, load_if_missing
             )

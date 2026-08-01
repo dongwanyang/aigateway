@@ -443,11 +443,11 @@ export default function Config() {
       })
       const topologyAutoApply = (
         draftConfig.gpu_scheduler as ConfigObject | undefined
-      )?.topology_auto_apply !== false
+      )?.topology_auto_apply === true
       setSuccess(restartRequired
         ? topologyAutoApply
-          ? '配置已保存；宿主机控制器将自动校验并重建 GPU/ComfyUI 拓扑'
-          : '配置已保存；自动应用已关闭，需要手工运行 GPU 拓扑控制器'
+          ? '配置已保存；已允许外部拓扑控制器自动应用（需管理员单独运行 --watch）'
+          : '配置已保存；请重新运行 quickstart 或手工运行 GPU 拓扑控制器'
         : '配置已保存并热生效（已取得的租约保持原期限）')
       setHasChanges(false)
       setInvalidDraftPaths(new Set())
