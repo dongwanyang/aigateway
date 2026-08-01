@@ -997,6 +997,7 @@ export default function Models() {
                   style={{ padding: '6px 10px', fontSize: '12px' }}
                   onClick={() => handleTestConnectivity(providerName)}
                   aria-label={`测试 ${providerName} 连通性`}
+                  title="测试连通性"
                   aria-busy={testResults[providerName]?.loading ?? false}
                   disabled={testResults[providerName]?.loading}
                 >
