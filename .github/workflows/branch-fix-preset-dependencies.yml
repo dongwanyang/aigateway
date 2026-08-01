@@ -29,96 +29,69 @@ jobs:
           source = Path("aigateway-api/src/aigateway_api/local_generation.py")
           text = source.read_text()
 
-          qwen_anchor = '''    qwen_models, qwen_errors = _preset_model_requirements(
-              [
-                  ("diffusion_models", "qwen_image_diffusion_model", qwen_diffusion),
-                  ("text_encoders", "qwen_image_text_encoder", qwen_encoder),
-                  ("vae", "qwen_image_vae", qwen_vae),
-              ],
-              feature_enabled=qwen_enabled,
-          )
-          '''
-          qwen_replacement = qwen_anchor + '''    # Standard confirmation refines the approved Qwen draft with the
-              # configured SDXL checkpoint, so availability must cover both stages.
+          qwen_anchor = "        feature_enabled=qwen_enabled,\n    )\n    video_enabled ="
+          qwen_new = """        feature_enabled=qwen_enabled,
+              )
+              # Standard confirmation refines the approved Qwen draft with the
+              # configured SDXL checkpoint, so availability covers both stages.
               qwen_models = list(dict.fromkeys([*qwen_models, *sdxl_models]))
               qwen_errors = list(dict.fromkeys([*qwen_errors, *sdxl_errors]))
-          '''
+              video_enabled ="""
           if text.count(qwen_anchor) != 1:
-              raise RuntimeError("qwen dependency block mismatch")
-          text = text.replace(qwen_anchor, qwen_replacement)
+              raise RuntimeError("qwen dependency insertion mismatch")
+          text = text.replace(qwen_anchor, qwen_new)
 
-          video_anchor = '''    video_models, video_errors = _preset_model_requirements(
-              [
-                  ("diffusion_models", "video_diffusion_model", video_diffusion),
-                  ("text_encoders", "video_text_encoder", video_encoder),
-                  ("vae", "video_vae", video_vae),
-              ],
-              feature_enabled=video_enabled,
-          )
-          '''
-          video_replacement = video_anchor + '''    # Video generation first creates an SDXL keyframe, then runs Wan.
+          video_anchor = "        feature_enabled=video_enabled,\n    )\n    upscale_enabled ="
+          video_new = """        feature_enabled=video_enabled,
+              )
+              # Video generation first creates an SDXL keyframe, then runs Wan.
               # Do not advertise the preset unless both stages are configured.
               video_models = list(dict.fromkeys([*video_models, *sdxl_models]))
               video_errors = list(dict.fromkeys([*video_errors, *sdxl_errors]))
-          '''
+              upscale_enabled ="""
           if text.count(video_anchor) != 1:
-              raise RuntimeError("video dependency block mismatch")
-          text = text.replace(video_anchor, video_replacement)
+              raise RuntimeError("video dependency insertion mismatch")
+          text = text.replace(video_anchor, video_new)
 
-          qwen_nodes = '''                "nodes": [
-                      "UNETLoader",
-                      "CLIPLoader",
-                      "VAELoader",
-          '''
-          qwen_nodes_new = '''                "nodes": [
-                      "LoadImage",
-                      "ImageScale",
-                      "CheckpointLoaderSimple",
-                      "VAEEncode",
-                      "UNETLoader",
-                      "CLIPLoader",
-                      "VAELoader",
-          '''
-          if text.count(qwen_nodes) != 1:
-              raise RuntimeError("qwen node list mismatch")
-          text = text.replace(qwen_nodes, qwen_nodes_new)
+          def add_nodes(segment: str, nodes: list[str]) -> str:
+              anchor = '                "nodes": [\n'
+              if segment.count(anchor) != 1:
+                  raise RuntimeError("preset node list mismatch")
+              inserted = anchor + "".join(f'                    "{node}",\n' for node in nodes)
+              return segment.replace(anchor, inserted, 1)
 
-          video_nodes = '''                "nodes": [
-                      "UNETLoader",
-                      "CLIPLoader",
-          '''
-          video_nodes_new = '''                "nodes": [
-                      *_CORE_IMAGE_NODES,
-                      "UNETLoader",
-                      "CLIPLoader",
-          '''
-          if text.count(video_nodes) != 1:
-              raise RuntimeError("video node list mismatch")
-          text = text.replace(video_nodes, video_nodes_new)
+          qwen_start = text.index('            "id": "qwen-image"')
+          video_start = text.index('            "id": "wan2.2-ti2v-5b"', qwen_start)
+          upscale_start = text.index('            "id": "realesrgan-faithful-4k"', video_start)
+          qwen_segment = add_nodes(
+              text[qwen_start:video_start],
+              ["LoadImage", "ImageScale", "CheckpointLoaderSimple", "VAEEncode"],
+          )
+          video_segment = add_nodes(
+              text[video_start:upscale_start],
+              list(_CORE_IMAGE_NODES),
+          )
+          text = text[:qwen_start] + qwen_segment + video_segment + text[upscale_start:]
 
           old_name = '"name": f"{Path(checkpoint_name).stem}（本地 Checkpoint）",'
           new_name = '"name": f"{Path(checkpoint_name).with_suffix(\"\").as_posix()}（本地 Checkpoint）",'
           if text.count(old_name) != 1:
               raise RuntimeError("checkpoint display name mismatch")
-          text = text.replace(old_name, new_name)
-          source.write_text(text)
+          source.write_text(text.replace(old_name, new_name))
 
           tests = Path("tests/unit/api/test_local_generation.py")
           test_text = tests.read_text()
-          import_anchor = '''from aigateway_api.local_generation import (
-              delete_custom_preset,
-          '''
-          import_new = '''from aigateway_api.local_generation import (
-              builtin_presets,
-              delete_custom_preset,
-          '''
+          import_anchor = "from aigateway_api.local_generation import (\n    delete_custom_preset,\n"
+          import_new = "from aigateway_api.local_generation import (\n    builtin_presets,\n    delete_custom_preset,\n"
           if test_text.count(import_anchor) != 1:
               raise RuntimeError("test import block mismatch")
           test_text = test_text.replace(import_anchor, import_new)
+          assertion_anchor = '    assert preset["source"] == "discovered"\n'
+          if test_text.count(assertion_anchor) != 1:
+              raise RuntimeError("discovered preset assertion mismatch")
           test_text = test_text.replace(
-              'assert preset["source"] == "discovered"\n',
-              'assert preset["source"] == "discovered"\n    assert preset["name"] == "portraits/cinematic（本地 Checkpoint）"\n',
-              1,
+              assertion_anchor,
+              assertion_anchor + '    assert preset["name"] == "portraits/cinematic（本地 Checkpoint）"\n',
           )
           test_text += '''
 
