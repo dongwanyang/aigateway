@@ -201,6 +201,12 @@ def test_multistage_presets_require_the_sdxl_stage():
         assert preset["enabled"] is False
         assert "checkpoints/default.safetensors" in preset["dependencies"]["models"]
         assert "CheckpointLoaderSimple" in preset["dependencies"]["nodes"]
+        if preset_id == "wan2.2-ti2v-5b":
+            assert "Wan22ImageToVideoLatent" in preset["dependencies"]["nodes"]
+            assert "CreateVideo" in preset["dependencies"]["nodes"]
+            assert "SaveVideo" in preset["dependencies"]["nodes"]
+            assert "WanImageToVideo" not in preset["dependencies"]["nodes"]
+            assert "SaveAnimatedWEBP" not in preset["dependencies"]["nodes"]
         assert (
             "checkpoint_not_allowlisted:default.safetensors"
             in preset["configuration_errors"]

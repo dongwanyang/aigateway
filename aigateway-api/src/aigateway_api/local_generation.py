@@ -248,8 +248,10 @@ def builtin_presets(comfy: dict[str, Any]) -> list[dict[str, Any]]:
                     "UNETLoader",
                     "CLIPLoader",
                     "VAELoader",
-                    "WanImageToVideo",
-                    "SaveAnimatedWEBP",
+                    "ModelSamplingSD3",
+                    "Wan22ImageToVideoLatent",
+                    "CreateVideo",
+                    "SaveVideo",
                 ],
             },
         },
@@ -319,7 +321,7 @@ def discovered_checkpoint_presets(comfy: dict[str, Any]) -> list[dict[str, Any]]
         presets.append(
             {
                 "id": preset_id,
-                "name": f"{Path(checkpoint_name).with_suffix("").as_posix()}（本地 Checkpoint）",
+                "name": f"{Path(checkpoint_name).with_suffix('').as_posix()}（本地 Checkpoint）",
                 "kind": "image",
                 "builtin": False,
                 "source": "discovered",
