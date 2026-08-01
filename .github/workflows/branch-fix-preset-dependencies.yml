@@ -69,7 +69,13 @@ jobs:
           )
           video_segment = add_nodes(
               text[video_start:upscale_start],
-              list(_CORE_IMAGE_NODES),
+              [
+                  "CheckpointLoaderSimple",
+                  "CLIPTextEncode",
+                  "KSampler",
+                  "VAEDecode",
+                  "SaveImage",
+              ],
           )
           text = text[:qwen_start] + qwen_segment + video_segment + text[upscale_start:]
 
