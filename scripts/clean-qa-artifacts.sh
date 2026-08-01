@@ -4,7 +4,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-for path in qa-report qa-reports reports/qa tests/qa-report test-results playwright-report screenshots; do
+for path in qa-report qa-reports reports/qa tests/qa-report test-results playwright-report qa-screenshots; do
   rm -rf -- "$path"
 done
 

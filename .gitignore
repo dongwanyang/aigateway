@@ -39,14 +39,14 @@ qdrant-data/
 grafana-data/
 
 # QA evidence
-docs/qa-evidence-*
-qa-report/
-qa-reports/
-reports/qa/
-tests/qa-report/
-test-results/
-playwright-report/
-screenshots/
+/docs/qa-evidence-*/
+/qa-report/
+/qa-reports/
+/reports/qa/
+/tests/qa-report/
+/test-results/
+/playwright-report/
+/qa-screenshots/
 
 # Local tooling / generated artifacts
 .claude/
