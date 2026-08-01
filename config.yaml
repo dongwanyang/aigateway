@@ -75,20 +75,20 @@ auth:
     group: admin-team
     quotas:
       daily_tokens: 10000000
-      monthly_cost: 5000.0
+      monthly_cost: 5000
       rate_limit_rpm: 600
       rate_limit_tpm: 10000000000
   distributed_mode: false
   defaults:
     daily_tokens: 1000000
-    monthly_cost: 50.0
+    monthly_cost: 50
     rate_limit_rpm: 60
     rate_limit_tpm: 100000
   budget_alert_threshold: 0.8
   groups:
   - name: admin-team
     daily_tokens: 10000000
-    monthly_cost: 5000.0
+    monthly_cost: 5000
     rate_limit_rpm: 600
     rate_limit_tpm: 10000000000
 plugins:
@@ -420,7 +420,7 @@ media_optimization:
     - eng
     - chi_sim
     caption_model: agnes-image-2.1-flash
-    max_file_size_mb: 20.0
+    max_file_size_mb: 20
     caption_max_tokens: 150
     caption_temperature: 0.3
     paddleocr:
@@ -428,13 +428,13 @@ media_optimization:
       use_angle_cls: true
   video:
     max_frames: 10
-    frame_interval_sec: 5.0
+    frame_interval_sec: 5
     scene_detection: true
     target_resolution: 720p
     max_duration_sec: 300
     whisper_model: faster-whisper
     language: auto
-    max_file_size_mb: 100.0
+    max_file_size_mb: 100
   audio:
     target_format: opus
     sample_rate: 16000
@@ -443,7 +443,7 @@ media_optimization:
     language: auto
     max_duration_sec: 600
     diarization_enabled: false
-    max_file_size_mb: 50.0
+    max_file_size_mb: 50
     whisper_model_size: base
   document:
     supported_formats:
@@ -461,7 +461,7 @@ media_optimization:
     embedding_model: Qwen/Qwen3-Embedding-0.6B
     vector_dim: 1024
     summary_max_length: 500
-    max_file_size_mb: 50.0
+    max_file_size_mb: 50
     long_doc_threshold_chars: 5000
     summary_preview_chars: 2000
     unstructured:
