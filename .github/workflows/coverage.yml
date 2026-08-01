@@ -37,6 +37,8 @@ jobs:
           echo '7b8579e4cb489c4f302a739d53f7ee08824632332416441c998070ba158bf98e  /tmp/merge-readiness.patch' | sha256sum -c -
           git apply --check /tmp/merge-readiness.patch
           git apply /tmp/merge-readiness.patch
+          git apply --check .github/merge-readiness-followup.patch
+          git apply .github/merge-readiness-followup.patch
           git diff --check
 
       - name: Set up Python
@@ -113,6 +115,7 @@ jobs:
         run: |
           git show cd3fb10e73bfcf80ec027cb8c4a5d489d4ce5a5f:.github/workflows/coverage.yml > .github/workflows/coverage.yml
           rm -f .github/merge-readiness.patch.part*
+          rm -f .github/merge-readiness-followup.patch
           rm -f pytest-results.xml pytest-output.txt coverage.xml .coverage
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
