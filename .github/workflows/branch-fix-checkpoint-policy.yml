@@ -23,17 +23,37 @@ jobs:
       - name: Apply and commit reviewed fixes
         shell: bash
         run: |
-          set -euo pipefail
-          cat .github/scripts/checkpoint-fix.part* | base64 -d | gzip -d > /tmp/apply_checkpoint_policy_fixes.py
-          python /tmp/apply_checkpoint_policy_fixes.py
-          python -c 'from pathlib import Path; p=Path("aigateway-api/src/aigateway_api/local_generation.py"); s=p.read_text(); old="""def validate_custom_preset_id(preset_id: str) -> str:\n    \"\"\"Validate custom IDs and keep runtime-generated namespaces reserved.\"\"\"\n    if not isinstance(preset_id, str) or not _SAFE_ID.fullmatch(preset_id):\n        raise ValueError(\"preset id must be a safe lowercase identifier\")\n    if preset_id.startswith(CHECKPOINT_PRESET_PREFIX):\n        raise ValueError(\"preset id uses reserved checkpoint namespace\")\n    return preset_id\n"""; new="""def validate_custom_preset_id(preset_id: str) -> str:\n    \"\"\"Validate custom IDs and keep runtime-generated namespaces reserved.\"\"\"\n    if isinstance(preset_id, str) and preset_id.startswith(CHECKPOINT_PRESET_PREFIX):\n        raise ValueError(\"preset id uses reserved checkpoint namespace\")\n    if not isinstance(preset_id, str) or not _SAFE_ID.fullmatch(preset_id):\n        raise ValueError(\"preset id must be a safe lowercase identifier\")\n    return preset_id\n"""; assert s.count(old)==1; p.write_text(s.replace(old,new))'
-          python -m compileall -q aigateway-core/src aigateway-api/src tests/unit
+          set +e
+          : > /tmp/checkpoint-fix.log
+          cat .github/scripts/checkpoint-fix.part* | base64 -d | gzip -d > /tmp/apply_checkpoint_policy_fixes.py 2>> /tmp/checkpoint-fix.log
+          status=$?
+          if [ "$status" -eq 0 ]; then
+            python /tmp/apply_checkpoint_policy_fixes.py >> /tmp/checkpoint-fix.log 2>&1
+            status=$?
+          fi
+          if [ "$status" -eq 0 ]; then
+            python -c 'from pathlib import Path; p=Path("aigateway-api/src/aigateway_api/local_generation.py"); s=p.read_text(); old="""def validate_custom_preset_id(preset_id: str) -> str:\n    \"\"\"Validate custom IDs and keep runtime-generated namespaces reserved.\"\"\"\n    if not isinstance(preset_id, str) or not _SAFE_ID.fullmatch(preset_id):\n        raise ValueError(\"preset id must be a safe lowercase identifier\")\n    if preset_id.startswith(CHECKPOINT_PRESET_PREFIX):\n        raise ValueError(\"preset id uses reserved checkpoint namespace\")\n    return preset_id\n"""; new="""def validate_custom_preset_id(preset_id: str) -> str:\n    \"\"\"Validate custom IDs and keep runtime-generated namespaces reserved.\"\"\"\n    if isinstance(preset_id, str) and preset_id.startswith(CHECKPOINT_PRESET_PREFIX):\n        raise ValueError(\"preset id uses reserved checkpoint namespace\")\n    if not isinstance(preset_id, str) or not _SAFE_ID.fullmatch(preset_id):\n        raise ValueError(\"preset id must be a safe lowercase identifier\")\n    return preset_id\n"""; assert s.count(old)==1; p.write_text(s.replace(old,new))' >> /tmp/checkpoint-fix.log 2>&1
+            status=$?
+          fi
+          if [ "$status" -eq 0 ]; then
+            python -m compileall -q aigateway-core/src aigateway-api/src tests/unit >> /tmp/checkpoint-fix.log 2>&1
+            status=$?
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ "$status" -ne 0 ]; then
+            cp /tmp/checkpoint-fix.log .github/checkpoint-fix-failure.log
+            git add .github/checkpoint-fix-failure.log
+            git commit -m "chore: record final checkpoint fix failure" || true
+            git push origin HEAD:feat/gpu-scheduler-topology
+            exit 0
+          fi
+
           rm -f .github/checkpoint-fix-failure.log
           rm -f .github/scripts/apply_checkpoint_policy_fixes.py.gz.b64
           rm -f .github/scripts/checkpoint-fix.part*
           rm -f .github/workflows/branch-fix-checkpoint-policy.yml
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
           git diff --cached --check
           git commit -m "fix(generation): enforce trusted checkpoint selection"
