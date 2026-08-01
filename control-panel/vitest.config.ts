@@ -3,16 +3,9 @@ import path from 'node:path'
 
 export default defineConfig({
   resolve: {
-    alias: [
-      {
-        find: /^@\/api\/client$/,
-        replacement: path.resolve(__dirname, './src/api/clientSafe.ts'),
-      },
-      {
-        find: '@',
-        replacement: path.resolve(__dirname, './src'),
-      },
-    ],
+    alias: {
+      '@': path.resolve(__dirname, './src'),
+    },
   },
   test: {
     environment: 'jsdom',

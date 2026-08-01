@@ -17,7 +17,6 @@
     "noFallthroughCasesInSwitch": true,
     "baseUrl": ".",
     "paths": {
-      "@/api/client": ["src/api/clientSafe.ts"],
       "@/*": ["src/*"]
     }
   },

@@ -137,6 +137,12 @@ const initialCodeRepository = {
 }
 
 let codeRepositories = [{ ...initialCodeRepository }]
+let configRevision = 'revision-1'
+
+function nextConfigRevision(): string {
+  const number = Number(configRevision.split('-').at(-1) ?? '1') + 1
+  return `revision-${number}`
+}
 
 function responseFor(input: RequestInfo | URL, init?: RequestInit): Response {
   const url = String(input)
@@ -195,9 +201,29 @@ function responseFor(input: RequestInfo | URL, init?: RequestInit): Response {
     const plugin = decodeURIComponent(url.split('/admin/plugins/')[1]?.split('/debug')[0] ?? '')
     return Response.json({ data: { plugin, debug: false }, message: 'success' })
   }
-  if (url.includes('/admin/config')) {
-    if (method === 'PUT') return Response.json({ data: { updated: true }, message: 'success' })
-    return Response.json({ data: fullConfig, message: 'success' })
+  if (url.endsWith('/admin/config') || url.endsWith('/admin/config/table')) {
+    if (method === 'PUT') {
+      const ifMatch = new Headers(init?.headers).get('If-Match')
+      if (ifMatch !== `"${configRevision}"`) {
+        return Response.json({
+          detail: {
+            error: {
+              code: 'config_version_conflict',
+              message: 'configuration changed since it was loaded',
+            },
+          },
+        }, { status: 409 })
+      }
+      configRevision = nextConfigRevision()
+      return Response.json(
+        { data: { updated: true }, message: 'success', revision: configRevision },
+        { headers: { ETag: `"${configRevision}"` } },
+      )
+    }
+    return Response.json(
+      { data: fullConfig, message: 'success', revision: configRevision },
+      { headers: { ETag: `"${configRevision}"` } },
+    )
   }
   if (url.includes('/admin/plugins-config')) {
     if (method === 'PUT') return Response.json({ data: { name: 'pii_detector', enabled: false }, message: 'success' })
@@ -464,6 +490,7 @@ function renderPage(component: React.ReactElement) {
 
 beforeEach(() => {
   codeRepositories = [{ ...initialCodeRepository }]
+  configRevision = 'revision-1'
   useChatStore.setState({
     sessions: [],
     activeId: null,
@@ -519,6 +546,7 @@ describe('control panel pages against production API response shapes', () => {
       String(input).endsWith('/admin/config') && init?.method === 'PUT'
     ))
     expect(saveCall).toBeDefined()
+    expect(new Headers(saveCall?.[1]?.headers).get('If-Match')).toBe('"revision-1"')
     const savedConfig = JSON.parse(String(saveCall?.[1]?.body))
     const savedProvider = savedConfig.providers.openai
     const savedModel = savedProvider.model_grouper[0].models[0]
@@ -806,6 +834,7 @@ describe('control panel pages against production API response shapes', () => {
         ([url, init]) => String(url).endsWith('/admin/config/table') && init?.method === 'PUT',
       )
       expect(call).toBeDefined()
+      expect(new Headers(call?.[1]?.headers).get('If-Match')).toBe('"revision-1"')
       const body = JSON.parse(String(call?.[1]?.body))
       expect(body.server.port).toBe(9000)
       expect(body.providers).toEqual(fullConfig.providers)

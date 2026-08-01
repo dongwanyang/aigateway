@@ -5,16 +5,9 @@ import path from 'path'
 export default defineConfig({
   plugins: [react()],
   resolve: {
-    alias: [
-      {
-        find: /^@\/api\/client$/,
-        replacement: path.resolve(__dirname, './src/api/clientSafe.ts'),
-      },
-      {
-        find: '@',
-        replacement: path.resolve(__dirname, './src'),
-      },
-    ],
+    alias: {
+      '@': path.resolve(__dirname, './src'),
+    },
   },
   base: process.env.VITE_BASE_URL ?? '/',
   build: {
