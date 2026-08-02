@@ -191,10 +191,10 @@ class TestSSEGeneratorReal:
         async for chunk in generator.generate():
             chunks.append(chunk)
 
-        assert len(chunks) == 3
+        assert len(chunks) == 2
         assert chunks[0] == 'data: {"key": "value"}\n\n'
         import json
         err_data = json.loads(chunks[1].replace("data: ", "").strip())
         assert err_data["error"]["code"] == "internal_error"
         assert "Something went wrong" in err_data["error"]["message"]
-        assert chunks[2] == 'data: [DONE]\n\n'
+        assert all("[DONE]" not in chunk for chunk in chunks)
