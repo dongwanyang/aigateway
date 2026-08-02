@@ -2,11 +2,19 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from aigateway_api import gpu_routes
+from aigateway_api.dispatcher import (
+    RequestDispatcher,
+    _empty_length_limited_data,
+    _guard_sse_output,
+)
 from aigateway_core.pipelines.generation._common.config import DraftWorkflowConfig
 from aigateway_core.pipelines.generation.draft.draft_generator import (
     DraftGeneratorStrategy,
@@ -85,6 +93,112 @@ async def test_empty_gpu_topology_uses_direct_comfyui_compatibility_path(
     assert worker is None
     assert calls == 1
     await coordinator.close()
+
+
+def test_comfyui_only_topology_is_reported_as_delegated_execution() -> None:
+    gateway = gpu_routes._normalize_gateway_topology(
+        {
+            "available": False,
+            "torch_initialized": False,
+            "error": "gpu_status_unavailable",
+        },
+        comfy_available=True,
+        scheduler={"devices": [], "workers": []},
+    )
+    execution = gpu_routes._execution_gpu_status(
+        gateway,
+        comfy_available=True,
+        normalized_comfy_memory={
+            "total_bytes": 16_000,
+            "free_bytes": 15_000,
+            "used_bytes": 1_000,
+        },
+        scheduler={"devices": [], "workers": []},
+    )
+
+    assert gateway["available"] is False
+    assert gateway["local_cuda_available"] is False
+    assert gateway["status"] == "delegated"
+    assert gateway["delegated_to"] == "comfyui"
+    assert gateway["error"] is None
+    assert execution == {
+        "available": True,
+        "mode": "delegated_comfyui",
+        "owner": "comfyui",
+        "memory": {
+            "total_bytes": 16_000,
+            "free_bytes": 15_000,
+            "used_bytes": 1_000,
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_low_text_output_budget_is_rejected_explicitly() -> None:
+    dispatcher = RequestDispatcher({})
+    body = SimpleNamespace(
+        model="agnes-2.0-flash",
+        max_tokens=10,
+        generation_options=None,
+    )
+
+    response = await dispatcher.dispatch(body, SimpleNamespace())
+    payload = json.loads(response.body)
+
+    assert response.status_code == 422
+    assert payload["error"]["code"] == "output_budget_exhausted"
+    assert payload["error"]["param"] == "max_tokens"
+    assert payload["error"]["details"]["minimum_recommended"] == 32
+
+
+def test_empty_length_limited_nonstream_response_is_detected() -> None:
+    exhausted, completion_tokens = _empty_length_limited_data(
+        {
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": ""},
+                    "finish_reason": "length",
+                }
+            ],
+            "usage": {"completion_tokens": 10},
+        }
+    )
+
+    assert exhausted is True
+    assert completion_tokens == 10
+
+
+@pytest.mark.asyncio
+async def test_empty_length_limited_stream_ends_with_error_not_done() -> None:
+    async def upstream():
+        yield 'data: {"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}\n\n'
+        yield 'data: {"choices":[{"index":0,"delta":{},"finish_reason":"length"}],"usage":{"completion_tokens":10}}\n\n'
+        yield "data: [DONE]\n\n"
+
+    chunks = [
+        chunk
+        async for chunk in _guard_sse_output(upstream(), max_tokens=10)
+    ]
+
+    assert any("output_budget_exhausted" in chunk for chunk in chunks)
+    assert all("[DONE]" not in chunk for chunk in chunks)
+
+
+@pytest.mark.asyncio
+async def test_successful_text_stream_keeps_single_done_marker() -> None:
+    async def upstream():
+        yield 'data: {"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}\n\n'
+        yield 'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
+        yield "data: [DONE]\n\n"
+
+    chunks = [
+        chunk
+        async for chunk in _guard_sse_output(upstream(), max_tokens=10)
+    ]
+
+    assert sum("[DONE]" in chunk for chunk in chunks) == 1
+    assert all("output_budget_exhausted" not in chunk for chunk in chunks)
 
 
 @pytest.mark.asyncio
