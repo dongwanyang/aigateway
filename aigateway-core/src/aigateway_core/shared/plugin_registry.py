@@ -77,7 +77,8 @@ class PluginRegistry:
     插件可按优先级排序执行，依赖关系会被自动解析。
 
     属性:
-        _registrations: 已注册的插件信息字典，key 为插件名。
+        _registrations: 已注册的插件注册信息，key 为插件名。
+        _instances: 已构造的运行时插件单例，key 为插件名。
     """
 
     def __init__(
@@ -88,6 +89,7 @@ class PluginRegistry:
         policies: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         self._registrations: dict[str, PluginRegistration] = {}
+        self._instances: dict[str, Any] = {}
         self._lock = threading.Lock()
         self.default_timeout_seconds = max(0.001, float(default_timeout_seconds))
         if default_failure_policy not in {"continue", "fail_fast"}:
@@ -178,6 +180,7 @@ class PluginRegistry:
             if name not in self._registrations:
                 raise KeyError(f"插件 '{name}' 未注册")
             del self._registrations[name]
+            self._instances.pop(name, None)
         logger.info("插件已注销: name=%s", name)
 
     # ------------------------------------------------------------------
@@ -195,11 +198,35 @@ class PluginRegistry:
         """
         return self._registrations.get(name)
 
-    def get_all(self, pipeline_kind: str | None = None) -> list[Any]:
-        """获取已注册插件的实例列表。
+    def _get_or_create_instance(self, reg: PluginRegistration) -> Any | None:
+        """Return the process-wide runtime instance for one registration."""
+        with self._lock:
+            cached = self._instances.get(reg.name)
+        if cached is not None:
+            return cached
 
-        按 priority 升序排列（数字小的先执行）。
-        返回的是实例化后的插件对象（调用 plugin_class()）。
+        try:
+            candidate = reg.plugin_class(**reg.config)
+        except TypeError as exc:
+            logger.warning(
+                "插件 '%s' 实例化失败（配置参数不匹配）: %s",
+                reg.name,
+                exc,
+            )
+            return None
+
+        # Constructors may be expensive, so instantiate outside the registry
+        # lock. If two callers race, keep the first published instance and let
+        # the losing temporary object be collected.
+        with self._lock:
+            return self._instances.setdefault(reg.name, candidate)
+
+    def get_all(self, pipeline_kind: str | None = None) -> list[Any]:
+        """获取已注册插件的运行时实例列表。
+
+        按 priority 升序排列（数字小的先执行）。每个注册项在进程内只构造
+        一次；PipelineEngine、健康检查和管理端查询共享同一实例，避免轮询
+        ``/health`` 时重复初始化 LangChain、模型或网络客户端。
 
         Args:
             pipeline_kind: 可选，按管道过滤 "understanding" | "generation"。
@@ -219,22 +246,18 @@ class PluginRegistry:
 
         instances: list[Any] = []
         for reg in registrations:
-            try:
-                # 使用 config 初始化插件实例
-                instance = reg.plugin_class(**reg.config)
-                instance.name = reg.name  # type: ignore[attr-defined]
-                instance.enabled = reg.enabled  # type: ignore[attr-defined]
-                instance.depends_on = reg.depends_on  # type: ignore[attr-defined]
-                instance.pipeline_kind = reg.pipeline_kind  # type: ignore[attr-defined]
-                instance.timeout_seconds = reg.timeout_seconds  # type: ignore[attr-defined]
-                instance.failure_policy = reg.failure_policy  # type: ignore[attr-defined]
-                instances.append(instance)
-            except TypeError as exc:
-                logger.warning(
-                    "插件 '%s' 实例化失败（配置参数不匹配）: %s",
-                    reg.name,
-                    exc,
-                )
+            instance = self._get_or_create_instance(reg)
+            if instance is None:
+                continue
+            # Refresh public runtime policy fields in case a registration object
+            # was updated in place by hot-reload code.
+            instance.name = reg.name  # type: ignore[attr-defined]
+            instance.enabled = reg.enabled  # type: ignore[attr-defined]
+            instance.depends_on = reg.depends_on  # type: ignore[attr-defined]
+            instance.pipeline_kind = reg.pipeline_kind  # type: ignore[attr-defined]
+            instance.timeout_seconds = reg.timeout_seconds  # type: ignore[attr-defined]
+            instance.failure_policy = reg.failure_policy  # type: ignore[attr-defined]
+            instances.append(instance)
 
         return instances
 
