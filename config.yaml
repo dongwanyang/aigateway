@@ -181,8 +181,8 @@ providers:
       fallback_models: []
       pricing:
         agnes-2.0-flash:
-          prompt: 0.02
-          completion: 1
+          prompt: 0.00000002
+          completion: 0.000001
         agnes-image-2.1-flash:
           prompt: 0
           completion: 0
@@ -225,11 +225,11 @@ providers:
       fallback_models: []
       pricing:
         deepseek-v4-flash:
-          prompt: 0.02
-          completion: 1
+          prompt: 0.00000002
+          completion: 0.000001
         deepseek-v4-pro:
-          prompt: 0.02
-          completion: 1
+          prompt: 0.00000002
+          completion: 0.000001
   glm5.2:
     api_key: ${GLM52_API_KEY:-}
     base_url: https://buddy.relaypool.cam/codebuddy/v1
