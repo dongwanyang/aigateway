@@ -56,6 +56,92 @@ def _queue_idle(queue: Any) -> bool | None:
     )
 
 
+def _normalize_gateway_topology(
+    gateway: dict[str, Any],
+    *,
+    comfy_available: bool,
+    scheduler: dict[str, Any],
+) -> dict[str, Any]:
+    """Describe local CUDA absence without reporting a false service failure.
+
+    In the default Compose topology the Gateway container has no CUDA device,
+    while ComfyUI owns the GPU and performs generation.  Local allocator
+    availability remains false, but the state is ``delegated`` rather than an
+    operational error.  The raw local facts are preserved for diagnostics.
+    """
+    result = dict(gateway)
+    devices = scheduler.get("devices") if isinstance(scheduler, dict) else []
+    workers = scheduler.get("workers") if isinstance(scheduler, dict) else []
+    has_pool = bool(devices) or bool(workers)
+    local_available = bool(result.get("available"))
+
+    result["local_cuda_available"] = local_available
+    result["delegated_to"] = None
+    if local_available:
+        result["status"] = "available"
+        return result
+    if has_pool:
+        result["status"] = "scheduler_pool"
+        if result.get("error") == "gpu_status_unavailable":
+            result["error"] = None
+        return result
+    if comfy_available:
+        result["status"] = "delegated"
+        result["delegated_to"] = "comfyui"
+        if result.get("error") == "gpu_status_unavailable":
+            result["error"] = None
+        return result
+
+    result["status"] = "unavailable"
+    return result
+
+
+def _execution_gpu_status(
+    gateway: dict[str, Any],
+    *,
+    comfy_available: bool,
+    normalized_comfy_memory: dict[str, Any] | None,
+    scheduler: dict[str, Any],
+) -> dict[str, Any]:
+    """Return the effective GPU execution backend for API consumers."""
+    devices = scheduler.get("devices") if isinstance(scheduler, dict) else []
+    workers = scheduler.get("workers") if isinstance(scheduler, dict) else []
+    if bool(gateway.get("available")):
+        return {
+            "available": True,
+            "mode": "gateway",
+            "owner": "gateway",
+            "memory": {
+                "total_bytes": gateway.get("device_total_bytes"),
+                "free_bytes": gateway.get("device_free_bytes"),
+                "used_bytes": gateway.get("device_used_bytes"),
+            },
+        }
+    if bool(devices) or bool(workers):
+        return {
+            "available": True,
+            "mode": "scheduler_pool",
+            "owner": "scheduler",
+            "device_count": len(devices or []),
+            "worker_count": len(workers or []),
+            "memory": None,
+        }
+    if comfy_available:
+        return {
+            "available": True,
+            "mode": "delegated_comfyui",
+            "owner": "comfyui",
+            "memory": normalized_comfy_memory,
+        }
+    return {
+        "available": False,
+        "mode": "unavailable",
+        "owner": None,
+        "memory": None,
+        "error": gateway.get("error") or "gpu_status_unavailable",
+    }
+
+
 @router.get("/gpu/status")
 async def get_gpu_status(
     request: Request,
@@ -72,6 +158,9 @@ async def get_gpu_status(
     comfy = await _probe(request)
     queue = comfy.get("queue") if isinstance(comfy, dict) else None
     idle = _queue_idle(queue)
+    comfy_available = (
+        bool(comfy.get("available")) if isinstance(comfy, dict) else False
+    )
     normalized_comfy_memory = comfy_memory(
         comfy.get("gpu") if isinstance(comfy, dict) else None
     )
@@ -90,13 +179,23 @@ async def get_gpu_status(
         "devices": [],
         "workers": [],
     }
+    gateway = _normalize_gateway_topology(
+        gateway,
+        comfy_available=comfy_available,
+        scheduler=scheduler,
+    )
+    execution = _execution_gpu_status(
+        gateway,
+        comfy_available=comfy_available,
+        normalized_comfy_memory=normalized_comfy_memory,
+        scheduler=scheduler,
+    )
     return {
         "data": {
             "gateway": gateway,
+            "execution": execution,
             "comfyui": {
-                "available": (
-                    bool(comfy.get("available")) if isinstance(comfy, dict) else False
-                ),
+                "available": comfy_available,
                 "memory": normalized_comfy_memory,
                 "endpoint_errors": (
                     comfy.get("endpoint_errors", {})
