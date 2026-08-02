@@ -151,9 +151,28 @@ async def _guard_sse_output(
 
 async def _dispatch_with_output_guard(self: Any, body: Any, request: Any):
     max_tokens = getattr(body, "max_tokens", None)
+    text_completion = _is_text_completion(body)
+    bypass_cache = (
+        text_completion
+        and isinstance(max_tokens, int)
+        and 0 < max_tokens < _MIN_TEXT_OUTPUT_TOKENS
+    )
+    original_cache_manager = getattr(self, "cache_manager", None)
+    if bypass_cache:
+        # Cache keys bucket max_tokens. Tiny budgets must not share a bucket
+        # with larger requests because an empty length-limited response could
+        # otherwise poison subsequent completions, or a tiny request could
+        # receive content generated with a larger budget.
+        self.cache_manager = None
+
     original_dispatch = getattr(type(self), _ORIGINAL_DISPATCH_ATTR)
-    response = await original_dispatch(self, body, request)
-    if not _is_text_completion(body):
+    try:
+        response = await original_dispatch(self, body, request)
+    finally:
+        if bypass_cache:
+            self.cache_manager = original_cache_manager
+
+    if not text_completion:
         return response
 
     if isinstance(response, StreamingResponse):
