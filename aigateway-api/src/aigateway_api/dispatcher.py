@@ -151,16 +151,6 @@ async def _guard_sse_output(
 
 async def _dispatch_with_output_guard(self: Any, body: Any, request: Any):
     max_tokens = getattr(body, "max_tokens", None)
-    if (
-        _is_text_completion(body)
-        and isinstance(max_tokens, int)
-        and max_tokens < _MIN_TEXT_OUTPUT_TOKENS
-    ):
-        return JSONResponse(
-            content=_output_budget_error(max_tokens),
-            status_code=422,
-        )
-
     original_dispatch = getattr(type(self), _ORIGINAL_DISPATCH_ATTR)
     response = await original_dispatch(self, body, request)
     if not _is_text_completion(body):
