@@ -1,6 +1,8 @@
 """Public Draft generator strategy with explicit storage configuration."""
 from __future__ import annotations
 
+from typing import Any
+
 from aigateway_core.pipelines.generation._common.exceptions import DraftWorkflowError
 
 from . import _draft_generator_impl as _impl
@@ -47,6 +49,38 @@ class DraftGeneratorStrategy(_impl.DraftGeneratorStrategy):
         if self._configuration_error:
             raise DraftWorkflowError(self._configuration_error)
         return await super().check_local_dependencies(*args, **kwargs)
+
+    async def _run_on_comfy_worker(
+        self,
+        draft_id: str,
+        capability: str,
+        operation: Any,
+        *,
+        preferred_worker_id: str | None = None,
+        memory_requirement_gb: float = 0.0,
+    ) -> tuple[Any, Any | None]:
+        """Use the legacy ComfyUI URL when no local worker topology exists.
+
+        The default Compose topology exposes the GPU only to the ComfyUI
+        container. In that deployment the Gateway cannot discover a local NVIDIA
+        device, so the topology-aware scheduler has no device/worker pair to
+        lease. Waiting in the scheduler would leave the draft at ``running``
+        without ever submitting ``/prompt`` to ComfyUI. Treat an empty topology
+        as the existing single-URL compatibility mode instead.
+        """
+        coordinator = self._gpu_coordinator
+        if coordinator is not None and coordinator.config.enabled:
+            status = coordinator.status()
+            if not status.get("devices") or not status.get("workers"):
+                return await operation(), None
+
+        return await super()._run_on_comfy_worker(
+            draft_id,
+            capability,
+            operation,
+            preferred_worker_id=preferred_worker_id,
+            memory_requirement_gb=memory_requirement_gb,
+        )
 
 
 for _name in dir(_impl):
