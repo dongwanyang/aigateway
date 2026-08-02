@@ -187,8 +187,8 @@ providers:
         fallback_models: []  # 降级模型列表（主模型全部失败后尝试）
         pricing:             # 每个模型的定价（$/token）
           agnes-2.0-flash:
-            prompt: 0.02     # 输入 token 单价
-            completion: 1    # 输出 token 单价
+            prompt: 0.00000002  # 输入 token 单价（$0.02 / 1M tokens）
+            completion: 0.000001 # 输出 token 单价（$1 / 1M tokens）
 
   deepseek:
     api_key: ${DEEPSEEK_API_KEY}
@@ -205,8 +205,8 @@ providers:
         fallback_models: []
         pricing:
           deepseek-v4-flash:
-            prompt: 0.02
-            completion: 1
+            prompt: 0.00000002
+            completion: 0.000001
 
 # ==========================
 # 向量嵌入配置
