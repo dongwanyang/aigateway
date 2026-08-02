@@ -17,6 +17,8 @@ from aigateway_core.dispatch.classifier import classify_request
 from aigateway_core.dispatch.dispatcher import RequestDispatcher as CoreRequestDispatcher
 
 _MIN_TEXT_OUTPUT_TOKENS = 32
+_ORIGINAL_DISPATCH_ATTR = "_aigateway_api_original_dispatch"
+_GUARDED_DISPATCH_ATTR = "_aigateway_api_output_guard"
 
 
 def _is_text_completion(body: Any) -> bool:
@@ -147,47 +149,60 @@ async def _guard_sse_output(
         yield done_chunk
 
 
-class RequestDispatcher(CoreRequestDispatcher):
-    """Core dispatcher with explicit output-budget failure semantics."""
+async def _dispatch_with_output_guard(self: Any, body: Any, request: Any):
+    max_tokens = getattr(body, "max_tokens", None)
+    if (
+        _is_text_completion(body)
+        and isinstance(max_tokens, int)
+        and max_tokens < _MIN_TEXT_OUTPUT_TOKENS
+    ):
+        return JSONResponse(
+            content=_output_budget_error(max_tokens),
+            status_code=422,
+        )
 
-    async def dispatch(self, body: Any, request: Any):
-        max_tokens = getattr(body, "max_tokens", None)
-        if (
-            _is_text_completion(body)
-            and isinstance(max_tokens, int)
-            and max_tokens < _MIN_TEXT_OUTPUT_TOKENS
-        ):
-            return JSONResponse(
-                content=_output_budget_error(max_tokens),
-                status_code=422,
-            )
-
-        response = await super().dispatch(body, request)
-        if not _is_text_completion(body):
-            return response
-
-        if isinstance(response, StreamingResponse):
-            response.body_iterator = _guard_sse_output(
-                response.body_iterator,
-                max_tokens=max_tokens,
-            )
-            return response
-
-        if isinstance(response, JSONResponse) and response.status_code == 200:
-            try:
-                payload = json.loads(response.body)
-            except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
-                return response
-            exhausted, completion_tokens = _empty_length_limited_data(
-                payload.get("data") if isinstance(payload, dict) else None
-            )
-            if exhausted:
-                error_payload = _output_budget_error(max_tokens, completion_tokens)
-                if isinstance(payload, dict) and payload.get("_meta"):
-                    error_payload["_meta"] = payload["_meta"]
-                return JSONResponse(content=error_payload, status_code=422)
-
+    original_dispatch = getattr(type(self), _ORIGINAL_DISPATCH_ATTR)
+    response = await original_dispatch(self, body, request)
+    if not _is_text_completion(body):
         return response
+
+    if isinstance(response, StreamingResponse):
+        response.body_iterator = _guard_sse_output(
+            response.body_iterator,
+            max_tokens=max_tokens,
+        )
+        return response
+
+    if isinstance(response, JSONResponse) and response.status_code == 200:
+        try:
+            payload = json.loads(response.body)
+        except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+            return response
+        exhausted, completion_tokens = _empty_length_limited_data(
+            payload.get("data") if isinstance(payload, dict) else None
+        )
+        if exhausted:
+            error_payload = _output_budget_error(max_tokens, completion_tokens)
+            if isinstance(payload, dict) and payload.get("_meta"):
+                error_payload["_meta"] = payload["_meta"]
+            return JSONResponse(content=error_payload, status_code=422)
+
+    return response
+
+
+if not hasattr(CoreRequestDispatcher, _ORIGINAL_DISPATCH_ATTR):
+    setattr(
+        CoreRequestDispatcher,
+        _ORIGINAL_DISPATCH_ATTR,
+        CoreRequestDispatcher.dispatch,
+    )
+if not getattr(CoreRequestDispatcher.dispatch, _GUARDED_DISPATCH_ATTR, False):
+    setattr(_dispatch_with_output_guard, _GUARDED_DISPATCH_ATTR, True)
+    CoreRequestDispatcher.dispatch = _dispatch_with_output_guard
+
+# Preserve the runtime-structure contract: API and Core imports are the same
+# class object, while the API module installs an idempotent HTTP-boundary guard.
+RequestDispatcher = CoreRequestDispatcher
 
 
 __all__ = ["RequestDispatcher", "classify_request"]
