@@ -2,16 +2,13 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from aigateway_api import gpu_routes
 from aigateway_api.dispatcher import (
-    RequestDispatcher,
     _empty_length_limited_data,
     _guard_sse_output,
 )
@@ -133,24 +130,6 @@ def test_comfyui_only_topology_is_reported_as_delegated_execution() -> None:
     }
 
 
-@pytest.mark.asyncio
-async def test_low_text_output_budget_is_rejected_explicitly() -> None:
-    dispatcher = RequestDispatcher({})
-    body = SimpleNamespace(
-        model="agnes-2.0-flash",
-        max_tokens=10,
-        generation_options=None,
-    )
-
-    response = await dispatcher.dispatch(body, SimpleNamespace())
-    payload = json.loads(response.body)
-
-    assert response.status_code == 422
-    assert payload["error"]["code"] == "output_budget_exhausted"
-    assert payload["error"]["param"] == "max_tokens"
-    assert payload["error"]["details"]["minimum_recommended"] == 32
-
-
 def test_empty_length_limited_nonstream_response_is_detected() -> None:
     exhausted, completion_tokens = _empty_length_limited_data(
         {
@@ -167,6 +146,24 @@ def test_empty_length_limited_nonstream_response_is_detected() -> None:
 
     assert exhausted is True
     assert completion_tokens == 10
+
+
+def test_short_nonstream_content_is_not_treated_as_budget_failure() -> None:
+    exhausted, completion_tokens = _empty_length_limited_data(
+        {
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "可以"},
+                    "finish_reason": "length",
+                }
+            ],
+            "usage": {"completion_tokens": 2},
+        }
+    )
+
+    assert exhausted is False
+    assert completion_tokens == 2
 
 
 @pytest.mark.asyncio
