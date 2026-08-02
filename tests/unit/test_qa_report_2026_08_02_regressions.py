@@ -2,13 +2,18 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from fastapi.responses import JSONResponse
 
 from aigateway_api import gpu_routes
 from aigateway_api.dispatcher import (
+    RequestDispatcher,
+    _ORIGINAL_DISPATCH_ATTR,
     _empty_length_limited_data,
     _guard_sse_output,
 )
@@ -164,6 +169,89 @@ def test_short_nonstream_content_is_not_treated_as_budget_failure() -> None:
 
     assert exhausted is False
     assert completion_tokens == 2
+
+
+@pytest.mark.asyncio
+async def test_dispatch_guard_maps_empty_budget_result_and_bypasses_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache_manager = object()
+    dispatcher = RequestDispatcher({"cache_manager": cache_manager})
+    observed_cache_managers: list[Any] = []
+
+    async def original_dispatch(self: Any, body: Any, request: Any) -> JSONResponse:
+        observed_cache_managers.append(self.cache_manager)
+        return JSONResponse(
+            content={
+                "data": {
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": ""},
+                            "finish_reason": "length",
+                        }
+                    ],
+                    "usage": {"completion_tokens": 10},
+                },
+                "message": "success",
+                "_meta": {"cost": 0.00001},
+            }
+        )
+
+    monkeypatch.setattr(RequestDispatcher, _ORIGINAL_DISPATCH_ATTR, original_dispatch)
+    body = SimpleNamespace(
+        model="agnes-2.0-flash",
+        max_tokens=10,
+        generation_options=None,
+    )
+
+    response = await dispatcher.dispatch(body, SimpleNamespace())
+    payload = json.loads(response.body)
+
+    assert observed_cache_managers == [None]
+    assert dispatcher.cache_manager is cache_manager
+    assert response.status_code == 422
+    assert payload["error"]["code"] == "output_budget_exhausted"
+    assert payload["error"]["param"] == "max_tokens"
+    assert payload["_meta"]["cost"] == 0.00001
+
+
+@pytest.mark.asyncio
+async def test_dispatch_guard_preserves_valid_short_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dispatcher = RequestDispatcher({"cache_manager": object()})
+
+    async def original_dispatch(self: Any, body: Any, request: Any) -> JSONResponse:
+        assert self.cache_manager is None
+        return JSONResponse(
+            content={
+                "data": {
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "可以"},
+                            "finish_reason": "length",
+                        }
+                    ],
+                    "usage": {"completion_tokens": 2},
+                },
+                "message": "success",
+            }
+        )
+
+    monkeypatch.setattr(RequestDispatcher, _ORIGINAL_DISPATCH_ATTR, original_dispatch)
+    body = SimpleNamespace(
+        model="agnes-2.0-flash",
+        max_tokens=10,
+        generation_options=None,
+    )
+
+    response = await dispatcher.dispatch(body, SimpleNamespace())
+    payload = json.loads(response.body)
+
+    assert response.status_code == 200
+    assert payload["data"]["choices"][0]["message"]["content"] == "可以"
 
 
 @pytest.mark.asyncio
