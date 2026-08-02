@@ -1,15 +1,28 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import yaml
-from fastapi import APIRouter, HTTPException, Request
-
 from aigateway_api import config_management_routes
 from aigateway_api.config_security import config_revision
 from aigateway_core.shared.config import ConfigManager
+from fastapi import APIRouter, HTTPException, Request
+
+
+def _read_text(path: str) -> str:
+    return Path(path).read_text(encoding="utf-8")
+
+
+def _load_yaml(path: str) -> dict:
+    return yaml.safe_load(_read_text(path))
+
+
+def _write_yaml(path: str, value: dict) -> None:
+    content = yaml.safe_dump(value, sort_keys=False)
+    Path(path).write_text(content, encoding="utf-8")
 
 
 def _minimal_config() -> dict:
@@ -99,8 +112,7 @@ async def test_plugin_toggle_uses_transaction_and_returns_revision(manager) -> N
         {},
     )
 
-    with open(manager.config_path, encoding="utf-8") as file:
-        persisted = yaml.safe_load(file)
+    persisted = _load_yaml(manager.config_path)
     assert persisted["plugins"][0]["enabled"] is False
     assert manager.get("plugins")[0]["enabled"] is False
     assert response.headers["etag"] == f'"{config_revision(manager.config_path)}"'
@@ -108,8 +120,7 @@ async def test_plugin_toggle_uses_transaction_and_returns_revision(manager) -> N
 
 @pytest.mark.asyncio
 async def test_plugin_toggle_rejects_non_boolean_without_writing(manager) -> None:
-    with open(manager.config_path, encoding="utf-8") as file:
-        before = file.read()
+    before = _read_text(manager.config_path)
 
     with pytest.raises(HTTPException) as exc_info:
         await config_management_routes.update_plugins_config_transactional(
@@ -122,8 +133,7 @@ async def test_plugin_toggle_rejects_non_boolean_without_writing(manager) -> Non
         )
 
     assert exc_info.value.status_code == 400
-    with open(manager.config_path, encoding="utf-8") as file:
-        assert file.read() == before
+    assert _read_text(manager.config_path) == before
 
 
 @pytest.mark.asyncio
@@ -154,8 +164,7 @@ async def test_generation_plugin_toggle_updates_nested_gate(manager) -> None:
         {},
     )
 
-    with open(manager.config_path, encoding="utf-8") as file:
-        persisted = yaml.safe_load(file)
+    persisted = _load_yaml(manager.config_path)
     assert persisted["generation_optimization"]["enabled"] is True
     assert persisted["generation_optimization"]["draft_workflow"]["enabled"] is True
     assert json.loads(response.body)["data"]["enabled"] is True
@@ -174,8 +183,7 @@ async def test_plugin_debug_transaction_updates_disk_and_runtime(manager) -> Non
         {},
     )
 
-    with open(manager.config_path, encoding="utf-8") as file:
-        persisted = yaml.safe_load(file)
+    persisted = _load_yaml(manager.config_path)
     assert persisted["debug"]["plugins"]["per_plugin"]["pii_detector"] is True
     assert manager.get("debug")["plugins"]["per_plugin"]["pii_detector"] is True
     assert json.loads(response.body)["revision"] == config_revision(manager.config_path)
@@ -207,8 +215,7 @@ async def test_global_config_merges_partial_debug_and_applies_runtime(
         {},
     )
 
-    with open(manager.config_path, encoding="utf-8") as file:
-        persisted = yaml.safe_load(file)
+    persisted = _load_yaml(manager.config_path)
     assert persisted["hot_reload"] is True
     assert persisted["debug_mode"] is True
     assert persisted["debug"]["entry"] is True
@@ -251,8 +258,7 @@ async def test_global_runtime_failure_rolls_back_file_and_runtime(
             {},
         )
 
-    with open(manager.config_path, encoding="utf-8") as file:
-        persisted = yaml.safe_load(file)
+    persisted = _load_yaml(manager.config_path)
     assert exc_info.value.status_code == 500
     assert persisted["hot_reload"] is False
     assert manager.get("hot_reload") is False
@@ -300,14 +306,12 @@ def test_install_replaces_conflicting_routes_and_is_idempotent() -> None:
 
 @pytest.mark.asyncio
 async def test_disabling_generation_plugin_preserves_disabled_global_gate(manager) -> None:
-    with open(manager.config_path, encoding="utf-8") as file:
-        persisted = yaml.safe_load(file)
+    persisted = _load_yaml(manager.config_path)
     persisted["generation_optimization"] = {
         "enabled": False,
         "draft_workflow": {"enabled": True},
     }
-    with open(manager.config_path, "w", encoding="utf-8") as file:
-        yaml.safe_dump(persisted, file, sort_keys=False)
+    _write_yaml(manager.config_path, persisted)
     manager.load()
 
     await config_management_routes.update_plugins_config_transactional(
@@ -319,7 +323,6 @@ async def test_disabling_generation_plugin_preserves_disabled_global_gate(manage
         {},
     )
 
-    with open(manager.config_path, encoding="utf-8") as file:
-        updated = yaml.safe_load(file)
+    updated = _load_yaml(manager.config_path)
     assert updated["generation_optimization"]["enabled"] is False
     assert updated["generation_optimization"]["draft_workflow"]["enabled"] is False

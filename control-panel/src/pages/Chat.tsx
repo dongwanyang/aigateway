@@ -1,5 +1,8 @@
 import { useChatSessions } from '@/hooks/useChatSessions'
 import { useAuth } from '@/contexts/AuthContext'
+import { useQuery } from '@tanstack/react-query'
+import { getGenerationPresets } from '@/api/client'
+import { queryKeys } from '@/query/keys'
 import SessionList from '@/components/chat/SessionList'
 import ChatTimeline from '@/components/chat/ChatTimeline'
 import ChatComposer from '@/components/chat/ChatComposer'
@@ -7,6 +10,12 @@ import { Trash2 } from 'lucide-react'
 
 export default function Chat() {
   const { isAuthenticated } = useAuth()
+  const presetsQuery = useQuery({
+    queryKey: queryKeys.generation.presets,
+    queryFn: async () => (await getGenerationPresets()).data,
+    enabled: isAuthenticated,
+    staleTime: 30_000,
+  })
   const {
     sessions, activeId, active, streaming, error, pendingAssistantId,
     newSession, selectSession, deleteSession,
@@ -72,7 +81,16 @@ export default function Chat() {
           />
         </div>
         <div className="mx-1 mt-2 rounded-md" style={{ backgroundColor: 'var(--color-bg-elevated)' }}>
-          <ChatComposer streaming={streaming} disabled={false} onSend={send} onStop={stop} />
+          <ChatComposer
+            streaming={streaming}
+            disabled={false}
+            onSend={send}
+            onStop={stop}
+            presets={Array.isArray(presetsQuery.data) ? presetsQuery.data : []}
+            presetsLoading={presetsQuery.isLoading || presetsQuery.isFetching}
+            presetsError={presetsQuery.error instanceof Error ? presetsQuery.error.message : null}
+            onRefreshPresets={() => { void presetsQuery.refetch() }}
+          />
         </div>
       </div>
     </div>

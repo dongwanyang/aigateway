@@ -108,7 +108,7 @@ def configured_text(path: str) -> str:
 
 def configured_number(
     path: str,
-    number_type: type[int] | type[float] = float,
+    number_type: type[int | float] = float,
 ):
     raw = get_runtime_value(path)
     try:

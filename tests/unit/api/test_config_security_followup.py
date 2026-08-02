@@ -6,19 +6,18 @@ from types import SimpleNamespace
 
 import pytest
 import yaml
-from fastapi import HTTPException, Request
-
 from aigateway_api import config_security, security_routes
 from aigateway_api.config_security import (
+    MASKED_SECRET,
     ConfigValidationError,
     ConfigVersionConflictError,
-    MASKED_SECRET,
     config_revision,
     redact_config,
     restore_masked_values,
     transactional_replace_config,
 )
 from aigateway_core.shared.config import ConfigManager
+from fastapi import HTTPException, Request
 
 
 def _request(body: bytes, *, content_type: str = "application/json") -> Request:

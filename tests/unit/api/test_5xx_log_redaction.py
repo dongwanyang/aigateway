@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import FastAPI, HTTPException
-from fastapi.testclient import TestClient
-
+import httpx
+import pytest
 from aigateway_api.main import _register_exception_handlers
+from fastapi import FastAPI, HTTPException
 
 
-def test_5xx_logs_do_not_include_raw_exception_secrets(caplog) -> None:
+@pytest.mark.asyncio
+async def test_5xx_logs_do_not_include_raw_exception_secrets(caplog) -> None:
     app = FastAPI()
     _register_exception_handlers(app)
     secret = "redis://user:super-secret@example:6379/0"
@@ -29,10 +30,14 @@ def test_5xx_logs_do_not_include_raw_exception_secrets(caplog) -> None:
             },
         )
 
-    client = TestClient(app, raise_server_exceptions=False)
-    with caplog.at_level(logging.ERROR):
-        assert client.get("/unhandled").status_code == 500
-        assert client.get("/http").status_code == 500
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://testserver",
+    ) as client:
+        with caplog.at_level(logging.ERROR):
+            assert (await client.get("/unhandled")).status_code == 500
+            assert (await client.get("/http")).status_code == 500
 
     assert secret not in caplog.text
     assert "super-secret" not in caplog.text

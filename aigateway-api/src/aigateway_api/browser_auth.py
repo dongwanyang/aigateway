@@ -29,8 +29,8 @@ _OPTIONAL_CONFIG_ERRORS = (
 
 def _optional_config_number(
     path: str,
-    number_type: type[int] | type[float],
-    default: int | float,
+    number_type: type[int | float],
+    default: float,
 ) -> int | float:
     """Read a numeric policy value without requiring a YAML deployment.
 
@@ -57,7 +57,7 @@ def _optional_config_text(path: str) -> str:
 
 def _positive_environment_number(
     name: str,
-    number_type: type[int] | type[float],
+    number_type: type[int | float],
 ) -> int | float | None:
     raw = os.environ.get(name, "").strip()
     if not raw:

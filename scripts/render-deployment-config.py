@@ -52,9 +52,7 @@ def render(
         if knowledge and external_embedding
         else "mps"
         if knowledge and accelerator == "mps"
-        else "cpu"
-        if shared_gpu
-        else "cuda"
+        else "auto"
         if knowledge and accelerator == "cuda"
         else "cpu"
     )
@@ -82,7 +80,7 @@ def render(
                 "embedding_api_base": None,
                 "embedding_api_key": None,
                 "embedding_device": (
-                    "cpu" if shared_gpu else "cuda" if knowledge and accelerator == "cuda" else "cpu"
+                    "auto" if knowledge and accelerator == "cuda" else "cpu"
                 ),
             }
         )
@@ -90,14 +88,14 @@ def render(
     embedding_config = config.setdefault("embedding", {})
     embedding_config["model"] = "/models/qwen3-embedding-0.6b"
     embedding_config["device"] = (
-        "cuda"
-        if knowledge and accelerator == "cuda" and not external_embedding and not shared_gpu
+        "auto"
+        if knowledge and accelerator == "cuda" and not external_embedding
         else "cpu"
     )
     embedding_config["idle_unload_seconds"] = 300
     prompt_config = _plugin(config, "prompt_compress").setdefault("config", {})
     prompt_config["device"] = (
-        "cuda" if accelerator == "cuda" and not shared_gpu else "cpu"
+        "auto" if accelerator == "cuda" else "cpu"
     )
     config.setdefault("code_rag", {})["enabled"] = knowledge
     config.setdefault("media_optimization", {})["enabled"] = studio
@@ -112,8 +110,17 @@ def render(
     comfy["required"] = True
     token = generation.setdefault("token_compressor", {})
     token.setdefault("clip", {})["device"] = (
-        "cuda" if studio and accelerator == "cuda" and not shared_gpu else "cpu"
+        "auto" if studio and accelerator == "cuda" else "cpu"
     )
+
+    scheduler = config.setdefault("gpu_scheduler", {})
+    scheduler["enabled"] = accelerator == "cuda"
+    scheduler.setdefault("policy", "auto")
+    scheduler.setdefault("generation_priority", True)
+    scheduler.setdefault("gateway_devices", "auto")
+    scheduler.setdefault("comfyui_devices", "auto")
+    scheduler.setdefault("gateway_fallback", "cpu")
+    scheduler.setdefault("comfyui_dynamic_vram_enabled", False)
 
     config["deployment"] = {
         "edition": edition,

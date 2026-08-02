@@ -173,4 +173,4 @@ for _name in dir(_impl):
     if _name not in globals():
         globals()[_name] = getattr(_impl, _name)
 
-__all__ = ["AsyncClient", "Timeout", "QdrantClientManager"]
+__all__ = ["AsyncClient", "QdrantClientManager", "Timeout"]

@@ -1,18 +1,18 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Self
 
 import httpx
 import pytest
-from fastapi import FastAPI, HTTPException
-from fastapi.testclient import TestClient
-from prometheus_client import CollectorRegistry, Gauge
-
 from aigateway_api import admin_routes, local_generation
 from aigateway_api.main import _register_exception_handlers
+from fastapi import FastAPI, HTTPException
+from prometheus_client import CollectorRegistry, Gauge
 
 
-def test_5xx_responses_never_include_exception_details() -> None:
+@pytest.mark.asyncio
+async def test_5xx_responses_never_include_exception_details() -> None:
     app = FastAPI()
     _register_exception_handlers(app)
 
@@ -32,15 +32,22 @@ def test_5xx_responses_never_include_exception_details() -> None:
             },
         )
 
-    client = TestClient(app, raise_server_exceptions=False)
-    for path, code in (("/unhandled", "internal_error"), ("/http", "upstream_failed")):
-        response = client.get(path)
-        assert response.status_code == 500
-        assert response.json() == {
-            "error": {"code": code, "message": "Internal Server Error"}
-        }
-        assert "secret" not in response.text
-        assert "detail" not in response.text
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://testserver",
+    ) as client:
+        for path, code in (
+            ("/unhandled", "internal_error"),
+            ("/http", "upstream_failed"),
+        ):
+            response = await client.get(path)
+            assert response.status_code == 500
+            assert response.json() == {
+                "error": {"code": code, "message": "Internal Server Error"}
+            }
+            assert "secret" not in response.text
+            assert "detail" not in response.text
 
 
 @pytest.mark.asyncio
@@ -144,7 +151,7 @@ async def test_comfyui_probe_keeps_partial_status(monkeypatch: pytest.MonkeyPatc
         def __init__(self, *args: object, **kwargs: object) -> None:
             pass
 
-        async def __aenter__(self) -> "Client":
+        async def __aenter__(self) -> Self:
             return self
 
         async def __aexit__(self, *args: object) -> None:

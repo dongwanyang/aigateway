@@ -149,6 +149,77 @@ describe('shared UI components', () => {
     expect(onStop).toHaveBeenCalled()
   })
 
+  it('discovers image presets, selects Qwen explicitly, and refreshes models', async () => {
+    const onSend = vi.fn()
+    const onRefreshPresets = vi.fn()
+    const user = userEvent.setup()
+    render(
+      <ChatComposer
+        streaming={false}
+        disabled={false}
+        onSend={onSend}
+        onStop={vi.fn()}
+        onRefreshPresets={onRefreshPresets}
+        presets={[
+          {
+            id: 'qwen-image',
+            name: 'Qwen-Image 中文/英文图片',
+            kind: 'image',
+            builtin: true,
+            source: 'builtin',
+            selectable: true,
+            enabled: true,
+            languages: ['zh', 'en'],
+            validation: { missing_models: [], missing_nodes: [] },
+          },
+          {
+            id: 'checkpoint.bG9jYWw',
+            name: 'local（本地 Checkpoint）',
+            kind: 'image',
+            builtin: false,
+            source: 'discovered',
+            selectable: true,
+            enabled: true,
+            languages: ['zh', 'en'],
+            validation: { missing_models: [], missing_nodes: [] },
+          },
+          {
+            id: 'missing-model',
+            name: '缺失模型',
+            kind: 'image',
+            builtin: false,
+            source: 'custom',
+            selectable: false,
+            enabled: true,
+            languages: ['en'],
+            validation: { missing_models: ['checkpoints/missing.safetensors'], missing_nodes: [] },
+          },
+        ]}
+      />,
+    )
+
+    const modelSelect = screen.getByRole('combobox', { name: '图片模型/预设' })
+    expect(screen.getByRole('option', { name: /local.*已安装/ })).toBeEnabled()
+    expect(screen.getByRole('option', { name: /缺失模型.*不可用/ })).toBeDisabled()
+    await user.selectOptions(modelSelect, 'qwen-image')
+    expect(screen.getByRole('combobox', { name: /后端/ })).toHaveValue('local')
+    await user.type(screen.getByPlaceholderText(/输入消息/), '生成一张海报')
+    await user.keyboard('{Enter}')
+
+    expect(onSend).toHaveBeenCalledWith('生成一张海报', {
+      generationOptions: {
+        backend: 'local',
+        preset_id: 'qwen-image',
+        quality: 'standard',
+        prompt_mode: 'auto',
+        width: undefined,
+        height: undefined,
+      },
+    })
+    await user.click(screen.getByRole('button', { name: '刷新图片模型' }))
+    expect(onRefreshPresets).toHaveBeenCalledTimes(1)
+  })
+
   it('handles image loading, lightbox controls and keyboard close', async () => {
     const user = userEvent.setup()
     const { rerender } = render(<MediaImage content="base64bytes" done={false} />)

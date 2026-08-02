@@ -44,7 +44,17 @@ describe('Config revision writes', () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input)
       if (url.endsWith('/admin/config/schema')) {
-        return Response.json({ data: { items: [] }, message: 'success' })
+        return Response.json({
+          data: {
+            items: [{
+              path: 'gpu_scheduler.comfyui_dynamic_vram_enabled',
+              module: 'gpu_scheduler',
+              description: '是否启用 ComfyUI Dynamic VRAM；修改后需重建 worker',
+              value_type: 'boolean',
+            }],
+          },
+          message: 'success',
+        })
       }
       if (url.endsWith('/admin/config/table') && init?.method === 'PUT') {
         return Response.json(
@@ -61,6 +71,7 @@ describe('Config revision writes', () => {
                 port: 8000,
                 cors_origins: ['http://localhost:5173'],
               },
+              gpu_scheduler: {},
             },
             message: 'success',
             revision: 'revision-1',
@@ -154,6 +165,36 @@ describe('Config revision writes', () => {
         '[\n  "http://localhost:5173"\n]',
       )
       expect(screen.getByRole('button', { name: /保存配置/ })).toBeDisabled()
+    })
+  })
+
+  it('exposes Dynamic VRAM as a restart-required GPU setting', async () => {
+    const user = userEvent.setup()
+    renderConfig()
+
+    const pathCell = await screen.findByText(
+      'gpu_scheduler.comfyui_dynamic_vram_enabled',
+    )
+    const row = pathCell.closest('tr')
+    if (!row) throw new Error('Dynamic VRAM row not found')
+    const select = within(row).getByRole('combobox')
+    expect(select).toHaveValue('false')
+
+    await user.selectOptions(select, 'true')
+    await user.click(screen.getByRole('button', { name: /保存配置/ }))
+
+    await waitFor(() => {
+      const call = vi.mocked(fetch).mock.calls.find(
+        ([url, init]) => String(url).endsWith('/admin/config/table') && init?.method === 'PUT',
+      )
+      expect(call).toBeDefined()
+      expect(
+        JSON.parse(String(call?.[1]?.body)).gpu_scheduler
+          .comfyui_dynamic_vram_enabled,
+      ).toBe(true)
+      expect(
+        screen.getByText(/请重新运行 quickstart 或手工运行 GPU 拓扑控制器/),
+      ).toBeInTheDocument()
     })
   })
 })

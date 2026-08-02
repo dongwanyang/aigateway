@@ -7,10 +7,9 @@ import secrets
 import tempfile
 from typing import Any
 
+from aigateway_core.shared.runtime_values import configured_number, configured_text
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field
-
-from aigateway_core.shared.runtime_values import configured_number, configured_text
 
 from .auth_middleware import SESSION_COOKIE_NAME
 from .browser_auth import get_browser_auth_store

@@ -42,9 +42,9 @@ function compactStringValue(value: string): boolean {
 export function isCompactStringArray(
   value: ConfigValue,
   schemaType?: string,
-  schemaEditor?: string,
+  _schemaEditor?: string,
 ): value is string[] {
-  if (schemaType !== 'string[]' || schemaEditor !== 'token_list' || !Array.isArray(value)) return false
+  if (schemaType !== 'string[]' || !Array.isArray(value)) return false
   return value.every(item => typeof item === 'string' && compactStringValue(item))
 }
 
@@ -130,6 +130,13 @@ function schemaTokens(segments: ConfigPathSegment[], wildcard: boolean): string[
       ) {
         value = '*'
       } else if (previousStrings.at(-1) === 'pricing' && previousStrings[0] === 'providers') {
+        value = '*'
+      } else if (
+        previousStrings.length === 3
+        && previousStrings[0] === 'generation_optimization'
+        && previousStrings[1] === 'model_router'
+        && previousStrings[2] === 'model_capabilities'
+      ) {
         value = '*'
       }
     }

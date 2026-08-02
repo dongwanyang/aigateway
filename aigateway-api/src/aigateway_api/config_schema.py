@@ -155,6 +155,15 @@ def _normalized_schema_path(path: tuple[str, ...]) -> str:
     for index, part in enumerate(parts[:-1]):
         if part == "pricing" and parts[0] == "providers":
             parts[index + 1] = "*"
+        if (
+            part == "model_capabilities"
+            and parts[:3] == [
+                "generation_optimization",
+                "model_router",
+                "model_capabilities",
+            ]
+        ):
+            parts[index + 1] = "*"
     return ".".join(parts)
 
 

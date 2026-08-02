@@ -15,6 +15,12 @@ from typing import Any
 _MIB = 1024 * 1024
 
 
+def _cuda_intentionally_disabled() -> bool:
+    """Return whether this process was explicitly denied CUDA devices."""
+    visible = os.getenv("CUDA_VISIBLE_DEVICES", "").strip().lower()
+    return visible in {"-1", "none", "void"}
+
+
 def nvidia_smi_status() -> dict[str, Any] | None:
     """Read device-wide memory without creating a CUDA context."""
     try:
@@ -73,6 +79,7 @@ def gateway_cuda_status() -> dict[str, Any]:
         "device_total_bytes": 0,
         "device_memory_source": None,
         "torch_initialized": False,
+        "cuda_disabled": _cuda_intentionally_disabled(),
         **device_status,
     }
     try:

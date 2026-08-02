@@ -114,6 +114,8 @@ services:
     environment:
       CUDA_VISIBLE_DEVICES: ${COMFYUI_CUDA_VISIBLE_DEVICES:-0}
       COMFYUI_VRAM_FLAG: ${COMFYUI_VRAM_FLAG:-}
+      # Dynamic VRAM can falsely OOM on T4/cudaMallocAsync with nearly all VRAM free.
+      COMFYUI_DISABLE_DYNAMIC_VRAM: ${COMFYUI_DISABLE_DYNAMIC_VRAM:-true}
       # CORS for the control-panel "打开 ComfyUI" link (cross-port = cross-site).
       # Default "*" is safe because the port above is loopback-only. Set
       # COMFYUI_CORS_ORIGIN=http://host:3000 if you expose ComfyUI beyond loopback.

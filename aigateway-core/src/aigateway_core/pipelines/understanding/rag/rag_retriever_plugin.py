@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 import time
 from collections import defaultdict
 from typing import Any
@@ -142,6 +143,96 @@ class RAGRetrieverPlugin:
         self._is_available: bool = False
         self._index: Any = None  # VectorStoreIndex instance
         self._init_attempted: bool = False
+        self._evicted = False
+        self._lifecycle_condition = threading.Condition(threading.RLock())
+        self._active_inference = 0
+        self._releasing = False
+        self._runtime_embedding_device = getattr(
+            self._config, "embedding_device", "auto"
+        )
+        self._configured_embedding_device = self._runtime_embedding_device
+        self._runtime_rerank_device = getattr(self._config, "rerank_device", "auto")
+        self._configured_rerank_device = self._runtime_rerank_device
+
+    def _gpu_bound_components(self) -> list[tuple[str, str]]:
+        components: list[tuple[str, str]] = []
+        if getattr(self._config, "embedding_backend", "local") == "local":
+            if self._configured_embedding_device != "cpu":
+                components.append(("embedding", self._configured_embedding_device))
+        if (
+            getattr(self._config, "rerank_enabled", False)
+            and getattr(self._config, "rerank_backend", "local") == "local"
+        ):
+            if self._configured_rerank_device != "cpu":
+                components.append(("rerank", self._configured_rerank_device))
+        return components
+
+    @property
+    def gpu_device_request(self) -> str:
+        components = self._gpu_bound_components()
+        if not components:
+            return "cpu"
+        explicit = {
+            device
+            for _, device in components
+            if device not in {"auto", "cuda"}
+        }
+        if len(explicit) > 1:
+            raise RuntimeError("rag_multiple_gpu_devices_not_supported")
+        if explicit:
+            return next(iter(explicit))
+        return "cuda" if any(device == "cuda" for _, device in components) else "auto"
+
+    def set_runtime_device(self, device: str) -> None:
+        components = self._gpu_bound_components()
+        next_embedding = (
+            device
+            if any(name == "embedding" for name, _ in components)
+            else self._configured_embedding_device
+        )
+        next_rerank = (
+            device
+            if any(name == "rerank" for name, _ in components)
+            else self._configured_rerank_device
+        )
+        if (
+            next_embedding == self._runtime_embedding_device
+            and next_rerank == self._runtime_rerank_device
+        ):
+            return
+        released = self.release_if_idle()
+        if released["busy"]:
+            raise RuntimeError("rag_embedding_busy")
+        self._runtime_embedding_device = next_embedding
+        self._runtime_rerank_device = next_rerank
+
+    def release_if_idle(self) -> dict[str, bool]:
+        """Release the local index/embedding without racing retrieval."""
+        with self._lifecycle_condition:
+            if self._active_inference or self._releasing:
+                return {"released": False, "busy": True}
+            if self._index is None:
+                self._init_attempted = False
+                return {"released": False, "busy": False}
+            self._releasing = True
+            index = self._index
+            self._index = None
+            self._is_available = False
+            self._init_attempted = False
+            self._evicted = True
+        try:
+            embed_model = getattr(index, "_embed_model", None)
+            model = getattr(embed_model, "_model", None)
+            if model is not None and hasattr(model, "to"):
+                try:
+                    model.to("cpu")
+                except Exception:
+                    pass
+        finally:
+            with self._lifecycle_condition:
+                self._releasing = False
+                self._lifecycle_condition.notify_all()
+        return {"released": True, "busy": False}
 
     def _ensure_index(self, *, load_if_missing: bool = True) -> bool:
         """Return whether the vector index is ready.
@@ -209,6 +300,7 @@ class RAGRetrieverPlugin:
                 index_kwargs["embed_model"] = embed_model
             self._index = VectorStoreIndex.from_vector_store(**index_kwargs)
             self._is_available = True
+            self._evicted = False
             logger.info(
                 "RAGRetrieverPlugin 已初始化: collection=%s, qdrant_url=%s, top_k=%d, embedding_backend=%s",
                 self._config.collection_name,
@@ -248,9 +340,7 @@ class RAGRetrieverPlugin:
                     "model_name": model_name,
                     "trust_remote_code": True,
                 }
-                embedding_device = getattr(
-                    self._config, "embedding_device", "auto"
-                )
+                embedding_device = self._runtime_embedding_device
                 if embedding_device != "auto":
                     kwargs["device"] = embedding_device
                 return HuggingFaceEmbedding(**kwargs)
@@ -288,6 +378,19 @@ class RAGRetrieverPlugin:
         return None
 
     async def execute(self, ctx: PipelineContext) -> PipelineContext:
+        """Hold a busy lease so generation never evicts in-flight retrieval."""
+        with self._lifecycle_condition:
+            while self._releasing:
+                self._lifecycle_condition.wait()
+            self._active_inference += 1
+        try:
+            return await self._execute_active(ctx)
+        finally:
+            with self._lifecycle_condition:
+                self._active_inference -= 1
+                self._lifecycle_condition.notify_all()
+
+    async def _execute_active(self, ctx: PipelineContext) -> PipelineContext:
         """执行 RAG 检索。
 
         1. 若不可用，直接返回 ctx（passthrough）
@@ -305,7 +408,9 @@ class RAGRetrieverPlugin:
         Returns:
             更新后的上下文（含检索结果）或原始上下文（passthrough）。
         """
-        if not self._ensure_index(load_if_missing=False):
+        if not await asyncio.to_thread(
+            self._ensure_index, load_if_missing=self._evicted
+        ):
             return ctx
 
         # 提取用户查询：取最后一条 role=user 的消息内容
@@ -511,7 +616,7 @@ class RAGRetrieverPlugin:
             vectors = encode_texts(
                 model_name,
                 [query],
-                device=getattr(self._config, "embedding_device", "auto"),
+                device=self._runtime_embedding_device,
             )
             return list(vectors[0]) if vectors else None
         except Exception as exc:
@@ -786,8 +891,8 @@ class RAGRetrieverPlugin:
                 top_n=len(nodes),
                 device=(
                     None
-                    if self._config.rerank_device == "auto"
-                    else self._config.rerank_device
+                    if self._runtime_rerank_device == "auto"
+                    else self._runtime_rerank_device
                 ),
             )
             # SentenceTransformerRerank 需要 QueryBundle

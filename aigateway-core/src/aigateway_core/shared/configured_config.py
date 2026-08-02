@@ -5,17 +5,18 @@ import copy
 import logging
 import os
 import threading
+from collections.abc import Callable
 from functools import wraps
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import yaml
 
-from .config import ConfigManager as _BaseConfigManager
 from .config import _DEFAULT_CONFIG, parse_integration_configs
+from .config import ConfigManager as _BaseConfigManager
 from .config_env import (
-    apply_environment_mode,
     apply_env_overrides,
+    apply_environment_mode,
     parse_env_value,
     resolve_env_references,
 )
@@ -70,7 +71,7 @@ def _serialized_reload(method: Callable[..., dict[str, Any]]):
     """Serialize validation, state commit and callbacks for one manager."""
 
     @wraps(method)
-    def wrapped(self: "ConfigManager", *args: Any, **kwargs: Any) -> dict[str, Any]:
+    def wrapped(self: ConfigManager, *args: Any, **kwargs: Any) -> dict[str, Any]:
         with self._reload_lock:
             return method(self, *args, **kwargs)
 

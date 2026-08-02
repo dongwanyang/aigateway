@@ -229,8 +229,8 @@ def build_effective_config(
 
 
 __all__ = [
-    "apply_environment_mode",
     "apply_env_overrides",
+    "apply_environment_mode",
     "build_effective_config",
     "env_key_to_config_path",
     "parse_env_value",

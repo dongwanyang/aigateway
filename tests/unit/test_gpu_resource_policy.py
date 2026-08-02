@@ -5,15 +5,24 @@ import importlib.util
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Self
 
 import httpx
 import pytest
-from fastapi import APIRouter
-
-from aigateway_api import admin_routes, gpu_routes
+from aigateway_api import gpu_routes
 from aigateway_core.prefix.cache import l3_semantic
 from aigateway_core.shared import gpu_memory
+from fastapi import APIRouter
+
+
+@pytest.fixture(autouse=True)
+def _inline_thread_offload(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep these unit tests deterministic without owning executor threads."""
+
+    async def _run_inline(func, *args: object, **kwargs: object) -> object:
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", _run_inline)
 
 
 def load_renderer():
@@ -25,7 +34,7 @@ def load_renderer():
     return module
 
 
-def test_shared_gpu_renderer_moves_gateway_models_to_cpu(tmp_path: Path) -> None:
+def test_shared_gpu_renderer_enables_dynamic_pool_without_static_cpu_split() -> None:
     renderer = load_renderer()
     source = Path(__file__).resolve().parents[2] / "config.yaml.template"
     config = renderer.render(
@@ -38,9 +47,10 @@ def test_shared_gpu_renderer_moves_gateway_models_to_cpu(tmp_path: Path) -> None
         monitoring=False,
         shared_gpu=True,
     )
-    assert config["embedding"]["device"] == "cpu"
+    assert config["embedding"]["device"] == "auto"
     assert config["deployment"]["shared_gpu"] is True
-    assert config["generation_optimization"]["token_compressor"]["clip"]["device"] == "cpu"
+    assert config["generation_optimization"]["token_compressor"]["clip"]["device"] == "auto"
+    assert config["gpu_scheduler"]["enabled"] is True
 
 
 def test_nvidia_smi_status_selects_visible_device(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -100,6 +110,25 @@ def test_gpu_status_does_not_initialize_torch_cuda(monkeypatch: pytest.MonkeyPat
     assert status["allocated_bytes"] == 0
     assert status["reserved_bytes"] == 0
     assert status["device_used_bytes"] == 2
+
+
+def test_gpu_status_reports_intentionally_disabled_cuda(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Cuda:
+        @staticmethod
+        def is_initialized() -> bool:
+            return False
+
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "-1")
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(cuda=Cuda()))
+    monkeypatch.setattr(gpu_memory, "nvidia_smi_status", lambda: None)
+
+    status = gpu_memory.gateway_cuda_status()
+
+    assert status["available"] is False
+    assert status["torch_initialized"] is False
+    assert status["cuda_disabled"] is True
 
 
 def test_gpu_status_reads_allocator_after_cuda_is_initialized(
@@ -201,7 +230,7 @@ def test_release_l3_model_clears_cached_objects(monkeypatch: pytest.MonkeyPatch)
         def __init__(self) -> None:
             self.devices: list[str] = []
 
-        def to(self, device: str) -> "Model":
+        def to(self, device: str) -> Model:
             self.devices.append(device)
             return self
 
@@ -259,7 +288,9 @@ async def test_gpu_status_route_reports_partial_comfyui_state(
 
 
 @pytest.mark.asyncio
-async def test_gpu_release_rejects_active_comfyui_queue(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_gpu_release_rejects_active_comfyui_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(
         gpu_routes,
         "_probe",
@@ -360,7 +391,7 @@ async def test_gpu_release_frees_gateway_and_idle_comfyui(
 @pytest.mark.asyncio
 async def test_release_comfyui_reports_http_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     class Client:
-        async def __aenter__(self) -> "Client":
+        async def __aenter__(self) -> Self:
             return self
 
         async def __aexit__(self, *args: object) -> None:

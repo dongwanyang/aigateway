@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import yaml
 import pytest
-
+import yaml
 from aigateway_api.config_security import (
     ConfigVersionConflictError,
     config_revision,

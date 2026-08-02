@@ -5,7 +5,6 @@ import logging
 
 import pytest
 import yaml
-
 from aigateway_api import security_routes
 from aigateway_api.config_security import (
     ConfigCommit,

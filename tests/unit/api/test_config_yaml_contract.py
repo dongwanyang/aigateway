@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 
 import yaml
-
 from aigateway_core.shared.config import ConfigManager
 
 

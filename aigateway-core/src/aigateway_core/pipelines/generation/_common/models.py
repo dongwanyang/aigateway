@@ -58,6 +58,7 @@ class GenerationRequest:
     media_type: str = "image"  # "image" | "video"
     quality: str = "standard"  # standard | creative_refine | faithful_4k
     preset_id: str | None = None
+    required_vram_gb: float | None = None
     injection_method: str = "ip-adapter"
     api_key_id: str = ""
     request_id: str = field(default_factory=lambda: uuid.uuid4().hex)
@@ -195,6 +196,8 @@ class DraftResult:
     stage: str = "queued"
     workflow_version: str = ""
     comfy_prompt_id: str | None = None
+    worker_id: str | None = None
+    device_uuid: str | None = None
     gpu_seconds: float = 0.0
     error: str | None = None
 

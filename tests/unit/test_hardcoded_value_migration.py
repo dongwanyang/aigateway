@@ -83,6 +83,8 @@ def _base_config() -> dict:
 def test_runtime_values_use_yaml_namespace_and_explicit_prefix(
     tmp_path, monkeypatch
 ):
+    monkeypatch.delenv("AI_GATEWAY_QDRANT_URL", raising=False)
+    monkeypatch.delenv("TEST_QDRANT_URL", raising=False)
     monkeypatch.setenv(
         "AI_GATEWAY_CONFIG_PATH", _write_config(tmp_path, _base_config())
     )
@@ -234,6 +236,7 @@ def test_qdrant_manager_uses_configured_connection_and_index_values(
     monkeypatch.setenv(
         "AI_GATEWAY_CONFIG_PATH", _write_config(tmp_path, _base_config())
     )
+    monkeypatch.delenv("AI_GATEWAY_QDRANT_URL", raising=False)
     monkeypatch.delenv("TEST_QDRANT_URL", raising=False)
 
     import aigateway_core.shared.qdrant_client as qdrant_module

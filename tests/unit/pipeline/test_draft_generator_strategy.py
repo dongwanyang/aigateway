@@ -70,7 +70,13 @@ def strategy(default_config, monkeypatch):
     instance = DraftGeneratorStrategy(
         config=default_config,
         redis_client=None,
-        comfyui_config=ComfyUIConfig(workflow_version="image-v1"),
+        comfyui_config=ComfyUIConfig(
+          workflow_version="image-v1",
+          checkpoint_name="test-model.safetensors",
+          allowed_checkpoints=["test-model.safetensors"],
+          checkpoint_vram_gb={"test-model.safetensors": 8.0},
+          sdxl_required_vram_gb=8.0,
+      ),
     )
     monkeypatch.setattr(instance, "_check_comfyui", AsyncMock(return_value=None))
     monkeypatch.setattr(
@@ -595,6 +601,42 @@ async def test_sync_marks_stale_running_draft_without_prompt_failed(strategy, im
 
 
 @pytest.mark.asyncio
+async def test_sync_keeps_stale_draft_while_owned_worker_is_waiting(strategy):
+    """A live local task waiting for a GPU lease must not be reported as lost."""
+    draft = DraftResult(
+        draft_id="queued-with-live-worker",
+        previews=[],
+        generation_params={"trace_id": "trace-queued"},
+        created_at=time.time() - 120,
+        expires_at=time.time() + 3600,
+        attempt_number=1,
+        max_attempts=5,
+        status=DRAFT_STATUS_RUNNING,
+        media_type="image",
+        session_id="sess-queued",
+        progress=0.1,
+        stage="running",
+    )
+    await strategy._store_draft(draft, ttl_seconds=3600)
+    task = asyncio.create_task(
+        asyncio.Event().wait(),
+        name=f"draft-generate-{draft.draft_id}",
+    )
+    strategy._bg_tasks.add(task)
+    task.add_done_callback(strategy._bg_tasks.discard)
+
+    try:
+        synced = await strategy.sync_draft_runtime_state(draft.draft_id)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert synced is not None
+    assert synced.status == DRAFT_STATUS_RUNNING
+    assert synced.error is None
+
+
+@pytest.mark.asyncio
 async def test_sync_keeps_running_draft_when_comfyui_state_check_is_transient(
     strategy,
 ):
@@ -751,3 +793,79 @@ async def test_delete_session_rejects_path_traversal(strategy, tmp_path):
         )
 
     assert marker.read_text(encoding="utf-8") == "keep"
+
+
+
+@pytest.mark.asyncio
+async def test_client_cancellation_detaches_confirmation_until_result_is_persisted(
+    strategy, image_request, default_config, monkeypatch
+):
+    result = await strategy.generate_draft(image_request, default_config)
+    draft = await _await_generating(strategy, result.draft_id)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _blocking_upscale(*_args, **_kwargs):
+        started.set()
+        await release.wait()
+        return draft.previews[0]
+
+    monkeypatch.setattr(strategy, "_upscale_with_comfyui", _blocking_upscale)
+    request_task = asyncio.create_task(strategy.confirm_draft(draft.draft_id))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    request_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await request_task
+
+    in_progress = await strategy.get_draft(draft.draft_id)
+    assert in_progress is not None
+    assert in_progress.status == DRAFT_STATUS_REFINING
+    assert any(
+        task.get_name() == f"draft-confirm-{draft.draft_id}"
+        for task in strategy._bg_tasks
+    )
+
+    release.set()
+    for _ in range(100):
+        completed = await strategy.get_draft(draft.draft_id)
+        if completed is not None and completed.status == DRAFT_STATUS_COMPLETED:
+            break
+        await asyncio.sleep(0.01)
+    assert completed is not None
+    assert completed.status == DRAFT_STATUS_COMPLETED
+    assert not any(
+        task.get_name() == f"draft-confirm-{draft.draft_id}"
+        for task in strategy._bg_tasks
+    )
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancels_prompt_and_restores_confirmation_to_pending(
+    strategy, image_request, default_config, monkeypatch
+):
+    result = await strategy.generate_draft(image_request, default_config)
+    draft = await _await_generating(strategy, result.draft_id)
+    started = asyncio.Event()
+    never = asyncio.Event()
+
+    async def _blocking_upscale(bound_draft, *_args, **_kwargs):
+        bound_draft.comfy_prompt_id = "prompt-shutdown"
+        await strategy._store_draft(bound_draft, ttl_seconds=60)
+        started.set()
+        await never.wait()
+
+    cancel = AsyncMock(return_value=True)
+    monkeypatch.setattr(strategy, "_upscale_with_comfyui", _blocking_upscale)
+    monkeypatch.setattr(strategy, "_cancel_comfyui_workflow", cancel)
+    request_task = asyncio.create_task(strategy.confirm_draft(draft.draft_id))
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    await strategy.shutdown()
+    with pytest.raises(asyncio.CancelledError):
+        await request_task
+
+    stored = await strategy.get_draft(draft.draft_id)
+    assert stored is not None
+    assert stored.status == DRAFT_STATUS_PENDING
+    assert stored.comfy_prompt_id is None
+    cancel.assert_awaited_once()

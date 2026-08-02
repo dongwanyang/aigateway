@@ -5,7 +5,6 @@ from types import ModuleType
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 from aigateway_core.pipelines.understanding.rag.configured_rag_retriever import (
     ConfiguredRAGRetrieverPlugin,
 )

@@ -164,6 +164,7 @@ def _read_yaml_config(path: str) -> dict[str, Any]:
 def _write_yaml_config(path: str, data: dict[str, Any]) -> None:
     import errno
     import fcntl
+
     import yaml
 
     lock_path = path + ".lock"

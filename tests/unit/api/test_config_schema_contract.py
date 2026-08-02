@@ -1,7 +1,18 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from aigateway_api import routes
 from aigateway_api.config_schema import parse_template_schema
+
+
+def test_gateway_image_contains_runtime_config_template() -> None:
+    dockerfile = (
+        Path(__file__).resolve().parents[3]
+        / "aigateway-api"
+        / "Dockerfile"
+    ).read_text(encoding="utf-8")
+    assert "COPY config.yaml.template /app/config.yaml.template" in dockerfile
 
 
 def test_template_schema_preserves_list_context(

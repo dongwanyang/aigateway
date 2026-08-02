@@ -89,8 +89,12 @@ export interface GenerationPreset {
   name: string
   kind: 'image' | 'video' | 'upscale'
   builtin: boolean
+  source?: 'builtin' | 'discovered' | 'custom'
+  selectable?: boolean
   enabled: boolean
   languages: string[]
+  required_vram_gb?: number
+  model_name?: string
   validation: { missing_models: string[]; missing_nodes: string[] }
 }
 export async function getComfyUIStatus(): Promise<ApiResponse<ComfyUIStatus>> { return fetchJson<ComfyUIStatus>('/admin/comfyui/status') }
@@ -101,8 +105,50 @@ export interface GpuStatusData {
   queue_idle: boolean | null
   shared_gpu: boolean
   diagnosis: string[]
+  scheduler?: {
+    enabled: boolean
+    policy: string
+    generation_priority: boolean
+    generation_queue_depth: number
+    devices: GpuDeviceStatus[]
+    workers: GpuWorkerStatus[]
+  }
+  devices?: GpuDeviceStatus[]
+  workers?: GpuWorkerStatus[]
+}
+export interface GpuDeviceStatus {
+  uuid: string
+  logical_index: number
+  name: string
+  total_memory_gb: number
+  free_memory_gb: number
+  state: string
+  gateway_leases: number
+  resident_components: string[]
+  worker_id: string | null
+  queue: { running: number; pending: number }
+  cooldown_remaining_seconds: number
+  oom_quarantine_remaining_seconds: number
+}
+export interface GpuWorkerStatus {
+  worker_id: string
+  device_uuid: string
+  server_url: string
+  capabilities: string[]
+  healthy: boolean
+  queue_running: number
+  queue_pending: number
+  unhealthy_cooldown_remaining_seconds: number
+  oom_quarantine_remaining_seconds: number
 }
 export async function getGpuStatus(): Promise<ApiResponse<GpuStatusData>> { return fetchJson<GpuStatusData>('/admin/gpu/status') }
+export async function updateGpuConfig(config: Record<string, unknown>, revision: string): Promise<ApiResponse<{ config: Record<string, unknown>; applied_fields: string[]; restart_required_fields: string[]; restart_required: boolean }>> {
+  return fetchJson('/admin/gpu/config', {
+    method: 'PUT',
+    headers: revision ? { 'If-Match': `"${revision}"` } : {},
+    body: JSON.stringify(config),
+  })
+}
 export async function releaseGpuMemory(): Promise<ApiResponse<{ gateway_models: Record<string, boolean>; comfyui: Record<string, unknown>; gateway: GpuStatusData['gateway'] }>> { return fetchJson<{ gateway_models: Record<string, boolean>; comfyui: Record<string, unknown>; gateway: GpuStatusData['gateway'] }>('/admin/gpu/release', { method: 'POST', body: JSON.stringify({}) }) }
 export async function getGenerationPresets(): Promise<ApiResponse<GenerationPreset[]>> { return fetchJson<GenerationPreset[]>('/admin/generation-presets') }
 export async function setPluginDebug(name: string, enabled: boolean): Promise<ApiResponse<{ plugin: string; debug: boolean }>> { return fetchJson<{ plugin: string; debug: boolean }>(`/admin/plugins/${encodeURIComponent(name)}/debug`, { method: 'POST', body: JSON.stringify({ enabled }) }) }

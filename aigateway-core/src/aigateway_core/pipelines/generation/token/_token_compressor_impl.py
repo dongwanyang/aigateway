@@ -75,8 +75,51 @@ class TokenCompressorStrategy:
         self._clip_processor: Any | None = None
         self._clip_available: bool = False
         self._clip_loaded: bool = False
-        self._device: str = self._clip_config.device
+        self._configured_device_request = self._clip_config.device
+        self._device: str = self._configured_device_request
         self._clip_lock = threading.Lock()
+        self._clip_condition = threading.Condition(threading.RLock())
+        self._clip_active = 0
+        self._clip_releasing = False
+
+    @property
+    def gpu_device_request(self) -> str:
+        return self._configured_device_request
+
+    def set_runtime_device(self, device: str) -> None:
+        if device == self._device:
+            return
+        released = self.release_if_idle()
+        if released["busy"]:
+            raise RuntimeError("clip_model_busy")
+        self._device = device
+
+    def release_if_idle(self) -> dict[str, bool]:
+        """Drop the resident CLIP model only when no compression is running."""
+        with self._clip_condition:
+            if self._clip_active or self._clip_releasing:
+                return {"released": False, "busy": True}
+            model = self._clip_model
+            processor = self._clip_processor
+            if model is None and processor is None:
+                self._clip_loaded = False
+                return {"released": False, "busy": False}
+            self._clip_releasing = True
+            self._clip_model = None
+            self._clip_processor = None
+            self._clip_available = False
+            self._clip_loaded = False
+        try:
+            if model is not None:
+                try:
+                    model.to("cpu")
+                except Exception:
+                    pass
+        finally:
+            with self._clip_condition:
+                self._clip_releasing = False
+                self._clip_condition.notify_all()
+        return {"released": True, "busy": False}
 
     def _ensure_clip_loaded(self) -> None:
         """延迟加载 CLIP 模型（首次调用时加载，避免阻塞启动）."""
@@ -142,6 +185,25 @@ class TokenCompressorStrategy:
             CompressionResult 包含 feature_vector 和 token 节省信息
         """
         start_time = time.monotonic()
+        with self._clip_condition:
+            while self._clip_releasing:
+                self._clip_condition.wait()
+            self._clip_active += 1
+
+        try:
+            return await self._compress_with_active_lease(image, config, start_time)
+        finally:
+            with self._clip_condition:
+                self._clip_active -= 1
+                self._clip_condition.notify_all()
+
+    async def _compress_with_active_lease(
+        self,
+        image: MediaContent,
+        config: TokenCompressorConfig,
+        start_time: float,
+    ) -> CompressionResult:
+        """Implementation body while a lifecycle busy lease is held."""
 
         # Check format support
         if not self._is_format_supported(image, config):

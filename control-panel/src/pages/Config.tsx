@@ -39,6 +39,7 @@ interface ComfyStatusView {
 interface GatewayGpuStatusView {
   available?: boolean
   torch_initialized?: boolean
+  cuda_disabled?: boolean
   allocated_bytes?: number
   reserved_bytes?: number
   error?: string | null
@@ -60,6 +61,7 @@ const GROUP_LABELS: Record<string, string> = {
   task_routing: '任务路由',
   generation: '生成接口',
   generation_optimization: '生成优化',
+  gpu_scheduler: 'GPU 动态资源池',
   auth: '认证与配额',
   plugins: '理解管道插件',
   providers: '模型提供商',
@@ -102,8 +104,16 @@ async function fetchPanelJson<T>(path: string, options: RequestInit = {}): Promi
 
 async function getVersionedConfig(): Promise<VersionedConfig> {
   const response = await fetchPanelJson<ConfigObject>('/admin/config')
+  const config = toConfigValue(response.data) as ConfigObject
+  const gpuScheduler = config.gpu_scheduler
+  if (
+    isPlainObject(gpuScheduler)
+    && !('comfyui_dynamic_vram_enabled' in gpuScheduler)
+  ) {
+    gpuScheduler.comfyui_dynamic_vram_enabled = false
+  }
   return {
-    config: toConfigValue(response.data) as ConfigObject,
+    config,
     revision: response.revision ?? '',
   }
 }
@@ -142,7 +152,13 @@ export function ConfigValueEditor({
   onChange: (row: ConfigRow, input: string) => boolean
   onValidityChange: (path: string, valid: boolean) => void
 }) {
-  const canonicalText = valueToText(row.value, row.schemaType, row.schemaEditor)
+  const isGpuDeviceSelector = (
+    row.path === 'gpu_scheduler.gateway_devices'
+    || row.path === 'gpu_scheduler.comfyui_devices'
+  )
+  const canonicalText = isGpuDeviceSelector && Array.isArray(row.value)
+    ? row.value.join(', ')
+    : valueToText(row.value, row.schemaType, row.schemaEditor)
   const compactStringArray = isCompactStringArray(
     row.value,
     row.schemaType,
@@ -220,6 +236,35 @@ export function ConfigValueEditor({
         <option value="true">true</option>
         <option value="false">false</option>
       </select>
+    )
+  }
+  if (row.path === 'gpu_scheduler.policy' || row.path === 'gpu_scheduler.gateway_fallback') {
+    const options = row.path.endsWith('policy')
+      ? [['auto', '自动调度'], ['manual', '手工设备池']]
+      : [['cpu', '回退 CPU'], ['wait', '等待 GPU'], ['fail', '立即失败']]
+    return (
+      <select
+        className="input"
+        value={String(row.value)}
+        onChange={event => onChange(row, event.target.value)}
+        style={{ width: '100%', fontSize: '12px' }}
+      >
+        {options.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+      </select>
+    )
+  }
+  if (isGpuDeviceSelector) {
+    return (
+      <input
+        className="input"
+        type="text"
+        value={draftText}
+        onFocus={() => setEditing(true)}
+        onChange={event => setDraftText(event.target.value)}
+        onBlur={commitDraft}
+        placeholder="auto，或逗号分隔 GPU UUID"
+        style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: '12px' }}
+      />
     )
   }
   if (compactStringArray) {
@@ -378,6 +423,16 @@ export default function Config() {
     setSuccess(null)
     if (!draftConfig || invalidDraftPaths.size > 0) return
     try {
+      const restartRequired = config != null && [
+        'gateway_devices',
+        'comfyui_devices',
+        'device_overrides',
+        'comfyui_dynamic_vram_enabled',
+      ].some(key => JSON.stringify(
+        (config.gpu_scheduler as ConfigObject | undefined)?.[key],
+      ) !== JSON.stringify(
+        (draftConfig.gpu_scheduler as ConfigObject | undefined)?.[key],
+      ))
       const result = await saveMutation.mutateAsync({
         config: draftConfig as Record<string, unknown>,
         revision,
@@ -386,7 +441,14 @@ export default function Config() {
         config: structuredClone(draftConfig),
         revision: result.revision ?? revision,
       })
-      setSuccess('配置已保存并生效')
+      const topologyAutoApply = (
+        draftConfig.gpu_scheduler as ConfigObject | undefined
+      )?.topology_auto_apply === true
+      setSuccess(restartRequired
+        ? topologyAutoApply
+          ? '配置已保存；已允许外部拓扑控制器自动应用（需管理员单独运行 --watch）'
+          : '配置已保存；请重新运行 quickstart 或手工运行 GPU 拓扑控制器'
+        : '配置已保存并热生效（已取得的租约保持原期限）')
       setHasChanges(false)
       setInvalidDraftPaths(new Set())
       setTimeout(() => setSuccess(null), 3000)
@@ -400,12 +462,19 @@ export default function Config() {
     setLocalError(null)
     try {
       const previous = readByPath(draftConfig, row.segments)
-      const parsed = parseEditedValue(
-        input,
-        previous,
-        row.schemaType,
-        row.schemaEditor,
+      const parsed = (
+        row.path === 'gpu_scheduler.gateway_devices'
+        || row.path === 'gpu_scheduler.comfyui_devices'
       )
+        ? input.trim() === 'auto'
+          ? 'auto'
+          : input.split(',').map(item => item.trim()).filter(Boolean)
+        : parseEditedValue(
+            input,
+            previous,
+            row.schemaType,
+            row.schemaEditor,
+          )
       const next = writeByPath(draftConfig, row.segments, parsed) as ConfigObject
       setDraftConfig(next)
       setHasChanges(JSON.stringify(next) !== JSON.stringify(config))
@@ -508,6 +577,22 @@ export default function Config() {
                 <div className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>
                   allocated {formatBytes(gatewayStatus.allocated_bytes)} · reserved {formatBytes(gatewayStatus.reserved_bytes)}
                 </div>
+              ) : (gpuQuery.data.scheduler?.devices?.length ?? 0) > 0 ? (
+                <div role="status" className="space-y-1">
+                  <div className="text-xs font-medium" style={{ color: 'var(--color-success)' }}>
+                    动态资源池可用 · {gpuQuery.data.scheduler?.devices.length ?? 0} 张 GPU
+                  </div>
+                  <div className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>
+                    Gateway 空闲时可借用 GPU；生成排队后停止新租约并等待在途推理安全结束。
+                  </div>
+                </div>
+              ) : (gpuQuery.data.shared_gpu || gatewayStatus?.cuda_disabled) && gpuQuery.data.comfyui.available ? (
+                <div role="status" className="space-y-1">
+                  <div className="text-xs font-medium" style={{ color: 'var(--color-success)' }}>GPU 已保留给 ComfyUI</div>
+                  <div className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>
+                    Gateway 辅助模型使用 CPU，不建立 CUDA 上下文，以把显存完整留给本地图片和视频生成。
+                  </div>
+                </div>
               ) : gatewayStatus?.available ? (
                 <div role="status" className="space-y-1">
                   <div className="text-xs font-medium" style={{ color: 'var(--color-text-secondary)' }}>未初始化 CUDA</div>
@@ -534,6 +619,44 @@ export default function Config() {
               队列为空只表示没有执行任务；模型权重和 PyTorch reserved cache 仍可能常驻显存。
               {gpuQuery.data.shared_gpu ? ' 当前 Gateway 与 ComfyUI 共用同一块 GPU。' : ''}
             </div>
+          </div>
+        )}
+
+        {(gpuQuery.data?.scheduler?.devices?.length ?? 0) > 0 && (
+          <div className="mb-4 overflow-x-auto">
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-xs font-semibold">设备池与 Worker</div>
+              <div className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>
+                模式 {gpuQuery.data?.scheduler?.policy} · 生成队列 {gpuQuery.data?.scheduler?.generation_queue_depth ?? 0}
+              </div>
+            </div>
+            <table style={{ width: '100%', minWidth: 820, fontSize: 12, borderCollapse: 'collapse' }}>
+              <thead>
+                <tr style={{ color: 'var(--color-text-tertiary)', textAlign: 'left' }}>
+                  <th style={{ padding: 8 }}>逻辑卡 / UUID</th>
+                  <th style={{ padding: 8 }}>显存</th>
+                  <th style={{ padding: 8 }}>状态</th>
+                  <th style={{ padding: 8 }}>Gateway</th>
+                  <th style={{ padding: 8 }}>ComfyUI Worker / 队列</th>
+                  <th style={{ padding: 8 }}>冷却</th>
+                </tr>
+              </thead>
+              <tbody>
+                {gpuQuery.data?.scheduler?.devices.map(device => (
+                  <tr key={device.uuid} style={{ borderTop: '1px solid var(--color-border)' }}>
+                    <td style={{ padding: 8 }}>
+                      <div>{device.logical_index} · {device.name}</div>
+                      <div style={{ color: 'var(--color-text-tertiary)', fontFamily: 'var(--font-mono)' }}>{device.uuid}</div>
+                    </td>
+                    <td style={{ padding: 8 }}>{device.free_memory_gb.toFixed(1)} / {device.total_memory_gb.toFixed(1)} GB 可用</td>
+                    <td style={{ padding: 8 }}>{device.state}</td>
+                    <td style={{ padding: 8 }}>{device.gateway_leases} 租约 · {device.resident_components.join(', ') || '无驻留模型'}</td>
+                    <td style={{ padding: 8 }}>{device.worker_id ?? '未分配'} · {device.queue.running} 运行 / {device.queue.pending} 等待</td>
+                    <td style={{ padding: 8 }}>{Math.ceil(Math.max(device.cooldown_remaining_seconds, device.oom_quarantine_remaining_seconds))} 秒</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         )}
 

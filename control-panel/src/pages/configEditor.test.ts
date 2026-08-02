@@ -31,6 +31,18 @@ describe('config editor helpers', () => {
     ])
   })
 
+  it('uses wildcard schema paths for generation model capability scores', () => {
+    expect(schemaPathCandidates([
+      'generation_optimization',
+      'model_router',
+      'model_capabilities',
+      'custom-image-model',
+    ])).toEqual([
+      'generation_optimization.model_router.model_capabilities.custom-image-model',
+      'generation_optimization.model_router.model_capabilities.*',
+    ])
+  })
+
   it('preserves dotted mapping keys during display, read and write', () => {
     const segments = [
       'providers',
@@ -109,9 +121,10 @@ describe('config editor helpers', () => {
     expect(() => parseEditedValue('true, typo', [true], 'boolean[]')).toThrow('JSON 格式无效')
   })
 
-  it('uses JSON for ordinary and comma-containing string arrays', () => {
+  it('uses compact inputs for all simple string arrays and JSON when items contain commas', () => {
     const value = ['alpha,beta', 'gamma']
-    expect(isCompactStringArray(['alpha', 'beta'], 'string[]')).toBe(false)
+    expect(isCompactStringArray(['alpha', 'beta'], 'string[]')).toBe(true)
+    expect(valueToText(['agnes-2.0-flash'], 'string[]')).toBe('agnes-2.0-flash')
     expect(isCompactStringArray(value, 'string[]', 'token_list')).toBe(false)
     expect(valueToText(value, 'string[]', 'token_list')).toBe('[\n  "alpha,beta",\n  "gamma"\n]')
   })

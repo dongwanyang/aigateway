@@ -198,6 +198,11 @@ def register_generation_optimization_plugins(
                 "allowed_checkpoints", ComfyUIConfig().allowed_checkpoints
             )
         ),
+        checkpoint_vram_gb=dict(
+            comfyui_dict.get(
+                "checkpoint_vram_gb", ComfyUIConfig().checkpoint_vram_gb
+            )
+        ),
         max_concurrency=comfyui_dict.get(
             "max_concurrency", ComfyUIConfig.max_concurrency
         ),
@@ -230,6 +235,12 @@ def register_generation_optimization_plugins(
         max_upscale_long_edge=comfyui_dict.get(
             "max_upscale_long_edge", ComfyUIConfig.max_upscale_long_edge
         ),
+        sdxl_required_vram_gb=comfyui_dict.get(
+            "sdxl_required_vram_gb", ComfyUIConfig.sdxl_required_vram_gb
+        ),
+        upscale_required_vram_gb=comfyui_dict.get(
+            "upscale_required_vram_gb", ComfyUIConfig.upscale_required_vram_gb
+        ),
         qwen_image_enabled=comfyui_dict.get(
             "qwen_image_enabled", ComfyUIConfig.qwen_image_enabled
         ),
@@ -250,6 +261,10 @@ def register_generation_optimization_plugins(
         ),
         qwen_image_max_draft_edge=comfyui_dict.get(
             "qwen_image_max_draft_edge", ComfyUIConfig.qwen_image_max_draft_edge
+        ),
+        qwen_image_required_vram_gb=comfyui_dict.get(
+            "qwen_image_required_vram_gb",
+            ComfyUIConfig.qwen_image_required_vram_gb,
         ),
         allowed_qwen_image_diffusion_models=list(
             comfyui_dict.get(
@@ -308,6 +323,9 @@ def register_generation_optimization_plugins(
         video_shift=comfyui_dict.get("video_shift", ComfyUIConfig.video_shift),
         video_execution_timeout=comfyui_dict.get(
             "video_execution_timeout", ComfyUIConfig.video_execution_timeout
+        ),
+        video_required_vram_gb=comfyui_dict.get(
+            "video_required_vram_gb", ComfyUIConfig.video_required_vram_gb
         ),
     ) if comfyui_dict else ComfyUIConfig()
 

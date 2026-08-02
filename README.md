@@ -101,6 +101,13 @@ NVIDIA ComfyUI 容器；Apple Silicon 的核心栈仍在 Docker 中，ComfyUI �
 Embedding 以用户级 MPS 服务运行，Gateway 通过 `host.docker.internal`
 访问。
 
+Linux/Windows 的本地 NVIDIA GPU 不再静态切成“Gateway 卡”和“ComfyUI
+卡”。安装器按 GPU UUID 生成
+`.aigateway/runtime/docker-compose.gpu.generated.yml`，每张生成卡运行一个
+ComfyUI worker，Gateway 可看到动态池中的全部设备。空闲时 Gateway 可以借卡；
+图片或视频任务到达后，调度器停止该卡的新 Gateway 租约，等待在途推理完成并
+安全卸载模型，再把卡交给 ComfyUI。单卡和多卡使用同一套机制。
+
 源码模式会从对应版本的 GHCR 镜像导入 BuildKit inline cache。Python
 依赖、PyTorch/CUDA 和系统包位于源码层之前，因此日常代码修改只会重新
 复制并安装本地 Gateway 包；Gateway 与 ComfyUI 也会复用同一 CUDA/PyTorch
@@ -328,6 +335,22 @@ bash scripts/quickstart.sh --edition studio --install-models
 docker compose --profile comfy-container ps
 ```
 
+调度参数集中在 `gpu_scheduler`。默认生成等待上限 120 秒、ComfyUI 空闲保留
+60 秒、显存安全余量 2GB；这些值都可在“系统配置 → GPU 动态资源池”修改。
+等待、心跳、冷却、重试和安全余量热生效，现有租约保持原期限；GPU UUID、
+设备池和 `device_overrides` 变更会在 API/控制台标记为“需重建”。出于 Docker
+权限边界考虑，安装器不会自动创建拥有 Docker Socket 权限的后台服务；拓扑变化后
+请重新运行 `quickstart.sh`，或由受信任的管理员手动运行
+`scripts/gpu-topology-controller.py` 完成校验和重建。`topology_auto_apply` 默认关闭。
+Gateway 容器本身不会挂载 Docker Socket。`gateway_memory_limit_percent` 只是可选的
+PyTorch 进程安全上限，不是严格显存预留，也不参与静态切分。
+
+固定的 ComfyUI 0.28 镜像默认关闭 Dynamic VRAM，规避部分 NVIDIA
+`cudaMallocAsync` 组合在显存仍充足时拒绝极小分配并误报 OOM。确认升级后的
+ComfyUI 与当前硬件稳定后，可在“系统配置 → GPU 动态资源池”把
+`comfyui_dynamic_vram_enabled` 设为 `true`；这是启动参数，保存后需要重建
+ComfyUI worker。环境变量 `COMFYUI_DISABLE_DYNAMIC_VRAM` 的优先级更高。
+
 本机可打开 `http://127.0.0.1:8188`。如果 Docker 运行在远程服务器，
 先从你的电脑建立 SSH 隧道，再打开同一地址：
 
@@ -362,7 +385,13 @@ Studio/Full 的 ComfyUI 镜像固定版本预装官方 ComfyUI-Manager，并以
 首次创建的空用户目录才会写入默认配置，后续启动不会覆盖管理员设置。
 ComfyUI 端口默认只绑定本机，节点和高级工作流继续在原生 ComfyUI 页面管理。
 
-聊天生成可选择“自动 / 本地 / 云端”与“标准 / 创意精修 / 4K 保真”。
+聊天生成可选择“自动 / 本地 / 云端”、图片模型/预设与“标准 / 创意精修 /
+4K 保真”。图片模型列表进入聊天页时从管理接口加载，也可在聊天输入框旁手动
+刷新。除 Qwen-Image 等内置工作流外，`models/checkpoints` 下新增的 `.safetensors`
+或 `.ckpt` 会自动成为本地 Checkpoint 选项；缺失模型或节点的预设显示为不可用。
+仅安装独立 UNet、文本编码器或 VAE 文件不足以推断正确工作流，这类架构需要先
+配置对应的生成预设。
+
 4K 保真使用 ComfyUI Core 节点和批准的 `RealESRGAN_x4plus.pth`，保持宽高比、
 不裁剪，最长边默认不超过 4096。模型不会在普通启动时静默下载；可显式运行：
 
@@ -372,8 +401,9 @@ bash scripts/model-manager.sh verify realesrgan-x4plus
 ```
 
 未安装 ComfyUI 的 Lite/Knowledge 版本仍可选择云端图片或视频模型。
-Qwen-Image FP8 由三个文件组成，合计约 30.1GB；安装后中文图片提示词会优先
-使用 Qwen-Image，未安装时继续由 AI Director 为 SDXL 做保真翻译和精简。
+Qwen-Image FP8 由三个文件组成，合计约 30.1GB；安装后可在聊天页明确选择
+“Qwen-Image 中文/英文图片”。只有将 `qwen_image_auto_select` 设为 `true` 时，
+未显式选择预设的中文图片提示词才会自动优先使用 Qwen-Image。
 
 ### 环境变量
 

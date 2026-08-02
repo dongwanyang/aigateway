@@ -4,7 +4,6 @@ import sys
 from pathlib import Path
 
 import yaml
-
 from aigateway_core.shared.config import ConfigManager
 from aigateway_core.shared.config_env import (
     apply_env_overrides,

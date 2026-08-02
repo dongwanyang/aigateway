@@ -2,7 +2,6 @@ import time
 from unittest.mock import AsyncMock
 
 import pytest
-
 from aigateway_core.pipelines.generation._common.config import DraftWorkflowConfig
 from aigateway_core.pipelines.generation._common.exceptions import DraftWorkflowError
 from aigateway_core.pipelines.generation._common.models import (

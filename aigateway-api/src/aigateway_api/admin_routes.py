@@ -17,7 +17,6 @@ import asyncio
 import base64
 import json
 import logging
-import re
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -203,6 +202,7 @@ class GenerationPresetImport(BaseModel):
     dependencies: PresetDependencies = Field(default_factory=PresetDependencies)
     languages: list[Literal["zh", "en"]] = Field(default_factory=lambda: ["en"])
     enabled: bool = False
+    required_vram_gb: float = Field(default=0.0, ge=0.0, le=1024.0)
 
 
 def _comfy_config(request: Request) -> dict[str, Any]:
@@ -260,14 +260,25 @@ async def get_generation_presets(
     from .local_generation import (
         builtin_presets,
         dependency_status,
+        discovered_checkpoint_presets,
         load_custom_presets,
+        merge_generation_presets,
         probe_comfyui,
     )
 
     comfy = _comfy_config(request)
     probe = await probe_comfyui(comfy)
     available_nodes = set(probe.get("available_nodes", []))
-    presets = builtin_presets(comfy) + await asyncio.to_thread(load_custom_presets)
+    discovered, custom = await asyncio.gather(
+        asyncio.to_thread(discovered_checkpoint_presets, comfy),
+        asyncio.to_thread(load_custom_presets),
+    )
+    for preset in custom:
+        preset.setdefault("source", "custom")
+        # Imported workflow execution is not part of the draft runtime yet.
+        # Do not advertise it as selectable and silently run the default model.
+        preset["selectable"] = False
+    presets = merge_generation_presets(builtin_presets(comfy), discovered, custom)
     for preset in presets:
         preset["validation"] = dependency_status(
             preset,
@@ -297,7 +308,13 @@ async def import_generation_preset(
             detail={"error": {"code": "conflict", "message": "preset id already exists"}},
         )
     preset = {**body.model_dump(), "builtin": False}
-    await asyncio.to_thread(save_custom_preset, preset)
+    try:
+        await asyncio.to_thread(save_custom_preset, preset)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": {"code": "validation_error", "message": str(exc)}},
+        ) from exc
     return {"data": preset, "message": "created"}
 
 
@@ -310,12 +327,18 @@ async def validate_generation_preset(
     from .local_generation import (
         builtin_presets,
         dependency_status,
+        discovered_checkpoint_presets,
         load_custom_presets,
+        merge_generation_presets,
         probe_comfyui,
     )
 
     comfy = _comfy_config(request)
-    presets = builtin_presets(comfy) + await asyncio.to_thread(load_custom_presets)
+    discovered, custom = await asyncio.gather(
+        asyncio.to_thread(discovered_checkpoint_presets, comfy),
+        asyncio.to_thread(load_custom_presets),
+    )
+    presets = merge_generation_presets(builtin_presets(comfy), discovered, custom)
     preset = next((item for item in presets if item.get("id") == preset_id), None)
     if preset is None:
         raise HTTPException(status_code=404, detail={"error": {"code": "not_found", "message": "preset not found"}})
@@ -344,7 +367,13 @@ async def update_generation_preset(
     if preset_id not in existing:
         raise HTTPException(status_code=404, detail={"error": {"code": "not_found", "message": "custom preset not found"}})
     preset = {**body.model_dump(), "builtin": False}
-    await asyncio.to_thread(save_custom_preset, preset)
+    try:
+        await asyncio.to_thread(save_custom_preset, preset)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": {"code": "validation_error", "message": str(exc)}},
+        ) from exc
     return {"data": preset, "message": "updated"}
 
 
@@ -2029,6 +2058,8 @@ async def import_rag_document(
                 lambda model: not callable(getattr(model, "encode", None))
             )
 
+            configured_device = "auto"
+
             def _load_local_embedding_model():
                 existing_model = _get_embedding_model()
                 if existing_model is not None:
@@ -2040,8 +2071,11 @@ async def import_rag_document(
                 _cfg_mgr = getattr(get_state(), "config_manager", None)
                 _emb_cfg = _cfg_mgr.get("embedding", {}) if _cfg_mgr else {}
                 _model_name = _emb_cfg.get("model", "Qwen/Qwen3-Embedding-0.6B")
-                _device = _emb_cfg.get("device", "auto")
-                _model_kwargs = {} if _device == "auto" else {"device": _device}
+                _model_kwargs = (
+                    {}
+                    if configured_device == "auto"
+                    else {"device": configured_device}
+                )
                 return SentenceTransformer(_model_name, **_model_kwargs)
 
             def _encode_local_embeddings():
@@ -2056,11 +2090,33 @@ async def import_rag_document(
 
             # 批量 encode — 注意：encode() 是同步 CPU 密集型操作，
             # 必须在线程池中执行，避免阻塞 Uvicorn 事件循环（其他页面请求会排队）
+            _cfg_mgr = getattr(request.app.state, "config_manager", None)
+            _emb_cfg = _cfg_mgr.get("embedding", {}) if _cfg_mgr else {}
+            requested_device = _emb_cfg.get("device", "auto")
+            coordinator = getattr(request.app.state, "gpu_coordinator", None)
             _loop = asyncio.get_running_loop()
-            vectors = await _loop.run_in_executor(
-                None,
-                _encode_local_embeddings,
-            )
+            if coordinator is not None and coordinator.config.enabled:
+                async with coordinator.gateway_lease(
+                    "embedding", requested_device
+                ) as gpu_lease:
+                    configured_device = gpu_lease.device
+                    cached = embedding_model_runtime.cache.get("model")
+                    cached_device = str(getattr(cached, "device", ""))
+                    if cached is not None and cached_device != configured_device:
+                        release_result = await asyncio.to_thread(
+                            embedding_model_runtime.release_if_idle
+                        )
+                        if release_result.get("busy"):
+                            raise RuntimeError(
+                                "embedding_model_busy_on_different_device"
+                            )
+                    vectors = await _loop.run_in_executor(
+                        None, _encode_local_embeddings
+                    )
+            else:
+                vectors = await _loop.run_in_executor(
+                    None, _encode_local_embeddings
+                )
             vectors_list = [v.tolist() for v in vectors]
         else:
             # 回退方案：使用 litellm embedding API 或哈希向量

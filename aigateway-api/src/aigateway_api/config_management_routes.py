@@ -9,7 +9,11 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from .auth_middleware import authenticate_admin
-from .config_security import ConfigCommit, read_versioned_yaml_config, transactional_replace_config
+from .config_security import (
+    ConfigCommit,
+    read_versioned_yaml_config,
+    transactional_replace_config,
+)
 from .security_routes import (
     _commit_revision,
     _config_error,

@@ -1,10 +1,9 @@
 from __future__ import annotations
 
+import aigateway_api  # noqa: F401 - installs the targeted CORS header extension
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.testclient import TestClient
-
-import aigateway_api  # noqa: F401 - installs the targeted CORS header extension
 
 
 def test_config_if_match_header_passes_cors_preflight() -> None:
