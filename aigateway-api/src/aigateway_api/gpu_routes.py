@@ -65,9 +65,9 @@ def _normalize_gateway_topology(
     """Describe local CUDA absence without reporting a false service failure.
 
     In the default Compose topology the Gateway container has no CUDA device,
-    while ComfyUI owns the GPU and performs generation.  Local allocator
+    while ComfyUI owns the GPU and performs generation. Local allocator
     availability remains false, but the state is ``delegated`` rather than an
-    operational error.  The raw local facts are preserved for diagnostics.
+    operational error. The raw local facts are preserved for diagnostics.
     """
     result = dict(gateway)
     devices = scheduler.get("devices") if isinstance(scheduler, dict) else []
@@ -88,6 +88,11 @@ def _normalize_gateway_topology(
     if comfy_available:
         result["status"] = "delegated"
         result["delegated_to"] = "comfyui"
+        # The existing control panel treats cuda_disabled + an available
+        # ComfyUI backend as an intentional GPU delegation state. In the
+        # default Compose topology that is accurate: the Gateway container is
+        # deliberately not granted a CUDA device.
+        result["cuda_disabled"] = True
         if result.get("error") == "gpu_status_unavailable":
             result["error"] = None
         return result
