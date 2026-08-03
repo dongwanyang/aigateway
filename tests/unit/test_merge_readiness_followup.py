@@ -70,6 +70,18 @@ class _RecordingCache:
         self.writes.append("l3")
 
 
+class RecordingMetrics:
+    def __init__(self) -> None:
+        self.requests: list[tuple[str, str, str]] = []
+        self.durations: list[tuple[str, float]] = []
+
+    def record_request(self, method: str, path: str, status: str) -> None:
+        self.requests.append((method, path, status))
+
+    def record_duration(self, path: str, duration: float) -> None:
+        self.durations.append((path, duration))
+
+
 class _RecordingKeyStore:
     def __init__(self) -> None:
         self.ledger_statuses: list[str] = []
