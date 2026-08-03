@@ -169,11 +169,21 @@ def _is_upstream_stream_failed(request: Any) -> bool:
     return bool(getattr(_request_state(request), "_upstream_stream_failed", False))
 
 
+def _mark_client_disconnected(request: Any) -> None:
+    _request_state(request)._client_disconnected = True
+
+
+def _is_client_disconnected(request: Any) -> bool:
+    return bool(getattr(_request_state(request), "_client_disconnected", False))
+
+
 def _terminal_status_code(request: Any) -> int | None:
     if _is_output_budget_exhausted(request):
         return 422
     if _is_upstream_stream_failed(request):
         return 502
+    if _is_client_disconnected(request):
+        return 499
     return None
 
 
@@ -182,6 +192,8 @@ def _terminal_ledger_status(request: Any) -> str | None:
         return "output_budget_exhausted"
     if _is_upstream_stream_failed(request):
         return "upstream_stream_error"
+    if _is_client_disconnected(request):
+        return "client_disconnected"
     return None
 
 
@@ -458,7 +470,7 @@ async def _guard_sse_output(
     metrics_collector: Any = None,
     started_at: float | None = None,
 ) -> AsyncIterator[str | bytes]:
-    """Emit one terminal SSE outcome only after inner cleanup and metrics."""
+    """Emit one final SSE outcome and settle consumer cancellation as 499."""
     saw_content = False
     terminal_reasons: list[str] = []
     saw_error = False
@@ -467,37 +479,63 @@ async def _guard_sse_output(
     error_chunk: str | bytes | None = None
     emitted_bytes = False
 
-    async for raw in iterator:
-        emitted_bytes = emitted_bytes or isinstance(raw, bytes)
-        text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
-        if text.strip() == "data: [DONE]":
-            done_chunk = raw
-            continue
-        if saw_error:
-            # Defensive drain: never expose data after a terminal error.
-            continue
-
-        payload = _parse_sse_payload(raw)
-        if payload is not None:
-            if isinstance(payload.get("error"), dict):
-                saw_error = True
-                error_chunk = raw
+    try:
+        async for raw in iterator:
+            emitted_bytes = emitted_bytes or isinstance(raw, bytes)
+            text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
+            if text.strip() == "data: [DONE]":
+                done_chunk = raw
                 continue
-            usage = payload.get("usage") or {}
-            if isinstance(usage, dict):
-                completion_tokens = max(
-                    completion_tokens,
-                    int(usage.get("completion_tokens", 0) or 0),
-                )
-            for choice in payload.get("choices", []) or []:
-                if not isinstance(choice, dict):
+            if saw_error:
+                continue
+
+            payload = _parse_sse_payload(raw)
+            if payload is not None:
+                if isinstance(payload.get("error"), dict):
+                    saw_error = True
+                    error_chunk = raw
                     continue
-                if _choice_has_output(choice):
-                    saw_content = True
-                finish_reason = choice.get("finish_reason")
-                if isinstance(finish_reason, str) and finish_reason:
-                    terminal_reasons.append(finish_reason)
-        yield raw
+                usage = payload.get("usage") or {}
+                if isinstance(usage, dict):
+                    completion_tokens = max(
+                        completion_tokens,
+                        int(usage.get("completion_tokens", 0) or 0),
+                    )
+                for choice in payload.get("choices", []) or []:
+                    if not isinstance(choice, dict):
+                        continue
+                    if _choice_has_output(choice):
+                        saw_content = True
+                    finish_reason = choice.get("finish_reason")
+                    if isinstance(finish_reason, str) and finish_reason:
+                        terminal_reasons.append(finish_reason)
+            yield raw
+    except (asyncio.CancelledError, GeneratorExit):
+        if request is not None:
+            _mark_client_disconnected(request)
+        status_code = (
+            _terminal_status_code(request)
+            if request is not None
+            else 499
+        ) or 499
+        if started_at is not None:
+            _record_final_metrics(
+                metrics_collector,
+                status_code=status_code,
+                started_at=started_at,
+            )
+        close = getattr(iterator, "aclose", None)
+        if callable(close):
+            try:
+                await close()
+            except (asyncio.CancelledError, GeneratorExit):
+                pass
+            except Exception as exc:
+                logger.debug(
+                    "Cancelled stream close failed: %s",
+                    type(exc).__name__,
+                )
+        raise
 
     exhausted = bool(
         _is_output_budget_exhausted(request)
@@ -520,8 +558,6 @@ async def _guard_sse_output(
             started_at=started_at,
         )
 
-    # Terminal events are deliberately emitted after the iterator has completed,
-    # so a client disconnect after receiving them cannot interrupt settlement.
     if saw_error:
         if error_chunk is not None:
             yield error_chunk

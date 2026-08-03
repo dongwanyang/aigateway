@@ -630,3 +630,99 @@ def test_obsolete_inflight_plugin_is_never_published() -> None:
 
     assert isinstance(new_instance, NewPlugin)
     assert registry.get_all()[0] is new_instance
+
+
+@pytest.mark.asyncio
+async def test_outer_stream_close_records_499_and_closes_upstream() -> None:
+    request = SimpleNamespace(state=SimpleNamespace())
+    metrics = RecordingMetrics()
+    upstream_closed = False
+
+    async def upstream():
+        nonlocal upstream_closed
+        try:
+            yield 'data: {"choices":[{"index":0,"delta":{"content":"partial"}}]}\n\n'
+            yield "data: [DONE]\n\n"
+        finally:
+            upstream_closed = True
+
+    stream = _guard_sse_output(
+        upstream(),
+        max_tokens=64,
+        request=request,
+        metrics_collector=metrics,
+        started_at=time.monotonic(),
+    )
+    assert "partial" in await anext(stream)
+    await stream.aclose()
+
+    assert upstream_closed is True
+    assert request.state._client_disconnected is True
+    assert metrics.requests == [("POST", "/v1/chat/completions", "499")]
+
+
+@pytest.mark.asyncio
+async def test_core_generator_close_releases_reservation_and_records_499(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = SimpleNamespace(
+        state=SimpleNamespace(
+            trace_id="trace-disconnect",
+            request_id="request-disconnect",
+            _lua_quota_reserved=True,
+            _lua_reserved_tokens=10,
+            _lua_reserved_cost=0.0,
+        )
+    )
+    key_store = _RecordingKeyStore()
+    key_proxy = _RequestKeyStoreProxy(key_store, request)
+    logged_statuses: list[int] = []
+
+    async def record_log(**kwargs: Any) -> None:
+        logged_statuses.append(int(kwargs["status_code"]))
+
+    monkeypatch.delattr(openai_compat, _LOG_ORIGINAL_ATTR, raising=False)
+    monkeypatch.setattr(openai_compat, "_record_request_log", record_log)
+    _install_request_log_guard()
+
+    async def provider():
+        yield {
+            "model": "test-model",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"content": "partial"},
+                    "finish_reason": None,
+                }
+            ],
+        }
+        yield {"choices": [], "usage": {}}
+
+    dispatcher = RequestDispatcher({})
+    settled = dispatcher._wrap_stream_full(
+        provider(),
+        None,
+        None,
+        key_proxy,
+        request,
+        "test-model",
+        "user",
+        "key-hash",
+        None,
+        None,
+        time.time(),
+        "group",
+        "understanding",
+        "group",
+        "group",
+    )
+    first = await anext(settled)
+    assert first["choices"][0]["delta"]["content"] == "partial"
+    await settled.aclose()
+
+    assert request.state._client_disconnected is True
+    assert logged_statuses == [499]
+    assert key_store.ledger_statuses == ["client_disconnected"]
+    assert len(key_store.release_calls) == 1
+    assert key_store.increment_calls == []
+    assert request.state._lua_quota_reserved is False

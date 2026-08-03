@@ -1303,13 +1303,14 @@ class RequestDispatcher:
                         if fr:
                             slot["finish_reason"] = fr
                 yield chunk
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, GeneratorExit):
             # Client disconnected. Explicitly close the upstream generator so
             # the provider connection is released promptly rather than waiting
             # on GC. Post-processing below still runs (quota/metrics) using
             # whatever we accumulated, but we skip cache backfill — a partial
             # stream is not a complete response and would poison the cache.
             client_disconnected = True
+            request.state._client_disconnected = True
             aclose = getattr(gen, "aclose", None)
             if aclose is not None:
                 try:
@@ -1355,7 +1356,10 @@ class RequestDispatcher:
         terminal_stream_failure = bool(
             getattr(request.state, "_upstream_stream_failed", False)
         )
-        if not usage and not terminal_stream_failure:
+        terminal_stream_outcome = terminal_stream_failure or bool(
+            getattr(request.state, "_client_disconnected", False)
+        )
+        if not usage and not terminal_stream_outcome:
             await self._release_quota_reservation(request, key_store, key_hash)
             return
 
@@ -1394,7 +1398,7 @@ class RequestDispatcher:
         # A terminal provider failure with no trustworthy usage must still
         # produce a zero-cost ledger row, but its optimistic reservation cannot
         # remain charged indefinitely.
-        if terminal_stream_failure and tt <= 0:
+        if terminal_stream_outcome and tt <= 0:
             await self._release_quota_reservation(request, key_store, key_hash)
 
         # 配额扣减（修正点：原流式不扣）
