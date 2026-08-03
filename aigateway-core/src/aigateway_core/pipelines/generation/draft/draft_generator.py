@@ -1,6 +1,7 @@
 """Public Draft generator strategy with explicit storage configuration."""
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from aigateway_core.pipelines.generation._common.exceptions import DraftWorkflowError
@@ -53,7 +54,7 @@ class DraftGeneratorStrategy(_impl.DraftGeneratorStrategy):
 
     @staticmethod
     def _pool_has_worker(status: Any, capability: str) -> bool:
-        """Return whether the scheduler has a structurally valid worker pair."""
+        """Return whether the scheduler has a valid worker/device capability pair."""
         if not isinstance(status, dict):
             return False
         devices = status.get("devices") or []
@@ -71,9 +72,29 @@ class DraftGeneratorStrategy(_impl.DraftGeneratorStrategy):
             if str(worker.get("device_uuid") or "") not in device_uuids:
                 continue
             capabilities = worker.get("capabilities") or []
-            if not isinstance(capabilities, list) or capability in capabilities:
+            if isinstance(capabilities, list) and capability in capabilities:
                 return True
         return False
+
+    def _scheduler_manages_comfyui(self, status: Any) -> bool:
+        """Return whether this ComfyUI endpoint belongs to the local GPU pool.
+
+        Explicit workers are authoritative. ``AIGATEWAY_SHARED_GPU`` preserves
+        fail-closed behavior during local quickstart startup even if generated
+        topology is accidentally missing. A remote/external ComfyUI endpoint has
+        neither signal and must not drain or lock local Gateway devices.
+        """
+        configured = bool(
+            getattr(self._comfyui_config, "scheduler_managed", False)
+        )
+        shared_env = os.getenv("AIGATEWAY_SHARED_GPU", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        workers = status.get("workers") if isinstance(status, dict) else []
+        return configured or shared_env or bool(workers)
 
     async def _run_on_comfy_worker(
         self,
@@ -84,21 +105,20 @@ class DraftGeneratorStrategy(_impl.DraftGeneratorStrategy):
         preferred_worker_id: str | None = None,
         memory_requirement_gb: float = 0.0,
     ) -> tuple[Any, Any | None]:
-        """Keep enabled CUDA deployments inside the shared GPU pool.
+        """Use the shared pool only for scheduler-managed local workers.
 
-        ``GpuResourceCoordinator`` arbitrates the same physical devices between
-        Gateway model leases and ComfyUI generation workers.  When that pool is
-        enabled, an empty or mismatched topology is a deployment error: directly
-        calling the legacy ComfyUI URL would bypass generation priority, Gateway
-        lease draining, Redis fencing, device locks and worker failover.
-
-        The legacy direct URL remains valid only when the coordinator is absent
-        or explicitly disabled; the base implementation already handles that
-        compatibility mode.
+        Local ComfyUI workers share physical devices with Gateway components and
+        therefore must be allocated through ``generation_lease()``. External or
+        remote ComfyUI endpoints do not own local devices and continue through
+        the base single-URL compatibility path without draining the local pool.
         """
         coordinator = self._gpu_coordinator
         if coordinator is not None and coordinator.config.enabled:
-            if not self._pool_has_worker(coordinator.status(), capability):
+            status = coordinator.status()
+            if self._scheduler_manages_comfyui(status) and not self._pool_has_worker(
+                status,
+                capability,
+            ):
                 raise DraftWorkflowError(_GPU_TOPOLOGY_ERROR)
 
         return await super()._run_on_comfy_worker(
