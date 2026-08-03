@@ -56,28 +56,128 @@ def _queue_idle(queue: Any) -> bool | None:
     )
 
 
+def _scheduler_lists(
+    scheduler: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if not isinstance(scheduler, dict):
+        return [], []
+    devices = scheduler.get("devices") or []
+    workers = scheduler.get("workers") or []
+    return (
+        [item for item in devices if isinstance(item, dict)]
+        if isinstance(devices, list)
+        else [],
+        [item for item in workers if isinstance(item, dict)]
+        if isinstance(workers, list)
+        else [],
+    )
+
+
+def _selector_allows(device_uuid: str, selector: Any) -> bool:
+    if selector in (None, "auto"):
+        return True
+    return isinstance(selector, list) and device_uuid in {
+        str(item) for item in selector
+    }
+
+
+def _device_override(scheduler: dict[str, Any], device_uuid: str) -> dict[str, Any]:
+    overrides = scheduler.get("device_overrides") or []
+    if not isinstance(overrides, list):
+        return {}
+    return next(
+        (
+            item
+            for item in overrides
+            if isinstance(item, dict) and str(item.get("uuid") or "") == device_uuid
+        ),
+        {},
+    )
+
+
 def _scheduler_pairs(
     scheduler: dict[str, Any],
 ) -> list[tuple[dict[str, Any], dict[str, Any]]]:
-    """Return structurally executable worker/device pairs."""
-    if not isinstance(scheduler, dict):
-        return []
-    devices = scheduler.get("devices") or []
-    workers = scheduler.get("workers") or []
-    if not isinstance(devices, list) or not isinstance(workers, list):
-        return []
+    """Return worker/device UUID pairs without conflating runtime health."""
+    devices, workers = _scheduler_lists(scheduler)
     devices_by_uuid = {
         str(device.get("uuid")): device
         for device in devices
-        if isinstance(device, dict) and device.get("uuid")
+        if device.get("uuid")
     }
     return [
         (worker, devices_by_uuid[str(worker.get("device_uuid"))])
         for worker in workers
-        if isinstance(worker, dict)
-        and worker.get("device_uuid")
+        if worker.get("device_uuid")
         and str(worker.get("device_uuid")) in devices_by_uuid
     ]
+
+
+def _scheduler_runnable_pairs(
+    scheduler: dict[str, Any],
+    *,
+    capability: str | None = None,
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """Return pairs currently eligible for generation scheduling.
+
+    This mirrors the non-memory parts of ``GpuResourceCoordinator`` candidate
+    selection: selector policy, device overrides, capability, health and worker
+    cooldown/quarantine. Memory requirements are request-specific and therefore
+    remain a generation-time decision.
+    """
+    runnable: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for worker, device in _scheduler_pairs(scheduler):
+        device_uuid = str(device.get("uuid") or "")
+        if not _selector_allows(device_uuid, scheduler.get("comfyui_devices")):
+            continue
+        override = _device_override(scheduler, device_uuid)
+        if override.get("enabled") is False:
+            continue
+        capabilities = override.get("capabilities")
+        if not isinstance(capabilities, list):
+            capabilities = worker.get("capabilities") or []
+        if not isinstance(capabilities, list) or not capabilities:
+            continue
+        if capability is not None and capability not in capabilities:
+            continue
+        if worker.get("healthy") is False:
+            continue
+        if float(worker.get("unhealthy_cooldown_remaining_seconds", 0) or 0) > 0:
+            continue
+        if float(worker.get("oom_quarantine_remaining_seconds", 0) or 0) > 0:
+            continue
+        runnable.append((worker, device))
+    return runnable
+
+
+def _eligible_gateway_devices(scheduler: dict[str, Any]) -> list[dict[str, Any]]:
+    devices, _ = _scheduler_lists(scheduler)
+    result: list[dict[str, Any]] = []
+    for device in devices:
+        device_uuid = str(device.get("uuid") or "")
+        if not device_uuid:
+            continue
+        if not _selector_allows(device_uuid, scheduler.get("gateway_devices")):
+            continue
+        if _device_override(scheduler, device_uuid).get("enabled") is False:
+            continue
+        result.append(device)
+    return result
+
+
+def _supported_capabilities(
+    pairs: list[tuple[dict[str, Any], dict[str, Any]]],
+    scheduler: dict[str, Any],
+) -> list[str]:
+    result: set[str] = set()
+    for worker, device in pairs:
+        override = _device_override(scheduler, str(device.get("uuid") or ""))
+        capabilities = override.get("capabilities")
+        if not isinstance(capabilities, list):
+            capabilities = worker.get("capabilities") or []
+        if isinstance(capabilities, list):
+            result.update(str(item) for item in capabilities if item)
+    return sorted(result)
 
 
 def _normalize_gateway_topology(
@@ -87,53 +187,42 @@ def _normalize_gateway_topology(
     scheduler: dict[str, Any],
     pool_expected: bool = False,
 ) -> dict[str, Any]:
-    """Normalize raw allocator facts against the shared GPU-pool topology.
-
-    CUDA deployments expose the same physical devices to Gateway and one or more
-    ComfyUI workers. ``GpuResourceCoordinator`` owns arbitration: Gateway may
-    borrow an idle device, while generation drains Gateway leases and allocates
-    the matching worker. ComfyUI availability therefore never turns an enabled
-    but broken scheduler into a successful delegated topology.
-
-    ``local_cuda_available`` preserves the raw nvidia-smi/PyTorch observation.
-    ``available`` represents effective GPU availability after considering the
-    scheduler inventory.
-    """
+    """Normalize raw CUDA visibility against the shared-pool contract."""
     result = dict(gateway)
     enabled = bool(scheduler.get("enabled")) if isinstance(scheduler, dict) else False
-    devices = scheduler.get("devices") if isinstance(scheduler, dict) else []
-    workers = scheduler.get("workers") if isinstance(scheduler, dict) else []
-    devices = devices if isinstance(devices, list) else []
-    workers = workers if isinstance(workers, list) else []
+    devices, workers = _scheduler_lists(scheduler)
     pairs = _scheduler_pairs(scheduler)
+    runnable_pairs = _scheduler_runnable_pairs(scheduler)
     local_available = bool(result.get("available"))
 
     result["local_cuda_available"] = local_available
     result["delegated_to"] = None
     result["scheduler_topology_complete"] = False
+    result["scheduler_runnable"] = False
 
-    # Shared-pool execution is authoritative whenever at least one configured
-    # ComfyUI worker maps to an actually discovered physical device.
     if enabled and pairs:
-        result["available"] = True
-        result["status"] = "scheduler_pool"
+        runnable = bool(runnable_pairs)
+        result["available"] = runnable
+        result["status"] = (
+            "scheduler_pool" if runnable else "scheduler_pool_degraded"
+        )
         result["scheduler_topology_complete"] = True
-        result["error"] = None
+        result["scheduler_runnable"] = runnable
+        result["error"] = None if runnable else "gpu_scheduler_no_runnable_worker"
         return result
 
-    # A CUDA deployment may legitimately use the scheduler only for Gateway
-    # leases (for example Knowledge edition without local generation workers).
+    # A CUDA deployment can intentionally use the scheduler only for Gateway
+    # components while generation runs on an external ComfyUI endpoint.
     if enabled and devices and not workers and not pool_expected:
-        result["available"] = True
-        result["status"] = "gateway_pool"
+        eligible_devices = _eligible_gateway_devices(scheduler)
+        available = bool(eligible_devices)
+        result["available"] = available
+        result["status"] = "gateway_pool" if available else "gateway_pool_degraded"
         result["scheduler_topology_complete"] = True
-        result["error"] = None
+        result["scheduler_runnable"] = available
+        result["error"] = None if available else "gpu_scheduler_no_eligible_gateway_device"
         return result
 
-    # Once the scheduler is enabled, missing inventory, orphan workers or an
-    # expected pool with no worker/device pair is a topology fault. Do not hide
-    # it behind a healthy ComfyUI HTTP probe: direct submission would bypass the
-    # Coordinator's drain/fence/lock protocol.
     if enabled:
         result["available"] = False
         result["status"] = "scheduler_error"
@@ -143,10 +232,9 @@ def _normalize_gateway_topology(
     if local_available:
         result["status"] = "available"
         result["scheduler_topology_complete"] = True
+        result["scheduler_runnable"] = True
         return result
 
-    # Direct/external ComfyUI is a compatibility mode only when the local GPU
-    # scheduler is explicitly disabled.
     if comfy_available:
         result["status"] = "delegated"
         result["delegated_to"] = "comfyui"
@@ -166,42 +254,58 @@ def _execution_gpu_status(
     scheduler: dict[str, Any],
     pool_expected: bool = False,
 ) -> dict[str, Any]:
-    """Return the effective execution backend without losing pool semantics."""
+    """Return effective ownership, topology and current runtime readiness."""
     enabled = bool(scheduler.get("enabled")) if isinstance(scheduler, dict) else False
-    devices = scheduler.get("devices") if isinstance(scheduler, dict) else []
-    workers = scheduler.get("workers") if isinstance(scheduler, dict) else []
-    devices = devices if isinstance(devices, list) else []
-    workers = workers if isinstance(workers, list) else []
+    devices, workers = _scheduler_lists(scheduler)
     pairs = _scheduler_pairs(scheduler)
+    runnable_pairs = _scheduler_runnable_pairs(scheduler)
 
-    # Pool mode must win over the raw Gateway allocator flag. Both Gateway and
-    # ComfyUI are clients of the Coordinator; neither owns the physical GPU.
     if enabled and pairs:
         paired_devices = {str(device.get("uuid")) for _, device in pairs}
-        return {
-            "available": True,
+        runnable_devices = {
+            str(device.get("uuid")) for _, device in runnable_pairs
+        }
+        result = {
+            "available": bool(runnable_pairs),
             "mode": "scheduler_pool",
             "owner": "scheduler",
+            "topology_complete": True,
+            "runnable_now": bool(runnable_pairs),
             "device_count": len(paired_devices),
             "worker_count": len(pairs),
+            "runnable_device_count": len(runnable_devices),
+            "runnable_worker_count": len(runnable_pairs),
+            "supported_capabilities": _supported_capabilities(pairs, scheduler),
             "memory": None,
         }
+        if not runnable_pairs:
+            result["error"] = "gpu_scheduler_no_runnable_worker"
+        return result
 
     if enabled and devices and not workers and not pool_expected:
-        return {
-            "available": True,
+        eligible_devices = _eligible_gateway_devices(scheduler)
+        result = {
+            "available": bool(eligible_devices),
             "mode": "gateway_pool",
             "owner": "scheduler",
+            "topology_complete": True,
+            "runnable_now": bool(eligible_devices),
             "device_count": len(devices),
             "worker_count": 0,
+            "external_comfyui_available": comfy_available,
             "memory": None,
         }
+        if not eligible_devices:
+            result["error"] = "gpu_scheduler_no_eligible_gateway_device"
+        return result
 
     if enabled:
         return {
             "available": False,
             "mode": "scheduler_error",
             "owner": "scheduler",
+            "topology_complete": False,
+            "runnable_now": False,
             "device_count": len(devices),
             "worker_count": len(workers),
             "memory": None,
@@ -213,6 +317,8 @@ def _execution_gpu_status(
             "available": True,
             "mode": "gateway",
             "owner": "gateway",
+            "topology_complete": True,
+            "runnable_now": True,
             "memory": {
                 "total_bytes": gateway.get("device_total_bytes"),
                 "free_bytes": gateway.get("device_free_bytes"),
@@ -225,12 +331,16 @@ def _execution_gpu_status(
             "available": True,
             "mode": "delegated_comfyui",
             "owner": "comfyui",
+            "topology_complete": True,
+            "runnable_now": True,
             "memory": normalized_comfy_memory,
         }
     return {
         "available": False,
         "mode": "unavailable",
         "owner": None,
+        "topology_complete": False,
+        "runnable_now": False,
         "memory": None,
         "error": gateway.get("error") or "gpu_status_unavailable",
     }
@@ -243,6 +353,11 @@ async def get_gpu_status(
 ):
     manager = getattr(request.app.state, "config_manager", None)
     deployment = manager.get("deployment", {}) if manager is not None else {}
+    scheduler_config = (
+        manager.get("gpu_scheduler", {}) if manager is not None else {}
+    )
+    if not isinstance(scheduler_config, dict):
+        scheduler_config = {}
     shared_gpu = (
         bool(deployment.get("shared_gpu", False))
         if isinstance(deployment, dict)
@@ -266,13 +381,22 @@ async def get_gpu_status(
             await asyncio.to_thread(discover_nvidia_devices)
         )
     scheduler = coordinator.status() if coordinator is not None else {
-        "enabled": False,
+        "enabled": bool(scheduler_config.get("enabled", False)),
         "policy": "unavailable",
         "generation_priority": False,
         "generation_queue_depth": 0,
         "devices": [],
         "workers": [],
     }
+    # Runtime status owns mutable telemetry; persisted configuration owns policy.
+    for key in (
+        "gateway_devices",
+        "comfyui_devices",
+        "device_overrides",
+        "device_safety_margin_gb",
+    ):
+        if key in scheduler_config:
+            scheduler[key] = scheduler_config[key]
     pool_expected = bool(scheduler.get("enabled")) and (
         shared_gpu or bool(scheduler.get("workers"))
     )
