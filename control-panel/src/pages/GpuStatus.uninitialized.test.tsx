@@ -5,6 +5,7 @@ import Config from './Config'
 
 const state = vi.hoisted(() => ({
   sharedGpu: false,
+  execution: undefined as Record<string, unknown> | undefined,
   gateway: {
     available: true,
     torch_initialized: false,
@@ -23,10 +24,18 @@ const api = vi.hoisted(() => ({
   getGpuStatus: vi.fn(async () => ({
     data: {
       gateway: { ...state.gateway },
+      execution: state.execution ? { ...state.execution } : undefined,
       comfyui: { available: true, memory: { total_bytes: 16_000, free_bytes: 15_500, used_bytes: 500 } },
       queue: { running: 0, pending: 0 },
       queue_idle: true,
       shared_gpu: state.sharedGpu,
+      scheduler: {
+        enabled: Boolean(state.execution),
+        policy: 'auto',
+        generation_queue_depth: 0,
+        devices: state.execution ? [{ uuid: 'GPU-a' }] : [],
+        workers: [],
+      },
       diagnosis: [],
     },
     message: 'success',
@@ -42,6 +51,7 @@ function renderConfig() {
 
 beforeEach(() => {
   state.sharedGpu = false
+  state.execution = undefined
   state.gateway = {
     available: true,
     torch_initialized: false,
@@ -91,12 +101,23 @@ it('shows allocator counters after Torch initializes CUDA', async () => {
   expect(screen.queryByText('未初始化 CUDA')).not.toBeInTheDocument()
 })
 
-it('explains when a shared GPU is intentionally reserved for ComfyUI', async () => {
+it('explains that Gateway and ComfyUI share a scheduler-owned pool', async () => {
   state.sharedGpu = true
   state.gateway.available = false
   state.gateway.error = 'gpu_status_unavailable'
+  state.execution = {
+    available: true,
+    mode: 'scheduler_pool',
+    owner: 'scheduler',
+    topology_complete: true,
+    runnable_now: true,
+    device_count: 1,
+    worker_count: 1,
+    runnable_worker_count: 1,
+  }
   renderConfig()
-  expect(await screen.findByText('GPU 已保留给 ComfyUI')).toBeInTheDocument()
-  expect(screen.getByText(/显存完整留给本地图片和视频生成/)).toBeInTheDocument()
+  expect(await screen.findByText(/动态资源池可用 · 1 张 GPU/)).toBeInTheDocument()
+  expect(screen.getByText(/Gateway 空闲时可借用 GPU/)).toBeInTheDocument()
+  expect(screen.queryByText('GPU 已保留给 ComfyUI')).not.toBeInTheDocument()
   expect(screen.queryByText('GPU 状态不可用')).not.toBeInTheDocument()
 })
