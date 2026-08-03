@@ -31,20 +31,26 @@ class SSEGenerator:
         """生成 SSE 格式的数据流。
 
         每个 chunk 经 ``json.dumps`` 序列化为单行 JSON（``ensure_ascii=False``
-        但 JSON 会把真实换行转义成字面 ``\n``，因此输出不含裸换行），
-        直接作为一条 SSE ``data:`` 事件发出。正常完成时以
-        ``data: [DONE]`` 结束；错误事件是终止事件，之后不得再发送成功终止标记。
-        不做额外转义——之前的 ``_escape_sse`` 会把 JSON 里的 ``\n`` 再翻倍成
-        ``\\n``，导致客户端 JSON 解析后得到字面 "反斜杠 n" 而非换行，
-        破坏代码块等含换行的内容。
+        但 JSON 会把真实换行转义成字面 ``\n``，因此输出不含裸换行）。
+        正常完成时以 ``data: [DONE]`` 结束；错误事件是终止事件，之后不再
+        向客户端发送数据，也不得发送成功终止标记。
+
+        收到错误事件后仍会继续排空内层生成器。Core dispatcher 的配额释放、
+        请求日志和账本结算位于其异步生成器循环之后；如果在错误事件的
+        ``yield`` 位置直接 ``break``/``aclose``，这些收尾逻辑会被跳过。
         """
         emit_done = True
+        terminal_error = False
         try:
             async for chunk in self.completion_gen:
+                if terminal_error:
+                    # Drain the producer so its post-stream settlement executes,
+                    # but never expose data after the terminal error event.
+                    continue
                 yield "data: " + json.dumps(chunk, ensure_ascii=False) + "\n\n"
                 if isinstance(chunk, dict) and isinstance(chunk.get("error"), dict):
+                    terminal_error = True
                     emit_done = False
-                    break
         except (asyncio.CancelledError, GeneratorExit):
             # Client disconnects must propagate cancellation to Starlette and
             # must not be converted into an SSE error event.
@@ -52,9 +58,15 @@ class SSEGenerator:
             raise
         except Exception as exc:
             emit_done = False
-            logger.error("SSE stream generation error: %s", exc)
+            logger.error(
+                "SSE stream generation error: %s",
+                type(exc).__name__,
+            )
             error_chunk = {
-                "error": {"code": "internal_error", "message": str(exc)},
+                "error": {
+                    "code": "internal_error",
+                    "message": "The response stream terminated unexpectedly.",
+                },
             }
             yield "data: " + json.dumps(error_chunk, ensure_ascii=False) + "\n\n"
         finally:
@@ -65,7 +77,10 @@ class SSEGenerator:
                 except (asyncio.CancelledError, GeneratorExit):
                     raise
                 except Exception as exc:
-                    logger.warning("Failed to close upstream SSE generator: %s", exc)
+                    logger.warning(
+                        "Failed to close upstream SSE generator: %s",
+                        type(exc).__name__,
+                    )
 
         if emit_done:
             yield "data: [DONE]\n\n"
