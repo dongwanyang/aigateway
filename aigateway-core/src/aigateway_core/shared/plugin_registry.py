@@ -232,10 +232,15 @@ class PluginRegistry:
                     is_builder = True
                 else:
                     completion, owner_thread = active_build
-                    # A constructor may inspect the registry. Waiting for its own
-                    # in-flight instance would deadlock; omit that incomplete
-                    # registration from the nested view instead.
-                    if owner_thread == current_thread:
+                    # A constructor may inspect the registry. If this thread is
+                    # itself constructing any plugin, waiting for another active
+                    # constructor can form an A->B / B->A cycle. Nested registry
+                    # views therefore omit all currently in-flight registrations.
+                    current_thread_is_building = any(
+                        builder_thread == current_thread
+                        for _, builder_thread in self._instance_builds.values()
+                    )
+                    if owner_thread == current_thread or current_thread_is_building:
                         return None
                     is_builder = False
             if is_builder:
