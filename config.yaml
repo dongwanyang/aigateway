@@ -533,7 +533,7 @@ generation_optimization:
       connect_timeout: 10
       execution_timeout: 1200
       required: true
-      scheduler_managed: false
+      scheduler_managed: true
       workflow_version: image-v1
       checkpoint_name: sd_xl_base_1.0.safetensors
       allowed_checkpoints:

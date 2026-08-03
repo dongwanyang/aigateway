@@ -507,7 +507,7 @@ generation_optimization:
       connect_timeout: 10    # 连接超时（秒）
       execution_timeout: 1200 # T4 上的大模型工作流可达数分钟；超时会主动取消 ComfyUI 任务
       required: true         # 不可用时 fail-closed，不静默改走外部媒体 API
-      scheduler_managed: false # 仅本地 CUDA 容器 Worker 设为 true；远程端点不得占用本机 GPU 租约
+      scheduler_managed: true # 仅本地 CUDA 容器 Worker 设为 true；远程端点不得占用本机 GPU 租约
       workflow_version: "image-v1" # 图片工作流版本；变更图结构时递增
       checkpoint_name: "sd_xl_base_1.0.safetensors" # 默认 SDXL checkpoint
       allowed_checkpoints: ["sd_xl_base_1.0.safetensors"] # 允许加载的 checkpoint 白名单
