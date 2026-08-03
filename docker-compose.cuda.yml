@@ -1,5 +1,11 @@
 services:
   gateway:
+    environment:
+      # The shared GPU pool discovers stable UUIDs and reads device telemetry
+      # through nvidia-smi/NVML without initializing a PyTorch CUDA context.
+      # Explicit utility capability keeps those driver tools available even
+      # though the Gateway image is based on python:slim rather than a CUDA base.
+      NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
     deploy:
       resources:
         reservations:
