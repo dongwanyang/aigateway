@@ -1,0 +1,31 @@
+name: Apply PR26 Zero Usage Fix
+
+on:
+  pull_request:
+    branches:
+      - main
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: ${{ github.event.pull_request.number == 26 }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/fix-qa-report-2026-08-02
+          fetch-depth: 0
+      - name: Apply zero-usage stream settlement fix
+        run: python scripts/apply_pr26_zero_usage_stream_fix.py
+      - name: Commit source and regression coverage
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add aigateway-api/src/aigateway_api/dispatcher.py \
+            aigateway-core/src/aigateway_core/dispatch/dispatcher.py \
+            tests/unit/test_merge_readiness_followup.py
+          git commit -m "fix(stream): settle zero-usage provider failures"
+          git push origin HEAD:agent/fix-qa-report-2026-08-02
