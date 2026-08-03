@@ -7,8 +7,10 @@ request-scoped protocol guards without mutating shared dispatcher state.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
+import logging
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -17,6 +19,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from aigateway_core.dispatch.classifier import classify_request
 from aigateway_core.dispatch.dispatcher import RequestDispatcher as CoreRequestDispatcher
+
+logger = logging.getLogger(__name__)
 
 _MIN_TEXT_OUTPUT_TOKENS = 32
 _ORIGINAL_DISPATCH_ATTR = "_aigateway_api_original_dispatch"
@@ -57,6 +61,19 @@ def _output_budget_error(
             },
         }
     }
+
+
+def _upstream_stream_error(usage: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "error": {
+            "code": "upstream_stream_error",
+            "message": "The upstream model stream terminated before completion.",
+            "type": "upstream_error",
+        }
+    }
+    if usage:
+        payload["usage"] = dict(usage)
+    return payload
 
 
 def _choice_has_output(choice: dict[str, Any]) -> bool:
@@ -136,6 +153,30 @@ def _is_output_budget_exhausted(request: Any) -> bool:
     )
 
 
+def _mark_upstream_stream_failed(request: Any) -> None:
+    _request_state(request)._upstream_stream_failed = True
+
+
+def _is_upstream_stream_failed(request: Any) -> bool:
+    return bool(getattr(_request_state(request), "_upstream_stream_failed", False))
+
+
+def _terminal_status_code(request: Any) -> int | None:
+    if _is_output_budget_exhausted(request):
+        return 422
+    if _is_upstream_stream_failed(request):
+        return 502
+    return None
+
+
+def _terminal_ledger_status(request: Any) -> str | None:
+    if _is_output_budget_exhausted(request):
+        return "output_budget_exhausted"
+    if _is_upstream_stream_failed(request):
+        return "upstream_stream_error"
+    return None
+
+
 def _cached_data(value: Any) -> dict[str, Any] | None:
     if isinstance(value, bytes):
         value = value.decode("utf-8", errors="replace")
@@ -160,7 +201,7 @@ class _RequestCacheProxy:
 
     @property
     def _qdrant_client(self) -> Any:
-        if self._bypass_all:
+        if self._blocked():
             return None
         return getattr(self._target, "_qdrant_client", None)
 
@@ -168,7 +209,7 @@ class _RequestCacheProxy:
         return getattr(self._target, name)
 
     def _blocked(self) -> bool:
-        return self._bypass_all or _is_output_budget_exhausted(self._request)
+        return self._bypass_all or _terminal_status_code(self._request) is not None
 
     def generate_cache_key(self, *args: Any, **kwargs: Any) -> Any:
         return self._target.generate_cache_key(*args, **kwargs)
@@ -195,9 +236,14 @@ class _RequestCacheProxy:
             return None
         return await self._target.l2_search_store(*args, **kwargs)
 
+    async def l3_store(self, *args: Any, **kwargs: Any) -> Any:
+        if self._blocked():
+            return None
+        return await self._target.l3_store(*args, **kwargs)
+
 
 class _RequestKeyStoreProxy:
-    """Preserve token accounting while marking exhausted outputs as failures."""
+    """Preserve token accounting while marking terminal outputs as failures."""
 
     def __init__(self, target: Any, request: Any) -> None:
         self._target = target
@@ -207,10 +253,10 @@ class _RequestKeyStoreProxy:
         return getattr(self._target, name)
 
     async def record_request_cost(self, *args: Any, **kwargs: Any) -> Any:
-        if _is_output_budget_exhausted(self._request):
+        terminal_status = _terminal_ledger_status(self._request)
+        if terminal_status is not None and kwargs.get("status") == "ok":
             kwargs = dict(kwargs)
-            if kwargs.get("status") == "ok":
-                kwargs["status"] = "output_budget_exhausted"
+            kwargs["status"] = terminal_status
         return await self._target.record_request_cost(*args, **kwargs)
 
 
@@ -270,30 +316,72 @@ async def _inspect_upstream_stream(
     iterator: AsyncIterator[Any],
     request: Any,
 ) -> AsyncIterator[Any]:
+    """Convert provider failures into one terminal chunk before Core cleanup.
+
+    The Core stream wrapper performs quota settlement, request logging and ledger
+    writes only after its input iterator finishes. Converting exceptions here
+    lets that wrapper finish normally; the SSE formatter can suppress ``[DONE]``
+    without closing the Core generator at a suspended ``yield`` point.
+    """
     saw_content = False
     terminal_reasons: list[str] = []
     completion_tokens = 0
+    last_usage: dict[str, Any] = {}
+    completed_normally = False
 
-    async for chunk in iterator:
-        if isinstance(chunk, dict):
-            usage = chunk.get("usage") or {}
-            if isinstance(usage, dict):
-                completion_tokens = max(
-                    completion_tokens,
-                    int(usage.get("completion_tokens", 0) or 0),
+    try:
+        async for original_chunk in iterator:
+            chunk = original_chunk
+            if isinstance(chunk, dict):
+                usage = chunk.get("usage") or {}
+                if isinstance(usage, dict) and usage:
+                    last_usage = dict(usage)
+                    completion_tokens = max(
+                        completion_tokens,
+                        int(usage.get("completion_tokens", 0) or 0),
+                    )
+                if isinstance(chunk.get("error"), dict):
+                    _mark_upstream_stream_failed(request)
+                    if last_usage and not isinstance(chunk.get("usage"), dict):
+                        chunk = dict(chunk)
+                        chunk["usage"] = dict(last_usage)
+                    yield chunk
+                    return
+                for choice in chunk.get("choices", []) or []:
+                    if not isinstance(choice, dict):
+                        continue
+                    if _choice_has_output(choice):
+                        saw_content = True
+                    finish_reason = choice.get("finish_reason")
+                    if isinstance(finish_reason, str) and finish_reason:
+                        terminal_reasons.append(finish_reason)
+            yield chunk
+        completed_normally = True
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        _mark_upstream_stream_failed(request)
+        logger.warning(
+            "Upstream model stream failed before completion: %s",
+            type(exc).__name__,
+        )
+        yield _upstream_stream_error(last_usage)
+    finally:
+        close = getattr(iterator, "aclose", None)
+        if callable(close):
+            try:
+                await close()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.debug(
+                    "Upstream stream close failed: %s",
+                    type(exc).__name__,
                 )
-            for choice in chunk.get("choices", []) or []:
-                if not isinstance(choice, dict):
-                    continue
-                if _choice_has_output(choice):
-                    saw_content = True
-                finish_reason = choice.get("finish_reason")
-                if isinstance(finish_reason, str) and finish_reason:
-                    terminal_reasons.append(finish_reason)
-        yield chunk
 
     if (
-        terminal_reasons
+        completed_normally
+        and terminal_reasons
         and all(reason == "length" for reason in terminal_reasons)
         and not saw_content
     ):
@@ -319,13 +407,12 @@ def _install_request_log_guard() -> None:
 
     async def guarded_record_request_log(*args: Any, **kwargs: Any) -> Any:
         request = kwargs.get("request")
-        if (
-            request is not None
-            and _is_output_budget_exhausted(request)
-            and kwargs.get("status_code") == 200
-        ):
+        terminal_status = (
+            _terminal_status_code(request) if request is not None else None
+        )
+        if terminal_status is not None and kwargs.get("status_code") == 200:
             kwargs = dict(kwargs)
-            kwargs["status_code"] = 422
+            kwargs["status_code"] = terminal_status
         return await original(*args, **kwargs)
 
     setattr(guarded_record_request_log, _LOG_GUARD_ATTR, True)
@@ -363,7 +450,7 @@ async def _guard_sse_output(
     metrics_collector: Any = None,
     started_at: float | None = None,
 ) -> AsyncIterator[str | bytes]:
-    """Replace an empty length-limited terminator with one terminal SSE error."""
+    """Emit one terminal SSE outcome while preserving inner cleanup."""
     saw_content = False
     terminal_reasons: list[str] = []
     saw_error = False
@@ -410,7 +497,10 @@ async def _guard_sse_output(
     if exhausted and request is not None:
         _mark_output_budget_exhausted(request, completion_tokens)
 
-    status_code = 422 if exhausted else (502 if saw_error else 200)
+    terminal_status = (
+        _terminal_status_code(request) if request is not None else None
+    )
+    status_code = terminal_status or (502 if saw_error else 200)
     if started_at is not None:
         _record_final_metrics(
             metrics_collector,
