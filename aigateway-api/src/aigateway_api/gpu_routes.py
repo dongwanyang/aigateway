@@ -135,8 +135,13 @@ def _scheduler_runnable_pairs(
             continue
         capabilities = override.get("capabilities")
         if not isinstance(capabilities, list):
-            capabilities = worker.get("capabilities") or []
-        if not isinstance(capabilities, list) or not capabilities:
+            worker_capabilities = worker.get("capabilities")
+            capabilities = (
+                worker_capabilities
+                if isinstance(worker_capabilities, list)
+                else ["image", "video", "upscale"]
+            )
+        if not capabilities:
             continue
         if capability is not None and capability not in capabilities:
             continue
@@ -174,9 +179,13 @@ def _supported_capabilities(
         override = _device_override(scheduler, str(device.get("uuid") or ""))
         capabilities = override.get("capabilities")
         if not isinstance(capabilities, list):
-            capabilities = worker.get("capabilities") or []
-        if isinstance(capabilities, list):
-            result.update(str(item) for item in capabilities if item)
+            worker_capabilities = worker.get("capabilities")
+            capabilities = (
+                worker_capabilities
+                if isinstance(worker_capabilities, list)
+                else ["image", "video", "upscale"]
+            )
+        result.update(str(item) for item in capabilities if item)
     return sorted(result)
 
 

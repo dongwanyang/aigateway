@@ -61,9 +61,9 @@ def _make_providers_config():
                     "models": ["model-a", "model-b", "model-c"],
                     "fallback_models": ["model-b", "model-c"],
                     "pricing": {
-                        "model-a": {"prompt": 0.01, "completion": 0.5},
-                        "model-b": {"prompt": 0.05, "completion": 1.0},
-                        "model-c": {"prompt": 0.10, "completion": 2.0},
+                        "model-a": {"prompt": 0.000005, "completion": 0.00001},
+                        "model-b": {"prompt": 0.000025, "completion": 0.00005},
+                        "model-c": {"prompt": 0.00005, "completion": 0.0001},
                     },
                 }
             ],
@@ -76,8 +76,8 @@ def _make_providers_config():
                     "models": ["model-d", "model-e"],
                     "fallback_models": ["model-e"],
                     "pricing": {
-                        "model-d": {"prompt": 0.03, "completion": 0.8},
-                        "model-e": {"prompt": 0.08, "completion": 1.5},
+                        "model-d": {"prompt": 0.000015, "completion": 0.00003},
+                        "model-e": {"prompt": 0.00004, "completion": 0.00008},
                     },
                 }
             ],
@@ -129,7 +129,7 @@ class TestBuildModelList:
         assert model_a.provider == "provider-a"
         assert model_a.modality == ["generative"]
         assert model_a.capability_score == 30
-        assert model_a.price_per_request == 0.01
+        assert model_a.price_per_request == pytest.approx(0.01)
         assert model_a.fallback_models == ["model-b", "model-c"]
         assert model_a.is_available is True
 
@@ -249,7 +249,7 @@ class TestNormalRouting:
         assert decision.selected_model == "model-d"
         assert decision.selected_provider == "provider-b"
         assert decision.reason == "complexity"
-        assert decision.estimated_cost == 0.03
+        assert decision.estimated_cost == pytest.approx(0.03)
 
     def test_selects_highest_capability_when_none_qualify(self):
         """没有模型 capability >= complexity 时选最高 capability."""
@@ -342,7 +342,7 @@ class TestModelOverride:
         assert decision.selected_model == "model-c"
         assert decision.selected_provider == "provider-a"
         assert decision.reason == "override"
-        assert decision.estimated_cost == 0.10
+        assert decision.estimated_cost == pytest.approx(0.10)
 
     def test_override_nonexistent_model_raises_error(self):
         strategy = _make_strategy()

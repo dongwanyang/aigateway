@@ -196,5 +196,6 @@ class TestSSEGeneratorReal:
         import json
         err_data = json.loads(chunks[1].replace("data: ", "").strip())
         assert err_data["error"]["code"] == "internal_error"
-        assert "Something went wrong" in err_data["error"]["message"]
+        assert err_data["error"]["message"] == "The response stream terminated unexpectedly."
+        assert "Something went wrong" not in err_data["error"]["message"]
         assert all("[DONE]" not in chunk for chunk in chunks)

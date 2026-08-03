@@ -68,7 +68,10 @@ async def test_enabled_gpu_pool_never_bypasses_missing_topology(
 ) -> None:
     strategy = DraftGeneratorStrategy(
         DraftWorkflowConfig(store_dir=str(tmp_path)),
-        comfyui_config=ComfyUIConfig(workflow_version="test"),
+        comfyui_config=ComfyUIConfig(
+            workflow_version="test",
+            scheduler_managed=True,
+        ),
         store_dir=str(tmp_path),
     )
     coordinator = GpuResourceCoordinator(
