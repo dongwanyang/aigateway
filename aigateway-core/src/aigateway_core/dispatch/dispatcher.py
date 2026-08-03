@@ -1352,7 +1352,10 @@ class RequestDispatcher:
         except Exception as exc:
             logger.warning("流式请求日志写入失败: %s", exc)
 
-        if not usage:
+        terminal_stream_failure = bool(
+            getattr(request.state, "_upstream_stream_failed", False)
+        )
+        if not usage and not terminal_stream_failure:
             await self._release_quota_reservation(request, key_store, key_hash)
             return
 
@@ -1387,6 +1390,12 @@ class RequestDispatcher:
                 )
             except Exception as exc:
                 logger.warning("流式成本账本写入失败: %s", exc)
+
+        # A terminal provider failure with no trustworthy usage must still
+        # produce a zero-cost ledger row, but its optimistic reservation cannot
+        # remain charged indefinitely.
+        if terminal_stream_failure and tt <= 0:
+            await self._release_quota_reservation(request, key_store, key_hash)
 
         # 配额扣减（修正点：原流式不扣）
         if key_hash and key_store and tt > 0:

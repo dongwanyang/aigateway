@@ -64,16 +64,24 @@ def _output_budget_error(
 
 
 def _upstream_stream_error(usage: dict[str, Any] | None = None) -> dict[str, Any]:
-    payload: dict[str, Any] = {
+    normalized_usage = {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+    }
+    if isinstance(usage, dict):
+        for key in normalized_usage:
+            normalized_usage[key] = max(0, int(usage.get(key, 0) or 0))
+    return {
         "error": {
             "code": "upstream_stream_error",
             "message": "The upstream model stream terminated before completion.",
             "type": "upstream_error",
-        }
+        },
+        # A non-empty zero usage object lets Core persist a failure ledger row.
+        # Core separately releases the reservation when total_tokens remains 0.
+        "usage": normalized_usage,
     }
-    if usage:
-        payload["usage"] = dict(usage)
-    return payload
 
 
 def _choice_has_output(choice: dict[str, Any]) -> bool:
@@ -342,9 +350,9 @@ async def _inspect_upstream_stream(
                     )
                 if isinstance(chunk.get("error"), dict):
                     _mark_upstream_stream_failed(request)
-                    if last_usage and not isinstance(chunk.get("usage"), dict):
+                    if not isinstance(chunk.get("usage"), dict) or not chunk.get("usage"):
                         chunk = dict(chunk)
-                        chunk["usage"] = dict(last_usage)
+                        chunk["usage"] = _upstream_stream_error(last_usage)["usage"]
                     yield chunk
                     return
                 for choice in chunk.get("choices", []) or []:

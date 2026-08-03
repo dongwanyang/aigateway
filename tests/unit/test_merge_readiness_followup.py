@@ -439,3 +439,50 @@ def test_plugin_registry_constructs_heavy_plugin_once_under_concurrency() -> Non
 
     assert constructions == 1
     assert all(instance is instances[0] for instance in instances)
+
+
+@pytest.mark.asyncio
+async def test_provider_failure_without_usage_records_ledger_and_releases_quota() -> None:
+    request = SimpleNamespace(
+        state=SimpleNamespace(
+            trace_id="trace-zero",
+            request_id="request-zero",
+            _lua_quota_reserved=True,
+            _lua_reserved_tokens=10,
+            _lua_reserved_cost=0.0,
+        )
+    )
+    key_store = _RecordingKeyStore()
+    key_proxy = _RequestKeyStoreProxy(key_store, request)
+
+    async def provider():
+        if False:
+            yield {}
+        raise RuntimeError("provider failed before first token")
+
+    dispatcher = RequestDispatcher({})
+    settled = dispatcher._wrap_stream_full(
+        _inspect_upstream_stream(provider(), request),
+        None,
+        None,
+        key_proxy,
+        request,
+        "test-model",
+        "user",
+        "key-hash",
+        None,
+        None,
+        time.time(),
+        "group",
+        "understanding",
+        "group",
+        "group",
+    )
+    chunks = [chunk async for chunk in SSEGenerator(settled).generate()]
+
+    assert any("upstream_stream_error" in chunk for chunk in chunks)
+    assert all("[DONE]" not in chunk for chunk in chunks)
+    assert key_store.ledger_statuses == ["upstream_stream_error"]
+    assert key_store.increment_calls == []
+    assert len(key_store.release_calls) == 1
+    assert request.state._lua_quota_reserved is False
