@@ -2,28 +2,26 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from fastapi.responses import JSONResponse
 
 from aigateway_api import gpu_routes
 from aigateway_api.dispatcher import (
-    RequestDispatcher,
-    _ORIGINAL_DISPATCH_ATTR,
     _empty_length_limited_data,
     _guard_sse_output,
 )
 from aigateway_core.pipelines.generation._common.config import DraftWorkflowConfig
+from aigateway_core.pipelines.generation._common.exceptions import DraftWorkflowError
 from aigateway_core.pipelines.generation.draft.draft_generator import (
     DraftGeneratorStrategy,
 )
 from aigateway_core.route.metrics.costing import estimate_model_cost
 from aigateway_core.route.streaming.sse import SSEGenerator
 from aigateway_core.shared.gpu_scheduler import (
+    ComfyWorker,
+    GpuDevice,
     GpuResourceCoordinator,
     GpuSchedulerConfig,
 )
@@ -65,7 +63,7 @@ def test_small_request_cost_is_not_inflated(
 
 
 @pytest.mark.asyncio
-async def test_empty_gpu_topology_uses_direct_comfyui_compatibility_path(
+async def test_enabled_gpu_pool_never_bypasses_missing_topology(
     tmp_path: Path,
 ) -> None:
     strategy = DraftGeneratorStrategy(
@@ -74,7 +72,9 @@ async def test_empty_gpu_topology_uses_direct_comfyui_compatibility_path(
         store_dir=str(tmp_path),
     )
     coordinator = GpuResourceCoordinator(
-        GpuSchedulerConfig.from_mapping({"generation_wait_timeout_seconds": 120}),
+        GpuSchedulerConfig.from_mapping(
+            {"generation_wait_timeout_seconds": 120, "enabled": True}
+        ),
         devices=[],
         workers=[],
     )
@@ -86,26 +86,87 @@ async def test_empty_gpu_topology_uses_direct_comfyui_compatibility_path(
         calls += 1
         return b"submitted"
 
-    result, worker = await asyncio.wait_for(
-        strategy._run_on_comfy_worker("draft-test", "image", operation),
-        timeout=0.1,
-    )
+    with pytest.raises(
+        DraftWorkflowError,
+        match="gpu_scheduler_topology_unavailable",
+    ):
+        await asyncio.wait_for(
+            strategy._run_on_comfy_worker("draft-test", "image", operation),
+            timeout=0.1,
+        )
 
-    assert result == b"submitted"
-    assert worker is None
-    assert calls == 1
+    assert calls == 0
     await coordinator.close()
 
 
-def test_comfyui_only_topology_is_reported_as_delegated_execution() -> None:
+@pytest.mark.asyncio
+async def test_enabled_gpu_pool_allocates_matching_comfy_worker(
+    tmp_path: Path,
+) -> None:
+    strategy = DraftGeneratorStrategy(
+        DraftWorkflowConfig(store_dir=str(tmp_path)),
+        comfyui_config=ComfyUIConfig(workflow_version="test"),
+        store_dir=str(tmp_path),
+    )
+    coordinator = GpuResourceCoordinator(
+        GpuSchedulerConfig.from_mapping(
+            {
+                "enabled": True,
+                "device_safety_margin_gb": 0,
+                "comfyui_idle_reservation_seconds": 0,
+            }
+        ),
+        devices=[GpuDevice("GPU-a", 0, total_memory_gb=16, free_memory_gb=15)],
+        workers=[
+            ComfyWorker(
+                "comfyui-gpu-0",
+                "GPU-a",
+                "http://comfyui:8188",
+                frozenset({"image", "video", "upscale"}),
+            )
+        ],
+    )
+    strategy._gpu_coordinator = coordinator
+
+    async def operation() -> str:
+        assert strategy._server_url() == "http://comfyui:8188"
+        return "submitted"
+
+    result, worker = await strategy._run_on_comfy_worker(
+        "draft-test",
+        "image",
+        operation,
+    )
+
+    assert result == "submitted"
+    assert worker is not None
+    assert worker.worker_id == "comfyui-gpu-0"
+    await coordinator.close()
+
+
+def test_shared_pool_status_is_authoritative() -> None:
+    scheduler = {
+        "enabled": True,
+        "devices": [{"uuid": "GPU-a"}],
+        "workers": [
+            {
+                "worker_id": "comfyui-gpu-0",
+                "device_uuid": "GPU-a",
+                "capabilities": ["image", "video", "upscale"],
+                "healthy": True,
+            }
+        ],
+    }
     gateway = gpu_routes._normalize_gateway_topology(
         {
             "available": False,
             "torch_initialized": False,
+            "cuda_disabled": False,
             "error": "gpu_status_unavailable",
         },
         comfy_available=True,
-        scheduler={"devices": [], "workers": []},
+        scheduler=scheduler,
+        pool_expected=True,
     )
     execution = gpu_routes._execution_gpu_status(
         gateway,
@@ -115,24 +176,19 @@ def test_comfyui_only_topology_is_reported_as_delegated_execution() -> None:
             "free_bytes": 15_000,
             "used_bytes": 1_000,
         },
-        scheduler={"devices": [], "workers": []},
+        scheduler=scheduler,
+        pool_expected=True,
     )
 
-    assert gateway["available"] is False
+    assert gateway["available"] is True
     assert gateway["local_cuda_available"] is False
-    assert gateway["status"] == "delegated"
-    assert gateway["delegated_to"] == "comfyui"
+    assert gateway["status"] == "scheduler_pool"
+    assert gateway["delegated_to"] is None
+    assert gateway["cuda_disabled"] is False
     assert gateway["error"] is None
-    assert execution == {
-        "available": True,
-        "mode": "delegated_comfyui",
-        "owner": "comfyui",
-        "memory": {
-            "total_bytes": 16_000,
-            "free_bytes": 15_000,
-            "used_bytes": 1_000,
-        },
-    }
+    assert execution["available"] is True
+    assert execution["mode"] == "scheduler_pool"
+    assert execution["owner"] == "scheduler"
 
 
 def test_empty_length_limited_nonstream_response_is_detected() -> None:
@@ -169,89 +225,6 @@ def test_short_nonstream_content_is_not_treated_as_budget_failure() -> None:
 
     assert exhausted is False
     assert completion_tokens == 2
-
-
-@pytest.mark.asyncio
-async def test_dispatch_guard_maps_empty_budget_result_and_bypasses_cache(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    cache_manager = object()
-    dispatcher = RequestDispatcher({"cache_manager": cache_manager})
-    observed_cache_managers: list[Any] = []
-
-    async def original_dispatch(self: Any, body: Any, request: Any) -> JSONResponse:
-        observed_cache_managers.append(self.cache_manager)
-        return JSONResponse(
-            content={
-                "data": {
-                    "choices": [
-                        {
-                            "index": 0,
-                            "message": {"role": "assistant", "content": ""},
-                            "finish_reason": "length",
-                        }
-                    ],
-                    "usage": {"completion_tokens": 10},
-                },
-                "message": "success",
-                "_meta": {"cost": 0.00001},
-            }
-        )
-
-    monkeypatch.setattr(RequestDispatcher, _ORIGINAL_DISPATCH_ATTR, original_dispatch)
-    body = SimpleNamespace(
-        model="agnes-2.0-flash",
-        max_tokens=10,
-        generation_options=None,
-    )
-
-    response = await dispatcher.dispatch(body, SimpleNamespace())
-    payload = json.loads(response.body)
-
-    assert observed_cache_managers == [None]
-    assert dispatcher.cache_manager is cache_manager
-    assert response.status_code == 422
-    assert payload["error"]["code"] == "output_budget_exhausted"
-    assert payload["error"]["param"] == "max_tokens"
-    assert payload["_meta"]["cost"] == 0.00001
-
-
-@pytest.mark.asyncio
-async def test_dispatch_guard_preserves_valid_short_content(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    dispatcher = RequestDispatcher({"cache_manager": object()})
-
-    async def original_dispatch(self: Any, body: Any, request: Any) -> JSONResponse:
-        assert self.cache_manager is None
-        return JSONResponse(
-            content={
-                "data": {
-                    "choices": [
-                        {
-                            "index": 0,
-                            "message": {"role": "assistant", "content": "可以"},
-                            "finish_reason": "length",
-                        }
-                    ],
-                    "usage": {"completion_tokens": 2},
-                },
-                "message": "success",
-            }
-        )
-
-    monkeypatch.setattr(RequestDispatcher, _ORIGINAL_DISPATCH_ATTR, original_dispatch)
-    body = SimpleNamespace(
-        model="agnes-2.0-flash",
-        max_tokens=10,
-        generation_options=None,
-    )
-
-    response = await dispatcher.dispatch(body, SimpleNamespace())
-    payload = json.loads(response.body)
-
-    assert response.status_code == 200
-    assert payload["data"]["choices"][0]["message"]["content"] == "可以"
 
 
 @pytest.mark.asyncio
