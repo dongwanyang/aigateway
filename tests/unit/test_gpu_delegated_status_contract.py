@@ -50,6 +50,46 @@ def test_valid_shared_pool_is_not_reported_as_comfyui_delegation() -> None:
     assert execution["owner"] == "scheduler"
 
 
+def test_pool_mode_precedes_raw_gateway_allocator_status() -> None:
+    scheduler = {
+        "enabled": True,
+        "devices": [{"uuid": "GPU-a"}],
+        "workers": [
+            {
+                "worker_id": "comfyui-gpu-0",
+                "device_uuid": "GPU-a",
+                "capabilities": ["image"],
+                "healthy": True,
+            }
+        ],
+    }
+    status = _normalize_gateway_topology(
+        {
+            "available": True,
+            "torch_initialized": False,
+            "cuda_disabled": False,
+            "device_total_bytes": 16_000,
+            "device_free_bytes": 15_000,
+            "device_used_bytes": 1_000,
+        },
+        comfy_available=True,
+        scheduler=scheduler,
+        pool_expected=True,
+    )
+    execution = _execution_gpu_status(
+        status,
+        comfy_available=True,
+        normalized_comfy_memory=None,
+        scheduler=scheduler,
+        pool_expected=True,
+    )
+
+    assert status["status"] == "scheduler_pool"
+    assert status["local_cuda_available"] is True
+    assert execution["mode"] == "scheduler_pool"
+    assert execution["owner"] == "scheduler"
+
+
 def test_enabled_pool_with_missing_inventory_is_an_error() -> None:
     scheduler = {
         "enabled": True,
