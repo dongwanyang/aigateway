@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import yaml
 
 from aigateway_api.dispatcher import (
     _OutputGuardBridge,
@@ -192,38 +194,56 @@ async def test_stream_exhaustion_records_422_and_suppresses_done() -> None:
 @pytest.mark.parametrize(
     "scheduler",
     [
-        {"devices": [{"uuid": "gpu-1"}], "workers": []},
-        {"devices": [], "workers": [{"worker_id": "w-1", "device_uuid": "gpu-1"}]},
         {
+            "enabled": True,
             "devices": [{"uuid": "gpu-1"}],
             "workers": [{"worker_id": "w-1", "device_uuid": "gpu-2"}],
         },
+        {
+            "enabled": True,
+            "devices": [],
+            "workers": [{"worker_id": "w-1", "device_uuid": "gpu-1"}],
+        },
+        {
+            "enabled": True,
+            "devices": [],
+            "workers": [],
+        },
     ],
 )
-def test_partial_scheduler_topology_is_not_reported_available(
+def test_enabled_pool_topology_failure_is_not_reported_as_delegated(
     scheduler: dict[str, Any],
 ) -> None:
     gateway = _normalize_gateway_topology(
-        {"available": False, "error": "gpu_status_unavailable"},
-        comfy_available=False,
+        {
+            "available": False,
+            "cuda_disabled": False,
+            "error": "gpu_status_unavailable",
+        },
+        comfy_available=True,
         scheduler=scheduler,
+        pool_expected=True,
     )
     execution = _execution_gpu_status(
         gateway,
-        comfy_available=False,
+        comfy_available=True,
         normalized_comfy_memory=None,
         scheduler=scheduler,
+        pool_expected=True,
     )
 
-    assert gateway["status"] == "unavailable"
+    assert gateway["available"] is False
+    assert gateway["status"] == "scheduler_error"
+    assert gateway["delegated_to"] is None
     assert gateway["scheduler_topology_complete"] is False
     assert gateway["error"] == "gpu_scheduler_topology_incomplete"
     assert execution["available"] is False
-    assert execution["mode"] == "unavailable"
+    assert execution["mode"] == "scheduler_error"
 
 
 def test_scheduler_pool_requires_matching_worker_device_pair() -> None:
     scheduler = {
+        "enabled": True,
         "devices": [{"uuid": "gpu-1"}, {"uuid": "gpu-2"}],
         "workers": [
             {"worker_id": "w-1", "device_uuid": "gpu-1"},
@@ -231,19 +251,66 @@ def test_scheduler_pool_requires_matching_worker_device_pair() -> None:
         ],
     }
     gateway = _normalize_gateway_topology(
-        {"available": False, "error": "gpu_status_unavailable"},
-        comfy_available=False,
+        {
+            "available": False,
+            "cuda_disabled": False,
+            "error": "gpu_status_unavailable",
+        },
+        comfy_available=True,
+        scheduler=scheduler,
+        pool_expected=True,
+    )
+    execution = _execution_gpu_status(
+        gateway,
+        comfy_available=True,
+        normalized_comfy_memory=None,
+        scheduler=scheduler,
+        pool_expected=True,
+    )
+
+    assert gateway["available"] is True
+    assert gateway["status"] == "scheduler_pool"
+    assert gateway["delegated_to"] is None
+    assert gateway["scheduler_topology_complete"] is True
+    assert execution["available"] is True
+    assert execution["mode"] == "scheduler_pool"
+    assert execution["device_count"] == 1
+    assert execution["worker_count"] == 1
+
+
+def test_direct_comfyui_delegation_requires_disabled_scheduler() -> None:
+    scheduler = {"enabled": False, "devices": [], "workers": []}
+    gateway = _normalize_gateway_topology(
+        {
+            "available": False,
+            "cuda_disabled": False,
+            "error": "gpu_status_unavailable",
+        },
+        comfy_available=True,
         scheduler=scheduler,
     )
     execution = _execution_gpu_status(
         gateway,
-        comfy_available=False,
-        normalized_comfy_memory=None,
+        comfy_available=True,
+        normalized_comfy_memory={"free_bytes": 10},
         scheduler=scheduler,
     )
 
-    assert gateway["status"] == "scheduler_pool"
-    assert gateway["scheduler_topology_complete"] is True
-    assert execution["available"] is True
-    assert execution["device_count"] == 1
-    assert execution["worker_count"] == 1
+    assert gateway["status"] == "delegated"
+    assert gateway["delegated_to"] == "comfyui"
+    assert gateway["cuda_disabled"] is False
+    assert execution["mode"] == "delegated_comfyui"
+
+
+def test_cuda_compose_exposes_nvidia_utility_capability() -> None:
+    compose_path = Path(__file__).resolve().parents[2] / "docker-compose.cuda.yml"
+    compose = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
+
+    gateway = compose["services"]["gateway"]
+    assert gateway["environment"]["NVIDIA_DRIVER_CAPABILITIES"] == (
+        "${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}"
+    )
+    reservation = gateway["deploy"]["resources"]["reservations"]["devices"][0]
+    assert reservation["driver"] == "nvidia"
+    assert reservation["count"] == "all"
+    assert reservation["capabilities"] == ["gpu"]
