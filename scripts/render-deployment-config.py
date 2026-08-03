@@ -27,10 +27,10 @@ def render(
     edition: str,
     accelerator: str,
     embedding_mode: str,
-    comfyui_mode: str = "remote",
     comfyui_url: str,
     embedding_url: str,
     monitoring: bool,
+    comfyui_mode: str = "remote",
     shared_gpu: bool = False,
 ) -> dict[str, Any]:
     if edition not in EDITIONS:
