@@ -54,15 +54,18 @@ class SSEGenerator:
         except Exception as exc:
             emit_done = False
             logger.error("SSE stream generation error: %s", type(exc).__name__)
-            terminal_error_event = "data: " + json.dumps(
-                {
-                    "error": {
-                        "code": "internal_error",
-                        "message": "The response stream terminated unexpectedly.",
-                    }
-                },
-                ensure_ascii=False,
-            ) + "\n\n"
+            # An explicit upstream error is authoritative. A later exception
+            # while draining cleanup must not overwrite its public code/message.
+            if terminal_error_event is None:
+                terminal_error_event = "data: " + json.dumps(
+                    {
+                        "error": {
+                            "code": "internal_error",
+                            "message": "The response stream terminated unexpectedly.",
+                        }
+                    },
+                    ensure_ascii=False,
+                ) + "\n\n"
         finally:
             close = getattr(self.completion_gen, "aclose", None)
             if callable(close):
