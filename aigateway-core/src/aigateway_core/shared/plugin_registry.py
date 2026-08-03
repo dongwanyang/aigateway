@@ -1,395 +1,66 @@
+"""Public plugin-registry surface with race-safe runtime instances.
+
+The registry implementation remains in ``_plugin_registry_impl``. This facade
+serializes first construction with register/unregister so heavyweight plugins are
+constructed exactly once and an instance from an obsolete registration can never
+be published under a newly registered plugin with the same name.
 """
-PluginRegistry — 插件注册表 (shared layer)
-==========================================
-
-Defining home for the plugin registry. Manages plugin lifecycle:
-registration, ordering, dependency validation. Validates depends_on at
-startup; skips disabled or out-of-order plugins.
-
-Per the runtime skeleton (see
-``docs/superpowers/specs/2026-07-07-runtime-structure-design.md``) this
-module lives under the ``shared`` layer. The legacy root path
-``aigateway_core.plugin_registry`` remains as a thin backward-compat shim.
-"""
-
 from __future__ import annotations
 
 import logging
-import threading
 from typing import Any
+
+from . import _plugin_registry_impl as _impl
 
 logger = logging.getLogger(__name__)
 
-
-# ------------------------------------------------------------------
-# 插件注册结构
-# ------------------------------------------------------------------
+PluginRegistration = _impl.PluginRegistration
 
 
-class PluginRegistration:
-    """单个插件的注册信息。
+class PluginRegistry(_impl.PluginRegistry):
+    """Plugin registry with one runtime instance per live registration."""
 
-    属性:
-        name: 插件名称，如 "prompt_compress"。
-        plugin_class: 插件类（需要可调用返回 Plugin 实例）。
-        enabled: 是否启用，默认 True。
-        depends_on: 依赖的其他插件名称列表。
-        priority: 执行优先级，数字越小越先执行。
-        config: 插件配置参数。
-    """
-
-    def __init__(
+    def _get_or_create_instance(
         self,
-        name: str,
-        plugin_class: type[Any],
-        enabled: bool = True,
-        depends_on: list[str] | None = None,
-        priority: int = 0,
-        config: dict[str, Any] | None = None,
-        pipeline_kind: str = "understanding",
-        timeout_seconds: float = 10.0,
-        failure_policy: str = "continue",
-    ) -> None:
-        self.name = name
-        self.plugin_class = plugin_class
-        self.enabled = enabled
-        self.depends_on = depends_on or []
-        self.priority = priority
-        self.config = config or {}
-        # 管道归属："understanding" | "generation"。
-        # get_all(pipeline_kind=...) 按此过滤，PipelineEngine 按此装载插件链。
-        self.pipeline_kind = pipeline_kind
-        self.timeout_seconds = max(0.001, float(timeout_seconds))
-        if failure_policy not in {"continue", "fail_fast"}:
-            raise ValueError("failure_policy must be 'continue' or 'fail_fast'")
-        self.failure_policy = failure_policy
-
-
-# ------------------------------------------------------------------
-# 注册表
-# ------------------------------------------------------------------
-
-
-class PluginRegistry:
-    """插件注册中心。
-
-    管理所有插件的注册、排序和依赖校验。
-    插件可按优先级排序执行，依赖关系会被自动解析。
-
-    属性:
-        _registrations: 已注册的插件注册信息，key 为插件名。
-        _instances: 已构造的运行时插件单例，key 为插件名。
-    """
-
-    def __init__(
-        self,
-        *,
-        default_timeout_seconds: float = 30.0,
-        default_failure_policy: str = "continue",
-        policies: dict[str, dict[str, Any]] | None = None,
-    ) -> None:
-        self._registrations: dict[str, PluginRegistration] = {}
-        self._instances: dict[str, Any] = {}
-        self._lock = threading.Lock()
-        self.default_timeout_seconds = max(0.001, float(default_timeout_seconds))
-        if default_failure_policy not in {"continue", "fail_fast"}:
-            raise ValueError("default_failure_policy must be 'continue' or 'fail_fast'")
-        self.default_failure_policy = default_failure_policy
-        self.policies = policies or {}
-
-    # ------------------------------------------------------------------
-    # 注册
-    # ------------------------------------------------------------------
-
-    def register(
-        self,
-        name: str,
-        plugin_class: type[Any],
-        enabled: bool = True,
-        depends_on: list[str] | None = None,
-        priority: int = 0,
-        config: dict[str, Any] | None = None,
-        pipeline_kind: str = "understanding",
-        timeout_seconds: float | None = None,
-        failure_policy: str | None = None,
-    ) -> None:
-        """注册一个插件。
-
-        Args:
-            name: 插件名称，必须全局唯一。
-            plugin_class: 插件类（需要有 execute(ctx: PipelineContext) 方法）。
-            enabled: 是否启用，默认 True。
-            depends_on: 依赖的其他插件名称列表，默认 []。
-            priority: 执行优先级，数字越小越先执行，默认 0。
-            config: 插件配置参数字典。
-            pipeline_kind: 管道归属 "understanding" | "generation"，默认 understanding。
-
-        Raises:
-            ValueError: 插件名重复时抛出。
-        """
-        if name in self._registrations:
-            raise ValueError(f"插件 '{name}' 已注册，不能重复注册")
-
+        reg: PluginRegistration,
+    ) -> Any | None:
+        # Plugin constructors may allocate model memory, background threads,
+        # sockets or file handles. Holding the registry lock during the one-time
+        # construction is preferable to constructing duplicate disposable
+        # instances under concurrent health/engine queries.
         with self._lock:
-            # Re-check inside the lock to avoid a register/register race
-            # where two callers both pass the existence check above.
-            if name in self._registrations:
-                raise ValueError(f"插件 '{name}' 已注册，不能重复注册")
-            policy = self.policies.get(name, {})
-            effective_timeout = (
-                timeout_seconds
-                if timeout_seconds is not None
-                else policy.get("timeout_seconds", self.default_timeout_seconds)
-            )
-            effective_failure_policy = (
-                failure_policy
-                or policy.get("failure_policy")
-                or self.default_failure_policy
-            )
-            self._registrations[name] = PluginRegistration(
-                name=name,
-                plugin_class=plugin_class,
-                enabled=enabled,
-                depends_on=depends_on or [],
-                priority=priority,
-                config=config,
-                pipeline_kind=pipeline_kind,
-                timeout_seconds=effective_timeout,
-                failure_policy=effective_failure_policy,
-            )
-
-        logger.info(
-            "插件注册: name=%s, enabled=%s, depends_on=%s, priority=%d, pipeline_kind=%s",
-            name,
-            enabled,
-            depends_on or [],
-            priority,
-            pipeline_kind,
-        )
-
-    def unregister(self, name: str) -> None:
-        """注销一个插件。
-
-        Args:
-            name: 插件名称。
-
-        Raises:
-            KeyError: 插件不存在时抛出。
-        """
-        with self._lock:
-            if name not in self._registrations:
-                raise KeyError(f"插件 '{name}' 未注册")
-            del self._registrations[name]
-            self._instances.pop(name, None)
-        logger.info("插件已注销: name=%s", name)
-
-    # ------------------------------------------------------------------
-    # 查询
-    # ------------------------------------------------------------------
+            current = self._registrations.get(reg.name)
+            if current is not reg:
+                return None
+            cached = self._instances.get(reg.name)
+            if cached is not None:
+                return cached
+            try:
+                instance = reg.plugin_class(**reg.config)
+            except TypeError as exc:
+                logger.warning(
+                    "插件 '%s' 实例化失败（配置参数不匹配）: %s",
+                    reg.name,
+                    exc,
+                )
+                return None
+            self._instances[reg.name] = instance
+            return instance
 
     def get(self, name: str) -> PluginRegistration | None:
-        """查询插件注册信息。
-
-        Args:
-            name: 插件名称。
-
-        Returns:
-            插件注册信息，不存在则返回 None。
-        """
-        return self._registrations.get(name)
-
-    def _get_or_create_instance(self, reg: PluginRegistration) -> Any | None:
-        """Return the process-wide runtime instance for one registration."""
+        """Return a registration snapshot under the registry lock."""
         with self._lock:
-            cached = self._instances.get(reg.name)
-        if cached is not None:
-            return cached
+            return self._registrations.get(name)
 
-        try:
-            candidate = reg.plugin_class(**reg.config)
-        except TypeError as exc:
-            logger.warning(
-                "插件 '%s' 实例化失败（配置参数不匹配）: %s",
-                reg.name,
-                exc,
-            )
-            return None
 
-        # Constructors may be expensive, so instantiate outside the registry
-        # lock. If two callers race, keep the first published instance and let
-        # the losing temporary object be collected.
-        with self._lock:
-            return self._instances.setdefault(reg.name, candidate)
+for _name in dir(_impl):
+    if _name.startswith("__") or _name in {"PluginRegistration", "PluginRegistry"}:
+        continue
+    globals()[_name] = getattr(_impl, _name)
 
-    def get_all(self, pipeline_kind: str | None = None) -> list[Any]:
-        """获取已注册插件的运行时实例列表。
 
-        按 priority 升序排列（数字小的先执行）。每个注册项在进程内只构造
-        一次；PipelineEngine、健康检查和管理端查询共享同一实例，避免轮询
-        ``/health`` 时重复初始化 LangChain、模型或网络客户端。
+def __getattr__(name: str) -> Any:
+    return getattr(_impl, name)
 
-        Args:
-            pipeline_kind: 可选，按管道过滤 "understanding" | "generation"。
-                为 None 时返回全部管道的插件。
 
-        Returns:
-            插件实例列表。
-        """
-        # Snapshot registrations under lock to prevent RuntimeError from
-        # concurrent dict modification during hot-reload (register/unregister).
-        with self._lock:
-            registrations = list(self._registrations.values())
-
-        registrations = sorted(registrations, key=lambda r: r.priority)
-        if pipeline_kind is not None:
-            registrations = [r for r in registrations if r.pipeline_kind == pipeline_kind]
-
-        instances: list[Any] = []
-        for reg in registrations:
-            instance = self._get_or_create_instance(reg)
-            if instance is None:
-                continue
-            # Refresh public runtime policy fields in case a registration object
-            # was updated in place by hot-reload code.
-            instance.name = reg.name  # type: ignore[attr-defined]
-            instance.enabled = reg.enabled  # type: ignore[attr-defined]
-            instance.depends_on = reg.depends_on  # type: ignore[attr-defined]
-            instance.pipeline_kind = reg.pipeline_kind  # type: ignore[attr-defined]
-            instance.timeout_seconds = reg.timeout_seconds  # type: ignore[attr-defined]
-            instance.failure_policy = reg.failure_policy  # type: ignore[attr-defined]
-            instances.append(instance)
-
-        return instances
-
-    def get_enabled_names(self) -> list[str]:
-        """获取所有已启用插件的名称列表。
-
-        Returns:
-            插件名称列表。
-        """
-        with self._lock:
-            return [name for name, reg in self._registrations.items() if reg.enabled]
-
-    # ------------------------------------------------------------------
-    # 依赖校验
-    # ------------------------------------------------------------------
-
-    def validate_dependencies(self) -> list[str]:
-        """校验所有插件的依赖关系。
-
-        检查：
-        1. 所有 depends_on 引用的插件是否存在
-        2. 是否存在循环依赖
-
-        Returns:
-            校验失败的错误消息列表，为空表示全部通过。
-        """
-        errors: list[str] = []
-        names = set(self._registrations.keys())
-
-        # 检查缺失依赖
-        for name, reg in self._registrations.items():
-            for dep in reg.depends_on:
-                if dep not in names:
-                    errors.append(
-                        f"插件 '{name}' 依赖 '{dep}' 但未注册"
-                    )
-
-        # 检查循环依赖（DFS）
-        visited: set[str] = set()
-        rec_stack: set[str] = set()
-        cycle_nodes: list[str] = []
-
-        def dfs(node: str) -> bool:
-            visited.add(node)
-            rec_stack.add(node)
-
-            reg = self._registrations.get(node)
-            if reg:
-                for dep in reg.depends_on:
-                    if dep not in visited:
-                        if dfs(dep):
-                            return True
-                    elif dep in rec_stack:
-                        cycle_nodes.append(dep)
-                        return True
-
-            rec_stack.discard(node)
-            return False
-
-        for name in self._registrations:
-            if name not in visited and dfs(name):
-                errors.append(
-                    f"插件依赖存在循环: {cycle_nodes}"
-                )
-                break
-
-        if errors:
-            logger.warning("插件依赖校验失败: %s", errors)
-        else:
-            logger.info("插件依赖校验通过: %d 个插件", len(self._registrations))
-
-        return errors
-
-    # ------------------------------------------------------------------
-    # 批量注册（从配置）
-    # ------------------------------------------------------------------
-
-    def register_from_config(self, configs: list[dict[str, Any]]) -> None:
-        """从配置字典列表批量注册插件。
-
-        Args:
-            configs: 每个元素包含:
-                - name (str): 插件名称
-                - enabled (bool): 是否启用
-                - depends_on (List[str]): 依赖列表
-                - priority (int): 优先级
-                - plugin_class (Type[Any]): 插件类
-                - config (Dict[str, Any]): 插件配置
-        """
-        for cfg in configs:
-            name = cfg.get("name")
-            plugin_class = cfg.get("plugin_class")
-
-            if not name or not plugin_class:
-                logger.warning("配置缺少 name 或 plugin_class，跳过: %s", cfg)
-                continue
-
-            self.register(
-                name=name,
-                plugin_class=plugin_class,
-                enabled=cfg.get("enabled", True),
-                depends_on=cfg.get("depends_on", []),
-                priority=cfg.get("priority", 0),
-                config=cfg.get("config", {}),
-            )
-
-    # ------------------------------------------------------------------
-    # 统计信息
-    # ------------------------------------------------------------------
-
-    def summary(self) -> dict[str, Any]:
-        """获取注册表的统计摘要。
-
-        Returns:
-            包含插件计数、启用状态等信息的字典。
-        """
-        with self._lock:
-            total = len(self._registrations)
-            enabled = sum(1 for r in self._registrations.values() if r.enabled)
-            plugins = {
-                name: {
-                    "enabled": reg.enabled,
-                    "depends_on": reg.depends_on,
-                    "priority": reg.priority,
-                }
-                for name, reg in self._registrations.items()
-            }
-        disabled = total - enabled
-
-        return {
-            "total": total,
-            "enabled": enabled,
-            "disabled": disabled,
-            "plugins": plugins,
-        }
+__all__ = ("PluginRegistration", "PluginRegistry")
