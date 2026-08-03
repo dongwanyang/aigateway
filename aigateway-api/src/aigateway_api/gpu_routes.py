@@ -365,6 +365,7 @@ async def get_gpu_status(
     scheduler_config = (
         manager.get("gpu_scheduler", {}) if manager is not None else {}
     )
+    comfy_config = _comfy_config(request)
     if not isinstance(scheduler_config, dict):
         scheduler_config = {}
     shared_gpu = (
@@ -406,8 +407,9 @@ async def get_gpu_status(
     ):
         if key in scheduler_config:
             scheduler[key] = scheduler_config[key]
+    scheduler_managed = bool(comfy_config.get("scheduler_managed", False))
     pool_expected = bool(scheduler.get("enabled")) and (
-        shared_gpu or bool(scheduler.get("workers"))
+        scheduler_managed or shared_gpu or bool(scheduler.get("workers"))
     )
     gateway = _normalize_gateway_topology(
         gateway,
@@ -438,6 +440,7 @@ async def get_gpu_status(
             "queue": queue,
             "queue_idle": idle,
             "shared_gpu": shared_gpu,
+            "scheduler_managed": scheduler_managed,
             "pool_expected": pool_expected,
             "diagnosis": diagnose_memory(
                 gateway,

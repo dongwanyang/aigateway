@@ -486,3 +486,84 @@ async def test_provider_failure_without_usage_records_ledger_and_releases_quota(
     assert key_store.increment_calls == []
     assert len(key_store.release_calls) == 1
     assert request.state._lua_quota_reserved is False
+
+
+@pytest.mark.asyncio
+async def test_terminal_error_is_emitted_only_after_producer_cleanup() -> None:
+    cleanup_ran = False
+
+    async def producer():
+        nonlocal cleanup_ran
+        try:
+            yield {"error": {"code": "upstream_error", "message": "failed"}}
+        finally:
+            cleanup_ran = True
+
+    stream = SSEGenerator(producer()).generate()
+    first = await anext(stream)
+
+    assert cleanup_ran is True
+    assert "upstream_error" in first
+    assert "[DONE]" not in first
+    with pytest.raises(StopAsyncIteration):
+        await anext(stream)
+
+
+@pytest.mark.asyncio
+async def test_outer_sse_guard_records_metrics_before_terminal_error() -> None:
+    cleanup_ran = False
+    metrics = RecordingMetrics()
+
+    async def upstream():
+        nonlocal cleanup_ran
+        try:
+            yield 'data: {"error":{"code":"upstream_error","message":"failed"}}\n\n'
+        finally:
+            cleanup_ran = True
+
+    stream = _guard_sse_output(
+        upstream(),
+        max_tokens=64,
+        metrics_collector=metrics,
+        started_at=time.monotonic(),
+    )
+    first = await anext(stream)
+
+    assert cleanup_ran is True
+    assert metrics.requests == [("POST", "/v1/chat/completions", "502")]
+    assert "upstream_error" in first
+
+
+def test_registration_propagates_scheduler_managed_flag(tmp_path: Path) -> None:
+    from aigateway_core.pipelines.generation.registration import (
+        register_generation_optimization_plugins,
+    )
+
+    class ConfigManager:
+        def get(self, key: str, default: Any = None) -> Any:
+            values = {
+                "generation_optimization": {
+                    "enabled": True,
+                    "draft_workflow": {
+                        "enabled": True,
+                        "store_dir": str(tmp_path),
+                        "comfyui": {
+                            "server_url": "http://comfyui:8188",
+                            "scheduler_managed": True,
+                        },
+                    },
+                },
+                "providers": {},
+                "auth": {},
+            }
+            return values.get(key, default)
+
+    registry = PluginRegistry()
+    register_generation_optimization_plugins(
+        registry=registry,
+        config_manager=ConfigManager(),
+    )
+    registration = registry.get("draft_generator")
+    assert registration is not None
+    strategy = registration.config["strategy"]
+    assert strategy._comfyui_config.scheduler_managed is True

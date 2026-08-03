@@ -187,6 +187,9 @@ def register_generation_optimization_plugins(
             "ws_reconnect_attempts", ComfyUIConfig.ws_reconnect_attempts
         ),
         required=comfyui_dict.get("required", ComfyUIConfig.required),
+        scheduler_managed=comfyui_dict.get(
+            "scheduler_managed", ComfyUIConfig.scheduler_managed
+        ),
         workflow_version=comfyui_dict.get(
             "workflow_version", ComfyUIConfig.workflow_version
         ),

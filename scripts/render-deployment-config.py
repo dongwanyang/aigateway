@@ -27,6 +27,7 @@ def render(
     edition: str,
     accelerator: str,
     embedding_mode: str,
+    comfyui_mode: str = "remote",
     comfyui_url: str,
     embedding_url: str,
     monitoring: bool,
@@ -34,6 +35,8 @@ def render(
 ) -> dict[str, Any]:
     if edition not in EDITIONS:
         raise ValueError(f"unsupported edition: {edition}")
+    if comfyui_mode not in {"container", "native", "remote"}:
+        raise ValueError(f"unsupported comfyui mode: {comfyui_mode}")
     with source.open("r", encoding="utf-8") as handle:
         config = yaml.safe_load(handle) or {}
 
@@ -108,6 +111,9 @@ def render(
     comfy = draft.setdefault("comfyui", {})
     comfy["server_url"] = comfyui_url.rstrip("/")
     comfy["required"] = True
+    comfy["scheduler_managed"] = bool(
+        studio and accelerator == "cuda" and comfyui_mode == "container"
+    )
     token = generation.setdefault("token_compressor", {})
     token.setdefault("clip", {})["device"] = (
         "auto" if studio and accelerator == "cuda" else "cpu"
@@ -126,6 +132,7 @@ def render(
         "edition": edition,
         "accelerator": accelerator,
         "embedding_mode": embedding_mode,
+        "comfyui_mode": comfyui_mode,
         "comfyui_enabled": studio,
         "rag_enabled": knowledge,
         "shared_gpu": shared_gpu,
@@ -165,6 +172,11 @@ def main() -> int:
         choices=("container", "native", "remote"),
         required=True,
     )
+    parser.add_argument(
+        "--comfyui-mode",
+        choices=("container", "native", "remote"),
+        default="remote",
+    )
     parser.add_argument("--comfyui-url", required=True)
     parser.add_argument("--embedding-url", default="")
     parser.add_argument("--monitoring", action="store_true")
@@ -175,6 +187,7 @@ def main() -> int:
         edition=args.edition,
         accelerator=args.accelerator,
         embedding_mode=args.embedding_mode,
+        comfyui_mode=args.comfyui_mode,
         comfyui_url=args.comfyui_url,
         embedding_url=args.embedding_url,
         monitoring=args.monitoring,

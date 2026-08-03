@@ -458,12 +458,13 @@ async def _guard_sse_output(
     metrics_collector: Any = None,
     started_at: float | None = None,
 ) -> AsyncIterator[str | bytes]:
-    """Emit one terminal SSE outcome while preserving inner cleanup."""
+    """Emit one terminal SSE outcome only after inner cleanup and metrics."""
     saw_content = False
     terminal_reasons: list[str] = []
     saw_error = False
     completion_tokens = 0
     done_chunk: str | bytes | None = None
+    error_chunk: str | bytes | None = None
     emitted_bytes = False
 
     async for raw in iterator:
@@ -472,11 +473,16 @@ async def _guard_sse_output(
         if text.strip() == "data: [DONE]":
             done_chunk = raw
             continue
+        if saw_error:
+            # Defensive drain: never expose data after a terminal error.
+            continue
 
         payload = _parse_sse_payload(raw)
         if payload is not None:
             if isinstance(payload.get("error"), dict):
                 saw_error = True
+                error_chunk = raw
+                continue
             usage = payload.get("usage") or {}
             if isinstance(usage, dict):
                 completion_tokens = max(
@@ -505,9 +511,7 @@ async def _guard_sse_output(
     if exhausted and request is not None:
         _mark_output_budget_exhausted(request, completion_tokens)
 
-    terminal_status = (
-        _terminal_status_code(request) if request is not None else None
-    )
+    terminal_status = _terminal_status_code(request) if request is not None else None
     status_code = terminal_status or (502 if saw_error else 200)
     if started_at is not None:
         _record_final_metrics(
@@ -516,7 +520,11 @@ async def _guard_sse_output(
             started_at=started_at,
         )
 
+    # Terminal events are deliberately emitted after the iterator has completed,
+    # so a client disconnect after receiving them cannot interrupt settlement.
     if saw_error:
+        if error_chunk is not None:
+            yield error_chunk
         return
     if exhausted:
         error_event = "data: " + json.dumps(

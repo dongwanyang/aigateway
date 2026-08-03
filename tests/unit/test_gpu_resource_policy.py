@@ -42,6 +42,7 @@ def test_shared_gpu_renderer_enables_dynamic_pool_without_static_cpu_split() -> 
         edition="full",
         accelerator="cuda",
         embedding_mode="container",
+        comfyui_mode="container",
         comfyui_url="http://comfyui:8188",
         embedding_url="",
         monitoring=False,
@@ -49,8 +50,29 @@ def test_shared_gpu_renderer_enables_dynamic_pool_without_static_cpu_split() -> 
     )
     assert config["embedding"]["device"] == "auto"
     assert config["deployment"]["shared_gpu"] is True
+    assert config["deployment"]["comfyui_mode"] == "container"
+    assert config["generation_optimization"]["draft_workflow"]["comfyui"]["scheduler_managed"] is True
     assert config["generation_optimization"]["token_compressor"]["clip"]["device"] == "auto"
     assert config["gpu_scheduler"]["enabled"] is True
+
+
+
+def test_remote_comfyui_is_not_scheduler_managed() -> None:
+    renderer = load_renderer()
+    source = Path(__file__).resolve().parents[2] / "config.yaml.template"
+    config = renderer.render(
+        source,
+        edition="full",
+        accelerator="cuda",
+        embedding_mode="container",
+        comfyui_mode="remote",
+        comfyui_url="https://remote-comfy.example",
+        embedding_url="",
+        monitoring=False,
+        shared_gpu=False,
+    )
+    assert config["deployment"]["comfyui_mode"] == "remote"
+    assert config["generation_optimization"]["draft_workflow"]["comfyui"]["scheduler_managed"] is False
 
 
 def test_nvidia_smi_status_selects_visible_device(monkeypatch: pytest.MonkeyPatch) -> None:

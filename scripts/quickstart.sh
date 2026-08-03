@@ -330,6 +330,7 @@ render_args=(
   --edition "$edition"
   --accelerator "$accelerator"
   --embedding-mode "$embedding_mode"
+  --comfyui-mode "$comfyui_mode"
   --comfyui-url "${comfyui_url:-http://comfyui.invalid}"
   --embedding-url "$embedding_url"
 )
