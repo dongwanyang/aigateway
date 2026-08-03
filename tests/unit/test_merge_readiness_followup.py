@@ -579,3 +579,54 @@ def test_registration_propagates_scheduler_managed_flag(tmp_path: Path) -> None:
     assert registration is not None
     strategy = registration.config["strategy"]
     assert strategy._comfyui_config.scheduler_managed is True
+
+
+
+def test_plugin_constructor_can_read_registry_without_deadlock() -> None:
+    registry = PluginRegistry()
+    nested_snapshots: list[list[Any]] = []
+
+    class ReentrantPlugin:
+        def __init__(self) -> None:
+            nested_snapshots.append(registry.get_all())
+
+        async def execute(self, ctx: Any) -> Any:
+            return ctx
+
+    registry.register("reentrant", ReentrantPlugin)
+    instances = registry.get_all()
+
+    assert len(instances) == 1
+    assert nested_snapshots == [[]]
+    assert registry.get_all()[0] is instances[0]
+
+
+def test_obsolete_inflight_plugin_is_never_published() -> None:
+    registry = PluginRegistry()
+    old_started = threading.Event()
+    release_old = threading.Event()
+
+    class OldPlugin:
+        def __init__(self) -> None:
+            old_started.set()
+            assert release_old.wait(timeout=2)
+
+        async def execute(self, ctx: Any) -> Any:
+            return ctx
+
+    class NewPlugin:
+        async def execute(self, ctx: Any) -> Any:
+            return ctx
+
+    registry.register("replaceable", OldPlugin)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        old_future = executor.submit(registry.get_all)
+        assert old_started.wait(timeout=2)
+        registry.unregister("replaceable")
+        registry.register("replaceable", NewPlugin)
+        new_instance = registry.get_all()[0]
+        release_old.set()
+        assert old_future.result(timeout=2) == []
+
+    assert isinstance(new_instance, NewPlugin)
+    assert registry.get_all()[0] is new_instance

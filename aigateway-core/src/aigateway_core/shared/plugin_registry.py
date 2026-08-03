@@ -90,6 +90,10 @@ class PluginRegistry:
     ) -> None:
         self._registrations: dict[str, PluginRegistration] = {}
         self._instances: dict[str, Any] = {}
+        # id(registration) -> (completion event, constructing thread id).
+        # Constructors run outside the global registry lock so one slow plugin
+        # does not block unrelated reads, registrations or unregistrations.
+        self._instance_builds: dict[int, tuple[threading.Event, int]] = {}
         self._lock = threading.Lock()
         self.default_timeout_seconds = max(0.001, float(default_timeout_seconds))
         if default_failure_policy not in {"continue", "fail_fast"}:
@@ -200,30 +204,72 @@ class PluginRegistry:
             return self._registrations.get(name)
 
     def _get_or_create_instance(self, reg: PluginRegistration) -> Any | None:
-        """Return the single runtime instance for the live registration.
+        """Return one runtime instance for the currently live registration.
 
-        Constructors may allocate model memory, threads, sockets or file handles.
-        Serialize first construction with register/unregister so concurrent
-        health and engine queries cannot create duplicate heavyweight instances,
-        and an obsolete registration cannot publish into a later same-name one.
+        First construction is coordinated per registration. The expensive and
+        potentially re-entrant constructor runs outside ``self._lock``; other
+        threads wait for that registration only. If the registration is removed
+        or replaced while construction is in flight, the obsolete candidate is
+        discarded and never published under the new registration.
         """
+        build_key = id(reg)
+        current_thread = threading.get_ident()
+
+        while True:
+            with self._lock:
+                if self._registrations.get(reg.name) is not reg:
+                    return None
+                cached = self._instances.get(reg.name)
+                if cached is not None:
+                    return cached
+                active_build = self._instance_builds.get(build_key)
+                if active_build is None:
+                    completion = threading.Event()
+                    self._instance_builds[build_key] = (
+                        completion,
+                        current_thread,
+                    )
+                    is_builder = True
+                else:
+                    completion, owner_thread = active_build
+                    # A constructor may inspect the registry. Waiting for its own
+                    # in-flight instance would deadlock; omit that incomplete
+                    # registration from the nested view instead.
+                    if owner_thread == current_thread:
+                        return None
+                    is_builder = False
+            if is_builder:
+                break
+            completion.wait()
+
+        candidate: Any | None = None
+        construction_error: BaseException | None = None
+        try:
+            candidate = reg.plugin_class(**reg.config)
+        except TypeError as exc:
+            logger.warning(
+                "插件 '%s' 实例化失败（配置参数不匹配）: %s",
+                reg.name,
+                exc,
+            )
+        except BaseException as exc:  # preserve constructor semantics after wakeup
+            construction_error = exc
+
         with self._lock:
-            if self._registrations.get(reg.name) is not reg:
-                return None
-            cached = self._instances.get(reg.name)
-            if cached is not None:
-                return cached
-            try:
-                instance = reg.plugin_class(**reg.config)
-            except TypeError as exc:
-                logger.warning(
-                    "插件 '%s' 实例化失败（配置参数不匹配）: %s",
-                    reg.name,
-                    exc,
-                )
-                return None
-            self._instances[reg.name] = instance
-            return instance
+            if (
+                candidate is not None
+                and self._registrations.get(reg.name) is reg
+            ):
+                published = self._instances.setdefault(reg.name, candidate)
+            else:
+                published = None
+            active_build = self._instance_builds.pop(build_key, None)
+            if active_build is not None:
+                active_build[0].set()
+
+        if construction_error is not None:
+            raise construction_error
+        return published
 
     def get_all(self, pipeline_kind: str | None = None) -> list[Any]:
         """获取已注册插件的运行时实例列表。
