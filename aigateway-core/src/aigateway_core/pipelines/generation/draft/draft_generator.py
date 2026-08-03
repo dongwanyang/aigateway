@@ -109,16 +109,15 @@ class DraftGeneratorStrategy(_impl.DraftGeneratorStrategy):
 
         Local ComfyUI workers share physical devices with Gateway components and
         therefore must be allocated through ``generation_lease()``. External or
-        remote ComfyUI endpoints do not own local devices and continue through
-        the base single-URL compatibility path without draining the local pool.
+        remote ComfyUI endpoints do not own local devices and execute through the
+        fixed URL without draining, fencing or locking any local Gateway GPU.
         """
         coordinator = self._gpu_coordinator
         if coordinator is not None and coordinator.config.enabled:
             status = coordinator.status()
-            if self._scheduler_manages_comfyui(status) and not self._pool_has_worker(
-                status,
-                capability,
-            ):
+            if not self._scheduler_manages_comfyui(status):
+                return await operation(), None
+            if not self._pool_has_worker(status, capability):
                 raise DraftWorkflowError(_GPU_TOPOLOGY_ERROR)
 
         return await super()._run_on_comfy_worker(
