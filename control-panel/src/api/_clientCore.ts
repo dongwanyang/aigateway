@@ -100,6 +100,21 @@ export interface GenerationPreset {
 export async function getComfyUIStatus(): Promise<ApiResponse<ComfyUIStatus>> { return fetchJson<ComfyUIStatus>('/admin/comfyui/status') }
 export interface GpuStatusData {
   gateway: { available: boolean; name?: string | null; allocated_bytes: number; reserved_bytes: number; device_used_bytes: number; device_free_bytes: number; device_total_bytes: number }
+  execution?: {
+    available: boolean
+    mode: 'scheduler_pool' | 'gateway_pool' | 'scheduler_error' | 'gateway' | 'delegated_comfyui' | 'unavailable'
+    owner: 'scheduler' | 'gateway' | 'comfyui' | null
+    topology_complete: boolean
+    runnable_now: boolean
+    device_count?: number
+    worker_count?: number
+    runnable_device_count?: number
+    runnable_worker_count?: number
+    supported_capabilities?: string[]
+    external_comfyui_available?: boolean
+    memory?: { total_bytes?: number | null; free_bytes?: number | null; used_bytes?: number | null } | null
+    error?: string
+  }
   comfyui: { available: boolean; memory: { total_bytes: number | null; free_bytes: number | null; used_bytes: number | null } | null; endpoint_errors?: Record<string, string> }
   queue: { running?: number; pending?: number } | null
   queue_idle: boolean | null
