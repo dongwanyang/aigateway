@@ -59,7 +59,7 @@ def _queue_idle(queue: Any) -> bool | None:
 def _scheduler_pairs(
     scheduler: dict[str, Any],
 ) -> list[tuple[dict[str, Any], dict[str, Any]]]:
-    """Return executable worker/device pairs from scheduler status."""
+    """Return structurally executable worker/device pairs."""
     if not isinstance(scheduler, dict):
         return []
     devices = scheduler.get("devices") or []
@@ -85,45 +85,76 @@ def _normalize_gateway_topology(
     *,
     comfy_available: bool,
     scheduler: dict[str, Any],
+    pool_expected: bool = False,
 ) -> dict[str, Any]:
-    """Describe local CUDA absence without reporting a false service failure.
+    """Normalize raw allocator facts against the shared GPU-pool topology.
 
-    In the default Compose topology the Gateway container has no CUDA device,
-    while ComfyUI owns the GPU and performs generation. Local allocator
-    availability remains false, but the state is ``delegated`` rather than an
-    operational error. A scheduler pool is considered executable only when at
-    least one worker references an actual discovered device.
+    CUDA deployments expose the same physical devices to Gateway and one or more
+    ComfyUI workers. ``GpuResourceCoordinator`` owns arbitration: Gateway may
+    borrow an idle device, while generation drains Gateway leases and allocates
+    the matching worker. ComfyUI availability therefore never turns an enabled
+    but broken scheduler into a successful delegated topology.
+
+    ``local_cuda_available`` preserves the raw nvidia-smi/PyTorch observation.
+    ``available`` represents effective GPU availability after considering the
+    scheduler inventory.
     """
     result = dict(gateway)
+    enabled = bool(scheduler.get("enabled")) if isinstance(scheduler, dict) else False
     devices = scheduler.get("devices") if isinstance(scheduler, dict) else []
     workers = scheduler.get("workers") if isinstance(scheduler, dict) else []
+    devices = devices if isinstance(devices, list) else []
+    workers = workers if isinstance(workers, list) else []
     pairs = _scheduler_pairs(scheduler)
-    has_pool = bool(pairs)
-    has_partial_topology = bool(devices) or bool(workers)
     local_available = bool(result.get("available"))
 
     result["local_cuda_available"] = local_available
     result["delegated_to"] = None
-    result["scheduler_topology_complete"] = has_pool or not has_partial_topology
+    result["scheduler_topology_complete"] = False
+
+    # Shared-pool execution is authoritative whenever at least one configured
+    # ComfyUI worker maps to an actually discovered physical device.
+    if enabled and pairs:
+        result["available"] = True
+        result["status"] = "scheduler_pool"
+        result["scheduler_topology_complete"] = True
+        result["error"] = None
+        return result
+
+    # A CUDA deployment may legitimately use the scheduler only for Gateway
+    # leases (for example Knowledge edition without local generation workers).
+    if enabled and devices and not workers and not pool_expected:
+        result["available"] = True
+        result["status"] = "gateway_pool"
+        result["scheduler_topology_complete"] = True
+        result["error"] = None
+        return result
+
+    # Once the scheduler is enabled, missing inventory, orphan workers or an
+    # expected pool with no worker/device pair is a topology fault. Do not hide
+    # it behind a healthy ComfyUI HTTP probe: direct submission would bypass the
+    # Coordinator's drain/fence/lock protocol.
+    if enabled:
+        result["available"] = False
+        result["status"] = "scheduler_error"
+        result["error"] = "gpu_scheduler_topology_incomplete"
+        return result
+
     if local_available:
         result["status"] = "available"
+        result["scheduler_topology_complete"] = True
         return result
-    if has_pool:
-        result["status"] = "scheduler_pool"
-        if result.get("error") == "gpu_status_unavailable":
-            result["error"] = None
-        return result
+
+    # Direct/external ComfyUI is a compatibility mode only when the local GPU
+    # scheduler is explicitly disabled.
     if comfy_available:
         result["status"] = "delegated"
         result["delegated_to"] = "comfyui"
-        result["cuda_disabled"] = True
         if result.get("error") == "gpu_status_unavailable":
             result["error"] = None
         return result
 
     result["status"] = "unavailable"
-    if has_partial_topology:
-        result["error"] = "gpu_scheduler_topology_incomplete"
     return result
 
 
@@ -133,10 +164,51 @@ def _execution_gpu_status(
     comfy_available: bool,
     normalized_comfy_memory: dict[str, Any] | None,
     scheduler: dict[str, Any],
+    pool_expected: bool = False,
 ) -> dict[str, Any]:
-    """Return the effective GPU execution backend for API consumers."""
+    """Return the effective execution backend without losing pool semantics."""
+    enabled = bool(scheduler.get("enabled")) if isinstance(scheduler, dict) else False
+    devices = scheduler.get("devices") if isinstance(scheduler, dict) else []
+    workers = scheduler.get("workers") if isinstance(scheduler, dict) else []
+    devices = devices if isinstance(devices, list) else []
+    workers = workers if isinstance(workers, list) else []
     pairs = _scheduler_pairs(scheduler)
-    if bool(gateway.get("available")):
+
+    # Pool mode must win over the raw Gateway allocator flag. Both Gateway and
+    # ComfyUI are clients of the Coordinator; neither owns the physical GPU.
+    if enabled and pairs:
+        paired_devices = {str(device.get("uuid")) for _, device in pairs}
+        return {
+            "available": True,
+            "mode": "scheduler_pool",
+            "owner": "scheduler",
+            "device_count": len(paired_devices),
+            "worker_count": len(pairs),
+            "memory": None,
+        }
+
+    if enabled and devices and not workers and not pool_expected:
+        return {
+            "available": True,
+            "mode": "gateway_pool",
+            "owner": "scheduler",
+            "device_count": len(devices),
+            "worker_count": 0,
+            "memory": None,
+        }
+
+    if enabled:
+        return {
+            "available": False,
+            "mode": "scheduler_error",
+            "owner": "scheduler",
+            "device_count": len(devices),
+            "worker_count": len(workers),
+            "memory": None,
+            "error": "gpu_scheduler_topology_incomplete",
+        }
+
+    if bool(gateway.get("local_cuda_available", gateway.get("available"))):
         return {
             "available": True,
             "mode": "gateway",
@@ -147,16 +219,7 @@ def _execution_gpu_status(
                 "used_bytes": gateway.get("device_used_bytes"),
             },
         }
-    if pairs:
-        paired_devices = {str(device.get("uuid")) for _, device in pairs}
-        return {
-            "available": True,
-            "mode": "scheduler_pool",
-            "owner": "scheduler",
-            "device_count": len(paired_devices),
-            "worker_count": len(pairs),
-            "memory": None,
-        }
+
     if comfy_available:
         return {
             "available": True,
@@ -210,16 +273,21 @@ async def get_gpu_status(
         "devices": [],
         "workers": [],
     }
+    pool_expected = bool(scheduler.get("enabled")) and (
+        shared_gpu or bool(scheduler.get("workers"))
+    )
     gateway = _normalize_gateway_topology(
         gateway,
         comfy_available=comfy_available,
         scheduler=scheduler,
+        pool_expected=pool_expected,
     )
     execution = _execution_gpu_status(
         gateway,
         comfy_available=comfy_available,
         normalized_comfy_memory=normalized_comfy_memory,
         scheduler=scheduler,
+        pool_expected=pool_expected,
     )
     return {
         "data": {
@@ -237,6 +305,7 @@ async def get_gpu_status(
             "queue": queue,
             "queue_idle": idle,
             "shared_gpu": shared_gpu,
+            "pool_expected": pool_expected,
             "diagnosis": diagnose_memory(
                 gateway,
                 normalized_comfy_memory,
