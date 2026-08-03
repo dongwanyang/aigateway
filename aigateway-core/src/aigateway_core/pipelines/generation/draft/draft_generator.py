@@ -10,10 +10,11 @@ from . import _draft_generator_impl as _impl
 _CONFIGURATION_ERROR = (
     "config_missing:generation_optimization.draft_workflow.store_dir"
 )
+_GPU_TOPOLOGY_ERROR = "gpu_scheduler_topology_unavailable"
 
 
 class DraftGeneratorStrategy(_impl.DraftGeneratorStrategy):
-    """Draft strategy that never invents a deployment storage path."""
+    """Draft strategy that never invents deployment storage or GPU topology."""
 
     def __init__(
         self,
@@ -50,6 +51,30 @@ class DraftGeneratorStrategy(_impl.DraftGeneratorStrategy):
             raise DraftWorkflowError(self._configuration_error)
         return await super().check_local_dependencies(*args, **kwargs)
 
+    @staticmethod
+    def _pool_has_worker(status: Any, capability: str) -> bool:
+        """Return whether the scheduler has a structurally valid worker pair."""
+        if not isinstance(status, dict):
+            return False
+        devices = status.get("devices") or []
+        workers = status.get("workers") or []
+        if not isinstance(devices, list) or not isinstance(workers, list):
+            return False
+        device_uuids = {
+            str(device.get("uuid"))
+            for device in devices
+            if isinstance(device, dict) and device.get("uuid")
+        }
+        for worker in workers:
+            if not isinstance(worker, dict):
+                continue
+            if str(worker.get("device_uuid") or "") not in device_uuids:
+                continue
+            capabilities = worker.get("capabilities") or []
+            if not isinstance(capabilities, list) or capability in capabilities:
+                return True
+        return False
+
     async def _run_on_comfy_worker(
         self,
         draft_id: str,
@@ -59,20 +84,22 @@ class DraftGeneratorStrategy(_impl.DraftGeneratorStrategy):
         preferred_worker_id: str | None = None,
         memory_requirement_gb: float = 0.0,
     ) -> tuple[Any, Any | None]:
-        """Use the legacy ComfyUI URL when no local worker topology exists.
+        """Keep enabled CUDA deployments inside the shared GPU pool.
 
-        The default Compose topology exposes the GPU only to the ComfyUI
-        container. In that deployment the Gateway cannot discover a local NVIDIA
-        device, so the topology-aware scheduler has no device/worker pair to
-        lease. Waiting in the scheduler would leave the draft at ``running``
-        without ever submitting ``/prompt`` to ComfyUI. Treat an empty topology
-        as the existing single-URL compatibility mode instead.
+        ``GpuResourceCoordinator`` arbitrates the same physical devices between
+        Gateway model leases and ComfyUI generation workers.  When that pool is
+        enabled, an empty or mismatched topology is a deployment error: directly
+        calling the legacy ComfyUI URL would bypass generation priority, Gateway
+        lease draining, Redis fencing, device locks and worker failover.
+
+        The legacy direct URL remains valid only when the coordinator is absent
+        or explicitly disabled; the base implementation already handles that
+        compatibility mode.
         """
         coordinator = self._gpu_coordinator
         if coordinator is not None and coordinator.config.enabled:
-            status = coordinator.status()
-            if not status.get("devices") or not status.get("workers"):
-                return await operation(), None
+            if not self._pool_has_worker(coordinator.status(), capability):
+                raise DraftWorkflowError(_GPU_TOPOLOGY_ERROR)
 
         return await super()._run_on_comfy_worker(
             draft_id,
@@ -81,6 +108,16 @@ class DraftGeneratorStrategy(_impl.DraftGeneratorStrategy):
             preferred_worker_id=preferred_worker_id,
             memory_requirement_gb=memory_requirement_gb,
         )
+
+    def _public_comfyui_error_code(
+        self,
+        exc: BaseException,
+        *,
+        fallback: str,
+    ) -> str:
+        if _GPU_TOPOLOGY_ERROR in str(exc).lower():
+            return _GPU_TOPOLOGY_ERROR
+        return super()._public_comfyui_error_code(exc, fallback=fallback)
 
 
 for _name in dir(_impl):
