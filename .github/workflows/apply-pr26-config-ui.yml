@@ -1,16 +1,17 @@
 name: Apply PR26 Config UI Patch
 
 on:
-  push:
+  pull_request:
     branches:
-      - agent/fix-qa-report-2026-08-02
+      - main
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: write
 
 jobs:
   apply:
-    if: ${{ !contains(github.event.head_commit.message, 'fix(ui): align GPU status with execution contract') }}
+    if: ${{ github.event.pull_request.number == 26 }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
