@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react'
 import { requestChatCompletion } from '@/api/consoleChat'
-import type { GenerationOptions } from '@/types'
+import type { ChatReferenceImage, GenerationOptions } from '@/types'
 import {
   getDraftResult,
   confirmDraft,
@@ -17,16 +17,18 @@ import {
 import {
   clearAllChatPolling,
   consumeChatEventStream,
+  describeDraftFailure,
   newSessionId,
   nextMessageId,
   pollDraftUntilSettled,
+  pollDraftProgressUntilStopped,
   pollVideoUntilTerminal,
   resumedSessionIds,
 } from '@/services/chatRuntime'
 
 function hasActiveAsyncTask(msg: ChatPageMessage): boolean {
   if (msg.videoId && !msg.error && !msg.incomplete) return true
-  if (msg.draft && ['generating', 'pending', 'confirming', 'rejecting'].includes(msg.draft.status)) return true
+  if (msg.draft && ['queued', 'running', 'generating', 'pending', 'refining', 'confirming', 'rejecting'].includes(msg.draft.status)) return true
   return false
 }
 
@@ -68,7 +70,13 @@ export interface UseChatSessions {
   newSession: () => void
   selectSession: (id: string) => void
   deleteSession: (id: string) => void
-  send: (text: string) => Promise<void>
+  send: (
+    text: string,
+    opts?: {
+      generationOptions?: GenerationOptions
+      referenceImage?: ChatReferenceImage
+    },
+  ) => Promise<void>
   stop: () => void
   clearActive: () => void
   confirmDraftMsg: (msgId: string) => Promise<void>
@@ -303,7 +311,12 @@ export function useChatSessions(): UseChatSessions {
 
   const send = useCallback(async (
     text: string,
-    opts?: { resume?: boolean; dropLastAssistant?: boolean; generationOptions?: GenerationOptions },
+    opts?: {
+      resume?: boolean
+      dropLastAssistant?: boolean
+      generationOptions?: GenerationOptions
+      referenceImage?: ChatReferenceImage
+    },
   ) => {
     const trimmed = text.trim()
     if (!trimmed || streaming || inflightRef.current) return
@@ -312,7 +325,14 @@ export function useChatSessions(): UseChatSessions {
     setError(null)
     if (!isResume && activeId) resumedSessionIds.delete(activeId)
 
-    const userMsg: ChatPageMessage = { id: nextMessageId(), role: 'user', content: trimmed, ts: Date.now() }
+    const userMsg: ChatPageMessage = {
+      id: nextMessageId(),
+      role: 'user',
+      content: trimmed,
+      referenceImageDataUrl: opts?.referenceImage?.dataUrl,
+      referenceImageName: opts?.referenceImage?.name,
+      ts: Date.now(),
+    }
     const assistantId = nextMessageId()
     const assistantMsg: ChatPageMessage = { id: assistantId, role: 'assistant', content: '', ts: Date.now() }
 
@@ -327,7 +347,18 @@ export function useChatSessions(): UseChatSessions {
     }
     const wireMessages: ChatMessage[] = (opts?.resume ? [...baseMsgs] : [...baseMsgs, userMsg])
       .filter(m => m.role === 'user' || (m.role === 'assistant' && m.content && !m.draft))
-      .map(m => ({ role: m.role, content: m.content }))
+      .map(m => ({
+        role: m.role,
+        content: m.referenceImageDataUrl
+          ? [
+              { type: 'text' as const, text: m.content },
+              {
+                type: 'image_url' as const,
+                image_url: { url: m.referenceImageDataUrl },
+              },
+            ]
+          : m.content,
+      }))
 
     setStreaming(true)
     const controller = new AbortController()
@@ -493,6 +524,24 @@ export function useChatSessions(): UseChatSessions {
     if (!msg?.draft || msg.draft.status === 'confirming' || msg.draft.status === 'rejecting') return
     patchMessage(msgId, m => m.draft ? { ...m, draft: { ...m.draft, status: 'confirming', errorMessage: undefined } } : m)
     flushToStorage()
+    const progressController = new AbortController()
+    const progressPolling = pollDraftProgressUntilStopped(
+      msg.draft.draftId,
+      progressController.signal,
+      progress => {
+        if (!['queued', 'running', 'generating', 'refining', 'confirming'].includes(progress.status ?? '')) return
+        patchMessage(msgId, message => message.draft ? {
+          ...message,
+          draft: {
+            ...message.draft,
+            status: normalizeDraftStatus(progress.status),
+            stage: progress.stage ?? message.draft.stage,
+            progress: normalizeDraftProgress(progress.progress) ?? message.draft.progress,
+            progressSource: progress.progressSource ?? message.draft.progressSource,
+          },
+        } : message)
+      },
+    )
     try {
       const result = await confirmDraft(msg.draft.draftId)
       if ('videoId' in result) {
@@ -511,8 +560,11 @@ export function useChatSessions(): UseChatSessions {
     } catch (e) {
       const code = e instanceof Error ? e.message : '确认失败'
       const expired = code.includes('expired') || code.includes('not_found')
-      patchMessage(msgId, m => m.draft ? { ...m, draft: { ...m.draft, status: expired ? 'expired' : 'error', errorMessage: code.includes('upstream_unavailable') ? '视频生成上游暂时不可用,请稍后重试' : code } } : m)
+      patchMessage(msgId, m => m.draft ? { ...m, draft: { ...m.draft, status: expired ? 'expired' : 'error', errorMessage: code.includes('upstream_unavailable') ? '视频生成上游暂时不可用,请稍后重试' : describeDraftFailure(code) } } : m)
       flushToStorage()
+    } finally {
+      progressController.abort()
+      await progressPolling
     }
   }, [sessions, activeId, patchMessage, pollVideoStatus, flushToStorage])
 

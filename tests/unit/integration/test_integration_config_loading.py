@@ -65,6 +65,7 @@ class TestParseIntegrationConfigsDefaults:
         assert c.public_url == ""
         assert c.connect_timeout == 10
         assert c.execution_timeout == 1200
+        assert c.progress_stall_timeout == 300
         assert c.qwen_image_draft_steps == 12
         assert c.qwen_image_max_draft_edge == 768
         assert c.ws_reconnect_attempts == 3
@@ -295,6 +296,47 @@ class TestTypeValidation:
         config_bad = {"plugins": [{"name": "conv_compressor", "config": {"max_history": True}}]}
         result = parse_integration_configs(config_bad, previous)
         assert result.conv_compressor.max_history == 15
+
+    def test_yaml_integer_is_valid_for_float_mapping(self):
+        config = {
+            "generation_optimization": {
+                "draft_workflow": {
+                    "comfyui": {
+                        "checkpoint_vram_gb": {
+                            "sd_xl_base_1.0.safetensors": 8,
+                        }
+                    }
+                }
+            }
+        }
+
+        result = parse_integration_configs(config)
+
+        assert result.comfyui.checkpoint_vram_gb == {
+            "sd_xl_base_1.0.safetensors": 8,
+        }
+
+    def test_invalid_float_mapping_item_retains_old(self):
+        previous = parse_integration_configs(
+            {
+                "generation_optimization": {
+                    "draft_workflow": {
+                        "comfyui": {"checkpoint_vram_gb": {"original": 10}}
+                    }
+                }
+            }
+        )
+        config_bad = {
+            "generation_optimization": {
+                "draft_workflow": {
+                    "comfyui": {"checkpoint_vram_gb": {"broken": "lots"}}
+                }
+            }
+        }
+
+        result = parse_integration_configs(config_bad, previous)
+
+        assert result.comfyui.checkpoint_vram_gb == {"original": 10}
 
 
 class TestRangeValidation:

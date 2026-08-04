@@ -19,9 +19,10 @@ import json
 import logging
 import os
 import threading
+import types
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Union, get_args, get_origin, get_type_hints
 
 import yaml
 
@@ -908,6 +909,7 @@ _FIELD_VALIDATORS: dict[tuple[type, str], Any] = {
     (CLIPConfig, "batch_size"): {"min": 1},
     (ComfyUIConfig, "connect_timeout"): {"min": 1},
     (ComfyUIConfig, "execution_timeout"): {"min": 1},
+    (ComfyUIConfig, "progress_stall_timeout"): {"min": 1},
     (ComfyUIConfig, "ws_reconnect_attempts"): {"min": 0},
     (ComfyUIConfig, "max_concurrency"): {"min": 1},
     (ComfyUIConfig, "min_free_gb"): {"min": 1},
@@ -1022,6 +1024,7 @@ def _validate_and_build(
         已验证的 dataclass 实例。
     """
     fields = dataclasses.fields(config_class)
+    resolved_types = get_type_hints(config_class)
     valid_kwargs: dict[str, Any] = {}
 
     for f in fields:
@@ -1035,7 +1038,7 @@ def _validate_and_build(
         raw_value = values[f.name]
 
         # 类型验证
-        expected_type = f.type
+        expected_type = resolved_types.get(f.name, f.type)
         if not _check_type(raw_value, expected_type):
             logger.warning(
                 "集成配置 %s.%s 类型无效: 期望 %s，实际 %r，保留旧值",
@@ -1061,39 +1064,47 @@ def _validate_and_build(
     return config_class(**valid_kwargs)
 
 
-def _check_type(value: Any, type_hint: str) -> bool:
-    """简单类型检查，基于 dataclass field type 注解字符串。
+def _check_type(value: Any, type_hint: Any) -> bool:
+    """递归检查 dataclass 字段值，包括泛型容器和联合类型。
 
     Args:
         value: 待检查值。
-        type_hint: 类型注解字符串（如 "bool", "float", "str", "int"）。
+        type_hint: 运行时类型注解。
 
     Returns:
         是否类型匹配。
     """
-    # 处理 Optional 类型
-    if "Optional" in str(type_hint):
-        if value is None:
-            return True
-        # 提取内部类型
-        inner = str(type_hint).replace("Optional[", "").rstrip("]")
-        return _check_type(value, inner)
+    if type_hint is Any:
+        return True
 
-    # 处理 List 类型
-    if "List" in str(type_hint) or "list" in str(type_hint):
-        return isinstance(value, list)
+    origin = get_origin(type_hint)
+    args = get_args(type_hint)
+    if origin in (types.UnionType, Union):
+        return any(_check_type(value, arg) for arg in args)
+    if origin is list:
+        return isinstance(value, list) and (
+            not args or all(_check_type(item, args[0]) for item in value)
+        )
+    if origin is dict:
+        return isinstance(value, dict) and (
+            len(args) != 2
+            or all(
+                _check_type(key, args[0]) and _check_type(item, args[1])
+                for key, item in value.items()
+            )
+        )
 
-    # 基础类型检查
-    type_str = str(type_hint).lower()
-    if "bool" in type_str:
+    if type_hint is type(None):
+        return value is None
+    if type_hint is bool:
         return isinstance(value, bool)
-    if "int" in type_str:
+    if type_hint is int:
         # int 类型不应接受 bool（Python 中 bool 是 int 子类）
         return isinstance(value, int) and not isinstance(value, bool)
-    if "float" in type_str:
+    if type_hint is float:
         # float 也接受 int（自动转换）
         return isinstance(value, (int, float)) and not isinstance(value, bool)
-    if "str" in type_str:
+    if type_hint is str:
         return isinstance(value, str)
 
     return True  # 未知类型，通过

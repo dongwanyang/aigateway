@@ -38,7 +38,7 @@ class AIDirectorConfig:
     Attributes:
         enabled: 是否启用 AI Director 策略 (默认: True)
         rewrite_model: 改写使用的模型名称 (默认: "gpt-4o-mini")
-        timeout_seconds: 模型调用超时时间/秒 (默认: 10.0, 范围: 1.0-120.0)
+        timeout_seconds: 模型调用超时时间/秒 (默认: 30.0, 范围: 1.0-120.0)
         max_prompt_length: 优化后 prompt 最大长度/字符 (默认: 2000, 范围: 100-50000)
         min_prompt_length: 触发自动扩展的最短 prompt 长度 (默认: 10, 范围: 1-1000)
         prompt_confirmation_enabled: 是否启用 prompt 确认流程 (默认: True)
@@ -46,7 +46,7 @@ class AIDirectorConfig:
 
     enabled: bool = True
     rewrite_model: str = "gpt-4o-mini"
-    timeout_seconds: float = 10.0
+    timeout_seconds: float = 30.0
     max_prompt_length: int = 2000
     min_prompt_length: int = 10
     prompt_confirmation_enabled: bool = True

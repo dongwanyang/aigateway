@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from typing import Any
 
 import httpx
@@ -162,6 +163,99 @@ async def _json_object(request: Request) -> dict[str, Any]:
     return body
 
 
+def _configured_model_names(config: Mapping[str, Any]) -> set[str]:
+    """Return model names explicitly declared by provider model groups."""
+    providers = config.get("providers")
+    if not isinstance(providers, Mapping):
+        return set()
+    names: set[str] = set()
+    for provider in providers.values():
+        if not isinstance(provider, Mapping):
+            continue
+        groups = provider.get("model_grouper")
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            if not isinstance(group, Mapping):
+                continue
+            models = group.get("models")
+            if not isinstance(models, list):
+                continue
+            for model in models:
+                if isinstance(model, str):
+                    name = model.strip()
+                elif isinstance(model, Mapping):
+                    name = str(model.get("name") or "").strip()
+                else:
+                    name = ""
+                if name:
+                    names.add(name)
+    return names
+
+
+def _prune_removed_model_references(
+    config: dict[str, Any], removed_models: set[str]
+) -> None:
+    """Remove list/map references only for models deleted by this transaction.
+
+    Unknown aliases that were never provider declarations are intentionally left
+    untouched.  This keeps the cleanup precise while preventing a deleted model
+    from surviving in routing, fallback, pricing, or generation-scoring tables.
+    """
+    if not removed_models:
+        return
+
+    providers = config.get("providers")
+    if isinstance(providers, dict):
+        for provider in providers.values():
+            if not isinstance(provider, dict):
+                continue
+            groups = provider.get("model_grouper")
+            if not isinstance(groups, list):
+                continue
+            for group in groups:
+                if not isinstance(group, dict):
+                    continue
+                fallbacks = group.get("fallback_models")
+                if isinstance(fallbacks, list):
+                    group["fallback_models"] = [
+                        item
+                        for item in fallbacks
+                        if not (
+                            isinstance(item, str)
+                            and item.strip() in removed_models
+                        )
+                    ]
+                pricing = group.get("pricing")
+                if isinstance(pricing, dict):
+                    for model_name in removed_models:
+                        pricing.pop(model_name, None)
+
+    task_routing = config.get("task_routing")
+    if isinstance(task_routing, dict):
+        preferences = task_routing.get("model_preferences")
+        if isinstance(preferences, dict):
+            for task, models in list(preferences.items()):
+                if isinstance(models, list):
+                    preferences[task] = [
+                        item
+                        for item in models
+                        if not (
+                            isinstance(item, str)
+                            and item.strip() in removed_models
+                        )
+                    ]
+
+    generation = config.get("generation_optimization")
+    if isinstance(generation, dict):
+        router_config = generation.get("model_router")
+        if isinstance(router_config, dict):
+            capabilities = router_config.get("model_capabilities")
+            if isinstance(capabilities, dict):
+                for model_name in removed_models:
+                    capabilities.pop(model_name, None)
+
+
 @router.get("/config")
 async def get_secure_full_config(
     request: Request,
@@ -207,9 +301,12 @@ async def update_secure_full_config(
             "debug",
         }
         candidate, _revision = read_versioned_yaml_config(manager.config_path)
+        previous_models = _configured_model_names(candidate)
         for key in writable:
             if key in submitted:
                 candidate[key] = submitted[key]
+        removed_models = previous_models - _configured_model_names(candidate)
+        _prune_removed_model_references(candidate, removed_models)
         commit = transactional_replace_config(
             manager.config_path,
             candidate,
@@ -232,9 +329,16 @@ async def update_secure_table_config(
     manager = _manager(request)
     try:
         expected = _expected_revision(request)
+        submitted = await _json_object(request)
+        previous, _revision = read_versioned_yaml_config(manager.config_path)
+        removed_models = (
+            _configured_model_names(previous)
+            - _configured_model_names(submitted)
+        )
+        _prune_removed_model_references(submitted, removed_models)
         commit = transactional_replace_config(
             manager.config_path,
-            await _json_object(request),
+            submitted,
             manager,
             expected_revision=expected,
         )

@@ -139,6 +139,26 @@ def _resolve_stream_logged_model(chunk: Any) -> str:
     return ""
 
 
+def _extract_reference_image_urls(messages: list[dict[str, Any]]) -> list[str]:
+    """Extract image URLs from the latest user turn without retaining raw text."""
+    for message in reversed(messages):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            return []
+        urls: list[str] = []
+        for part in content:
+            if not isinstance(part, dict) or part.get("type") != "image_url":
+                continue
+            image_url = part.get("image_url")
+            url = image_url.get("url") if isinstance(image_url, dict) else image_url
+            if isinstance(url, str) and url:
+                urls.append(url)
+        return urls
+    return []
+
+
 def _emit_stage(trace_id: str, stage: str, name: str, duration_ms: float,
                 status: str = "ok", payload: dict | None = None,
                 dimension: str | None = None) -> None:
@@ -297,6 +317,12 @@ class RequestDispatcher:
         # 解析 user_id / key_hash（从鉴权中间件注入）
         user_id, key_hash = self._resolve_identity(request)
 
+        # Media optimization may replace an image block with OCR/caption text.
+        # Preserve only the image payloads needed by img2img/img2video. Keeping
+        # the complete pre-PII user message here would expose unnecessary text
+        # to every generation plugin.
+        reference_image_urls = _extract_reference_image_urls(body.messages)
+
         # ===== 共用前置 1: Media Optimization =====
         # 多模态 content(图片/音频/视频)先转文本,PII 才能扫到图片 OCR 出的敏感文本。
         # 注意:生成管道的图片输入(文生图不适用,图生图适用)按理不该 OCR,
@@ -343,6 +369,7 @@ class RequestDispatcher:
             "request_start_time": request_start_time,
             "mol_meta": mol_meta,
             "pii_meta": pii_meta,
+            "reference_image_urls": reference_image_urls,
         }
 
         # ===== 分流(只看模态和显式意图,不看 body.model)=====
@@ -743,6 +770,9 @@ class RequestDispatcher:
                 ctx = PipelineContext(
                     request={"messages": body.messages, "model": body.model,
                              "stream": getattr(body, "stream", False),
+                             "reference_image_urls": prefix.get(
+                                 "reference_image_urls", []
+                             ),
                              "generation_options": (
                                  body.generation_options.model_dump()
                                  if getattr(body, "generation_options", None)
@@ -1303,13 +1333,14 @@ class RequestDispatcher:
                         if fr:
                             slot["finish_reason"] = fr
                 yield chunk
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, GeneratorExit):
             # Client disconnected. Explicitly close the upstream generator so
             # the provider connection is released promptly rather than waiting
             # on GC. Post-processing below still runs (quota/metrics) using
             # whatever we accumulated, but we skip cache backfill — a partial
             # stream is not a complete response and would poison the cache.
             client_disconnected = True
+            request.state._client_disconnected = True
             aclose = getattr(gen, "aclose", None)
             if aclose is not None:
                 try:
@@ -1352,7 +1383,13 @@ class RequestDispatcher:
         except Exception as exc:
             logger.warning("流式请求日志写入失败: %s", exc)
 
-        if not usage:
+        terminal_stream_failure = bool(
+            getattr(request.state, "_upstream_stream_failed", False)
+        )
+        terminal_stream_outcome = terminal_stream_failure or bool(
+            getattr(request.state, "_client_disconnected", False)
+        )
+        if not usage and not terminal_stream_outcome:
             await self._release_quota_reservation(request, key_store, key_hash)
             return
 
@@ -1387,6 +1424,12 @@ class RequestDispatcher:
                 )
             except Exception as exc:
                 logger.warning("流式成本账本写入失败: %s", exc)
+
+        # A terminal provider failure with no trustworthy usage must still
+        # produce a zero-cost ledger row, but its optimistic reservation cannot
+        # remain charged indefinitely.
+        if terminal_stream_outcome and tt <= 0:
+            await self._release_quota_reservation(request, key_store, key_hash)
 
         # 配额扣减（修正点：原流式不扣）
         if key_hash and key_store and tt > 0:

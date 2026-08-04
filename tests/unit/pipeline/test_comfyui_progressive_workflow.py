@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from io import BytesIO
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import httpx
@@ -12,11 +14,14 @@ from aigateway_core.pipelines.generation._common.models import (
     DraftResult,
     GenerationRequest,
 )
+from aigateway_core.pipelines.generation.draft import _draft_generator_impl as impl
 from aigateway_core.pipelines.generation.draft import draft_generator as module
 from aigateway_core.pipelines.generation.draft.draft_generator import (
     DraftGeneratorStrategy,
 )
+from aigateway_core.prefix.media.types import MediaContent, MediaType
 from aigateway_core.shared.integration_configs import ComfyUIConfig
+from PIL import Image
 
 
 @pytest.fixture
@@ -67,6 +72,12 @@ class FakeRedis:
 
     async def sadd(self, key, value):
         self.sets.setdefault(key, set()).add(value)
+
+
+def reference_png() -> bytes:
+    output = BytesIO()
+    Image.new("RGB", (24, 16), color=(180, 120, 40)).save(output, "PNG")
+    return output.getvalue()
 
 
 def test_draft_workflow_uses_allowlisted_checkpoint_and_stable_seed(strategy):
@@ -124,6 +135,178 @@ def test_refine_workflow_reuses_prompt_seed_checkpoint_and_preview(strategy):
     assert workflow["5"]["inputs"]["text"] == "ocean sunset"
     assert workflow["7"]["inputs"]["seed"] == 123456
     assert workflow["7"]["inputs"]["denoise"] == 0.25
+
+
+@pytest.mark.asyncio
+async def test_reference_image_draft_submits_img2img_workflow(
+    strategy, monkeypatch
+):
+    async def run_inline(func, *args):
+        return func(*args)
+
+    monkeypatch.setattr(module.asyncio, "to_thread", run_inline)
+    monkeypatch.setattr(strategy, "_check_comfyui", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        strategy,
+        "_ensure_storage_capacity",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        strategy,
+        "_upload_image",
+        AsyncMock(return_value="reference.png"),
+    )
+    submit = AsyncMock(return_value="prompt-reference")
+    monkeypatch.setattr(strategy, "_submit_workflow", submit)
+    monkeypatch.setattr(strategy, "_record_comfy_job", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        strategy,
+        "_poll_result",
+        AsyncMock(return_value=b"generated-reference"),
+    )
+    checkpoint = (
+        Path(strategy._comfyui_config.models_path)
+        / "checkpoints"
+        / "approved.safetensors"
+    )
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"model")
+    request = GenerationRequest(
+        prompt="a golden retriever running on grass",
+        request_id="req-reference",
+        reference_images=[
+            MediaContent(
+                media_type=MediaType.IMAGE,
+                raw_data=reference_png(),
+                mime_type="image/png",
+            )
+        ],
+    )
+
+    result = await strategy._generate_image_preview_with_comfyui(
+        request,
+        strategy._config,
+        seed=42,
+        draft_id="draft-reference",
+    )
+
+    assert result == b"generated-reference"
+    workflow = submit.await_args.args[0]
+    assert workflow["1"]["class_type"] == "LoadImage"
+    assert workflow["1"]["inputs"]["image"] == "reference.png"
+    assert workflow["7"]["inputs"]["steps"] == 12
+    assert workflow["7"]["inputs"]["denoise"] == 0.35
+    assert workflow["9"]["inputs"]["filename_prefix"] == (
+        "draft_reference_req-reference"
+    )
+
+
+@pytest.mark.asyncio
+async def test_reference_image_is_video_keyframe_without_sdxl_regeneration(
+    strategy, monkeypatch
+):
+    async def run_inline(func, *args):
+        return func(*args)
+
+    monkeypatch.setattr(module.asyncio, "to_thread", run_inline)
+    generate_image = AsyncMock()
+    monkeypatch.setattr(
+        strategy,
+        "_generate_image_preview_with_comfyui",
+        generate_image,
+    )
+    request = GenerationRequest(
+        prompt="make the dog run",
+        media_type="video",
+        reference_images=[
+            MediaContent(
+                media_type=MediaType.IMAGE,
+                raw_data=reference_png(),
+                mime_type="image/png",
+            )
+        ],
+    )
+
+    previews = await strategy._generate_video_previews_with_comfyui(
+        request,
+        strategy._config,
+        seed=17,
+        draft_id="draft-img2video",
+    )
+
+    assert len(previews) == 1
+    with Image.open(BytesIO(previews[0])) as preview:
+        assert preview.size == (24, 16)
+    generate_image.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_qwen_reference_image_fails_with_actionable_error(
+    strategy, monkeypatch
+):
+    monkeypatch.setattr(strategy, "_check_comfyui", AsyncMock(return_value=None))
+    request = GenerationRequest(
+        prompt="编辑这张图",
+        preset_id="qwen-image",
+        reference_images=[
+            MediaContent(
+                media_type=MediaType.IMAGE,
+                raw_data=reference_png(),
+            )
+        ],
+    )
+
+    with pytest.raises(
+        DraftWorkflowError,
+        match="comfyui_qwen_image_reference_unsupported",
+    ):
+        await strategy.check_local_dependencies(request)
+
+
+def test_reference_data_url_rejects_oversized_payload_before_decode(monkeypatch):
+    monkeypatch.setattr(impl, "_MAX_REFERENCE_IMAGE_BYTES", 3)
+
+    with pytest.raises(
+        DraftWorkflowError,
+        match="comfyui_reference_image_too_large",
+    ):
+        module.DraftGeneratorStrategy._decode_reference_data_url(
+            "data:image/png;base64,AAAAAAAA"
+        )
+
+
+@pytest.mark.asyncio
+async def test_img2video_preflight_does_not_require_unused_sdxl_checkpoint(
+    strategy, monkeypatch
+):
+    async def run_inline(func, *args):
+        return func(*args)
+
+    monkeypatch.setattr(module.asyncio, "to_thread", run_inline)
+    monkeypatch.setattr(strategy, "_check_comfyui", AsyncMock(return_value=None))
+    models = Path(strategy._comfyui_config.models_path)
+    for folder, filename in (
+        ("diffusion_models", strategy._comfyui_config.video_diffusion_model),
+        ("text_encoders", strategy._comfyui_config.video_text_encoder),
+        ("vae", strategy._comfyui_config.video_vae),
+    ):
+        path = models / folder / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"model")
+    request = GenerationRequest(
+        prompt="make this dog run",
+        media_type="video",
+        reference_images=[
+            MediaContent(
+                media_type=MediaType.IMAGE,
+                raw_data=reference_png(),
+            )
+        ],
+    )
+
+    await strategy.check_local_dependencies(request)
+
+    assert not (models / "checkpoints" / "approved.safetensors").exists()
 
 
 @pytest.mark.asyncio
@@ -366,8 +549,8 @@ async def test_apply_comfyui_progress_persists_real_step_ratio(strategy):
     await strategy._apply_comfyui_progress(
         "draft-progress",
         "prompt-progress",
-        0.5,
-        value=6,
+        0.25,
+        value=3,
         max_value=12,
         stage="running",
         trace_id="trace-progress",
@@ -375,11 +558,182 @@ async def test_apply_comfyui_progress_persists_real_step_ratio(strategy):
 
     reloaded = await strategy.get_draft("draft-progress")
     assert reloaded is not None
-    assert reloaded.stage == "sampling 6/12"
-    assert reloaded.progress == pytest.approx(0.525)
+    assert reloaded.stage == "sampling 3/12"
+    assert reloaded.progress == pytest.approx(0.25)
     assert reloaded.generation_params["progress_source"] == "comfyui"
     data = json.loads(redis.hashes["aigateway:trace:trace-progress"]["data"])
     assert "comfyui.progress" in [event["name"] for event in data["events"]]
+
+
+@pytest.mark.asyncio
+async def test_record_comfy_job_resets_previous_workflow_percentage(strategy):
+    redis = FakeRedis()
+    strategy._redis_client = redis
+    draft = DraftResult(
+        draft_id="draft-submit",
+        previews=[],
+        generation_params={"progress_source": "comfyui"},
+        created_at=1.0,
+        expires_at=9999999999.0,
+        status=DRAFT_STATUS_RUNNING,
+        media_type="image",
+        progress=0.89,
+        stage="sampling 12/12",
+        comfy_prompt_id="old-prompt",
+    )
+    await strategy._store_draft(draft, ttl_seconds=60)
+
+    await strategy._record_comfy_job("draft-submit", "new-prompt", "refining")
+
+    reloaded = await strategy.get_draft("draft-submit")
+    assert reloaded is not None
+    assert reloaded.comfy_prompt_id == "new-prompt"
+    assert reloaded.progress == 0.0
+    assert reloaded.stage == "waiting_for_comfyui"
+    assert reloaded.generation_params["progress_source"] == "comfyui"
+
+
+@pytest.mark.asyncio
+async def test_refine_submission_starts_at_exact_comfyui_zero(strategy, monkeypatch):
+    draft = DraftResult(
+        draft_id="draft-refine-submit",
+        previews=[reference_png()],
+        generation_params={
+            "prompt": "a dog",
+            "seed": 17,
+            "quality": "standard",
+            "progress_source": "comfyui",
+        },
+        created_at=1.0,
+        expires_at=9999999999.0,
+        status=DRAFT_STATUS_RUNNING,
+        media_type="image",
+        progress=0.89,
+        stage="sampling 12/12",
+    )
+    monkeypatch.setattr(
+        strategy,
+        "_ensure_storage_capacity",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        strategy,
+        "_upload_image",
+        AsyncMock(return_value="draft.png"),
+    )
+    monkeypatch.setattr(strategy, "_build_refine_workflow", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        strategy,
+        "_submit_workflow",
+        AsyncMock(return_value="prompt-refine"),
+    )
+    monkeypatch.setattr(
+        strategy,
+        "_poll_result",
+        AsyncMock(return_value=b"refined"),
+    )
+    monkeypatch.setattr(
+        strategy,
+        "_emit_draft_trace",
+        AsyncMock(return_value=None),
+    )
+
+    result = await strategy._upscale_with_comfyui(draft, (1024, 1024))
+
+    assert result == b"refined"
+    assert draft.comfy_prompt_id == "prompt-refine"
+    assert draft.stage == "waiting_for_comfyui"
+    assert draft.progress == 0.0
+    assert draft.generation_params["progress_source"] == "comfyui"
+
+
+@pytest.mark.asyncio
+async def test_comfyui_executing_resets_previous_node_progress(strategy):
+    redis = FakeRedis()
+    strategy._redis_client = redis
+    draft = DraftResult(
+        draft_id="draft-node",
+        previews=[],
+        generation_params={"progress_source": "comfyui"},
+        created_at=1.0,
+        expires_at=9999999999.0,
+        status=DRAFT_STATUS_RUNNING,
+        media_type="image",
+        progress=1.0,
+        stage="sampling 12/12",
+        comfy_prompt_id="prompt-node",
+    )
+    await strategy._store_draft(draft, ttl_seconds=60)
+
+    await strategy._apply_comfyui_executing(
+        "draft-node", "prompt-node", node="vae-decode"
+    )
+
+    reloaded = await strategy.get_draft("draft-node")
+    assert reloaded is not None
+    assert reloaded.progress == 0.0
+    assert reloaded.stage == "executing vae-decode"
+    assert reloaded.generation_params["progress_source"] == "comfyui"
+
+
+@pytest.mark.asyncio
+async def test_postprocess_stage_is_indeterminate_not_invented_percentage(strategy):
+    redis = FakeRedis()
+    strategy._redis_client = redis
+    draft = DraftResult(
+        draft_id="draft-finalize",
+        previews=[],
+        generation_params={"progress_source": "comfyui"},
+        created_at=1.0,
+        expires_at=9999999999.0,
+        status=DRAFT_STATUS_RUNNING,
+        media_type="image",
+        progress=1.0,
+        stage="sampling 12/12",
+        comfy_prompt_id="prompt-finalize",
+    )
+    await strategy._store_draft(draft, ttl_seconds=60)
+
+    await strategy._set_comfyui_postprocess_stage(
+        "draft-finalize", "prompt-finalize", stage="finalizing"
+    )
+
+    reloaded = await strategy.get_draft("draft-finalize")
+    assert reloaded is not None
+    assert reloaded.stage == "finalizing"
+    assert reloaded.generation_params["progress_source"] == "stage"
+
+
+@pytest.mark.asyncio
+async def test_poll_results_cancels_workflow_when_progress_stalls(
+    strategy, monkeypatch
+):
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {}
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, _url):
+            return Response()
+
+    strategy._comfyui_config.progress_stall_timeout = 0
+    cancel = AsyncMock(return_value=True)
+    monkeypatch.setattr("httpx.AsyncClient", lambda **_kwargs: Client())
+    monkeypatch.setattr(strategy, "_cancel_comfyui_workflow", cancel)
+
+    with pytest.raises(DraftWorkflowError, match="comfyui_progress_stalled"):
+        await strategy._poll_results("prompt-stalled", timeout=60)
+
+    cancel.assert_awaited_once_with("prompt-stalled", server_url=None)
 
 
 @pytest.mark.asyncio
@@ -434,6 +788,97 @@ async def test_poll_results_retries_transient_history_timeout(strategy, monkeypa
 
     assert result == b"image-bytes"
     assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_poll_results_waits_for_partial_history_outputs(strategy, monkeypatch):
+    class Response:
+        def __init__(self, payload=None, content=b""):
+            self.status_code = 200
+            self._payload = payload
+            self.content = content
+
+        def json(self):
+            return self._payload
+
+    partial = {
+        "prompt-image": {
+            "status": {"status_str": "success", "completed": False, "messages": []},
+            "outputs": {},
+        }
+    }
+    completed = {
+        "prompt-image": {
+            "status": {"status_str": "success", "completed": True, "messages": []},
+            "outputs": {
+                "9": {
+                    "images": [
+                        {
+                            "filename": "draft.png",
+                            "subfolder": "",
+                            "type": "output",
+                        }
+                    ]
+                }
+            },
+        }
+    }
+    histories = iter((partial, completed))
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, url):
+            if "/history/" in url:
+                return Response(next(histories))
+            return Response(content=b"image-bytes")
+
+    monkeypatch.setattr("httpx.AsyncClient", lambda **_kwargs: Client())
+    monkeypatch.setattr(module.asyncio, "sleep", AsyncMock())
+
+    result = await strategy._poll_result("prompt-image", timeout=5)
+
+    assert result == b"image-bytes"
+
+
+@pytest.mark.asyncio
+async def test_poll_results_reports_interrupted_workflow(strategy, monkeypatch):
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "prompt-image": {
+                    "status": {
+                        "status_str": "error",
+                        "completed": False,
+                        "messages": [["execution_interrupted", {"node_id": "9"}]],
+                    },
+                    "outputs": {},
+                }
+            }
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, _url):
+            return Response()
+
+    monkeypatch.setattr("httpx.AsyncClient", lambda **_kwargs: Client())
+
+    with pytest.raises(
+        DraftWorkflowError, match="comfyui_workflow_execution_failed"
+    ):
+        await strategy._poll_results("prompt-image", timeout=1)
 
 
 @pytest.mark.asyncio

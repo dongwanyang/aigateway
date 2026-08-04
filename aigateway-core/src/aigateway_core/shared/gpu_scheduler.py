@@ -72,7 +72,7 @@ class GpuSchedulerConfig:
     gateway_devices: DeviceSelector = "auto"
     comfyui_devices: DeviceSelector = "auto"
     gateway_fallback: Literal["cpu", "wait", "fail"] = "cpu"
-    generation_wait_timeout_seconds: float = 120.0
+    generation_wait_timeout_seconds: float = 600.0
     comfyui_idle_reservation_seconds: float = 60.0
     lease_ttl_seconds: float = 15.0
     lease_heartbeat_seconds: float = 5.0
@@ -155,7 +155,7 @@ class GpuSchedulerConfig:
             comfyui_devices=_device_selector(raw.get("comfyui_devices", "auto"), "comfyui_devices"),
             gateway_fallback=fallback,  # type: ignore[arg-type]
             generation_wait_timeout_seconds=_positive_number(
-                raw.get("generation_wait_timeout_seconds", 120),
+                raw.get("generation_wait_timeout_seconds", 600),
                 "generation_wait_timeout_seconds",
             ),
             comfyui_idle_reservation_seconds=_positive_number(
@@ -1570,7 +1570,16 @@ class GpuResourceCoordinator:
 
 
 def workers_from_config(config: Mapping[str, Any], devices: Sequence[GpuDevice]) -> list[ComfyWorker]:
-    """Parse generated worker topology, retaining the single-URL compatibility path."""
+    """Parse explicit pool workers without assigning remote endpoints locally.
+
+    An enabled scheduler may only receive workers whose stable ``device_uuid``
+    mapping was generated explicitly. A fixed ComfyUI URL is not evidence that
+    the endpoint owns a local GPU; synthesizing such a mapping would let remote
+    queue and memory telemetry drain or lock local Gateway devices.
+
+    The historical single-URL compatibility path remains available only when
+    the scheduler is absent or explicitly disabled.
+    """
     scheduler = config.get("gpu_scheduler", {})
     raw_workers = scheduler.get("workers", []) if isinstance(scheduler, Mapping) else []
     workers: list[ComfyWorker] = []
@@ -1589,10 +1598,15 @@ def workers_from_config(config: Mapping[str, Any], devices: Sequence[GpuDevice])
                 worker_id=str(raw.get("worker_id") or f"comfyui-{index}"),
                 device_uuid=device_uuid,
                 server_url=server_url,
-                capabilities=frozenset(str(item) for item in capabilities),
+                capabilities=frozenset(str(item) for item in capabilities if item),
             ))
-    if workers or not devices:
+
+    scheduler_enabled = (
+        isinstance(scheduler, Mapping) and scheduler.get("enabled") is True
+    )
+    if workers or not devices or scheduler_enabled:
         return workers
+
     generation = config.get("generation_optimization", {})
     draft = generation.get("draft_workflow", {}) if isinstance(generation, Mapping) else {}
     comfy = draft.get("comfyui", {}) if isinstance(draft, Mapping) else {}

@@ -205,6 +205,35 @@ def render_topology(
     return {"services": services}, workers
 
 
+def _runtime_inventory(devices: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Serialize host-discovered devices for Gateway-side topology fallback."""
+    result: list[dict[str, Any]] = []
+    for device in devices:
+        uuid = str(device.get("uuid") or "").strip()
+        if not uuid:
+            continue
+        try:
+            index = int(device.get("index", 0))
+            total_memory_gb = round(
+                max(0, int(device.get("memory_total_mb", 0))) / 1024,
+                3,
+            )
+        except (TypeError, ValueError):
+            continue
+        result.append(
+            {
+                "index": index,
+                "uuid": uuid,
+                "name": str(device.get("name") or "NVIDIA GPU"),
+                "total_memory_gb": total_memory_gb,
+                # Runtime worker probes replace this optimistic bootstrap value
+                # before the coordinator starts accepting generation work.
+                "free_memory_gb": total_memory_gb,
+            }
+        )
+    return result
+
+
 def _select_devices(
     devices: list[dict[str, Any]],
     scheduler: dict[str, Any],
@@ -258,6 +287,10 @@ def main() -> int:
         raise SystemExit("no NVIDIA GPU UUIDs discovered")
 
     inventory = devices
+    runtime_inventory = _runtime_inventory(inventory)
+    if not runtime_inventory:
+        raise SystemExit("no valid NVIDIA GPU UUIDs discovered")
+
     with _config_write_lock(args.runtime_config):
         runtime = yaml.safe_load(
             args.runtime_config.read_text(encoding="utf-8")
@@ -279,6 +312,8 @@ def main() -> int:
                 "policy": scheduler.get("policy", "auto"),
                 "gateway_devices": scheduler.get("gateway_devices", "auto"),
                 "comfyui_devices": scheduler.get("comfyui_devices", "auto"),
+                "inventory_source": "host_generated",
+                "devices": runtime_inventory,
                 "workers": workers,
             }
         )

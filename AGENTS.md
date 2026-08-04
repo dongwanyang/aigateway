@@ -233,6 +233,18 @@ Run `python3 -m pytest tests/ui/ -q` when a user journey spans the browser and b
 
 For Compose changes, run `docker compose config`.
 
+For a cached source-container rebuild, use the installer and the persisted deployment state:
+
+```bash
+BUILDKIT_PROGRESS=plain \
+  bash scripts/quickstart.sh \
+    --non-interactive \
+    --distribution source \
+    --build
+```
+
+Do not replace this with a bare `docker compose build` or `docker compose up --build` command: those commands omit `.aigateway-install.env` unless every env file and generated overlay is supplied explicitly, and may select the Lite target or wrong registry cache. Do not use `--no-cache`, `docker builder prune`, or `docker system prune -a` unless the user explicitly requests cache-bypass/cleanup or there is concrete evidence of cache corruption. See `INSTALL.md` for the rebuild and cache-miss contract.
+
 For backend Python, dependency, Dockerfile, or baked configuration changes, rebuild the affected image, check `GET /health`, and inspect recent gateway logs for errors.
 
 Run the benchmark suite when changing routing, caching, compression, token accounting, provider fallback, or cost behavior. Do not require live provider secrets for unrelated unit-test changes.

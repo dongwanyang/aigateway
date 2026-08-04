@@ -220,6 +220,43 @@ describe('shared UI components', () => {
     expect(onRefreshPresets).toHaveBeenCalledTimes(1)
   })
 
+  it('uploads and sends a reference image for img2img or img2video', async () => {
+    const onSend = vi.fn()
+    const user = userEvent.setup()
+    render(
+      <ChatComposer
+        streaming={false}
+        disabled={false}
+        onSend={onSend}
+        onStop={vi.fn()}
+      />,
+    )
+    const file = new File(['reference-image'], 'golden.png', {
+      type: 'image/png',
+    })
+
+    await user.upload(screen.getByLabelText('上传参考图'), file)
+    expect(await screen.findByRole('img', { name: '参考图预览' })).toBeVisible()
+    await user.type(
+      screen.getByPlaceholderText(/输入消息/),
+      '让这只狗在草地上奔跑',
+    )
+    await user.keyboard('{Enter}')
+
+    expect(onSend).toHaveBeenCalledWith(
+      '让这只狗在草地上奔跑',
+      {
+        referenceImage: expect.objectContaining({
+          name: 'golden.png',
+          mimeType: 'image/png',
+          size: file.size,
+          dataUrl: expect.stringMatching(/^data:image\/png;base64,/),
+        }),
+      },
+    )
+    expect(screen.queryByRole('img', { name: '参考图预览' })).not.toBeInTheDocument()
+  })
+
   it('handles image loading, lightbox controls and keyboard close', async () => {
     const user = userEvent.setup()
     const { rerender } = render(<MediaImage content="base64bytes" done={false} />)
@@ -296,8 +333,47 @@ describe('shared UI components', () => {
       onReject={vi.fn()}
     />)
 
-    expect(screen.getByText(/60%.*sampling 6\/12/)).toBeInTheDocument()
+    expect(screen.getByText(/60%.*采样 6\/12/)).toBeInTheDocument()
     expect(screen.getByRole('progressbar', { name: /草稿生成进度/ })).toHaveAttribute('aria-valuenow', '60')
+  })
+
+  it('renders the finalizing phase without claiming sampling is complete output', () => {
+    render(<DraftCard
+      draft={{
+        draftId: 'd-finalizing',
+        previewUrl: '/preview',
+        mediaType: 'image',
+        status: 'refining',
+        stage: 'finalizing',
+        progress: 1,
+        progressSource: 'stage',
+      }}
+      onConfirm={vi.fn()}
+      onReject={vi.fn()}
+    />)
+
+    expect(screen.getByText(/正在解码并保存/)).toBeInTheDocument()
+    expect(screen.getByText(/正在解码并保存/)).not.toHaveTextContent(/100%/)
+    expect(screen.getByRole('progressbar', { name: /草稿生成进度/ })).not.toHaveAttribute('aria-valuenow')
+  })
+
+  it('resets to the ComfyUI node progress when a new node starts', () => {
+    render(<DraftCard
+      draft={{
+        draftId: 'd-node-loading',
+        previewUrl: '/preview',
+        mediaType: 'image',
+        status: 'running',
+        stage: 'executing 12',
+        progress: 0,
+        progressSource: 'comfyui',
+      }}
+      onConfirm={vi.fn()}
+      onReject={vi.fn()}
+    />)
+
+    expect(screen.getByText(/0%.*ComfyUI 节点 12 执行中/)).toBeInTheDocument()
+    expect(screen.getByRole('progressbar', { name: /草稿生成进度/ })).toHaveAttribute('aria-valuenow', '0')
   })
 
   it('renders a local ComfyUI video result without an Agnes video id', () => {

@@ -616,6 +616,51 @@ describe('control panel pages against production API response shapes', () => {
     expect(screen.getByText('video')).toBeInTheDocument()
   })
 
+  it('adds and removes primary and fallback models through visible controls', async () => {
+    const user = userEvent.setup()
+    renderPage(<Models />)
+    await screen.findByText('gpt-4o')
+
+    await user.click(screen.getByRole('button', { name: '+ 添加模型' }))
+    expect(screen.getByRole('heading', { name: /新增模型.*openai/ })).toBeInTheDocument()
+    await user.type(screen.getByPlaceholderText('如: gpt-4o'), 'qa-image-model')
+    await user.click(screen.getByText('图像 (image)'))
+    await user.click(screen.getByRole('button', { name: '添加' }))
+    expect(screen.getByText('qa-image-model')).toBeInTheDocument()
+    expect(screen.getAllByText('image').length).toBeGreaterThan(1)
+
+    await user.click(screen.getByRole('button', { name: '+ 添加降级模型' }))
+    const fallbackInputs = screen.getAllByPlaceholderText('降级模型名称')
+    const addedFallback = fallbackInputs.at(-1)!
+    await user.type(addedFallback, 'qa-fallback-model')
+    expect(addedFallback).toHaveValue('qa-fallback-model')
+    const removeFallback = addedFallback.parentElement?.querySelector('button')
+    if (!removeFallback) throw new Error('fallback remove button not found')
+    await user.click(removeFallback)
+    expect(screen.queryByDisplayValue('qa-fallback-model')).not.toBeInTheDocument()
+
+    await user.click(screen.getAllByTitle('移除模型').at(-1)!)
+    expect(screen.queryByText('qa-image-model')).not.toBeInTheDocument()
+  })
+
+  it('removes a provider and persists the resulting provider map', async () => {
+    const user = userEvent.setup()
+    renderPage(<Models />)
+    await screen.findByText('openai')
+
+    await user.click(screen.getByTitle('删除提供商'))
+    expect(screen.queryByText('openai')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: /保存配置/ }))
+
+    await waitFor(() => {
+      const call = vi.mocked(fetch).mock.calls.find(
+        ([url, init]) => String(url).endsWith('/admin/config') && init?.method === 'PUT',
+      )
+      expect(call).toBeDefined()
+      expect(JSON.parse(String(call?.[1]?.body)).providers).toEqual({})
+    })
+  })
+
   it('switches quota tabs, searches keys and opens creation forms', async () => {
     const user = userEvent.setup()
     renderPage(<Quotas />)
@@ -649,6 +694,41 @@ describe('control panel pages against production API response shapes', () => {
     await waitFor(() => expect(fetch).toHaveBeenCalledWith(
       expect.stringMatching(/\/admin\/api-keys\/key-1$/),
       expect.objectContaining({ method: 'PUT', body: expect.stringContaining('2000') }),
+    ))
+  })
+
+  it('opens key details and executes rotate, revoke and group assignment actions', async () => {
+    const user = userEvent.setup()
+    renderPage(<Quotas />)
+    await screen.findByText(/gw-test/)
+
+    await user.click(screen.getByTitle('查看详情'))
+    expect(screen.getByRole('dialog', { name: /API Key 详情 alice/ })).toBeInTheDocument()
+    expect(screen.getByText('key-1')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '关闭' }))
+    expect(screen.queryByRole('dialog', { name: /API Key 详情 alice/ })).not.toBeInTheDocument()
+
+    await user.click(screen.getByTitle('旋转密钥'))
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith(
+      expect.stringMatching(/\/admin\/api-keys\/key-1\/rotate$/),
+      expect.objectContaining({ method: 'POST' }),
+    ))
+
+    await user.click(screen.getByRole('button', { name: '用户组' }))
+    const selects = screen.getAllByRole('combobox')
+    await user.selectOptions(selects.at(-2)!, 'key-1')
+    await user.selectOptions(selects.at(-1)!, 'grp-team')
+    await user.click(screen.getByRole('button', { name: '分配' }))
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith(
+      expect.stringMatching(/\/admin\/api-keys\/key-1\/group$/),
+      expect.objectContaining({ method: 'PUT', body: '{"group_id":"grp-team"}' }),
+    ))
+
+    await user.click(screen.getByRole('button', { name: 'API Keys' }))
+    await user.click(screen.getByTitle('撤销'))
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith(
+      expect.stringMatching(/\/admin\/api-keys\/key-1$/),
+      expect.objectContaining({ method: 'DELETE' }),
     ))
   })
 
@@ -698,6 +778,37 @@ describe('control panel pages against production API response shapes', () => {
     ))
   })
 
+  it('edits L3 cache configuration and toggles and deletes an entry', async () => {
+    const user = userEvent.setup()
+    renderPage(<Cache />)
+    await user.click(screen.getByRole('button', { name: 'L3 缓存管理' }))
+    expect(await screen.findByText('hello')).toBeInTheDocument()
+
+    await user.click(screen.getByTitle('切换为手动（永不过期）'))
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith(
+      expect.stringMatching(/\/admin\/cache\/l3\/entries\/point-1\/mode$/),
+      expect.objectContaining({ method: 'PUT', body: expect.stringContaining('"mode":"manual"') }),
+    ))
+    await user.click(screen.getByTitle('删除'))
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith(
+      expect.stringMatching(/\/admin\/cache\/l3\/entries\/point-1$/),
+      expect.objectContaining({ method: 'DELETE' }),
+    ))
+
+    await user.click(screen.getByRole('button', { name: /配置/ }))
+    const configHeading = await screen.findByText('L3 缓存配置')
+    const configCard = configHeading.closest('section')
+    if (!configCard) throw new Error('L3 config card not found')
+    const configInputs = within(configCard).getAllByRole('spinbutton')
+    await user.clear(configInputs[0])
+    await user.type(configInputs[0], '30')
+    await user.click(within(configCard).getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith(
+      expect.stringMatching(/\/admin\/cache\/l3\/config$/),
+      expect.objectContaining({ method: 'PUT', body: expect.stringContaining('"auto_cleanup_interval_minutes":30') }),
+    ))
+  })
+
   it('opens a trace from a persisted log row', async () => {
     const user = userEvent.setup()
     renderPage(<Logs />)
@@ -721,6 +832,23 @@ describe('control panel pages against production API response shapes', () => {
     await waitFor(() => expect(fetch).toHaveBeenCalledWith(
       expect.stringMatching(/\/admin\/logs\/batch-delete$/),
       expect.objectContaining({ method: 'POST', body: '{"request_ids":["req-1"]}' }),
+    ))
+  })
+
+  it('copies, filters and clears request logs through the toolbar', async () => {
+    const user = userEvent.setup()
+    renderPage(<Logs />)
+    await screen.findByText('req-1')
+    await user.click(screen.getByTitle('点击复制'))
+    expect(await screen.findByText('✓')).toBeInTheDocument()
+
+    await user.type(screen.getByPlaceholderText(/搜索 trace_id/), 'alice')
+    await user.selectOptions(screen.getByRole('combobox'), '200')
+    await user.click(screen.getByRole('checkbox', { name: /仅缓存命中/ }))
+    await user.click(screen.getByRole('button', { name: /清空全部/ }))
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith(
+      expect.stringMatching(/\/admin\/logs$/),
+      expect.objectContaining({ method: 'DELETE' }),
     ))
   })
 
@@ -756,6 +884,32 @@ describe('control panel pages against production API response shapes', () => {
       expect.stringMatching(/\/admin\/rag\/documents\/doc-1$/),
       expect.objectContaining({ method: 'DELETE' }),
     ))
+  })
+
+  it('uploads, clears and imports a local knowledge document', async () => {
+    const user = userEvent.setup()
+    renderPage(<Knowledge />)
+    await screen.findByText('guide.txt')
+    await user.click(screen.getByRole('button', { name: /导入文档/ }))
+    await user.click(screen.getByRole('button', { name: /上传文件/ }))
+    const fileInput = document.querySelector<HTMLInputElement>('input[type="file"]')
+    if (!fileInput) throw new Error('knowledge file input not found')
+
+    await user.upload(fileInput, new File(['# QA knowledge'], 'qa-notes.md', { type: 'text/markdown' }))
+    expect(await screen.findByText('qa-notes.md')).toBeInTheDocument()
+    await user.click(screen.getByTitle('清除'))
+    expect(screen.queryByText('qa-notes.md')).not.toBeInTheDocument()
+
+    await user.upload(fileInput, new File(['# Imported QA knowledge'], 'qa-import.md', { type: 'text/markdown' }))
+    await user.click(screen.getByRole('button', { name: '开始导入' }))
+    expect(await screen.findByText(/导入成功: 3 个分块, 42 tokens/)).toBeInTheDocument()
+    const importCall = vi.mocked(fetch).mock.calls.find(([url, init]) => (
+      String(url).endsWith('/admin/rag/documents')
+      && init?.method === 'POST'
+      && String(init.body).includes('qa-import.md')
+    ))
+    expect(importCall).toBeDefined()
+    expect(String(importCall?.[1]?.body)).toContain('# Imported QA knowledge')
   })
 
   it('persists plugin, debug and hot-reload toggle changes', async () => {
@@ -874,5 +1028,36 @@ describe('control panel pages against production API response shapes', () => {
     expect(screen.queryByText('Hello world')).not.toBeInTheDocument()
     const chatState = useChatStore.getState()
     expect(chatState.sessions.find(session => session.id === chatState.activeId)?.messages).toEqual([])
+  })
+
+  it('sends the uploaded reference image as an OpenAI multimodal message', async () => {
+    const user = userEvent.setup()
+    renderPage(<Chat />)
+    const file = new File(['reference'], 'source.webp', { type: 'image/webp' })
+    await user.upload(await screen.findByLabelText('上传参考图'), file)
+    await user.type(
+      screen.getByPlaceholderText(/输入消息/),
+      '基于参考图生成一段奔跑视频',
+    )
+    await user.click(screen.getByRole('button', { name: '发送' }))
+
+    await waitFor(() => {
+      const call = vi.mocked(fetch).mock.calls.find(
+        ([url, init]) => (
+          String(url).endsWith('/admin/console/chat/completions')
+          && init?.method === 'POST'
+          && String(init.body).includes('基于参考图生成一段奔跑视频')
+        ),
+      )
+      expect(call).toBeDefined()
+      const body = JSON.parse(String(call?.[1]?.body))
+      expect(body.messages.at(-1).content).toEqual([
+        { type: 'text', text: '基于参考图生成一段奔跑视频' },
+        {
+          type: 'image_url',
+          image_url: { url: expect.stringMatching(/^data:image\/webp;base64,/) },
+        },
+      ])
+    })
   })
 })

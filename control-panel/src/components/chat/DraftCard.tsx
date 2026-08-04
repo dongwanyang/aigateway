@@ -18,13 +18,26 @@ export default function DraftCard({ draft, onConfirm, onReject }: DraftCardProps
   const hasRealComfyProgress = draft.progressSource === 'comfyui'
   const indeterminateProgress = busy
     && progressPercent !== null
-    && progressPercent < 100
     && ['running', 'refining', 'confirming'].includes(draft.status)
     && !hasRealComfyProgress
-  const progressText = (!indeterminateProgress && progressPercent !== null && (hasRealComfyProgress || progressPercent >= 100))
+  const progressText = (!indeterminateProgress && progressPercent !== null && hasRealComfyProgress)
     ? ` ${progressPercent}%`
     : ''
-  const stageText = draft.stage && draft.stage !== draft.status ? draft.stage : ''
+  const stageText = (() => {
+    if (!draft.stage || draft.stage === draft.status) return ''
+    const sampling = draft.stage.match(/^sampling (\d+)\/(\d+)$/)
+    if (sampling) return `采样 ${sampling[1]}/${sampling[2]}`
+    const executing = draft.stage.match(/^executing (.+)$/)
+    if (executing) return `ComfyUI 节点 ${executing[1]} 执行中`
+    const labels: Record<string, string> = {
+      waiting_for_comfyui: '等待 ComfyUI 响应',
+      preparing_for_comfyui: '正在准备 ComfyUI 工作流',
+      finalizing: '正在解码并保存',
+      downloading: '正在获取生成结果',
+      preview_ready: '预览已就绪',
+    }
+    return labels[draft.stage] ?? draft.stage
+  })()
   const stageLabel = stageText ? ` · ${stageText}` : ''
 
   return (

@@ -40,7 +40,7 @@ def test_yaml_cors_bootstrap_does_not_become_runtime_env_override(
     )
     assert aigateway_api.os.environ[
         "AI_GATEWAY_CORS_ORIGINS_BOOTSTRAPPED_FROM_YAML"
-    ] == "1"
+    ] == "https://one.example"
 
     manager = ConfigManager(str(path))
     assert "AI_GATEWAY_CORS_ORIGINS" not in aigateway_api.os.environ

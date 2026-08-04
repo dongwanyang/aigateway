@@ -98,18 +98,31 @@ def _preload_cors_origins() -> None:
         if isinstance(value, str) and value.strip()
     ]
     if normalized:
-        os.environ["AI_GATEWAY_CORS_ORIGINS"] = ",".join(normalized)
-        os.environ[_CORS_YAML_BOOTSTRAP_MARKER] = "1"
+        bootstrap_origins = ",".join(normalized)
+        os.environ["AI_GATEWAY_CORS_ORIGINS"] = bootstrap_origins
+        # Store the synthetic value itself. ConfigManager can then distinguish
+        # it from an operator/test override written after package import.
+        os.environ[_CORS_YAML_BOOTSTRAP_MARKER] = bootstrap_origins
 
 
 def _install_admin_security_guards() -> None:
     """Install sensitive-route, transactional-config and ownership replacements."""
-    from . import admin_routes
+    from . import admin_routes, security_routes
     from .config_management_routes import install_config_management_routes
     from .draft_security import assert_draft_owner
-    from .security_routes import install_security_routes
+    from .model_reference_cleanup import (
+        configured_model_names,
+        prune_removed_model_references,
+    )
 
-    install_security_routes(admin_routes.router)
+    # Secure route handlers resolve these globals at request time. Replacing the
+    # narrow legacy helpers here preserves their public test/import surface while
+    # installing the complete scalar-reference validation contract.
+    security_routes._configured_model_names = configured_model_names
+    security_routes._prune_removed_model_references = (
+        prune_removed_model_references
+    )
+    security_routes.install_security_routes(admin_routes.router)
     install_config_management_routes(admin_routes.router)
     admin_routes._assert_draft_owner = assert_draft_owner
 

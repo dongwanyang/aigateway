@@ -187,8 +187,8 @@ providers:
         fallback_models: []  # 降级模型列表（主模型全部失败后尝试）
         pricing:             # 每个模型的定价（$/token）
           agnes-2.0-flash:
-            prompt: 0.02     # 输入 token 单价
-            completion: 1    # 输出 token 单价
+            prompt: 0.00000002  # 输入 token 单价（$0.02 / 1M tokens）
+            completion: 0.000001 # 输出 token 单价（$1 / 1M tokens）
 
   deepseek:
     api_key: ${DEEPSEEK_API_KEY}
@@ -205,8 +205,8 @@ providers:
         fallback_models: []
         pricing:
           deepseek-v4-flash:
-            prompt: 0.02
-            completion: 1
+            prompt: 0.00000002
+            completion: 0.000001
 
 # ==========================
 # 向量嵌入配置
@@ -458,7 +458,7 @@ gpu_scheduler:
   gateway_devices: auto      # Gateway 可借用的设备：auto 或 GPU UUID 列表；修改设备拓扑后需重建
   comfyui_devices: auto      # ComfyUI worker 使用的设备：auto 或 GPU UUID 列表；修改设备拓扑后需重建
   gateway_fallback: cpu      # 无可用 GPU 时 Gateway 的行为：cpu 回退 | wait 等待 | fail 立即失败（热生效）
-  generation_wait_timeout_seconds: 120 # 生成任务等待 Gateway 释放 GPU 的最长秒数，超时返回 gpu_queue_timeout（热生效）
+  generation_wait_timeout_seconds: 600 # 生成任务等待 Gateway 释放 GPU 的最长秒数；单卡视频/首次加载期间允许后续任务排队（热生效）
   comfyui_idle_reservation_seconds: 60 # 生成结束后为 ComfyUI 保留已加载模型的空闲秒数，之后 /free 并允许借用（热生效）
   lease_ttl_seconds: 15      # Gateway GPU 租约在 Redis 中的有效秒数，防止进程异常后永久占用（热生效；旧租约不变）
   lease_heartbeat_seconds: 5 # GPU 租约续期心跳间隔秒数，必须小于 lease_ttl_seconds（热生效；旧租约不变）
@@ -482,6 +482,7 @@ generation_optimization:
   preset_store_dir: /app/data/generation-presets  # 控制台自定义生成预设目录
   ai_director:
     enabled: true              # 是否启用 Prompt 结构化改写
+    timeout_seconds: 30        # 上游改写模型通常约 8-12 秒返回；留足余量，仍受整条请求 deadline 限制
   model_router:
     enabled: true              # 是否启用生成模型路由策略
     model_capabilities:        # 模型生成能力评分（数值越大越优先）
@@ -506,7 +507,9 @@ generation_optimization:
       manager_enabled: true   # 是否启用 ComfyUI Manager
       connect_timeout: 10    # 连接超时（秒）
       execution_timeout: 1200 # T4 上的大模型工作流可达数分钟；超时会主动取消 ComfyUI 任务
+      progress_stall_timeout: 300 # 连续无执行/采样/历史反馈的最长秒数；需覆盖大模型首次加载，超时会取消卡死任务
       required: true         # 不可用时 fail-closed，不静默改走外部媒体 API
+      scheduler_managed: true # 仅本地 CUDA 容器 Worker 设为 true；远程端点不得占用本机 GPU 租约
       workflow_version: "image-v1" # 图片工作流版本；变更图结构时递增
       checkpoint_name: "sd_xl_base_1.0.safetensors" # 默认 SDXL checkpoint
       allowed_checkpoints: ["sd_xl_base_1.0.safetensors"] # 允许加载的 checkpoint 白名单

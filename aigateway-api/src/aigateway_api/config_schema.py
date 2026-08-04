@@ -55,6 +55,7 @@ _DESCRIPTION_FALLBACKS: dict[str, str] = {
     "task_routing.enabled": "是否启用任务路由策略",
     "task_routing.model_preferences.coding": "编码任务偏好模型",
     "generation_optimization.draft_workflow.comfyui.manager_enabled": "是否启用 ComfyUI Manager",
+    "generation_optimization.draft_workflow.comfyui.progress_stall_timeout": "ComfyUI 连续无进度反馈超时（秒）",
     "generation_optimization.draft_workflow.comfyui.checkpoint_name": "SD checkpoint 名称",
     "generation_optimization.draft_workflow.comfyui.video_enabled": "是否启用视频生成",
     "generation_optimization.draft_workflow.comfyui.video_cfg": "视频 CFG 引导强度",

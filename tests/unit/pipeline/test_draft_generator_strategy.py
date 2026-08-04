@@ -347,6 +347,9 @@ class TestConfirmDraft:
         assert ok is True
         assert claimed is not None
         assert claimed.status == DRAFT_STATUS_REFINING
+        assert claimed.stage == "preparing_for_comfyui"
+        assert claimed.progress == 0.0
+        assert claimed.generation_params["progress_source"] == "stage"
         assert claimed.previews == pending.previews
 
     @pytest.mark.asyncio
@@ -633,6 +636,41 @@ async def test_sync_keeps_stale_draft_while_owned_worker_is_waiting(strategy):
 
     assert synced is not None
     assert synced.status == DRAFT_STATUS_RUNNING
+    assert synced.error is None
+
+
+@pytest.mark.asyncio
+async def test_sync_keeps_refining_draft_while_confirmation_is_preparing(strategy):
+    """Status polling must not kill confirm before its ComfyUI prompt exists."""
+    draft = DraftResult(
+        draft_id="refine-with-live-confirm",
+        previews=[b"preview"],
+        generation_params={"trace_id": "trace-confirm", "progress_source": "stage"},
+        created_at=time.time() - 120,
+        expires_at=time.time() + 3600,
+        status=DRAFT_STATUS_REFINING,
+        media_type="image",
+        session_id="sess-confirm",
+        progress=0.0,
+        stage="preparing_for_comfyui",
+    )
+    await strategy._store_draft(draft, ttl_seconds=3600)
+    task = asyncio.create_task(
+        asyncio.Event().wait(),
+        name=f"draft-confirm-{draft.draft_id}",
+    )
+    strategy._bg_tasks.add(task)
+    task.add_done_callback(strategy._bg_tasks.discard)
+
+    try:
+        synced = await strategy.sync_draft_runtime_state(draft.draft_id)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert synced is not None
+    assert synced.status == DRAFT_STATUS_REFINING
+    assert synced.stage == "preparing_for_comfyui"
     assert synced.error is None
 
 

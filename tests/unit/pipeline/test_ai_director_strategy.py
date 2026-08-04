@@ -34,6 +34,10 @@ from aigateway_core.pipelines.generation.director.ai_director import (
 from aigateway_core.prefix.media.types import MediaContent, MediaType
 
 
+def test_ai_director_default_timeout_allows_normal_provider_latency():
+    assert AIDirectorConfig().timeout_seconds == 30.0
+
+
 @pytest.fixture
 def default_config():
     """Default AI Director config."""
@@ -291,6 +295,19 @@ class TestAIDirectorStrategyOptimizePrompt:
         messages = call_args.kwargs.get("messages") or call_args[1].get("messages", [])
         system_msg = messages[0]["content"]
         assert system_msg == _REWRITE_SYSTEM_PROMPT
+
+    @pytest.mark.parametrize(
+        "system_prompt",
+        [_REWRITE_SYSTEM_PROMPT, _EXPAND_SYSTEM_PROMPT],
+    )
+    def test_default_system_prompts_require_english_for_sdxl(self, system_prompt):
+        """Default optimization must produce text SDXL's CLIP can understand."""
+        assert "必须使用自然、准确的英文" in system_prompt
+        assert "Subject:" in system_prompt
+        assert "Action:" in system_prompt
+        assert "Environment:" in system_prompt
+        assert "Camera:" in system_prompt
+        assert "只将该文字原样保留" in system_prompt
 
     @pytest.mark.asyncio
     async def test_empty_response_fallback(self, default_config, pipeline_ctx):

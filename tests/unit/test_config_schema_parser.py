@@ -38,10 +38,10 @@ def test_dynamic_leaf_descriptions_are_not_reduced_to_parent_text(
     by_path = _by_path(schema_items)
     assert by_path["providers.*.model_grouper[].pricing.*.prompt"][
         "description"
-    ] == "输入 token 单价"
+    ] == "输入 token 单价（$0.02 / 1M tokens）"
     assert by_path["providers.*.model_grouper[].pricing.*.completion"][
         "description"
-    ] == "输出 token 单价"
+    ] == "输出 token 单价（$1 / 1M tokens）"
     assert "模型标识符" in str(
         by_path["providers.*.model_grouper[].models[].name"]["description"]
     )

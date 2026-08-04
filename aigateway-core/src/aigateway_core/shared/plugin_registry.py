@@ -77,7 +77,8 @@ class PluginRegistry:
     插件可按优先级排序执行，依赖关系会被自动解析。
 
     属性:
-        _registrations: 已注册的插件信息字典，key 为插件名。
+        _registrations: 已注册的插件注册信息，key 为插件名。
+        _instances: 已构造的运行时插件单例，key 为插件名。
     """
 
     def __init__(
@@ -88,6 +89,11 @@ class PluginRegistry:
         policies: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         self._registrations: dict[str, PluginRegistration] = {}
+        self._instances: dict[str, Any] = {}
+        # id(registration) -> (completion event, constructing thread id).
+        # Constructors run outside the global registry lock so one slow plugin
+        # does not block unrelated reads, registrations or unregistrations.
+        self._instance_builds: dict[int, tuple[threading.Event, int]] = {}
         self._lock = threading.Lock()
         self.default_timeout_seconds = max(0.001, float(default_timeout_seconds))
         if default_failure_policy not in {"continue", "fail_fast"}:
@@ -178,6 +184,7 @@ class PluginRegistry:
             if name not in self._registrations:
                 raise KeyError(f"插件 '{name}' 未注册")
             del self._registrations[name]
+            self._instances.pop(name, None)
         logger.info("插件已注销: name=%s", name)
 
     # ------------------------------------------------------------------
@@ -193,13 +200,88 @@ class PluginRegistry:
         Returns:
             插件注册信息，不存在则返回 None。
         """
-        return self._registrations.get(name)
+        with self._lock:
+            return self._registrations.get(name)
+
+    def _get_or_create_instance(self, reg: PluginRegistration) -> Any | None:
+        """Return one runtime instance for the currently live registration.
+
+        First construction is coordinated per registration. The expensive and
+        potentially re-entrant constructor runs outside ``self._lock``; other
+        threads wait for that registration only. If the registration is removed
+        or replaced while construction is in flight, the obsolete candidate is
+        discarded and never published under the new registration.
+        """
+        build_key = id(reg)
+        current_thread = threading.get_ident()
+
+        while True:
+            with self._lock:
+                if self._registrations.get(reg.name) is not reg:
+                    return None
+                cached = self._instances.get(reg.name)
+                if cached is not None:
+                    return cached
+                active_build = self._instance_builds.get(build_key)
+                if active_build is None:
+                    completion = threading.Event()
+                    self._instance_builds[build_key] = (
+                        completion,
+                        current_thread,
+                    )
+                    is_builder = True
+                else:
+                    completion, owner_thread = active_build
+                    # A constructor may inspect the registry. If this thread is
+                    # itself constructing any plugin, waiting for another active
+                    # constructor can form an A->B / B->A cycle. Nested registry
+                    # views therefore omit all currently in-flight registrations.
+                    current_thread_is_building = any(
+                        builder_thread == current_thread
+                        for _, builder_thread in self._instance_builds.values()
+                    )
+                    if owner_thread == current_thread or current_thread_is_building:
+                        return None
+                    is_builder = False
+            if is_builder:
+                break
+            completion.wait()
+
+        candidate: Any | None = None
+        construction_error: BaseException | None = None
+        try:
+            candidate = reg.plugin_class(**reg.config)
+        except TypeError as exc:
+            logger.warning(
+                "插件 '%s' 实例化失败（配置参数不匹配）: %s",
+                reg.name,
+                exc,
+            )
+        except BaseException as exc:  # preserve constructor semantics after wakeup
+            construction_error = exc
+
+        with self._lock:
+            if (
+                candidate is not None
+                and self._registrations.get(reg.name) is reg
+            ):
+                published = self._instances.setdefault(reg.name, candidate)
+            else:
+                published = None
+            active_build = self._instance_builds.pop(build_key, None)
+            if active_build is not None:
+                active_build[0].set()
+
+        if construction_error is not None:
+            raise construction_error
+        return published
 
     def get_all(self, pipeline_kind: str | None = None) -> list[Any]:
-        """获取已注册插件的实例列表。
+        """获取已注册插件的运行时实例列表。
 
-        按 priority 升序排列（数字小的先执行）。
-        返回的是实例化后的插件对象（调用 plugin_class()）。
+        按 priority 升序排列（数字小的先执行）。每个注册项在进程内只构造
+        一次；PipelineEngine、健康检查和管理端查询共享同一实例，避免轮询
+        ``/health`` 时重复初始化 LangChain、模型或网络客户端。
 
         Args:
             pipeline_kind: 可选，按管道过滤 "understanding" | "generation"。
@@ -219,22 +301,18 @@ class PluginRegistry:
 
         instances: list[Any] = []
         for reg in registrations:
-            try:
-                # 使用 config 初始化插件实例
-                instance = reg.plugin_class(**reg.config)
-                instance.name = reg.name  # type: ignore[attr-defined]
-                instance.enabled = reg.enabled  # type: ignore[attr-defined]
-                instance.depends_on = reg.depends_on  # type: ignore[attr-defined]
-                instance.pipeline_kind = reg.pipeline_kind  # type: ignore[attr-defined]
-                instance.timeout_seconds = reg.timeout_seconds  # type: ignore[attr-defined]
-                instance.failure_policy = reg.failure_policy  # type: ignore[attr-defined]
-                instances.append(instance)
-            except TypeError as exc:
-                logger.warning(
-                    "插件 '%s' 实例化失败（配置参数不匹配）: %s",
-                    reg.name,
-                    exc,
-                )
+            instance = self._get_or_create_instance(reg)
+            if instance is None:
+                continue
+            # Refresh public runtime policy fields in case a registration object
+            # was updated in place by hot-reload code.
+            instance.name = reg.name  # type: ignore[attr-defined]
+            instance.enabled = reg.enabled  # type: ignore[attr-defined]
+            instance.depends_on = reg.depends_on  # type: ignore[attr-defined]
+            instance.pipeline_kind = reg.pipeline_kind  # type: ignore[attr-defined]
+            instance.timeout_seconds = reg.timeout_seconds  # type: ignore[attr-defined]
+            instance.failure_policy = reg.failure_policy  # type: ignore[attr-defined]
+            instances.append(instance)
 
         return instances
 

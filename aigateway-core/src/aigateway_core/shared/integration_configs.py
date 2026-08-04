@@ -37,8 +37,10 @@ class CLIPConfig:
 class ComfyUIConfig:
     """ComfyUI API 连接与工作流配置。
 
-    URL、挂载路径、workflow/checkpoint 和 upscale model 必须由配置提供；
-    缺失时调用方应报告配置错误或关闭对应能力。
+    ``scheduler_managed`` is derived from deployment topology rather than user
+    input. It is true only when this endpoint represents a local worker in the
+    Gateway GPU pool; external/remote ComfyUI endpoints must never drain or lock
+    local Gateway devices.
     """
 
     server_url: str = ""
@@ -46,8 +48,10 @@ class ComfyUIConfig:
     manager_enabled: bool = True
     connect_timeout: int = 10
     execution_timeout: int = 1200
+    progress_stall_timeout: int = 300
     ws_reconnect_attempts: int = 3
     required: bool = True
+    scheduler_managed: bool = False
     workflow_version: str = ""
     checkpoint_name: str = ""
     allowed_checkpoints: list[str] = field(default_factory=list)

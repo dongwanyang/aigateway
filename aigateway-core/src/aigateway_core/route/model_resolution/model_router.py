@@ -28,6 +28,32 @@ from aigateway_core.pipelines.generation._common.models import RoutingDecision
 
 logger = logging.getLogger(__name__)
 
+# Static routing cannot know final usage before selecting a model. Convert the
+# configured USD/token rates to one stable representative USD/request estimate.
+# Actual billing continues to use measured prompt/completion tokens.
+_ROUTING_ESTIMATED_PROMPT_TOKENS = 1_000
+_ROUTING_ESTIMATED_COMPLETION_TOKENS = 500
+
+
+def _non_negative_rate(value: Any) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return result if result > 0 else 0.0
+
+
+def estimate_routing_request_cost(pricing: Any) -> float:
+    """Convert one model's USD/token pricing to representative USD/request."""
+    if not isinstance(pricing, dict):
+        return 0.0
+    return (
+        _non_negative_rate(pricing.get("prompt", 0.0))
+        * _ROUTING_ESTIMATED_PROMPT_TOKENS
+        + _non_negative_rate(pricing.get("completion", 0.0))
+        * _ROUTING_ESTIMATED_COMPLETION_TOKENS
+    )
+
 
 # ---------------------------------------------------------------------------
 # 内部辅助数据结构
@@ -521,15 +547,11 @@ class ModelRouterStrategy:
                             )
                         )
 
-                    # 获取价格: 使用 pricing 中的 prompt 价格作为 price_per_request
-                    price = 0.0
-                    model_pricing = group_pricing.get(model_name, {})
-                    if isinstance(model_pricing, dict):
-                        prompt_price = model_pricing.get("prompt", 0.0)
-                        try:
-                            price = float(prompt_price)
-                        except (TypeError, ValueError):
-                            price = 0.0
+                    # Route comparisons and exposed estimates use
+                    # USD/request; provider configuration remains USD/token.
+                    price = estimate_routing_request_cost(
+                        group_pricing.get(model_name, {})
+                    )
 
                     model_list.append(
                         ModelConfig(

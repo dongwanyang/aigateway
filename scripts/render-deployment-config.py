@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import os
 import tempfile
 from pathlib import Path
@@ -21,6 +23,19 @@ def _plugin(config: dict[str, Any], name: str) -> dict[str, Any]:
     raise ValueError(f"base config is missing plugin {name!r}")
 
 
+@contextlib.contextmanager
+def _config_write_lock(path: Path):
+    """Share the runtime config lock used by control-panel transactions."""
+    lock_path = Path(str(path) + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def render(
     source: Path,
     *,
@@ -30,16 +45,22 @@ def render(
     comfyui_url: str,
     embedding_url: str,
     monitoring: bool,
+    comfyui_mode: str = "remote",
     shared_gpu: bool = False,
 ) -> dict[str, Any]:
     if edition not in EDITIONS:
         raise ValueError(f"unsupported edition: {edition}")
+    if comfyui_mode not in {"container", "native", "remote"}:
+        raise ValueError(f"unsupported comfyui mode: {comfyui_mode}")
     with source.open("r", encoding="utf-8") as handle:
         config = yaml.safe_load(handle) or {}
 
     knowledge = edition in {"knowledge", "full"}
     studio = edition in {"studio", "full"}
     external_embedding = knowledge and embedding_mode in {"native", "remote"}
+    local_comfyui_pool = bool(
+        studio and accelerator == "cuda" and comfyui_mode == "container"
+    )
 
     for name in ("rag_retriever", "prompt_compress", "conv_compressor"):
         _plugin(config, name)["enabled"] = knowledge
@@ -108,6 +129,7 @@ def render(
     comfy = draft.setdefault("comfyui", {})
     comfy["server_url"] = comfyui_url.rstrip("/")
     comfy["required"] = True
+    comfy["scheduler_managed"] = local_comfyui_pool
     token = generation.setdefault("token_compressor", {})
     token.setdefault("clip", {})["device"] = (
         "auto" if studio and accelerator == "cuda" else "cpu"
@@ -122,10 +144,20 @@ def render(
     scheduler.setdefault("gateway_fallback", "cpu")
     scheduler.setdefault("comfyui_dynamic_vram_enabled", False)
 
+    # ``devices`` and ``workers`` are generated from the current host inventory
+    # by render-gpu-topology.py.  They must not survive a switch to CPU, MPS,
+    # native ComfyUI, or a remote endpoint, otherwise a stale local UUID could be
+    # advertised as runnable after an edition/topology change.
+    if not local_comfyui_pool:
+        scheduler.pop("devices", None)
+        scheduler.pop("workers", None)
+        scheduler.pop("inventory_source", None)
+
     config["deployment"] = {
         "edition": edition,
         "accelerator": accelerator,
         "embedding_mode": embedding_mode,
+        "comfyui_mode": comfyui_mode,
         "comfyui_enabled": studio,
         "rag_enabled": knowledge,
         "shared_gpu": shared_gpu,
@@ -165,22 +197,32 @@ def main() -> int:
         choices=("container", "native", "remote"),
         required=True,
     )
+    parser.add_argument(
+        "--comfyui-mode",
+        choices=("container", "native", "remote"),
+        default="remote",
+    )
     parser.add_argument("--comfyui-url", required=True)
     parser.add_argument("--embedding-url", default="")
     parser.add_argument("--monitoring", action="store_true")
     parser.add_argument("--shared-gpu", action="store_true")
     args = parser.parse_args()
-    config = render(
-        args.source,
-        edition=args.edition,
-        accelerator=args.accelerator,
-        embedding_mode=args.embedding_mode,
-        comfyui_url=args.comfyui_url,
-        embedding_url=args.embedding_url,
-        monitoring=args.monitoring,
-        shared_gpu=args.shared_gpu,
-    )
-    _atomic_dump(args.output, config)
+    # Keep the lock across source read, deployment mutation and atomic replace.
+    # When source == output this prevents a control-panel save from landing
+    # between our read and write and being silently overwritten.
+    with _config_write_lock(args.output):
+        config = render(
+            args.source,
+            edition=args.edition,
+            accelerator=args.accelerator,
+            embedding_mode=args.embedding_mode,
+            comfyui_mode=args.comfyui_mode,
+            comfyui_url=args.comfyui_url,
+            embedding_url=args.embedding_url,
+            monitoring=args.monitoring,
+            shared_gpu=args.shared_gpu,
+        )
+        _atomic_dump(args.output, config)
     return 0
 
 

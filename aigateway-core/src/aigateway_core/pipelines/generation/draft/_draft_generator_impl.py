@@ -16,6 +16,8 @@ Draft Generator Strategy — 渐进式生成工作流核心逻辑
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import logging
 import math
@@ -24,12 +26,13 @@ import re
 import shutil
 import time
 import uuid
+from collections.abc import Callable
 from contextvars import ContextVar
 from io import BytesIO
 from typing import Any
 from urllib.parse import quote, urlparse, urlunparse
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 from aigateway_core.pipelines.generation._common.config import DraftWorkflowConfig
 from aigateway_core.pipelines.generation._common.exceptions import DraftWorkflowError
@@ -47,6 +50,7 @@ from aigateway_core.pipelines.generation._common.models import (
     GenerationRequest,
     UpscaleResult,
 )
+from aigateway_core.prefix.media.types import MediaContent, MediaType
 from aigateway_core.shared.comfyui_model_discovery import (
     CHECKPOINT_PRESET_PREFIX,
     checkpoint_name_from_preset_id,
@@ -62,6 +66,8 @@ _DRAFT_KEY_PREFIX = "aigateway:draft"
 _DRAFT_SESSION_KEY_PREFIX = "aigateway:draft:session"
 _MODELS_SIZE_CACHE_TTL_SECONDS = 60.0
 _DRAFT_RUNTIME_STALE_GRACE_SECONDS = 60.0
+_MAX_REFERENCE_IMAGE_BYTES = 10 * 1024 * 1024
+_MAX_REFERENCE_IMAGE_PIXELS = 16_000_000
 
 # Default negative prompt for image generation
 _DEFAULT_NEGATIVE_PROMPT = "ugly, blurry, low quality, distorted, deformed"
@@ -238,6 +244,7 @@ class DraftGeneratorStrategy:
             "trace_id": request.trace_id,
             "required_vram_gb": draft_required_vram_gb,
             "required_vram_explicit": request.required_vram_gb is not None,
+            "has_reference_image": bool(request.reference_images),
         }
         if is_video:
             generation_params["video_model"] = self._comfyui_config.video_diffusion_model
@@ -378,11 +385,15 @@ class DraftGeneratorStrategy:
             "gpu_queue_timeout",
             "comfyui_gpu_out_of_memory",
             "comfyui_execution_timeout",
+            "comfyui_progress_stalled",
             "comfyui_storage_low",
             "comfyui_workflow_execution_failed",
             "comfyui_missing_dependencies",
             "comfyui_model_budget_exceeded",
             "comfyui_output_budget_exceeded",
+            "comfyui_invalid_reference_image",
+            "comfyui_reference_image_too_large",
+            "comfyui_qwen_image_reference_unsupported",
         )
         for code in known_codes:
             if code in error_text:
@@ -551,6 +562,25 @@ class DraftGeneratorStrategy:
         max_attempts = config.max_regeneration_attempts
         trace_id = request.trace_id or str(generation_params.get("trace_id") or "")
         try:
+            if request.reference_images:
+                reference_data = await self._reference_image_bytes(
+                    request.reference_images[0]
+                )
+                request.reference_images = [
+                    MediaContent(
+                        media_type=MediaType.IMAGE,
+                        raw_data=reference_data,
+                        mime_type="image/png",
+                        size_bytes=len(reference_data),
+                    )
+                ]
+                draft_dir = self._ensure_draft_dir(chat_session_id, draft_id)
+                await asyncio.to_thread(
+                    self._write_reference_bytes,
+                    draft_dir,
+                    reference_data,
+                )
+
             running = await self._load_draft(draft_id)
             if running is not None:
                 attempt_number = running.attempt_number
@@ -963,10 +993,14 @@ class DraftGeneratorStrategy:
                 draft = await self._load_draft(draft_id)
                 if draft is None:
                     return None, False
-                if draft.status == DRAFT_STATUS_PENDING and time.time() <= draft.expires_at:
+                if (
+                    draft.status == DRAFT_STATUS_PENDING
+                    and time.time() <= draft.expires_at
+                ):
                     draft.status = DRAFT_STATUS_REFINING
-                    draft.stage = "refining"
-                    draft.progress = 0.25
+                    draft.stage = "preparing_for_comfyui"
+                    draft.progress = 0.0
+                    draft.generation_params["progress_source"] = "stage"
                     ttl_remaining = max(1, int(draft.expires_at - time.time()))
                     await self._store_draft(draft, ttl_remaining)
                     return draft, True
@@ -981,7 +1015,12 @@ if tonumber(ARGV[1]) > tonumber(data['expires_at'] or '0') then
 end
 if data['status'] == ARGV[2] then
   data['status'] = ARGV[3]
-  redis.call('SET', KEYS[1], cjson.encode(data), 'EX', tonumber(ARGV[4]))
+  data['stage'] = ARGV[4]
+  data['progress'] = 0
+  if data['generation_params'] then
+    data['generation_params']['progress_source'] = 'stage'
+  end
+  redis.call('SET', KEYS[1], cjson.encode(data), 'EX', tonumber(ARGV[5]))
   return {1, cjson.encode(data)}
 end
 return {3, raw}
@@ -998,6 +1037,7 @@ return {3, raw}
                 now,
                 DRAFT_STATUS_PENDING,
                 DRAFT_STATUS_REFINING,
+                "preparing_for_comfyui",
                 ttl_remaining,
             )
         except (AttributeError, TypeError):
@@ -1007,8 +1047,9 @@ return {3, raw}
                     return None, False
                 if draft.status == DRAFT_STATUS_PENDING and now <= draft.expires_at:
                     draft.status = DRAFT_STATUS_REFINING
-                    draft.stage = "refining"
-                    draft.progress = 0.25
+                    draft.stage = "preparing_for_comfyui"
+                    draft.progress = 0.0
+                    draft.generation_params["progress_source"] = "stage"
                     ttl_remaining = max(1, int(draft.expires_at - now))
                     await self._store_draft(draft, ttl_remaining)
                     return draft, True
@@ -1024,8 +1065,9 @@ return {3, raw}
             data = json.loads(raw)
             draft = self._draft_from_serialized(draft_id, data)
             if code == 1:
-                draft.stage = "refining"
-                draft.progress = 0.25
+                draft.stage = "preparing_for_comfyui"
+                draft.progress = 0.0
+                draft.generation_params["progress_source"] = "stage"
                 await self._store_draft(draft, ttl_remaining)
             return draft, code == 1
         return await self._load_draft(draft_id), False
@@ -1136,6 +1178,7 @@ return {3, raw}
             active_task_names = {
                 f"draft-generate-{draft_id}",
                 f"draft-regenerate-{draft_id}",
+                f"draft-confirm-{draft_id}",
             }
             if any(
                 not task.done() and task.get_name() in active_task_names
@@ -1384,7 +1427,12 @@ return {3, raw}
         # Validate that stage before validating the Wan confirmation stage so
         # backend=auto can fail early and fall back instead of returning a draft
         # that later dies in a background task.
-        if self._should_use_qwen_image(request):
+        uses_qwen_image = self._should_use_qwen_image(request)
+        if uses_qwen_image and request.reference_images:
+            raise DraftWorkflowError("comfyui_qwen_image_reference_unsupported")
+        if request.media_type == "video" and request.reference_images:
+            required = []
+        elif uses_qwen_image:
             diffusion, encoder, vae = self._validate_qwen_image_models()
             required: list[tuple[str, str]] = [
                 ("diffusion_models", diffusion),
@@ -1720,6 +1768,65 @@ return {3, raw}
             raise DraftWorkflowError("ComfyUI image upload returned no filename")
         return stored_name
 
+    @staticmethod
+    def _decode_reference_data_url(source_url: str) -> bytes:
+        try:
+            header, encoded = source_url.split(",", 1)
+        except ValueError as exc:
+            raise DraftWorkflowError("comfyui_invalid_reference_image") from exc
+        if not header.startswith("data:image/") or ";base64" not in header:
+            raise DraftWorkflowError("comfyui_invalid_reference_image")
+        max_encoded_length = ((_MAX_REFERENCE_IMAGE_BYTES + 2) // 3) * 4
+        if len(encoded) > max_encoded_length:
+            raise DraftWorkflowError("comfyui_reference_image_too_large")
+        try:
+            return base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise DraftWorkflowError("comfyui_invalid_reference_image") from exc
+
+    @staticmethod
+    def _normalize_reference_image(image_data: bytes) -> bytes:
+        if not image_data or len(image_data) > _MAX_REFERENCE_IMAGE_BYTES:
+            raise DraftWorkflowError("comfyui_reference_image_too_large")
+        try:
+            with Image.open(BytesIO(image_data)) as opened:
+                width, height = opened.size
+                if (
+                    width <= 0
+                    or height <= 0
+                    or width * height > _MAX_REFERENCE_IMAGE_PIXELS
+                ):
+                    raise DraftWorkflowError("comfyui_reference_image_too_large")
+                image = ImageOps.exif_transpose(opened)
+                image.load()
+                mode = "RGBA" if "A" in image.getbands() else "RGB"
+                normalized = image.convert(mode)
+                output = BytesIO()
+                normalized.save(output, format="PNG")
+                result = output.getvalue()
+        except DraftWorkflowError:
+            raise
+        except Exception as exc:
+            raise DraftWorkflowError("comfyui_invalid_reference_image") from exc
+        if len(result) > _MAX_REFERENCE_IMAGE_BYTES:
+            raise DraftWorkflowError("comfyui_reference_image_too_large")
+        return result
+
+    async def _reference_image_bytes(self, reference: MediaContent) -> bytes:
+        image_data = reference.optimized_data or reference.raw_data
+        if image_data is None:
+            source_url = reference.source_url or ""
+            if source_url.startswith("data:"):
+                image_data = await asyncio.to_thread(
+                    self._decode_reference_data_url,
+                    source_url,
+                )
+            elif source_url.startswith(("http://", "https://")):
+                image_data = await self._fetch_image_bytes(source_url)
+            else:
+                raise DraftWorkflowError("comfyui_invalid_reference_image")
+        return await asyncio.to_thread(self._normalize_reference_image, image_data)
+
     async def _submit_workflow(
         self,
         workflow_json: dict,
@@ -1775,12 +1882,15 @@ return {3, raw}
         if draft is None:
             return
         draft.comfy_prompt_id = prompt_id
-        draft.stage = stage
+        draft.stage = "waiting_for_comfyui"
         draft.status = (
             DRAFT_STATUS_REFINING if stage == "refining" else DRAFT_STATUS_RUNNING
         )
-        draft.progress = 0.35 if stage == "refining" else 0.15
-        draft.generation_params["progress_source"] = "stage"
+        # A newly submitted ComfyUI workflow has not reported any node progress
+        # yet.  Reset the value instead of carrying a sampler percentage from a
+        # previous preview/refine workflow.
+        draft.progress = 0.0
+        draft.generation_params["progress_source"] = "comfyui"
         await self._store_draft(
             draft, max(1, int(draft.expires_at - time.time()))
         )
@@ -1815,6 +1925,7 @@ return {3, raw}
         trace_id: str | None,
         client_id: str,
         stage: str,
+        on_feedback: Callable[[], None] | None = None,
     ) -> None:
         """Consume ComfyUI WebSocket progress events and persist real step ratio."""
         if not draft_id:
@@ -1826,6 +1937,7 @@ return {3, raw}
             return
 
         last_ratio = -1.0
+        last_node: str | None = None
         try:
             async with websockets.connect(
                 self._comfy_ws_url(client_id),
@@ -1846,8 +1958,28 @@ return {3, raw}
                     if msg_prompt_id and msg_prompt_id != prompt_id:
                         continue
                     message_type = message.get("type")
-                    if message_type == "executing" and data.get("node") is None:
-                        break
+                    if message_type in {"executing", "progress", "progress_state"}:
+                        if on_feedback is not None:
+                            on_feedback()
+                    if message_type == "executing":
+                        node = data.get("node")
+                        if node is None:
+                            await self._set_comfyui_postprocess_stage(
+                                draft_id,
+                                prompt_id,
+                                stage="finalizing",
+                            )
+                            break
+                        node_text = str(node)
+                        if node_text != last_node:
+                            last_node = node_text
+                            last_ratio = -1.0
+                            await self._apply_comfyui_executing(
+                                draft_id,
+                                prompt_id,
+                                node=node_text,
+                            )
+                        continue
                     if message_type == "progress_state":
                         node_states = data.get("nodes")
                         if not isinstance(node_states, dict):
@@ -1875,7 +2007,7 @@ return {3, raw}
                         max_value, (int, float)
                     ) or max_value <= 0:
                         continue
-                    ratio = min(0.99, max(0.0, float(value) / float(max_value)))
+                    ratio = min(1.0, max(0.0, float(value) / float(max_value)))
                     if ratio - last_ratio < 0.01 and ratio < 0.99:
                         continue
                     last_ratio = ratio
@@ -1896,6 +2028,29 @@ return {3, raw}
                 prompt_id,
                 type(exc).__name__,
             )
+
+    async def _apply_comfyui_executing(
+        self,
+        draft_id: str,
+        prompt_id: str,
+        *,
+        node: str,
+    ) -> None:
+        """Reset raw node progress when ComfyUI starts another node."""
+        draft = await self._load_draft(draft_id)
+        if draft is None or draft.comfy_prompt_id != prompt_id:
+            return
+        if draft.status not in {
+            DRAFT_STATUS_GENERATING,
+            DRAFT_STATUS_QUEUED,
+            DRAFT_STATUS_RUNNING,
+            DRAFT_STATUS_REFINING,
+        }:
+            return
+        draft.progress = 0.0
+        draft.stage = f"executing {node}"
+        draft.generation_params["progress_source"] = "comfyui"
+        await self._store_draft(draft, max(1, int(draft.expires_at - time.time())))
 
     async def _apply_comfyui_progress(
         self,
@@ -1918,9 +2073,10 @@ return {3, raw}
             DRAFT_STATUS_REFINING,
         }:
             return
-        base = 0.35 if stage == "refining" else 0.10
-        span = 0.60 if stage == "refining" else 0.85
-        draft.progress = min(0.99, base + ratio * span)
+        # Persist the exact ratio reported by the active ComfyUI node.  This is
+        # deliberately not an invented whole-workflow percentage: ComfyUI may
+        # start another sampler/node and reset its own progress to zero.
+        draft.progress = min(1.0, max(0.0, ratio))
         draft.stage = f"sampling {value}/{max_value}"
         draft.generation_params["progress_source"] = "comfyui"
         await self._store_draft(draft, max(1, int(draft.expires_at - time.time())))
@@ -1935,6 +2091,27 @@ return {3, raw}
                 "progress": round(draft.progress, 4),
             },
             stage="comfyui",
+        )
+
+    async def _set_comfyui_postprocess_stage(
+        self,
+        draft_id: str | None,
+        prompt_id: str,
+        *,
+        stage: str,
+    ) -> None:
+        """Switch to an indeterminate phase when ComfyUI has no numeric ratio."""
+        if not draft_id:
+            return
+        draft = await self._load_draft(draft_id)
+        if draft is None or draft.comfy_prompt_id != prompt_id:
+            return
+        if draft.status not in {DRAFT_STATUS_RUNNING, DRAFT_STATUS_REFINING}:
+            return
+        draft.stage = stage
+        draft.generation_params["progress_source"] = "stage"
+        await self._store_draft(
+            draft, max(1, int(draft.expires_at - time.time()))
         )
 
     async def _poll_results(
@@ -1975,7 +2152,15 @@ return {3, raw}
         poll_interval = 1.0  # seconds
         deadline = time.monotonic() + timeout
         transient_errors = 0
+        stalled = False
+        last_feedback_at = time.monotonic()
+        last_history_signature: str | None = None
         progress_task: asyncio.Task[None] | None = None
+
+        def mark_feedback() -> None:
+            nonlocal last_feedback_at
+            last_feedback_at = time.monotonic()
+
         if progress_client_id and draft_id:
             progress_task = asyncio.create_task(
                 self._watch_comfyui_progress(
@@ -1984,6 +2169,7 @@ return {3, raw}
                     trace_id=trace_id,
                     client_id=progress_client_id,
                     stage=progress_stage,
+                    on_feedback=mark_feedback,
                 )
             )
 
@@ -1997,6 +2183,12 @@ return {3, raw}
                 timeout=self._comfyui_config.connect_timeout
             ) as client:
                 while time.monotonic() < deadline:
+                    if (
+                        time.monotonic() - last_feedback_at
+                        >= self._comfyui_config.progress_stall_timeout
+                    ):
+                        stalled = True
+                        break
                     try:
                         response = await client.get(history_url)
                     except (httpx.TimeoutException, httpx.TransportError) as exc:
@@ -2029,9 +2221,23 @@ return {3, raw}
                         if prompt_id in history:
                             # Workflow completed — extract output image
                             prompt_data = history[prompt_id]
-                            status_messages = prompt_data.get("status", {}).get(
-                                "messages", []
+                            status = prompt_data.get("status", {})
+                            history_signature = json.dumps(
+                                {
+                                    "status": status,
+                                    "output_nodes": sorted(
+                                        str(key)
+                                                    for key in prompt_data.get("outputs", {})
+                                    ),
+                                },
+                                ensure_ascii=False,
+                                sort_keys=True,
+                                default=str,
                             )
+                            if history_signature != last_history_signature:
+                                last_history_signature = history_signature
+                                mark_feedback()
+                            status_messages = status.get("messages", [])
                             for message in status_messages:
                                 if not isinstance(message, (list, tuple)):
                                     continue
@@ -2045,12 +2251,29 @@ return {3, raw}
                                     raise DraftWorkflowError(
                                         "comfyui_gpu_out_of_memory"
                                     )
-                                if message and message[0] == "execution_error":
+                                if message and message[0] in {
+                                    "execution_error",
+                                    "execution_interrupted",
+                                }:
                                     raise DraftWorkflowError(
                                         "comfyui_workflow_execution_failed"
                                     )
                             outputs = prompt_data.get("outputs", {})
+                            if not outputs and status.get("completed") is False:
+                                await self._set_comfyui_postprocess_stage(
+                                    draft_id,
+                                    prompt_id,
+                                    stage="finalizing",
+                                )
+                                await sleep_until_next_poll()
+                                continue
+                            await self._set_comfyui_postprocess_stage(
+                                draft_id,
+                                prompt_id,
+                                stage="finalizing",
+                            )
                             results: list[bytes] = []
+                            download_deferred = False
                             for node_output in outputs.values():
                                 media_entries: list[dict[str, Any]] = []
                                 for output_key in (
@@ -2069,7 +2292,6 @@ return {3, raw}
                                             for entry in value
                                             if isinstance(entry, dict)
                                         )
-                                download_deferred = False
                                 for media_info in media_entries:
                                     filename = media_info.get("filename", "")
                                     if not filename:
@@ -2081,6 +2303,11 @@ return {3, raw}
                                         f"?filename={filename}"
                                         f"&subfolder={subfolder}"
                                         f"&type={media_type}"
+                                    )
+                                    await self._set_comfyui_postprocess_stage(
+                                        draft_id,
+                                        prompt_id,
+                                        stage="downloading",
                                     )
                                     try:
                                         media_response = await client.get(view_url)
@@ -2162,6 +2389,12 @@ return {3, raw}
                 self._active_worker_url.reset(worker_token)
 
         await self._cancel_comfyui_workflow(prompt_id, server_url=server_url)
+        if stalled:
+            raise DraftWorkflowError(
+                "comfyui_progress_stalled: "
+                f"no feedback for {self._comfyui_config.progress_stall_timeout}s; "
+                f"prompt_id={prompt_id}"
+            )
         raise DraftWorkflowError(
             f"ComfyUI 工作流执行超时 ({timeout}s): prompt_id={prompt_id}"
         )
@@ -2421,6 +2654,10 @@ return {3, raw}
         seed: int,
         target_resolution: tuple[int, int],
         checkpoint_name: str | None = None,
+        *,
+        steps: int = 24,
+        denoise: float = 0.25,
+        filename_prefix: str = "refined",
     ) -> dict:
         """Build same-checkpoint img2img refinement from the approved draft."""
         target_width, target_height = target_resolution
@@ -2469,11 +2706,11 @@ return {3, raw}
                 "class_type": "KSampler",
                 "inputs": {
                     "seed": seed,
-                    "steps": 24,
+                    "steps": steps,
                     "cfg": 7.0,
                     "sampler_name": "euler",
                     "scheduler": "normal",
-                    "denoise": 0.25,
+                    "denoise": denoise,
                     "model": ["3", 0],
                     "positive": ["5", 0],
                     "negative": ["6", 0],
@@ -2487,7 +2724,7 @@ return {3, raw}
             "9": {
                 "class_type": "SaveImage",
                 "inputs": {
-                    "filename_prefix": "refined",
+                    "filename_prefix": filename_prefix,
                     "images": ["8", 0],
                 },
             },
@@ -2721,9 +2958,36 @@ return {3, raw}
         await self._ensure_storage_capacity()
         async with self._comfyui_semaphore:
             try:
-                workflow = self._build_image_draft_workflow(
-                    request, config, seed=seed
-                )
+                if request.reference_images:
+                    if self._should_use_qwen_image(request):
+                        raise DraftWorkflowError(
+                            "comfyui_qwen_image_reference_unsupported"
+                        )
+                    reference_data = await self._reference_image_bytes(
+                        request.reference_images[0]
+                    )
+                    input_name = await self._upload_image(
+                        reference_data,
+                        f"reference-{request.request_id}.png",
+                    )
+                    workflow = self._build_refine_workflow(
+                        input_name=input_name,
+                        prompt=request.prompt,
+                        seed=(
+                            seed
+                            if seed is not None
+                            else int(uuid.uuid4().int % (2**32))
+                        ),
+                        target_resolution=config.draft_resolution,
+                        checkpoint_name=self._checkpoint_for_request(request),
+                        steps=12,
+                        denoise=0.35,
+                        filename_prefix=f"draft_reference_{request.request_id}",
+                    )
+                else:
+                    workflow = self._build_image_draft_workflow(
+                        request, config, seed=seed
+                    )
                 client_id = self._comfy_client_id(draft_id, "draft")
                 prompt_id = await self._submit_workflow(
                     workflow, client_id=client_id
@@ -2755,6 +3019,8 @@ return {3, raw}
         draft_id: str,
     ) -> list[bytes]:
         """Generate one cheap SDXL keyframe; Wan runs only after confirmation."""
+        if request.reference_images:
+            return [await self._reference_image_bytes(request.reference_images[0])]
         preview = await self._generate_image_preview_with_comfyui(
             request,
             config,
@@ -2854,9 +3120,9 @@ return {3, raw}
                     workflow, client_id=client_id
                 )
                 draft.comfy_prompt_id = prompt_id
-                draft.stage = "refining"
-                draft.progress = 0.35
-                draft.generation_params["progress_source"] = "stage"
+                draft.stage = "waiting_for_comfyui"
+                draft.progress = 0.0
+                draft.generation_params["progress_source"] = "comfyui"
                 await self._store_draft(
                     draft, max(1, int(draft.expires_at - time.time()))
                 )
@@ -3175,8 +3441,29 @@ return {3, raw}
         is_video = media_type == "video"
         generation_params = old_draft.generation_params.copy()
         generation_params["seed"] = int(uuid.uuid4().int % (2**32))
+        reference_images: list[MediaContent] = []
+        if generation_params.get("has_reference_image"):
+            old_draft_dir = self._draft_dir(
+                old_draft.session_id,
+                old_draft.draft_id,
+            )
+            reference_data = await asyncio.to_thread(
+                self._read_reference_bytes,
+                old_draft_dir,
+            )
+            if not reference_data:
+                raise DraftWorkflowError("comfyui_invalid_reference_image")
+            reference_images.append(
+                MediaContent(
+                    media_type=MediaType.IMAGE,
+                    raw_data=reference_data,
+                    mime_type="image/png",
+                    size_bytes=len(reference_data),
+                )
+            )
         request = GenerationRequest(
             prompt=str(generation_params.get("prompt", "")),
+            reference_images=reference_images,
             target_resolution=tuple(
                 generation_params.get(
                     "target_resolution", self._config.default_target_resolution
@@ -3352,6 +3639,22 @@ return {3, raw}
         else:
             with open(os.path.join(draft_dir, "preview.bin"), "wb") as f:
                 f.write(previews[0])
+
+    @staticmethod
+    def _write_reference_bytes(draft_dir: str, image_data: bytes) -> None:
+        with open(os.path.join(draft_dir, "reference.png"), "wb") as file:
+            file.write(image_data)
+
+    @staticmethod
+    def _read_reference_bytes(draft_dir: str) -> bytes:
+        path = os.path.join(draft_dir, "reference.png")
+        if not os.path.isfile(path):
+            return b""
+        try:
+            with open(path, "rb") as file:
+                return file.read()
+        except OSError:
+            return b""
 
     def _read_preview_bytes(
         self, draft_dir: str, media_type: str

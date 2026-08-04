@@ -1,4 +1,4 @@
-import { getDraftPreview, getVideoStatus } from '@/api/client'
+import { getDraftPreview, getDraftStatus, getVideoStatus } from '@/api/client'
 import type { ChatPageMessage, VideoStatusResponse } from '@/types'
 
 let messageIdCounter = 0
@@ -46,6 +46,18 @@ export function describeDraftFailure(message: string): string {
   }
   if (normalized.includes('comfyui_recovery_failed')) {
     return 'ComfyUI 任务已结束，但结果恢复失败。请重试；若持续发生，请检查 ComfyUI 历史记录。（comfyui_recovery_failed）'
+  }
+  if (normalized.includes('comfyui_progress_stalled')) {
+    return 'ComfyUI 长时间没有返回执行进度，任务已自动取消。请检查 ComfyUI 日志或 GPU 状态后重试。（comfyui_progress_stalled）'
+  }
+  if (normalized.includes('comfyui_invalid_reference_image')) {
+    return '参考图片无效或格式不受支持。请重新选择 PNG、JPEG 或 WebP 图片后重试。（comfyui_invalid_reference_image）'
+  }
+  if (normalized.includes('comfyui_reference_image_too_large')) {
+    return '参考图片尺寸过大。请使用不超过 10 MB、1600 万像素的图片后重试。（comfyui_reference_image_too_large）'
+  }
+  if (normalized.includes('comfyui_qwen_image_reference_unsupported')) {
+    return '当前 Qwen 图片工作流暂不支持参考图。请将图片模型预设切换为 SDXL 后重试。（comfyui_qwen_image_reference_unsupported）'
   }
   return message
 }
@@ -106,6 +118,51 @@ export async function pollDraftUntilSettled(
     return { kind: 'expired', message: '草稿生成超时' }
   } finally {
     pollingDraftIds.delete(draftId)
+  }
+}
+
+function waitUntilNextPoll(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve()
+  return new Promise(resolve => {
+    const timer = setTimeout(done, DRAFT_POLL_INTERVAL_MS)
+    function done() {
+      clearTimeout(timer)
+      signal.removeEventListener('abort', done)
+      resolve()
+    }
+    signal.addEventListener('abort', done, { once: true })
+  })
+}
+
+/** Poll status while the blocking confirmation request performs local refine. */
+export async function pollDraftProgressUntilStopped(
+  draftId: string,
+  signal: AbortSignal,
+  onProgress: (progress: DraftPollProgress) => void,
+): Promise<void> {
+  let confirmationStarted = false
+  for (let attempt = 0; attempt < DRAFT_POLL_MAX_ATTEMPTS && !signal.aborted; attempt += 1) {
+    await waitUntilNextPoll(signal)
+    if (signal.aborted) return
+    try {
+      const status = await getDraftStatus(draftId)
+      if (status.status === 'refining' || status.status === 'confirming') {
+        confirmationStarted = true
+      }
+      onProgress({
+        status: status.status,
+        stage: status.stage,
+        progress: status.progress,
+        progressSource: status.progressSource,
+      })
+      if (
+        ['completed', 'confirmed', 'failed', 'cancelled', 'expired'].includes(status.status)
+        || (confirmationStarted && status.status === 'pending')
+      ) return
+    } catch (error) {
+      if (signal.aborted) return
+      console.warn(`Failed to poll draft confirmation progress for ${draftId}:`, error)
+    }
   }
 }
 

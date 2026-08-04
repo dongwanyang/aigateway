@@ -28,30 +28,44 @@ class SSEGenerator:
         self.chat_id = chat_id or f"chatcmpl-{uuid.uuid4().hex[:12]}"
 
     async def generate(self) -> AsyncIterator[str]:
-        """生成 SSE 格式的数据流。
+        """Generate SSE data and emit a terminal outcome after producer cleanup.
 
-        每个 chunk 经 ``json.dumps`` 序列化为单行 JSON（``ensure_ascii=False``
-        但 JSON 会把真实换行转义成字面 ``\n``，因此输出不含裸换行），
-        直接作为一条 SSE ``data:`` 事件发出，末尾 ``data: [DONE]`` 结束。
-        不做额外转义——之前的 ``_escape_sse`` 会把 JSON 里的 ``\n`` 再翻倍成
-        ``\\n``，导致客户端 JSON 解析后得到字面 "反斜杠 n" 而非换行，
-        破坏代码块等含换行的内容。
+        Normal chunks are streamed immediately. An error chunk is buffered while
+        the inner producer is drained so quota, request-log and ledger settlement
+        can finish before the client receives the terminal event. No data after
+        the first error is exposed and a failed stream never emits ``[DONE]``.
         """
         emit_done = True
+        terminal_error_event: str | None = None
         try:
             async for chunk in self.completion_gen:
-                yield "data: " + json.dumps(chunk, ensure_ascii=False) + "\n\n"
+                if terminal_error_event is not None:
+                    # Drain the producer without exposing post-terminal data.
+                    continue
+                event = "data: " + json.dumps(chunk, ensure_ascii=False) + "\n\n"
+                if isinstance(chunk, dict) and isinstance(chunk.get("error"), dict):
+                    terminal_error_event = event
+                    emit_done = False
+                    continue
+                yield event
         except (asyncio.CancelledError, GeneratorExit):
-            # Client disconnects must propagate cancellation to Starlette and
-            # must not be converted into an SSE error event.
             emit_done = False
             raise
         except Exception as exc:
-            logger.error("SSE stream generation error: %s", exc)
-            error_chunk = {
-                "error": {"code": "internal_error", "message": str(exc)},
-            }
-            yield "data: " + json.dumps(error_chunk, ensure_ascii=False) + "\n\n"
+            emit_done = False
+            logger.error("SSE stream generation error: %s", type(exc).__name__)
+            # An explicit upstream error is authoritative. A later exception
+            # while draining cleanup must not overwrite its public code/message.
+            if terminal_error_event is None:
+                terminal_error_event = "data: " + json.dumps(
+                    {
+                        "error": {
+                            "code": "internal_error",
+                            "message": "The response stream terminated unexpectedly.",
+                        }
+                    },
+                    ensure_ascii=False,
+                ) + "\n\n"
         finally:
             close = getattr(self.completion_gen, "aclose", None)
             if callable(close):
@@ -60,7 +74,12 @@ class SSEGenerator:
                 except (asyncio.CancelledError, GeneratorExit):
                     raise
                 except Exception as exc:
-                    logger.warning("Failed to close upstream SSE generator: %s", exc)
+                    logger.warning(
+                        "Failed to close upstream SSE generator: %s",
+                        type(exc).__name__,
+                    )
 
-        if emit_done:
+        if terminal_error_event is not None:
+            yield terminal_error_event
+        elif emit_done:
             yield "data: [DONE]\n\n"

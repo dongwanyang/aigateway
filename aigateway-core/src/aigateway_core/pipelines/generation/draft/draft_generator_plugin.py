@@ -26,6 +26,7 @@ from aigateway_core.pipelines.generation._common.models import (
 from aigateway_core.pipelines.generation.draft.draft_generator import (
     DraftGeneratorStrategy,
 )
+from aigateway_core.prefix.media.types import MediaContent, MediaType
 
 logger = logging.getLogger(__name__)
 
@@ -366,6 +367,7 @@ class DraftGeneratorPlugin:
         return GenerationRequest(
             prompt=prompt,
             source_prompt=self._extract_original_prompt(ctx),
+            reference_images=self._extract_reference_images(ctx),
             target_resolution=target_resolution,
             target_fps=target_fps,
             media_type=media_type,
@@ -378,6 +380,78 @@ class DraftGeneratorPlugin:
             request_id=ctx.request_id,
             trace_id=ctx.trace_id,
         )
+
+    @staticmethod
+    def _extract_reference_images(ctx: PipelineContext) -> list[MediaContent]:
+        """Preserve the latest user-supplied image for img2img / img2video."""
+        media_opt = ctx.extra.get("media_optimization", {})
+        results = media_opt.get("per_media_results", [])
+        references: list[MediaContent] = []
+        for result in results:
+            if isinstance(result, MediaContent):
+                if result.media_type == MediaType.IMAGE:
+                    references.append(result)
+            elif isinstance(result, dict) and result.get("media_type") in {
+                "image",
+                MediaType.IMAGE,
+            }:
+                references.append(
+                    MediaContent(
+                        media_type=MediaType.IMAGE,
+                        source_url=result.get("source_url"),
+                        raw_data=result.get("raw_data"),
+                        optimized_data=result.get("optimized_data"),
+                        mime_type=result.get("mime_type"),
+                        size_bytes=int(result.get("size_bytes", 0) or 0),
+                    )
+                )
+        if references:
+            return references
+
+        for url in ctx.request.get("reference_image_urls", []):
+            if not isinstance(url, str) or not url:
+                continue
+            mime_type = None
+            if url.startswith("data:image/"):
+                mime_type = url[5:].split(";", 1)[0]
+            references.append(
+                MediaContent(
+                    media_type=MediaType.IMAGE,
+                    source_url=url,
+                    mime_type=mime_type,
+                )
+            )
+        if references:
+            return references
+
+        messages = ctx.request.get("messages", [])
+        for message in reversed(messages):
+            if not isinstance(message, dict) or message.get("role") != "user":
+                continue
+            content = message.get("content", [])
+            if isinstance(content, list):
+                for part in content:
+                    if not isinstance(part, dict) or part.get("type") != "image_url":
+                        continue
+                    image_url = part.get("image_url", {})
+                    url = (
+                        image_url.get("url", "")
+                        if isinstance(image_url, dict)
+                        else image_url
+                    )
+                    if isinstance(url, str) and url:
+                        mime_type = None
+                        if url.startswith("data:image/"):
+                            mime_type = url[5:].split(";", 1)[0]
+                        references.append(
+                            MediaContent(
+                                media_type=MediaType.IMAGE,
+                                source_url=url,
+                                mime_type=mime_type,
+                            )
+                        )
+            break
+        return references
 
     @staticmethod
     def _extract_original_prompt(ctx: PipelineContext) -> str:

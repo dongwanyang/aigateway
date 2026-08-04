@@ -64,7 +64,7 @@ def _coordinator(**config: object) -> GpuResourceCoordinator:
 
 def test_scheduler_config_validates_heartbeat_and_exposes_defaults() -> None:
     config = GpuSchedulerConfig.from_mapping({})
-    assert config.generation_wait_timeout_seconds == 120
+    assert config.generation_wait_timeout_seconds == 600
     assert config.comfyui_idle_reservation_seconds == 60
     assert config.gateway_memory_limit_percent is None
     assert config.comfyui_dynamic_vram_enabled is False

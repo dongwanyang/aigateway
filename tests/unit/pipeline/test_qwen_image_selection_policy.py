@@ -57,6 +57,32 @@ def test_explicit_sdxl_preset_overrides_auto_selection(tmp_path):
     assert strategy._should_use_qwen_image(request) is False
 
 
+def test_auto_selection_routes_chinese_prompt_to_installed_qwen(tmp_path):
+    models = tmp_path / "models"
+    for folder, filename in (
+        ("diffusion_models", "qwen_image_fp8_e4m3fn.safetensors"),
+        ("text_encoders", "qwen_2.5_vl_7b_fp8_scaled.safetensors"),
+        ("vae", "qwen_image_vae.safetensors"),
+    ):
+        path = models / folder / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"model")
+    strategy = DraftGeneratorStrategy(
+        config=DraftWorkflowConfig(store_dir=str(tmp_path / "drafts")),
+        comfyui_config=ComfyUIConfig(
+            models_path=str(models),
+            qwen_image_auto_select=True,
+            qwen_image_enabled=True,
+        ),
+    )
+    request = GenerationRequest(
+        prompt="a golden retriever running on grass",
+        source_prompt="一只金毛犬在草地上奔跑",
+    )
+
+    assert strategy._should_use_qwen_image(request) is True
+
+
 def test_explicit_qwen_preset_respects_disabled_policy(tmp_path):
     strategy = make_strategy(tmp_path, enabled=False)
     request = GenerationRequest(prompt="一只金毛犬", preset_id="qwen-image")
