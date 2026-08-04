@@ -585,7 +585,7 @@ generation_optimization:
       - wan2.2_vae.safetensors
       video_width: 512
       video_height: 288
-      video_frames: 17
+      video_frames: 41
       video_fps: 8
       video_steps: 20
       video_cfg: 5
