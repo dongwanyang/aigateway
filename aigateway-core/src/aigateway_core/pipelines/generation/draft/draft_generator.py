@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import math
@@ -58,6 +59,8 @@ class DraftGeneratorStrategy(_impl.DraftGeneratorStrategy):
             task_tracker=task_tracker,
         )
         self._configuration_error = None if configured else _CONFIGURATION_ERROR
+        self._confirmation_task_lock = asyncio.Lock()
+        self._confirmation_tasks: dict[str, asyncio.Task[Any]] = {}
 
     async def check_local_dependencies(self, *args, **kwargs):
         if self._configuration_error:
@@ -111,9 +114,58 @@ class DraftGeneratorStrategy(_impl.DraftGeneratorStrategy):
             )
         return draft
 
+    async def confirm_draft(self, draft_id: str):
+        """Coalesce concurrent confirmation requests for the same draft.
+
+        The persisted pending-to-refining compare-and-set remains the
+        cross-process idempotency gate. This local registry additionally makes
+        rapid duplicate requests on one API worker await the same task and
+        receive the same result instead of racing into a state-conflict error.
+        """
+        async with self._confirmation_task_lock:
+            task = self._confirmation_tasks.get(draft_id)
+            if task is None or task.done():
+                task = asyncio.create_task(
+                    self._confirm_draft_impl(draft_id),
+                    name=f"draft-confirm-{draft_id}",
+                )
+                self._confirmation_tasks[draft_id] = task
+                self._bg_tasks.add(task)
+
+                def _confirmation_done(completed: asyncio.Task[Any]) -> None:
+                    self._bg_tasks.discard(completed)
+                    current = self._confirmation_tasks.get(draft_id)
+                    if current is completed:
+                        self._confirmation_tasks.pop(draft_id, None)
+                    try:
+                        completed.exception()
+                    except (Exception, asyncio.CancelledError):
+                        pass
+
+                task.add_done_callback(_confirmation_done)
+
+        return await asyncio.shield(task)
+
     @staticmethod
-    def _freeze_video_keyframe(draft: Any) -> None:
-        """Attach the exact preview digest before a video draft becomes visible."""
+    def _source_kind(draft: Any) -> str:
+        params = draft.generation_params
+        return (
+            "source_draft"
+            if params.get("source_draft_id")
+            else "uploaded"
+            if params.get("has_reference_image")
+            else "generated_keyframe"
+        )
+
+    @classmethod
+    def _freeze_video_keyframe(cls, draft: Any) -> None:
+        """Freeze the exact preview digest once for each video draft identity.
+
+        A confirmation failure may return the same draft to ``pending``. That
+        rollback must never re-baseline changed preview bytes. Regeneration has
+        a new draft ID, so it receives a new digest even though its generation
+        parameters were copied from the rejected draft.
+        """
         if (
             draft.media_type != "video"
             or draft.status != _impl.DRAFT_STATUS_PENDING
@@ -122,39 +174,85 @@ class DraftGeneratorStrategy(_impl.DraftGeneratorStrategy):
             return
 
         params = draft.generation_params
+        expected_hash = str(params.get("source_image_sha256") or "")
+        frozen_draft_id = str(params.get("source_image_frozen_draft_id") or "")
+
+        if expected_hash and (
+            not frozen_draft_id or frozen_draft_id == draft.draft_id
+        ):
+            # Backfill the marker for drafts created by the first implementation
+            # without changing their already-frozen digest.
+            params["source_image_frozen_draft_id"] = draft.draft_id
+            params.setdefault("source_kind", cls._source_kind(draft))
+            return
+
         params["source_image_sha256"] = hashlib.sha256(
             draft.previews[0]
         ).hexdigest()
-        params["source_kind"] = (
-            "source_draft"
-            if params.get("source_draft_id")
-            else "uploaded"
-            if params.get("has_reference_image")
-            else "generated_keyframe"
-        )
+        params["source_image_frozen_draft_id"] = draft.draft_id
+        params["source_kind"] = cls._source_kind(draft)
+
+    @staticmethod
+    def _validate_frozen_video_keyframe(draft: Any) -> None:
+        """Validate frozen video input before acquiring a generation worker."""
+        if draft.media_type != "video":
+            return
+        if not draft.previews:
+            raise DraftWorkflowError("video_keyframe_integrity_missing")
+
+        params = draft.generation_params
+        expected_hash = str(params.get("source_image_sha256") or "")
+        if not expected_hash:
+            raise DraftWorkflowError("video_keyframe_integrity_missing")
+
+        frozen_draft_id = str(params.get("source_image_frozen_draft_id") or "")
+        if frozen_draft_id and frozen_draft_id != draft.draft_id:
+            raise DraftWorkflowError("video_keyframe_integrity_mismatch")
+
+        actual_hash = hashlib.sha256(draft.previews[0]).hexdigest()
+        if not hmac.compare_digest(actual_hash, expected_hash):
+            raise DraftWorkflowError("video_keyframe_integrity_mismatch")
 
     async def _store_draft(self, draft, ttl_seconds):
         # Hashing happens before the same write that exposes status=pending, so
         # confirmation can never observe an approved video preview without its
-        # frozen identity.
+        # frozen identity. The per-draft marker prevents confirmation rollback
+        # from accepting modified bytes as a new baseline.
         self._freeze_video_keyframe(draft)
         await super()._store_draft(draft, ttl_seconds)
+
+    async def _regenerate_draft(self, old_draft):
+        """Preserve the old draft identity before copying frozen parameters."""
+        if old_draft.media_type == "video":
+            params = old_draft.generation_params
+            if params.get("source_image_sha256") and not params.get(
+                "source_image_frozen_draft_id"
+            ):
+                # Drafts created by the first freeze implementation have a
+                # digest but no per-draft marker. Backfill the old identity
+                # before the base implementation copies the parameters into a
+                # newly generated draft, allowing that new draft to re-freeze.
+                params["source_image_frozen_draft_id"] = old_draft.draft_id
+        return await super()._regenerate_draft(old_draft)
+
+    async def _claim_draft_confirmation(self, draft_id: str):
+        """Claim and validate frozen video input before worker scheduling."""
+        draft, claimed = await super()._claim_draft_confirmation(draft_id)
+        if not claimed or draft is None or draft.media_type != "video":
+            return draft, claimed
+
+        try:
+            self._validate_frozen_video_keyframe(draft)
+        except DraftWorkflowError as exc:
+            await self._mark_draft_confirmation_failed(draft, str(exc))
+            raise
+        return draft, claimed
 
     async def _generate_video_with_comfyui(self, draft):
         """Generate Wan video from the frozen keyframe and motion-only prompt."""
         if not self._comfyui_config.video_enabled:
             raise DraftWorkflowError("comfyui_video_not_enabled")
-        if not draft.previews:
-            raise DraftWorkflowError("Video draft has no approved keyframe")
-
-        expected_hash = str(
-            draft.generation_params.get("source_image_sha256") or ""
-        )
-        actual_hash = hashlib.sha256(draft.previews[0]).hexdigest()
-        if not expected_hash:
-            raise DraftWorkflowError("video_keyframe_integrity_missing")
-        if not hmac.compare_digest(actual_hash, expected_hash):
-            raise DraftWorkflowError("video_keyframe_integrity_mismatch")
+        self._validate_frozen_video_keyframe(draft)
 
         frame_count = self._video_frame_count(draft)
         fps = self._video_fps(draft)
