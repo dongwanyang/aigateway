@@ -214,6 +214,8 @@ class SQLiteStore(_impl.SQLiteStore):
         # precision for per-token prices while bounding floating point noise.
         new_monthly = round(float(data.get("monthly_cost_used", 0.0)) + cost, 12)
         prefix = "Group " if group else ""
+        daily_label = "Group daily" if group else "Daily"
+        monthly_label = "Group monthly" if group else "Monthly"
 
         if new_rpm_count > rpm_limit:
             return (
@@ -230,14 +232,14 @@ class SQLiteStore(_impl.SQLiteStore):
         if new_daily > daily_limit:
             return (
                 None,
-                f"{prefix}daily token limit exceeded: "
+                f"{daily_label} token limit exceeded: "
                 f"{int(data.get('daily_tokens_used', 0))}/{daily_limit}",
                 0,
             )
         if new_monthly > monthly_limit:
             return (
                 None,
-                f"{prefix}monthly cost limit exceeded: "
+                f"{monthly_label} cost limit exceeded: "
                 f"${float(data.get('monthly_cost_used', 0.0)):.6f}/"
                 f"${monthly_limit:.6f}",
                 0,
@@ -472,6 +474,7 @@ class SQLiteStore(_impl.SQLiteStore):
         _reserved_cost: float = 0.0,
     ) -> None:
         """Reconcile reservations and atomically append period usage records."""
+        accounting_cost = cost
         tokens, cost = self._validated_usage(tokens, cost)
         reserved_tokens, reserved_cost = self._validated_usage(
             _reserved_tokens,
@@ -523,7 +526,7 @@ class SQLiteStore(_impl.SQLiteStore):
                 "daily",
                 today,
                 tokens,
-                cost,
+                accounting_cost,
                 model,
                 tokens_in,
                 tokens_out,
@@ -535,7 +538,7 @@ class SQLiteStore(_impl.SQLiteStore):
                 "monthly",
                 month,
                 tokens,
-                cost,
+                accounting_cost,
                 model,
                 tokens_in,
                 tokens_out,
@@ -586,7 +589,7 @@ class SQLiteStore(_impl.SQLiteStore):
                 "daily",
                 today,
                 tokens,
-                cost,
+                accounting_cost,
                 model,
                 tokens_in,
                 tokens_out,
@@ -598,7 +601,7 @@ class SQLiteStore(_impl.SQLiteStore):
                 "monthly",
                 month,
                 tokens,
-                cost,
+                accounting_cost,
                 model,
                 tokens_in,
                 tokens_out,
