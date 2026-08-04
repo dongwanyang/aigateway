@@ -94,6 +94,7 @@ async def draft_action(
     """
     action = request_body.action
 
+    # 获取 DraftGeneratorStrategy 实例 (from app state)
     strategy = _get_draft_strategy(request)
 
     if strategy is None:
@@ -137,6 +138,7 @@ async def draft_action(
             )
 
         else:
+            # Should not reach here due to validator, but defensive
             raise HTTPException(
                 status_code=400,
                 detail={
@@ -153,6 +155,8 @@ async def draft_action(
     except Exception as exc:
         error_msg = str(exc)
 
+        # 上游瞬时不可用(Agnes /videos 5xx,或连不上/超时等网络故障):返回 502 + retryable,
+        # 而非落到 else → 500。与 admin_routes.confirm_draft 保持一致。
         upstream_status = getattr(exc, "upstream_status", None)
         upstream_unavailable = getattr(exc, "upstream_unavailable", False)
         if (isinstance(upstream_status, int) and upstream_status >= 500) or upstream_unavailable:
@@ -176,6 +180,7 @@ async def draft_action(
                 detail["error"]["upstream_status"] = upstream_status
             raise HTTPException(status_code=502, detail=detail)
 
+        # Map DraftWorkflowError messages to appropriate HTTP status codes
         if "not found or expired" in error_msg:
             raise HTTPException(
                 status_code=404,
@@ -242,11 +247,20 @@ async def draft_action(
 
 
 def _get_draft_strategy(request: Request) -> Any | None:
-    """从 app state 获取 DraftGeneratorStrategy 实例."""
+    """从 app state 获取 DraftGeneratorStrategy 实例.
+
+    Args:
+        request: FastAPI Request 对象
+
+    Returns:
+        DraftGeneratorStrategy 实例，不存在时返回 None
+    """
+    # 尝试从 app.state.draft_generator_strategy 获取
     strategy = getattr(request.app.state, "draft_generator_strategy", None)
     if strategy is not None:
         return strategy
 
+    # 尝试从 generation_optimization 命名空间获取
     gen_opt = getattr(request.app.state, "generation_optimization", None)
     if gen_opt is not None:
         strategy = getattr(gen_opt, "draft_generator_strategy", None)
