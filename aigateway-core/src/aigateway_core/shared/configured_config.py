@@ -88,7 +88,15 @@ class ConfigManager(_BaseConfigManager):
         # ``aigateway_api`` may temporarily copy YAML CORS origins into the env so
         # middleware can be constructed before lifespan startup. It is not a real
         # operator override and must not outrank YAML in runtime configuration.
-        if os.environ.pop(_CORS_YAML_BOOTSTRAP_MARKER, None) == "1":
+        bootstrap_origins = os.environ.pop(
+            _CORS_YAML_BOOTSTRAP_MARKER,
+            None,
+        )
+        if (
+            bootstrap_origins
+            and os.environ.get("AI_GATEWAY_CORS_ORIGINS")
+            == bootstrap_origins
+        ):
             os.environ.pop("AI_GATEWAY_CORS_ORIGINS", None)
         super().__init__(config_path=config_path)
 

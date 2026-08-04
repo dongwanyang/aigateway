@@ -335,7 +335,7 @@ bash scripts/quickstart.sh --edition studio --install-models
 docker compose --profile comfy-container ps
 ```
 
-调度参数集中在 `gpu_scheduler`。默认生成等待上限 120 秒、ComfyUI 空闲保留
+调度参数集中在 `gpu_scheduler`。默认生成等待上限 600 秒、ComfyUI 空闲保留
 60 秒、显存安全余量 2GB；这些值都可在“系统配置 → GPU 动态资源池”修改。
 等待、心跳、冷却、重试和安全余量热生效，现有租约保持原期限；GPU UUID、
 设备池和 `device_overrides` 变更会在 API/控制台标记为“需重建”。出于 Docker
@@ -362,8 +362,14 @@ ComfyUI 本身不经过 Gateway 登录认证，因此不建议把
 `COMFYUI_HOST_BIND` 改成 `0.0.0.0`。
 
 草稿使用低分辨率、低采样步数；确认后上传已认可草稿，并复用相同
-checkpoint、seed 与 prompt 执行 img2img 高清精修。模型默认预算 30GB、
+checkpoint、seed 与 prompt 执行 img2img 高清精修。模型默认预算 80GB、
 输出预算 10GB、系统保留空间 30GB，输出超过保留期后自动清理。
+
+控制台进度条显示当前 ComfyUI 节点原样上报的 `value / max`，新节点开始时会
+按 ComfyUI 语义重置为 0%；模型加载、解码、保存和下载等没有数值进度的阶段
+显示为不定进度，不再伪造整条工作流百分比。默认连续 300 秒收不到 WebSocket
+执行/采样事件或历史状态变化才判定卡死，并在取消对应 ComfyUI prompt 后返回
+`comfyui_progress_stalled`。
 
 视频请求先用同一 SDXL 草稿流程生成一张低成本关键帧；确认后将该关键帧、
 prompt 和 seed 交给 `wan2.2-ti2v-5b-v1`，由 ComfyUI 原生
@@ -391,6 +397,11 @@ ComfyUI 端口默认只绑定本机，节点和高级工作流继续在原生 Co
 或 `.ckpt` 会自动成为本地 Checkpoint 选项；缺失模型或节点的预设显示为不可用。
 仅安装独立 UNet、文本编码器或 VAE 文件不足以推断正确工作流，这类架构需要先
 配置对应的生成预设。
+
+聊天输入框支持上传一张 PNG、JPEG 或 WebP 参考图（最大 10MB、1600 万像素）。
+图片意图使用 SDXL img2img 草稿与确认精修；视频意图直接把参考图作为 Wan
+首帧执行图生视频，不再额外生成 SDXL 关键帧。当前 Qwen-Image 工作流不支持
+参考图，显式选择该预设时会提示切换到 SDXL，而不是静默忽略图片。
 
 4K 保真使用 ComfyUI Core 节点和批准的 `RealESRGAN_x4plus.pth`，保持宽高比、
 不裁剪，最长边默认不超过 4096。模型不会在普通启动时静默下载；可显式运行：

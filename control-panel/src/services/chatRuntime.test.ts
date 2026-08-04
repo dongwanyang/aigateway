@@ -4,6 +4,7 @@ import {
   clearAllChatPolling,
   consumeChatEventStream,
   pollDraftUntilSettled,
+  pollDraftProgressUntilStopped,
   type ChatStreamChunk,
 } from './chatRuntime'
 
@@ -94,5 +95,34 @@ describe('consumeChatEventStream', () => {
       message: 'draft_worker_lost',
     })
     expect(preview).toHaveBeenCalledTimes(1)
+  })
+
+  it('polls confirmation progress until aborted and reports post-processing stages', async () => {
+    vi.useFakeTimers()
+    const status = vi.spyOn(api, 'getDraftStatus').mockResolvedValue({
+      status: 'refining',
+      expiresAt: 0,
+      attemptNumber: 1,
+      maxAttempts: 5,
+      progress: 0.95,
+      stage: 'finalizing',
+      workflowVersion: 'image-v1',
+      progressSource: 'comfyui',
+    })
+    const controller = new AbortController()
+    const progress = vi.fn()
+
+    const polling = pollDraftProgressUntilStopped('draft-confirm', controller.signal, progress)
+    await vi.advanceTimersByTimeAsync(1_000)
+    controller.abort()
+    await polling
+
+    expect(status).toHaveBeenCalledTimes(1)
+    expect(progress).toHaveBeenCalledWith({
+      status: 'refining',
+      stage: 'finalizing',
+      progress: 0.95,
+      progressSource: 'comfyui',
+    })
   })
 })

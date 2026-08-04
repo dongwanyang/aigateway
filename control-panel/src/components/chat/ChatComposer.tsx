@@ -1,12 +1,21 @@
 import { useEffect, useState, useRef, type KeyboardEvent } from 'react'
-import { RefreshCw, Send, Square } from 'lucide-react'
+import { ImagePlus, RefreshCw, Send, Square, X } from 'lucide-react'
 import type { GenerationPreset } from '@/api/client'
-import type { GenerationOptions } from '@/types'
+import type { ChatReferenceImage, GenerationOptions } from '@/types'
+
+const MAX_REFERENCE_IMAGE_BYTES = 10 * 1024 * 1024
+const REFERENCE_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp'])
 
 interface ChatComposerProps {
   streaming: boolean
   disabled: boolean
-  onSend: (text: string, opts?: { generationOptions?: GenerationOptions }) => void
+  onSend: (
+    text: string,
+    opts?: {
+      generationOptions?: GenerationOptions
+      referenceImage?: ChatReferenceImage
+    },
+  ) => void
   onStop: () => void
   presets?: GenerationPreset[]
   presetsLoading?: boolean
@@ -36,7 +45,10 @@ export default function ChatComposer({
   const [presetId, setPresetId] = useState('')
   const [quality, setQuality] = useState<NonNullable<GenerationOptions['quality']>>('standard')
   const [size, setSize] = useState('')
+  const [referenceImage, setReferenceImage] = useState<ChatReferenceImage | null>(null)
+  const [referenceError, setReferenceError] = useState<string | null>(null)
   const taRef = useRef<HTMLTextAreaElement>(null)
+  const imageInputRef = useRef<HTMLInputElement>(null)
   const imagePresets = Array.isArray(presets)
     ? presets.filter(preset => preset.kind === 'image')
     : []
@@ -51,7 +63,8 @@ export default function ChatComposer({
     const t = text.trim()
     if (!t || streaming || disabled) return
     if (backend === 'auto' && !presetId && quality === 'standard' && !size) {
-      onSend(t)
+      if (referenceImage) onSend(t, { referenceImage })
+      else onSend(t)
     } else {
       const [width, height] = size
         ? size.split('x').map(value => Number(value))
@@ -65,10 +78,47 @@ export default function ChatComposer({
           width,
           height,
         },
+        referenceImage: referenceImage ?? undefined,
       })
     }
     setText('')
+    setReferenceImage(null)
+    setReferenceError(null)
+    if (imageInputRef.current) imageInputRef.current.value = ''
     if (taRef.current) taRef.current.style.height = 'auto'
+  }
+
+  async function selectReferenceImage(file: File | undefined) {
+    setReferenceError(null)
+    if (!file) return
+    if (!REFERENCE_IMAGE_TYPES.has(file.type)) {
+      setReferenceError('参考图仅支持 PNG、JPEG 或 WebP。')
+      return
+    }
+    if (file.size > MAX_REFERENCE_IMAGE_BYTES) {
+      setReferenceError('参考图不能超过 10MB。')
+      return
+    }
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => (
+        typeof reader.result === 'string'
+          ? resolve(reader.result)
+          : reject(new Error('图片读取失败'))
+      )
+      reader.onerror = () => reject(reader.error ?? new Error('图片读取失败'))
+      reader.readAsDataURL(file)
+    }).catch((error: unknown) => {
+      setReferenceError(error instanceof Error ? error.message : '图片读取失败')
+      return null
+    })
+    if (!dataUrl) return
+    setReferenceImage({
+      dataUrl,
+      name: file.name,
+      mimeType: file.type,
+      size: file.size,
+    })
   }
 
   function onKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
@@ -164,7 +214,56 @@ export default function ChatComposer({
           图片模型列表加载失败，仍可使用自动选择：{presetsError}
         </div>
       )}
+      <input
+        ref={imageInputRef}
+        type="file"
+        accept="image/png,image/jpeg,image/webp"
+        aria-label="上传参考图"
+        className="hidden"
+        disabled={streaming || disabled}
+        onChange={event => { void selectReferenceImage(event.target.files?.[0]) }}
+      />
+      {referenceImage && (
+        <div className="mb-2 flex items-center gap-2 text-xs" style={{ color: 'var(--color-text-secondary)' }}>
+          <img
+            src={referenceImage.dataUrl}
+            alt="参考图预览"
+            className="h-14 w-14 rounded object-cover"
+          />
+          <span className="max-w-64 truncate">{referenceImage.name}</span>
+          <button
+            type="button"
+            aria-label="移除参考图"
+            title="移除参考图"
+            disabled={streaming || disabled}
+            onClick={() => {
+              setReferenceImage(null)
+              setReferenceError(null)
+              if (imageInputRef.current) imageInputRef.current.value = ''
+            }}
+            className="inline-flex rounded p-1 cursor-pointer disabled:opacity-50"
+          >
+            <X size={14} />
+          </button>
+        </div>
+      )}
+      {referenceError && (
+        <div role="alert" className="mb-2 text-xs" style={{ color: 'var(--color-danger)' }}>
+          {referenceError}
+        </div>
+      )}
       <div className="flex items-end gap-2">
+      <button
+        type="button"
+        aria-label="选择参考图"
+        title="上传参考图，用于图生图或图生视频"
+        disabled={streaming || disabled}
+        onClick={() => imageInputRef.current?.click()}
+        className="inline-flex items-center justify-center px-2 py-2 rounded-md cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+        style={{ color: 'var(--color-text-secondary)', border: '1px solid var(--color-border)' }}
+      >
+        <ImagePlus size={17} />
+      </button>
       <textarea
         ref={taRef}
         value={text}

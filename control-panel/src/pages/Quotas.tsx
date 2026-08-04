@@ -29,6 +29,7 @@ export default function Quotas() {
 
   // 编辑配额状态
   const [editingKey, setEditingKey] = useState<ApiKeyItem | null>(null)
+  const [viewingKey, setViewingKey] = useState<ApiKeyItem | null>(null)
   const [editForm, setEditForm] = useState<{
     daily_tokens: number
     monthly_cost: number
@@ -410,6 +411,34 @@ export default function Quotas() {
             </Card>
           )}
 
+          {viewingKey && (
+            <Card>
+              <div role="dialog" aria-label={`API Key 详情 ${viewingKey.user_id}`}>
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-md font-semibold">API Key 详情 — {viewingKey.user_id}</h3>
+                  <button
+                    className="btn btn-secondary"
+                    onClick={() => setViewingKey(null)}
+                  >
+                    关闭
+                  </button>
+                </div>
+                <dl className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+                  <div><dt style={{ color: 'var(--color-text-tertiary)' }}>Key ID</dt><dd className="font-mono break-all">{viewingKey.id}</dd></div>
+                  <div><dt style={{ color: 'var(--color-text-tertiary)' }}>Key 前缀</dt><dd className="font-mono">{viewingKey.key_prefix}...</dd></div>
+                  <div><dt style={{ color: 'var(--color-text-tertiary)' }}>用户组</dt><dd>{viewingKey.group_name || '—'}</dd></div>
+                  <div><dt style={{ color: 'var(--color-text-tertiary)' }}>缓存范围</dt><dd>{viewingKey.cache_scope || '—'}</dd></div>
+                  <div><dt style={{ color: 'var(--color-text-tertiary)' }}>状态</dt><dd>{viewingKey.status}</dd></div>
+                  <div><dt style={{ color: 'var(--color-text-tertiary)' }}>创建时间</dt><dd>{new Date(viewingKey.created_at).toLocaleString()}</dd></div>
+                  <div><dt style={{ color: 'var(--color-text-tertiary)' }}>日 Token</dt><dd>{viewingKey.quotas.daily_tokens_used} / {viewingKey.quotas.daily_tokens_limit}</dd></div>
+                  <div><dt style={{ color: 'var(--color-text-tertiary)' }}>月成本</dt><dd>${viewingKey.quotas.monthly_cost_used.toFixed(2)} / ${viewingKey.quotas.monthly_cost_limit.toFixed(2)}</dd></div>
+                  <div><dt style={{ color: 'var(--color-text-tertiary)' }}>RPM</dt><dd>{viewingKey.quotas.rpm_current} / {viewingKey.quotas.rpm_limit}</dd></div>
+                  <div><dt style={{ color: 'var(--color-text-tertiary)' }}>TPM</dt><dd>{viewingKey.quotas.tpm_current} / {viewingKey.quotas.tpm_limit}</dd></div>
+                </dl>
+              </div>
+            </Card>
+          )}
+
           {/* 列表 */}
           <Card>
             <div className="table-container">
@@ -478,7 +507,7 @@ export default function Quotas() {
                                 <RotateCw size={16} />
                               </button>
                             )}
-                            <button className="p-1.5 rounded cursor-pointer transition-colors" style={{ color: 'var(--color-text-tertiary)' }} title="查看详情">
+                            <button className="p-1.5 rounded cursor-pointer transition-colors" style={{ color: 'var(--color-text-tertiary)' }} title="查看详情" onClick={() => setViewingKey(key)}>
                               <Eye size={16} />
                             </button>
                             {key.status === 'active' && (

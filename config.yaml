@@ -485,7 +485,7 @@ gpu_scheduler:
   gateway_devices: auto
   comfyui_devices: auto
   gateway_fallback: cpu
-  generation_wait_timeout_seconds: 120
+  generation_wait_timeout_seconds: 600
   comfyui_idle_reservation_seconds: 60
   lease_ttl_seconds: 15
   lease_heartbeat_seconds: 5
@@ -503,6 +503,7 @@ generation_optimization:
   preset_store_dir: /app/data/generation-presets
   ai_director:
     enabled: true
+    timeout_seconds: 30
   model_router:
     model_capabilities:
       agnes-2.0-flash: 60
@@ -532,6 +533,7 @@ generation_optimization:
       manager_enabled: true
       connect_timeout: 10
       execution_timeout: 1200
+      progress_stall_timeout: 300
       required: true
       scheduler_managed: true
       workflow_version: image-v1

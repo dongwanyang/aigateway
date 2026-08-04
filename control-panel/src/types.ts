@@ -47,9 +47,13 @@ export type ErrorCode =
 // 聊天补全
 // ------------------------------------------------------------------
 
+export type ChatContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } }
+
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool'
-  content: string
+  content: string | ChatContentPart[]
   name?: string
   tool_call_id?: string
 }
@@ -86,6 +90,13 @@ export interface GenerationOptions {
   quality?: 'standard' | 'creative_refine' | 'faithful_4k'
   width?: number
   height?: number
+}
+
+export interface ChatReferenceImage {
+  dataUrl: string
+  name: string
+  mimeType: string
+  size: number
 }
 
 export interface ChatChoice {
@@ -462,6 +473,9 @@ export interface ChatPageMessage {
   id: string
   role: 'user' | 'assistant'
   content: string
+  /** 当前会话内的参考图；序列化时移除 data URL，避免撑爆 localStorage。 */
+  referenceImageDataUrl?: string
+  referenceImageName?: string
   intent?: 'understanding' | 'generation:image' | 'generation:video' | null
   model?: string
   error?: boolean

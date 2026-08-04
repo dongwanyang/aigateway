@@ -183,6 +183,9 @@ def register_generation_optimization_plugins(
         ),
         connect_timeout=comfyui_dict.get("connect_timeout", ComfyUIConfig.connect_timeout),
         execution_timeout=comfyui_dict.get("execution_timeout", ComfyUIConfig.execution_timeout),
+        progress_stall_timeout=comfyui_dict.get(
+            "progress_stall_timeout", ComfyUIConfig.progress_stall_timeout
+        ),
         ws_reconnect_attempts=comfyui_dict.get(
             "ws_reconnect_attempts", ComfyUIConfig.ws_reconnect_attempts
         ),

@@ -60,9 +60,13 @@ export function serializeSessions(sessions: ChatSession[]): string {
   return JSON.stringify(sessions.map(session => ({
     ...session,
     messages: session.messages.map(message => {
-      if (!message.draft) return message
+      const {
+        referenceImageDataUrl: _referenceImage,
+        ...messageWithoutReferenceData
+      } = message
+      if (!message.draft) return messageWithoutReferenceData
       const { previewDataUrl: _preview, resultDataUrl: _result, ...draft } = message.draft
-      return { ...message, draft: draft as ChatDraftState }
+      return { ...messageWithoutReferenceData, draft: draft as ChatDraftState }
     }),
   })))
 }

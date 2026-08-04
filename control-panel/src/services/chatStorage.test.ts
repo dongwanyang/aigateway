@@ -41,6 +41,26 @@ describe('chatStorage', () => {
     expect(stored[0].messages[0].draft.draftId).toBe('draft-1')
   })
 
+  it('does not persist uploaded reference image data URLs', () => {
+    const withReference: ChatSession = {
+      ...session,
+      messages: [{
+        id: 'user-reference',
+        role: 'user',
+        content: '生成视频',
+        referenceImageName: 'reference.png',
+        referenceImageDataUrl: 'data:image/png;base64,large-payload',
+        ts: 1,
+      }],
+    }
+
+    persistSessions([withReference])
+
+    const stored = JSON.parse(localStorage.getItem(CHAT_SESSIONS_KEY) ?? '[]')
+    expect(stored[0].messages[0].referenceImageDataUrl).toBeUndefined()
+    expect(stored[0].messages[0].referenceImageName).toBe('reference.png')
+  })
+
   it('migrates the legacy single-session message list', () => {
     localStorage.setItem('aigateway:chat:messages', JSON.stringify([{
       id: 'legacy-message',

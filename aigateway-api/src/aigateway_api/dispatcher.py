@@ -13,12 +13,13 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator
-from typing import Any
-
-from fastapi.responses import JSONResponse, StreamingResponse
+from typing import Any, Self
 
 from aigateway_core.dispatch.classifier import classify_request
-from aigateway_core.dispatch.dispatcher import RequestDispatcher as CoreRequestDispatcher
+from aigateway_core.dispatch.dispatcher import (
+    RequestDispatcher as CoreRequestDispatcher,
+)
+from fastapi.responses import JSONResponse, StreamingResponse
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +140,7 @@ def _request_state(request: Any) -> Any:
     state = getattr(request, "state", None)
     if state is None:
         state = type("RequestState", (), {})()
-        setattr(request, "state", state)
+        request.state = state
     return state
 
 
@@ -281,10 +282,10 @@ class _RequestKeyStoreProxy:
 
 
 class _NoopRequestTracker:
-    def __enter__(self) -> "_NoopRequestTracker":
+    def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, *_args: Any) -> bool:
+    def __exit__(self, *_args: object) -> bool:
         return False
 
 

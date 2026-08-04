@@ -72,7 +72,7 @@ class GpuSchedulerConfig:
     gateway_devices: DeviceSelector = "auto"
     comfyui_devices: DeviceSelector = "auto"
     gateway_fallback: Literal["cpu", "wait", "fail"] = "cpu"
-    generation_wait_timeout_seconds: float = 120.0
+    generation_wait_timeout_seconds: float = 600.0
     comfyui_idle_reservation_seconds: float = 60.0
     lease_ttl_seconds: float = 15.0
     lease_heartbeat_seconds: float = 5.0
@@ -155,7 +155,7 @@ class GpuSchedulerConfig:
             comfyui_devices=_device_selector(raw.get("comfyui_devices", "auto"), "comfyui_devices"),
             gateway_fallback=fallback,  # type: ignore[arg-type]
             generation_wait_timeout_seconds=_positive_number(
-                raw.get("generation_wait_timeout_seconds", 120),
+                raw.get("generation_wait_timeout_seconds", 600),
                 "generation_wait_timeout_seconds",
             ),
             comfyui_idle_reservation_seconds=_positive_number(

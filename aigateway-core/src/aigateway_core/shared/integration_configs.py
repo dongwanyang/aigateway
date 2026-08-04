@@ -48,6 +48,7 @@ class ComfyUIConfig:
     manager_enabled: bool = True
     connect_timeout: int = 10
     execution_timeout: int = 1200
+    progress_stall_timeout: int = 300
     ws_reconnect_attempts: int = 3
     required: bool = True
     scheduler_managed: bool = False

@@ -98,8 +98,11 @@ def _preload_cors_origins() -> None:
         if isinstance(value, str) and value.strip()
     ]
     if normalized:
-        os.environ["AI_GATEWAY_CORS_ORIGINS"] = ",".join(normalized)
-        os.environ[_CORS_YAML_BOOTSTRAP_MARKER] = "1"
+        bootstrap_origins = ",".join(normalized)
+        os.environ["AI_GATEWAY_CORS_ORIGINS"] = bootstrap_origins
+        # Store the synthetic value itself. ConfigManager can then distinguish
+        # it from an operator/test override written after package import.
+        os.environ[_CORS_YAML_BOOTSTRAP_MARKER] = bootstrap_origins
 
 
 def _install_admin_security_guards() -> None:

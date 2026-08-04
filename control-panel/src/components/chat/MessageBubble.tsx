@@ -33,6 +33,13 @@ export default function MessageBubble({ msg, isStreaming, pendingAssistantId, on
     return (
       <div className="flex justify-end mb-4">
         <div className="max-w-[70%] px-4 py-2 rounded-lg" style={{ backgroundColor: 'var(--color-primary)', color: 'var(--color-text-inverse)' }}>
+          {msg.referenceImageDataUrl && (
+            <img
+              src={msg.referenceImageDataUrl}
+              alt={msg.referenceImageName || '用户参考图'}
+              className="mb-2 max-h-48 max-w-full rounded object-contain"
+            />
+          )}
           <p className="whitespace-pre-wrap break-words">{msg.content}</p>
         </div>
       </div>

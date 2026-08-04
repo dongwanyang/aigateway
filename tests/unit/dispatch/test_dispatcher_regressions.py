@@ -9,10 +9,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi.responses import JSONResponse
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-core", "src"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "aigateway-api", "src"))
 
+from aigateway_core.dispatch.classifier import ClassificationResult
 from aigateway_core.dispatch.dispatcher import RequestDispatcher
 
 
@@ -29,6 +31,74 @@ def test_resolve_identity_uses_full_sha256_key_hash():
     assert user_id == "user-1"
     assert key_hash == hashlib.sha256(b"gw-test-secret").hexdigest()
     assert len(key_hash) == 64
+
+
+@pytest.mark.asyncio
+async def test_generation_dispatch_preserves_only_reference_image_urls():
+    original_messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "turn this dog into a watercolor"},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,cmVmZXJlbmNl"},
+                },
+            ],
+        }
+    ]
+    optimized_messages = [
+        {"role": "user", "content": "turn this dog into a watercolor\n[dog image]"}
+    ]
+    body = SimpleNamespace(
+        messages=original_messages,
+        model="auto",
+        stream=False,
+    )
+    request = SimpleNamespace(
+        headers={},
+        state=SimpleNamespace(
+            trace_id="trace-reference-image",
+            api_key_data={},
+        ),
+    )
+    dispatcher = RequestDispatcher({"generation_engine": object()})
+    expected_response = JSONResponse({"ok": True})
+
+    with (
+        patch(
+            "aigateway_api.openai_compat._apply_media_optimization",
+            new=AsyncMock(
+                return_value={"messages": optimized_messages, "meta": {"images": 1}}
+            ),
+        ),
+        patch(
+            "aigateway_api.openai_compat._apply_pii_detection",
+            new=AsyncMock(
+                return_value={"messages": optimized_messages, "meta": {}}
+            ),
+        ),
+        patch(
+            "aigateway_core.dispatch.dispatcher.classify_request",
+            new=AsyncMock(
+                return_value=ClassificationResult("generation:image")
+            ),
+        ),
+        patch.object(
+            dispatcher,
+            "_dispatch_generation",
+            new=AsyncMock(return_value=expected_response),
+        ) as dispatch_generation,
+    ):
+        response = await dispatcher._dispatch(body, request)
+
+    assert response is expected_response
+    prefix = dispatch_generation.await_args.args[5]
+    assert prefix["reference_image_urls"] == [
+        "data:image/png;base64,cmVmZXJlbmNl"
+    ]
+    assert "reference_messages" not in prefix
+    assert body.messages == optimized_messages
 
 
 class _FakeCache:
