@@ -21,7 +21,7 @@ def _config(*, min_frames: int = 1, max_frames: int = 481):
     "config",
     [
         _config(max_frames=41),
-        _config(min_frames=42),
+        _config(min_frames=66),
     ],
 )
 def test_source_video_timing_never_silently_changes_requested_duration(config):
