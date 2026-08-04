@@ -64,7 +64,12 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/aigateway-gateway:${{ github.ref_name }}-${{ matrix.suffix }}
             ghcr.io/${{ github.repository_owner }}/aigateway-gateway:latest-${{ matrix.suffix }}
           cache-from: type=gha,scope=gateway-${{ matrix.target }}
-          cache-to: type=gha,mode=max,scope=gateway-${{ matrix.target }}
+          # GHA cache accelerates CI. Inline cache is embedded in the published
+          # image so source installations can import it through Compose
+          # cache_from=type=registry on a fresh local BuildKit builder.
+          cache-to: |
+            type=gha,mode=max,scope=gateway-${{ matrix.target }}
+            type=inline
 
   comfyui:
     runs-on: ubuntu-24.04
@@ -87,7 +92,9 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/aigateway-comfyui:${{ github.ref_name }}-cuda
             ghcr.io/${{ github.repository_owner }}/aigateway-comfyui:latest-cuda
           cache-from: type=gha,scope=comfyui
-          cache-to: type=gha,mode=max,scope=comfyui
+          cache-to: |
+            type=gha,mode=max,scope=comfyui
+            type=inline
 
   control-panel:
     runs-on: ubuntu-24.04
@@ -110,4 +117,6 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/aigateway-control-panel:${{ github.ref_name }}
             ghcr.io/${{ github.repository_owner }}/aigateway-control-panel:latest
           cache-from: type=gha,scope=control-panel
-          cache-to: type=gha,mode=max,scope=control-panel
+          cache-to: |
+            type=gha,mode=max,scope=control-panel
+            type=inline
