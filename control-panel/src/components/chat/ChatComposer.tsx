@@ -7,7 +7,6 @@ import {
   DEFAULT_VIDEO_FPS,
   VIDEO_DURATION_OPTIONS,
   type VideoDurationSeconds,
-  type VideoGenerationOptions,
 } from '@/types/videoGeneration'
 
 const MAX_REFERENCE_IMAGE_BYTES = 10 * 1024 * 1024
@@ -80,7 +79,7 @@ export default function ChatComposer({
       const [width, height] = size
         ? size.split('x').map(value => Number(value))
         : [undefined, undefined]
-      const generationOptions: VideoGenerationOptions = {
+      const generationOptions: GenerationOptions = {
         backend,
         preset_id: presetId || undefined,
         quality,
@@ -98,6 +97,7 @@ export default function ChatComposer({
       })
     }
     setText('')
+    setVideoDurationSeconds(DEFAULT_VIDEO_DURATION_SECONDS)
     setReferenceImage(null)
     setReferenceError(null)
     if (imageInputRef.current) imageInputRef.current.value = ''
