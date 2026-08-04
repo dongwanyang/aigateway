@@ -35,8 +35,12 @@ describe('normalizeChatMessages', () => {
     const normalized = normalizeChatMessages(messages)
 
     expect(normalized).toHaveLength(1)
-    const serialized = JSON.stringify(normalized)
-    expect(serialized.match(/image_url/g)).toHaveLength(1)
+    const content = normalized[0]?.content
+    expect(Array.isArray(content)).toBe(true)
+    const imageParts = Array.isArray(content)
+      ? content.filter(part => part.type === 'image_url')
+      : []
+    expect(imageParts).toHaveLength(1)
   })
 
   it('keeps deliberate repeated prompts separated by an assistant response', () => {
