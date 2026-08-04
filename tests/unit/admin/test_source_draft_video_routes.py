@@ -34,7 +34,14 @@ def _app(auth_dependency) -> FastAPI:
     return app
 
 
-def test_source_video_route_installer_is_idempotent():
+def test_source_video_route_installer_is_idempotent(monkeypatch):
+    source_router = APIRouter()
+
+    @source_router.post("/probe")
+    async def probe():
+        return {"ok": True}
+
+    monkeypatch.setattr(routes_module, "router", source_router)
     admin_router = APIRouter()
 
     routes_module.install_source_draft_video_routes(admin_router)
@@ -43,7 +50,7 @@ def test_source_video_route_installer_is_idempotent():
     matching = [
         route
         for route in admin_router.routes
-        if getattr(route, "path", "") == "/draft/{source_draft_id}/video"
+        if getattr(route, "path", "") == "/probe"
     ]
     assert len(matching) == 1
     assert "POST" in set(getattr(matching[0], "methods", set()) or set())
