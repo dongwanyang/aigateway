@@ -5,6 +5,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+import yaml
 from aigateway_api.auth_middleware import authenticate_admin
 from aigateway_api.config_security import config_revision
 from aigateway_api.gpu_routes import router
@@ -73,6 +74,56 @@ async def test_gpu_config_is_transactional_and_classifies_restart_fields(
     ]
     assert body["data"]["restart_required"] is True
     assert body["revision"] != revision
+
+
+@pytest.mark.asyncio
+async def test_gpu_config_preserves_host_generated_topology(tmp_path: Path) -> None:
+    app, config_path = _app(tmp_path)
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["gpu_scheduler"].update(
+        {
+            "inventory_source": "host_generated",
+            "devices": [
+                {
+                    "index": 0,
+                    "uuid": "GPU-test",
+                    "name": "Test GPU",
+                    "total_memory_gb": 16,
+                    "free_memory_gb": 16,
+                }
+            ],
+            "workers": [
+                {
+                    "worker_id": "comfyui-gpu-0",
+                    "device_uuid": "GPU-test",
+                    "server_url": "http://comfyui:8188",
+                    "capabilities": ["image"],
+                }
+            ],
+        }
+    )
+    config_path.write_text(
+        yaml.safe_dump(config, sort_keys=False),
+        encoding="utf-8",
+    )
+    app.state.config_manager = ConfigManager(str(config_path))
+    revision = config_revision(str(config_path))
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.put(
+            "/admin/gpu/config",
+            headers={"If-Match": f'"{revision}"'},
+            json={"generation_wait_timeout_seconds": 90},
+        )
+
+    assert response.status_code == 200, response.text
+    persisted = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    scheduler = persisted["gpu_scheduler"]
+    assert scheduler["inventory_source"] == "host_generated"
+    assert scheduler["devices"][0]["uuid"] == "GPU-test"
+    assert scheduler["workers"][0]["device_uuid"] == "GPU-test"
 
 
 @pytest.mark.asyncio
