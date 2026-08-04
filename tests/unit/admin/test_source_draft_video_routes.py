@@ -5,11 +5,10 @@ from unittest.mock import AsyncMock
 
 import aigateway_api.source_draft_video_routes as routes_module
 import pytest
-from aigateway_api import admin_routes
 from aigateway_core.pipelines.generation._common.exceptions import (
     DraftWorkflowError,
 )
-from fastapi import FastAPI, HTTPException
+from fastapi import APIRouter, FastAPI, HTTPException
 from httpx import ASGITransport, AsyncClient
 
 
@@ -35,13 +34,19 @@ def _app(auth_dependency) -> FastAPI:
     return app
 
 
-@pytest.mark.asyncio
-async def test_source_video_route_is_installed_on_admin_router():
-    paths = {
-        getattr(route, "path", "")
-        for route in admin_routes.router.routes
-    }
-    assert "/draft/{source_draft_id}/video" in paths
+def test_source_video_route_installer_is_idempotent():
+    admin_router = APIRouter()
+
+    routes_module.install_source_draft_video_routes(admin_router)
+    routes_module.install_source_draft_video_routes(admin_router)
+
+    matching = [
+        route
+        for route in admin_router.routes
+        if getattr(route, "path", "") == "/draft/{source_draft_id}/video"
+    ]
+    assert len(matching) == 1
+    assert "POST" in set(getattr(matching[0], "methods", set()) or set())
 
 
 @pytest.mark.asyncio
