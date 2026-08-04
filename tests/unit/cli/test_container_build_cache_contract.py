@@ -34,14 +34,15 @@ def test_compose_registry_cache_is_configured_for_each_built_service() -> None:
 
 def test_agent_guidance_uses_stateful_cached_rebuild_entrypoint() -> None:
     guidance = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    claude = (REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
     install = (REPO_ROOT / "INSTALL.md").read_text(encoding="utf-8")
 
-    for document in (guidance, install):
-        assert "--env-file .aigateway-install.env" in document or (
-            "bash scripts/quickstart.sh" in document
-            and "--distribution source" in document
-            and "--build" in document
-        )
+    for document in (guidance, claude, install):
+        assert "bash scripts/quickstart.sh" in document
+        assert "--distribution source" in document
+        assert "--build" in document
 
     assert "Do not replace this with a bare `docker compose build`" in guidance
+    assert "Do not replace the command above with bare `docker compose build`" in claude
+    assert "type=inline" in claude
     assert "不要让自动化工具或编码代理默认执行以下命令" in install
