@@ -329,8 +329,8 @@ async def update_secure_table_config(
     manager = _manager(request)
     try:
         expected = _expected_revision(request)
-        previous, _revision = read_versioned_yaml_config(manager.config_path)
         submitted = await _json_object(request)
+        previous, _revision = read_versioned_yaml_config(manager.config_path)
         removed_models = (
             _configured_model_names(previous)
             - _configured_model_names(submitted)
