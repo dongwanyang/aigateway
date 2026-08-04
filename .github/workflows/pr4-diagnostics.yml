@@ -1,0 +1,109 @@
+name: PR4 Diagnostics
+
+on:
+  push:
+    branches: [agent/pr4-existing-image-to-video]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  focused-python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: |
+          npm install -g --force @colbymchenry/codegraph
+          pip install -e aigateway-core
+          pip install -e "aigateway-api[all]"
+          pip install -r tests/requirements-test.txt
+
+      - name: Run focused diagnostics
+        id: diagnostics
+        env:
+          AI_GATEWAY_REDIS_URL: redis://localhost:6379/0
+        run: |
+          set +e
+          : > pr4-diagnostics.txt
+
+          echo '## Test authenticity audit' >> pr4-diagnostics.txt
+          python scripts/audit_tests.py >> pr4-diagnostics.txt 2>&1
+          audit_status=$?
+
+          echo '\n## Focused pytest' >> pr4-diagnostics.txt
+          python -m pytest \
+            tests/unit/pipeline/test_source_draft_video.py \
+            tests/unit/admin/test_source_draft_video_routes.py \
+            --strict-markers \
+            --max-warnings=0 \
+            -W error::RuntimeWarning \
+            -vv >> pr4-diagnostics.txt 2>&1
+          pytest_status=$?
+
+          echo '\n## Ruff' >> pr4-diagnostics.txt
+          python -m ruff check \
+            aigateway-core/src/aigateway_core/pipelines/generation/draft/source_draft_video.py \
+            aigateway-api/src/aigateway_api/source_draft_video_routes.py \
+            tests/unit/pipeline/test_source_draft_video.py \
+            tests/unit/admin/test_source_draft_video_routes.py \
+            >> pr4-diagnostics.txt 2>&1
+          ruff_status=$?
+
+          {
+            echo "audit_status=$audit_status"
+            echo "pytest_status=$pytest_status"
+            echo "ruff_status=$ruff_status"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ "$audit_status" -ne 0 ] || [ "$pytest_status" -ne 0 ] || [ "$ruff_status" -ne 0 ]; then
+            exit 1
+          fi
+
+      - name: Comment diagnostic summary
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AUDIT_STATUS: ${{ steps.diagnostics.outputs.audit_status }}
+          PYTEST_STATUS: ${{ steps.diagnostics.outputs.pytest_status }}
+          RUFF_STATUS: ${{ steps.diagnostics.outputs.ruff_status }}
+        run: |
+          {
+            echo '<!-- pr4-focused-diagnostics -->'
+            echo '## PR4 focused diagnostics'
+            echo
+            echo "- authenticity audit: ${AUDIT_STATUS:-not-run}"
+            echo "- focused pytest: ${PYTEST_STATUS:-not-run}"
+            echo "- Ruff: ${RUFF_STATUS:-not-run}"
+            echo
+            echo '<details><summary>Output</summary>'
+            echo
+            echo '```text'
+            tail -c 50000 pr4-diagnostics.txt
+            echo
+            echo '```'
+            echo '</details>'
+          } > pr4-comment.md
+          gh pr comment 34 --body-file pr4-comment.md
