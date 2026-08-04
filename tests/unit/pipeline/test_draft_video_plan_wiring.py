@@ -146,6 +146,27 @@ def test_draft_plugin_rejects_unsafe_translated_fallback():
         plugin._assert_video_plan_ready(ctx, request)
 
 
+def test_pending_video_draft_freezes_keyframe_before_storage():
+    strategy = object.__new__(DraftGeneratorStrategy)
+    preview = b"persisted-preview"
+    draft = DraftResult(
+        draft_id="draft-freeze",
+        previews=[preview],
+        generation_params={"has_reference_image": False},
+        created_at=0,
+        expires_at=100,
+        status="pending",
+        media_type="video",
+    )
+
+    strategy._freeze_video_keyframe(draft)
+
+    assert draft.generation_params["source_image_sha256"] == (
+        hashlib.sha256(preview).hexdigest()
+    )
+    assert draft.generation_params["source_kind"] == "generated_keyframe"
+
+
 @pytest.mark.asyncio
 async def test_wan_confirmation_consumes_frozen_motion_plan_and_timing():
     strategy = object.__new__(DraftGeneratorStrategy)
