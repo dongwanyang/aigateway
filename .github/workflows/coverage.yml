@@ -6,31 +6,7 @@ on:
   push:
     branches: [main]
 
-permissions:
-  contents: write
-
 jobs:
-  apply-pr2-text-guard-fix:
-    if: github.actor != 'github-actions[bot]'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: agent/pr2-video-duration-parameters
-          fetch-depth: 0
-
-      - name: Apply text guard patch
-        run: python .github/scripts/apply_pr2_text_guard_fix.py
-
-      - name: Commit text guard patch
-        run: |
-          git rm .github/scripts/apply_pr2_text_guard_fix.py
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add aigateway-api/src/aigateway_api/dispatcher.py
-          git commit -m "fix: preserve text output guards for auto routing"
-          git push origin HEAD:agent/pr2-video-duration-parameters
-
   python-coverage:
     runs-on: ubuntu-latest
     timeout-minutes: 20
