@@ -148,6 +148,22 @@ class DraftGeneratorPlugin:
                 },
             )
             ctx.should_stop = True
+        except ValueError as exc:
+            duration_ms = (time.monotonic() - started_at) * 1000.0
+            ctx.extra.setdefault(NS_GENERATION_OPTIMIZATION, {})[
+                "draft_generator"
+            ] = {
+                "applicable": False,
+                "reason": "invalid_generation_options",
+                "local_error": str(exc),
+                "duration_ms": duration_ms,
+            }
+            ctx.add_plugin_trace(
+                "draft_generator",
+                duration_ms,
+                "failed",
+                payload={"reason": "invalid_generation_options"},
+            )
         except Exception as exc:
             duration_ms = (time.monotonic() - started_at) * 1000.0
             ctx.extra.setdefault(NS_GENERATION_OPTIMIZATION, {})[
