@@ -140,18 +140,25 @@ export async function pollDraftProgressUntilStopped(
   signal: AbortSignal,
   onProgress: (progress: DraftPollProgress) => void,
 ): Promise<void> {
+  let confirmationStarted = false
   for (let attempt = 0; attempt < DRAFT_POLL_MAX_ATTEMPTS && !signal.aborted; attempt += 1) {
     await waitUntilNextPoll(signal)
     if (signal.aborted) return
     try {
       const status = await getDraftStatus(draftId)
+      if (status.status === 'refining' || status.status === 'confirming') {
+        confirmationStarted = true
+      }
       onProgress({
         status: status.status,
         stage: status.stage,
         progress: status.progress,
         progressSource: status.progressSource,
       })
-      if (['completed', 'confirmed', 'failed', 'cancelled', 'expired'].includes(status.status)) return
+      if (
+        ['completed', 'confirmed', 'failed', 'cancelled', 'expired'].includes(status.status)
+        || (confirmationStarted && status.status === 'pending')
+      ) return
     } catch (error) {
       if (signal.aborted) return
       console.warn(`Failed to poll draft confirmation progress for ${draftId}:`, error)
