@@ -100,8 +100,6 @@ def _preload_cors_origins() -> None:
     if normalized:
         bootstrap_origins = ",".join(normalized)
         os.environ["AI_GATEWAY_CORS_ORIGINS"] = bootstrap_origins
-        # Store the synthetic value itself. ConfigManager can then distinguish
-        # it from an operator/test override written after package import.
         os.environ[_CORS_YAML_BOOTSTRAP_MARKER] = bootstrap_origins
 
 
@@ -115,9 +113,6 @@ def _install_admin_security_guards() -> None:
         prune_removed_model_references,
     )
 
-    # Secure route handlers resolve these globals at request time. Replacing the
-    # narrow legacy helpers here preserves their public test/import surface while
-    # installing the complete scalar-reference validation contract.
     security_routes._configured_model_names = configured_model_names
     security_routes._prune_removed_model_references = (
         prune_removed_model_references
@@ -133,6 +128,14 @@ def _install_gpu_routes() -> None:
     from .gpu_routes import install_gpu_routes
 
     install_gpu_routes(admin_routes.router)
+
+
+def _install_source_draft_video_routes() -> None:
+    """Install the authenticated existing-image-to-video endpoint."""
+    from . import admin_routes
+    from .source_draft_video_routes import install_source_draft_video_routes
+
+    install_source_draft_video_routes(admin_routes.router)
 
 
 def _install_config_schema_parser() -> None:
@@ -156,4 +159,5 @@ _allow_config_precondition_header()
 _preload_cors_origins()
 _install_admin_security_guards()
 _install_gpu_routes()
+_install_source_draft_video_routes()
 _install_config_schema_parser()
