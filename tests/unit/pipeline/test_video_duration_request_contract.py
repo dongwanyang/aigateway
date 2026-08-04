@@ -70,6 +70,7 @@ async def test_invalid_video_duration_options_fail_closed_in_execute(
     result = await plugin.execute(_video_context(duration_seconds))
 
     draft_info = result.extra["generation_optimization"]["draft_generator"]
+    assert result.should_stop is True
     assert draft_info["applicable"] is False
     assert draft_info["reason"] == "invalid_generation_options"
     assert draft_info["local_error"]
@@ -84,6 +85,7 @@ async def test_invalid_video_fps_fails_closed_in_execute() -> None:
     result = await plugin.execute(_video_context(5, fps=0))
 
     draft_info = result.extra["generation_optimization"]["draft_generator"]
+    assert result.should_stop is True
     assert draft_info["applicable"] is False
     assert draft_info["reason"] == "invalid_generation_options"
     assert draft_info["local_error"] == "fps must be a positive integer"
