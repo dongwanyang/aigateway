@@ -7,7 +7,9 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from aigateway_core.pipelines.generation._common.exceptions import DraftWorkflowError
+from aigateway_core.pipelines.generation._common.exceptions import (
+    DraftWorkflowError,
+)
 from aigateway_core.pipelines.generation.draft.source_draft_video import (
     create_video_draft_from_source,
 )
@@ -62,12 +64,27 @@ def _strategy(request: Request) -> Any:
 def _error_response(error: str) -> tuple[int, str, str]:
     code = error.split(":", 1)[0].strip() or "internal_error"
     exact: dict[str, tuple[int, str]] = {
-        "source_draft_not_found": (404, "原图片草稿不存在、已过期或结果文件已清理。"),
+        "source_draft_not_found": (
+            404,
+            "原图片草稿不存在、已过期或结果文件已清理。",
+        ),
         "source_draft_forbidden": (403, "无权使用该图片草稿。"),
-        "source_draft_invalid_type": (409, "仅支持使用已完成的图片结果创建视频。"),
-        "video_duration_unsupported": (422, "当前模型不支持该视频时长或帧率。"),
-        "video_motion_prompt_missing": (422, "请描述主体动作或镜头运动。"),
-        "source_draft_immutable": (409, "来源图片视频草稿不可重新生成关键帧。"),
+        "source_draft_invalid_type": (
+            409,
+            "仅支持使用已完成的图片结果创建视频。",
+        ),
+        "video_duration_unsupported": (
+            422,
+            "当前模型不支持该视频时长或帧率。",
+        ),
+        "video_motion_prompt_missing": (
+            422,
+            "请描述主体动作或镜头运动。",
+        ),
+        "source_draft_immutable": (
+            409,
+            "来源图片视频草稿不可重新生成关键帧。",
+        ),
     }
     if code in exact:
         status, message = exact[code]
@@ -83,13 +100,28 @@ def _error_response(error: str) -> tuple[int, str, str]:
         "comfyui_invalid_video_vae",
         "gpu_scheduler",
     )
-    if code.startswith(unavailable_prefixes) or (
+    if code.startswith(unavailable_prefixes):
+        return (
+            503,
+            code,
+            "本地视频生成服务当前不可用或依赖未就绪。",
+        )
+    if (
         "ComfyUI service is unavailable" in error
         or "ComfyUI health check failed" in error
     ):
-        return 503, code, "本地视频生成服务当前不可用或依赖未就绪。"
-    if code.startswith("comfyui_storage_") or code.startswith("comfyui_output_budget_"):
-        return 507, code, "本地生成存储空间不足。"
+        return (
+            503,
+            "comfyui_unavailable",
+            "本地视频生成服务当前不可用或依赖未就绪。",
+        )
+    resource_prefixes = (
+        "comfyui_storage_",
+        "comfyui_output_budget_",
+        "comfyui_model_budget_",
+    )
+    if code.startswith(resource_prefixes):
+        return 507, code, "本地生成存储空间或模型预算不足。"
     return 500, "internal_error", "创建视频草稿时发生内部错误。"
 
 
