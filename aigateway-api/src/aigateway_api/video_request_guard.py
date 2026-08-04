@@ -20,8 +20,18 @@ _EN_REFERENCE_RE = re.compile(
     r"\b(?:this|that|the\s+above|previous|last)\s+(?:image|picture|photo|frame)\b",
     re.IGNORECASE,
 )
-_ZH_VIDEO_RE = re.compile(r"(?:视频|图生视频|动起来|动画|运动|运镜|镜头运动)")
-_EN_VIDEO_RE = re.compile(r"\b(?:video|animate|animation|motion|moving|camera\s+move)\b", re.IGNORECASE)
+_ZH_VIDEO_GENERATION_RE = re.compile(
+    r"(?:图生视频|生成视频|制作视频|创建视频|视频生成|"
+    r"(?:生成|制作|创建|转成|转换成|转换为|做成|变成).{0,16}(?:视频|动画)|"
+    r"(?:让|使).{0,16}(?:动起来|运动起来)|动起来)"
+)
+_EN_VIDEO_GENERATION_RE = re.compile(
+    r"(?:\banimate\b|"
+    r"\b(?:generate|create|make|turn|convert)\b.{0,60}\b(?:video|animation)\b|"
+    r"\b(?:video|animation)\b.{0,60}\b(?:generate|create|make)\b|"
+    r"\bmake\b.{0,40}\b(?:move|moving)\b)",
+    re.IGNORECASE,
+)
 
 
 def _value(obj: Any, key: str, default: Any = None) -> Any:
@@ -80,8 +90,11 @@ def reference_image_required(body: Any) -> bool:
     if has_image or not text.strip():
         return False
     references_image = bool(_ZH_REFERENCE_RE.search(text) or _EN_REFERENCE_RE.search(text))
-    requests_video = bool(_ZH_VIDEO_RE.search(text) or _EN_VIDEO_RE.search(text))
-    return references_image and requests_video
+    requests_video_generation = bool(
+        _ZH_VIDEO_GENERATION_RE.search(text)
+        or _EN_VIDEO_GENERATION_RE.search(text)
+    )
+    return references_image and requests_video_generation
 
 
 def _reference_image_error() -> JSONResponse:
