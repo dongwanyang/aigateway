@@ -31,6 +31,7 @@ AI Gateway 跨平台安装器
   --production / --no-production
   --install-models                    通过模型管理器安装批准模型
   --build                             source 模式强制重建
+  --reset-config                      丢弃控制台修改并从仓库 config.yaml 重建运行配置
   --no-start                          只生成安装状态和运行配置
   --show-plan                         显示方案，不写文件
   --non-interactive
@@ -50,6 +51,7 @@ interactive="true"
 start="true"
 show_plan="false"
 build="false"
+reset_config="false"
 install_models="false"
 action="up"
 edition_explicit="false"
@@ -98,6 +100,7 @@ while [[ $# -gt 0 ]]; do
     --no-production) production="false"; shift ;;
     --install-models) install_models="true"; shift ;;
     --build|build) build="true"; shift ;;
+    --reset-config) reset_config="true"; shift ;;
     --no-start) start="false"; shift ;;
     --show-plan) show_plan="true"; start="false"; interactive="false"; shift ;;
     --non-interactive) interactive="false"; shift ;;
@@ -276,7 +279,10 @@ if [[ "$interactive" == "true" && "$edition_explicit" == "false" ]]; then
     3) edition="studio" ;; 4) edition="full" ;; "") ;;
     *) fail "无效选择" ;;
   esac
+  reset_args=()
+  [[ "$reset_config" == "true" ]] && reset_args+=(--reset-config)
   exec "$0" --edition "$edition" --distribution "$distribution" \
+    "${reset_args[@]}" \
     $([[ "$monitoring" == "true" ]] && printf -- --monitoring || printf -- --no-monitoring) \
     $([[ "$production" == "true" ]] && printf -- --production || printf -- --no-production)
 fi
@@ -323,9 +329,18 @@ trap 'rm -f "$tmp_state"' EXIT
 mv "$tmp_state" "$STATE_FILE"
 trap - EXIT
 
+config_source="$ROOT_DIR/config.yaml"
+if [[ "$reset_config" == "true" ]]; then
+  [[ -f "$RUNTIME_CONFIG" ]] \
+    && warn "将按 --reset-config 丢弃现有运行配置和控制台修改"
+elif [[ -s "$RUNTIME_CONFIG" ]]; then
+  config_source="$RUNTIME_CONFIG"
+  info "保留现有运行配置；仅刷新套餐、平台和部署拥有的字段"
+fi
+
 render_args=(
   "$ROOT_DIR/scripts/render-deployment-config.py"
-  --source "$ROOT_DIR/config.yaml"
+  --source "$config_source"
   --output "$RUNTIME_CONFIG"
   --edition "$edition"
   --accelerator "$accelerator"
