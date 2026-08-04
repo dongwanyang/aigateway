@@ -235,7 +235,7 @@ def builtin_presets(comfy: dict[str, Any]) -> list[dict[str, Any]]:
             "enabled": video_enabled and not video_errors,
             "configuration_status": _preset_status(video_enabled, video_errors),
             "configuration_errors": video_errors,
-            "languages": ["en"],
+            "languages": ["zh", "en"],
             "required_vram_gb": float(comfy.get("video_required_vram_gb", 12.0)),
             "dependencies": {
                 "models": video_models,

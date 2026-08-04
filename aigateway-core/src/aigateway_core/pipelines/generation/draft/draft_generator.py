@@ -1,7 +1,12 @@
 """Public Draft generator strategy with explicit storage configuration."""
+
 from __future__ import annotations
 
+import hashlib
+import hmac
+import math
 import os
+import time
 from typing import Any
 
 from aigateway_core.pipelines.generation._common.exceptions import DraftWorkflowError
@@ -12,6 +17,13 @@ _CONFIGURATION_ERROR = (
     "config_missing:generation_optimization.draft_workflow.store_dir"
 )
 _GPU_TOPOLOGY_ERROR = "gpu_scheduler_topology_unavailable"
+_VIDEO_ERROR_CODES = {
+    "video_keyframe_integrity_missing",
+    "video_keyframe_integrity_mismatch",
+    "video_duration_unsupported",
+    "video_fps_invalid",
+    "comfyui_video_workflow_invalid",
+}
 
 
 class DraftGeneratorStrategy(_impl.DraftGeneratorStrategy):
@@ -52,6 +64,171 @@ class DraftGeneratorStrategy(_impl.DraftGeneratorStrategy):
             raise DraftWorkflowError(self._configuration_error)
         return await super().check_local_dependencies(*args, **kwargs)
 
+    async def submit_draft(
+        self,
+        request,
+        config,
+        keyframe_count=None,
+        chat_session_id=None,
+        user_id=None,
+        group_id=None,
+    ):
+        """Persist the complete video plan before background generation runs."""
+        if request.media_type == "video" and request.keyframe_prompt:
+            request.prompt = request.keyframe_prompt
+        draft = await super().submit_draft(
+            request,
+            config,
+            keyframe_count,
+            chat_session_id,
+            user_id,
+            group_id,
+        )
+        if request.media_type == "video":
+            params = draft.generation_params
+            params.update(
+                {
+                    "source_prompt": request.source_prompt or request.prompt,
+                    "keyframe_prompt": request.keyframe_prompt or request.prompt,
+                    "motion_prompt": request.motion_prompt or request.prompt,
+                    "prompt_language": request.prompt_language,
+                    "keyframe_language": request.keyframe_language,
+                    "motion_language": request.motion_language,
+                    "language_fallback_reason": request.language_fallback_reason,
+                    "duration_seconds": request.duration_seconds,
+                    "fps": request.target_fps,
+                    "frame_count": request.frame_count,
+                    "source_draft_id": request.source_draft_id,
+                    # Never trust a client-provided digest as the frozen preview
+                    # identity. It is calculated from the persisted preview below.
+                    "requested_source_image_sha256": request.source_image_sha256,
+                    "source_image_sha256": None,
+                }
+            )
+            await self._store_draft(
+                draft,
+                max(1, int(draft.expires_at - time.time())),
+            )
+        return draft
+
+    @staticmethod
+    def _freeze_video_keyframe(draft: Any) -> None:
+        """Attach the exact preview digest before a video draft becomes visible."""
+        if (
+            draft.media_type != "video"
+            or draft.status != _impl.DRAFT_STATUS_PENDING
+            or not draft.previews
+        ):
+            return
+
+        params = draft.generation_params
+        params["source_image_sha256"] = hashlib.sha256(
+            draft.previews[0]
+        ).hexdigest()
+        params["source_kind"] = (
+            "source_draft"
+            if params.get("source_draft_id")
+            else "uploaded"
+            if params.get("has_reference_image")
+            else "generated_keyframe"
+        )
+
+    async def _store_draft(self, draft, ttl_seconds):
+        # Hashing happens before the same write that exposes status=pending, so
+        # confirmation can never observe an approved video preview without its
+        # frozen identity.
+        self._freeze_video_keyframe(draft)
+        await super()._store_draft(draft, ttl_seconds)
+
+    async def _generate_video_with_comfyui(self, draft):
+        """Generate Wan video from the frozen keyframe and motion-only prompt."""
+        if not self._comfyui_config.video_enabled:
+            raise DraftWorkflowError("comfyui_video_not_enabled")
+        if not draft.previews:
+            raise DraftWorkflowError("Video draft has no approved keyframe")
+
+        expected_hash = str(
+            draft.generation_params.get("source_image_sha256") or ""
+        )
+        actual_hash = hashlib.sha256(draft.previews[0]).hexdigest()
+        if not expected_hash:
+            raise DraftWorkflowError("video_keyframe_integrity_missing")
+        if not hmac.compare_digest(actual_hash, expected_hash):
+            raise DraftWorkflowError("video_keyframe_integrity_mismatch")
+
+        frame_count = self._video_frame_count(draft)
+        fps = self._video_fps(draft)
+        await self._ensure_storage_capacity()
+        input_name = await self._upload_image(
+            draft.previews[0], f"video-keyframe-{draft.draft_id}.png"
+        )
+        motion_prompt = str(
+            draft.generation_params.get("motion_prompt")
+            or draft.generation_params.get("prompt")
+            or ""
+        )
+        workflow = self._build_video_workflow(
+            input_name=input_name,
+            prompt=motion_prompt,
+            seed=int(draft.generation_params.get("seed", 0)),
+            draft_id=draft.draft_id,
+        )
+        self._apply_video_timing(
+            workflow,
+            frame_count=frame_count,
+            fps=fps,
+        )
+        async with self._comfyui_semaphore:
+            client_id = self._comfy_client_id(draft.draft_id, "video")
+            prompt_id = await self._submit_workflow(workflow, client_id=client_id)
+            await self._record_comfy_job(draft.draft_id, prompt_id, "refining")
+            result = await self._poll_result(
+                prompt_id,
+                timeout=self._comfyui_config.video_execution_timeout,
+                trace_id=str(draft.generation_params.get("trace_id") or ""),
+                draft_id=draft.draft_id,
+                progress_client_id=client_id,
+                progress_stage="refining",
+            )
+        return result
+
+    @staticmethod
+    def _video_frame_count(draft: Any) -> int:
+        value = draft.generation_params.get("frame_count")
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value <= 0
+            or value % 4 != 1
+        ):
+            raise DraftWorkflowError("video_duration_unsupported")
+        return value
+
+    @staticmethod
+    def _video_fps(draft: Any) -> float:
+        value = draft.generation_params.get("fps")
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or float(value) <= 0
+        ):
+            raise DraftWorkflowError("video_fps_invalid")
+        return float(value)
+
+    @staticmethod
+    def _apply_video_timing(
+        workflow: dict[str, Any],
+        *,
+        frame_count: int,
+        fps: float,
+    ) -> None:
+        try:
+            workflow["5"]["inputs"]["length"] = frame_count
+            workflow["11"]["inputs"]["fps"] = fps
+        except (KeyError, TypeError) as exc:
+            raise DraftWorkflowError("comfyui_video_workflow_invalid") from exc
+
     @staticmethod
     def _pool_has_worker(status: Any, capability: str) -> bool:
         """Return whether the scheduler has a valid worker/device capability pair."""
@@ -77,13 +254,6 @@ class DraftGeneratorStrategy(_impl.DraftGeneratorStrategy):
         return False
 
     def _scheduler_manages_comfyui(self, status: Any) -> bool:
-        """Return whether this ComfyUI endpoint belongs to the local GPU pool.
-
-        Explicit workers are authoritative. ``AIGATEWAY_SHARED_GPU`` preserves
-        fail-closed behavior during local quickstart startup even if generated
-        topology is accidentally missing. A remote/external ComfyUI endpoint has
-        neither signal and must not drain or lock local Gateway devices.
-        """
         configured = bool(
             getattr(self._comfyui_config, "scheduler_managed", False)
         )
@@ -105,13 +275,6 @@ class DraftGeneratorStrategy(_impl.DraftGeneratorStrategy):
         preferred_worker_id: str | None = None,
         memory_requirement_gb: float = 0.0,
     ) -> tuple[Any, Any | None]:
-        """Use the shared pool only for scheduler-managed local workers.
-
-        Local ComfyUI workers share physical devices with Gateway components and
-        therefore must be allocated through ``generation_lease()``. External or
-        remote ComfyUI endpoints do not own local devices and execute through the
-        fixed URL without draining, fencing or locking any local Gateway GPU.
-        """
         coordinator = self._gpu_coordinator
         if coordinator is not None and coordinator.config.enabled:
             status = coordinator.status()
@@ -133,14 +296,6 @@ class DraftGeneratorStrategy(_impl.DraftGeneratorStrategy):
         draft: Any,
         reason: str,
     ) -> None:
-        """Rollback a failed confirm without retaining stale ComfyUI state.
-
-        A confirmation failure returns the accepted preview to ``pending`` so it
-        can be retried. The previous prompt binding and node-level progress must
-        be cleared at the same time; otherwise status reconciliation can inspect
-        the disappeared prompt during the next confirmation's preparation phase
-        and incorrectly roll the new attempt back before it submits to ComfyUI.
-        """
         draft.comfy_prompt_id = None
         generation_params = getattr(draft, "generation_params", None)
         if isinstance(generation_params, dict):
@@ -153,8 +308,12 @@ class DraftGeneratorStrategy(_impl.DraftGeneratorStrategy):
         *,
         fallback: str,
     ) -> str:
-        if _GPU_TOPOLOGY_ERROR in str(exc).lower():
+        error_text = str(exc).lower()
+        if _GPU_TOPOLOGY_ERROR in error_text:
             return _GPU_TOPOLOGY_ERROR
+        for code in _VIDEO_ERROR_CODES:
+            if code in error_text:
+                return code
         return super()._public_comfyui_error_code(exc, fallback=fallback)
 
 

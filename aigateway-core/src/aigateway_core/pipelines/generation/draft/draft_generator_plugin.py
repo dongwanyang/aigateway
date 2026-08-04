@@ -1,18 +1,10 @@
-"""
-DraftGeneratorPlugin — 渐进式生成工作流插件封装
-================================================
-
-将 DraftGeneratorStrategy 封装为 PipelineEngine 插件，注册到 PluginRegistry。
-在 execute() 中通过 emit_plugin_event 发 TraceEvent,判断是否为生成请求并启用 Draft 工作流，
-启用时生成低分辨率草图供用户预览确认。
-
-需求: 3.6, 1.8
-"""
+"""DraftGeneratorPlugin — progressive generation workflow adapter."""
 
 from __future__ import annotations
 
-import logging
+import math
 import time
+from typing import Any
 
 from aigateway_core.dispatch.context import PipelineContext
 from aigateway_core.pipelines.generation._common.config import (
@@ -28,32 +20,14 @@ from aigateway_core.pipelines.generation.draft.draft_generator import (
 )
 from aigateway_core.prefix.media.types import MediaContent, MediaType
 
-logger = logging.getLogger(__name__)
-
-# 命名空间常量
 NS_GENERATION_OPTIMIZATION = "generation_optimization"
+_SUPPORTED_VIDEO_DURATIONS = (3.0, 5.0, 8.0)
+_MAX_VIDEO_FPS = 60
+_MAX_VIDEO_FRAMES = 481
 
 
 class DraftGeneratorPlugin:
-    """渐进式生成工作流插件 — 将 DraftGeneratorStrategy 封装为 PipelineEngine 插件.
-
-    通过 PluginRegistry 注册后由 PipelineEngine 自动调度执行。
-    依赖 token_compressor 插件先行执行。
-
-    行为:
-    - 禁用时: 透传请求，不做任何修改
-    - 启用时:
-      1. 检查请求是否为生成请求（需要 Draft 工作流）
-      2. 从上下文构建 GenerationRequest
-      3. 调用 strategy.generate_draft() 生成草图
-      4. 将 draft_id 和 previews 写入 ctx.extra["generation_optimization"]["draft_generator"]
-      5. 记录 span 属性
-
-    Attributes:
-        name: 插件名称 "draft_generator"
-        enabled: 是否启用
-        depends_on: 依赖的插件列表 ["token_compressor"]
-    """
+    """Build GenerationRequest objects and submit progressive drafts."""
 
     name: str = "draft_generator"
     enabled: bool = True
@@ -64,53 +38,19 @@ class DraftGeneratorPlugin:
         strategy: DraftGeneratorStrategy,
         config: GenerationOptimizationConfig,
     ) -> None:
-        """初始化 DraftGeneratorPlugin.
-
-        Args:
-            strategy: DraftGeneratorStrategy 实例，负责 Draft 工作流核心逻辑
-            config: 生成优化层主配置实例
-        """
         self._strategy = strategy
         self._config = config
 
     async def execute(self, ctx: PipelineContext) -> PipelineContext:
-        """执行 Draft 工作流逻辑.
-
-        流程:
-        1. 检查 Draft 工作流是否启用，禁用时直接透传
-        2. 创建子 span 用于追踪 (需求 1.8)
-        3. 检查请求是否为生成请求（需要 Draft 工作流）
-        4. 如果 Draft 工作流启用且适用:
-           - 从上下文构建 GenerationRequest
-           - 调用 strategy.generate_draft()
-           - 将 draft_id 和 previews 写入上下文
-        5. 记录 span 属性
-
-        Args:
-            ctx: 管线上下文
-
-        Returns:
-            修改后的管线上下文
-        """
-        # 检查是否禁用 — 禁用时透传不做修改
         if not self._config.draft_workflow.enabled:
-            logger.debug(
-                "generation_optimization.draft_generator.disabled",
-                extra={
-                    "request_id": ctx.request_id,
-                    "trace_id": ctx.trace_id,
-                },
-            )
             return ctx
 
-        generation_options = ctx.request.get("generation_options", {})
-        if (
-            isinstance(generation_options, dict)
-            and generation_options.get("backend") == "cloud"
-        ):
-            gen_opt = ctx.extra.setdefault(NS_GENERATION_OPTIMIZATION, {})
-            faithful_4k = generation_options.get("quality") == "faithful_4k"
-            gen_opt["draft_generator"] = {
+        options = self._generation_options(ctx)
+        if options.get("backend") == "cloud":
+            faithful_4k = options.get("quality") == "faithful_4k"
+            ctx.extra.setdefault(NS_GENERATION_OPTIMIZATION, {})[
+                "draft_generator"
+            ] = {
                 "applicable": False,
                 "reason": (
                     "invalid_generation_options"
@@ -126,55 +66,37 @@ class DraftGeneratorPlugin:
             }
             return ctx
 
-        start_time = time.monotonic()
-
+        started_at = time.monotonic()
         try:
-            # 判断是否为生成请求（需要 Draft 工作流）
             if not self._is_generation_request(ctx):
-                duration_ms = (time.monotonic() - start_time) * 1000.0
-                gen_opt = ctx.extra.setdefault(NS_GENERATION_OPTIMIZATION, {})
-                gen_opt["draft_generator"] = {
+                ctx.extra.setdefault(NS_GENERATION_OPTIMIZATION, {})[
+                    "draft_generator"
+                ] = {
                     "applicable": False,
                     "reason": "not_a_generation_request",
-                    "duration_ms": duration_ms,
+                    "duration_ms": (time.monotonic() - started_at) * 1000.0,
                 }
-                logger.debug(
-                    "generation_optimization.draft_generator.skipped",
-                    extra={
-                        "request_id": ctx.request_id,
-                        "trace_id": ctx.trace_id,
-                        "reason": "not_a_generation_request",
-                    },
-                )
-                # 非生成请求视为 skip — PipelineEngine 自动埋点，无需手动 emit
                 return ctx
 
-            # 从上下文构建 GenerationRequest
-            generation_request = self._build_generation_request(ctx)
-            backend = (
-                generation_options.get("backend", "auto")
-                if isinstance(generation_options, dict)
-                else "auto"
-            )
+            request = self._build_generation_request(ctx)
+            self._assert_video_plan_ready(ctx, request)
+            backend = str(options.get("backend") or "auto")
             try:
-                await self._strategy.check_local_dependencies(generation_request)
+                await self._strategy.check_local_dependencies(request)
             except DraftWorkflowError as exc:
-                gen_opt = ctx.extra.setdefault(NS_GENERATION_OPTIMIZATION, {})
-                gen_opt["draft_generator"] = {
+                ctx.extra.setdefault(NS_GENERATION_OPTIMIZATION, {})[
+                    "draft_generator"
+                ] = {
                     "applicable": False,
                     "reason": (
                         "local_backend_unavailable"
-                        if backend == "local"
-                        or generation_request.quality == "faithful_4k"
+                        if backend == "local" or request.quality == "faithful_4k"
                         else "auto_fallback_to_cloud"
                     ),
                     "local_error": str(exc),
-                    "duration_ms": (time.monotonic() - start_time) * 1000.0,
+                    "duration_ms": (time.monotonic() - started_at) * 1000.0,
                 }
                 return ctx
-
-            # 提取显式指定的关键帧数量（如果有）
-            keyframe_count = self._extract_keyframe_count(ctx)
 
             owner_user_id = (
                 ctx.extra["draft_owner_user_id"]
@@ -186,27 +108,22 @@ class DraftGeneratorPlugin:
                 if "draft_owner_group_id" in ctx.extra
                 else ctx.extra.get("group_id")
             )
-
-            # 调用 strategy.generate_draft()
             draft_result: DraftResult = await self._strategy.generate_draft(
-                request=generation_request,
+                request=request,
                 config=self._config.draft_workflow,
-                keyframe_count=keyframe_count,
+                keyframe_count=self._extract_keyframe_count(ctx),
                 chat_session_id=ctx.extra.get("chat_session_id"),
                 user_id=owner_user_id,
                 group_id=owner_group_id,
             )
-
-            # 计算耗时
-            duration_ms = (time.monotonic() - start_time) * 1000.0
-
-            # 将 draft_id 和 previews 写入 ctx.extra
-            gen_opt = ctx.extra.setdefault(NS_GENERATION_OPTIMIZATION, {})
+            duration_ms = (time.monotonic() - started_at) * 1000.0
             actual_checkpoint = draft_result.generation_params.get(
                 "checkpoint",
                 self._strategy.checkpoint_name,
             )
-            gen_opt["draft_generator"] = {
+            ctx.extra.setdefault(NS_GENERATION_OPTIMIZATION, {})[
+                "draft_generator"
+            ] = {
                 "applicable": True,
                 "draft_id": draft_result.draft_id,
                 "preview_count": len(draft_result.previews),
@@ -218,174 +135,311 @@ class DraftGeneratorPlugin:
                 "draft_model": f"comfyui:{actual_checkpoint}",
                 "duration_ms": duration_ms,
             }
-
-            logger.info(
-                "generation_optimization.draft_generator.completed",
-                extra={
-                    "request_id": ctx.request_id,
-                    "trace_id": ctx.trace_id,
-                    "draft_id": draft_result.draft_id,
-                    "preview_count": len(draft_result.previews),
-                    "attempt_number": draft_result.attempt_number,
-                    "duration_ms": round(duration_ms, 2),
-                },
-            )
-
-            # 记录插件 trace（业务 metadata）
             ctx.add_plugin_trace(
-                "draft_generator", duration_ms, "success",
+                "draft_generator",
+                duration_ms,
+                "success",
                 payload={
                     "applicable": True,
                     "preview_count": len(draft_result.previews),
                     "status": draft_result.status,
+                    "has_video_plan": bool(request.motion_prompt),
+                    "frame_count": request.frame_count,
                 },
             )
-
-            # 草稿已生成，短路后续插件（gen_model_router、cost_tracker 等跳过）
-            # 高清放大由用户确认后通过 /admin/draft/{id}/confirm 独立触发
             ctx.should_stop = True
-
         except Exception as exc:
-            duration_ms = (time.monotonic() - start_time) * 1000.0
-
-            logger.warning(
-                "generation_optimization.draft_generator.error",
-                extra={
-                    "reason": str(exc),
-                    "fallback_action": "passthrough",
-                    "request_id": ctx.request_id,
-                    "trace_id": ctx.trace_id,
-                    "duration_ms": round(duration_ms, 2),
-                },
-            )
-            # 故障降级: 写入错误信息，不阻断管线
-            gen_opt = ctx.extra.setdefault(NS_GENERATION_OPTIMIZATION, {})
-            gen_opt["draft_generator"] = {
+            duration_ms = (time.monotonic() - started_at) * 1000.0
+            ctx.extra.setdefault(NS_GENERATION_OPTIMIZATION, {})[
+                "draft_generator"
+            ] = {
                 "applicable": True,
                 "draft_id": None,
                 "preview_count": 0,
                 "duration_ms": duration_ms,
                 "error": str(exc),
             }
-
         return ctx
 
+    def _assert_video_plan_ready(
+        self,
+        ctx: PipelineContext,
+        request: GenerationRequest,
+    ) -> None:
+        if request.media_type != "video":
+            return
+        generation = ctx.extra.get(NS_GENERATION_OPTIMIZATION, {})
+        director = (
+            generation.get("ai_director", {})
+            if isinstance(generation, dict)
+            else {}
+        )
+        if not isinstance(director, dict):
+            return
+        if director.get("error") and not request.motion_prompt:
+            raise DraftWorkflowError("video_prompt_plan_unavailable")
+        plan = director.get("video_plan")
+        if not isinstance(plan, dict):
+            return
+        fallback_reason = self._optional_text(plan.get("fallback_reason"))
+        prompt_language = self._optional_text(plan.get("prompt_language"))
+        keyframe_language = self._optional_text(plan.get("keyframe_language"))
+        motion_language = self._optional_text(plan.get("motion_language"))
+        requires_conversion = bool(
+            prompt_language
+            and (
+                (keyframe_language and keyframe_language != prompt_language)
+                or (motion_language and motion_language != prompt_language)
+            )
+        )
+        if fallback_reason and requires_conversion:
+            raise DraftWorkflowError("video_prompt_plan_unavailable")
+
     def _is_generation_request(self, ctx: PipelineContext) -> bool:
-        """判断当前请求是否为需要 Draft 工作流的生成请求.
-
-        判断条件（满足任一即视为生成请求）:
-        1. 请求中显式标记了 generation_mode 或 draft_workflow
-        2. Intent Evaluator 已在上下文中标记为 generative 类型
-        3. 请求模型为 generative 类型
-
-        Args:
-            ctx: 管线上下文
-
-        Returns:
-            True 如果是生成请求且适用 Draft 工作流
-        """
-        # 检查请求中是否显式启用 draft workflow
         if ctx.request.get("draft_workflow") or ctx.request.get("enable_draft"):
             return True
-
-        # 检查请求中的 generation_mode 标志
         if ctx.request.get("generation_mode"):
             return True
-
-        # Intent classifier 已判定为生成意图（通过 pipeline_kind）
         if ctx.pipeline_kind in ("generation:image", "generation:video"):
             return True
-
-        # 检查模型名中是否包含生成类关键词
         model = ctx.request.get("model", "")
         if isinstance(model, str):
-            gen_keywords = ["image", "video", "generative", "dall-e", "stable-diffusion"]
-            model_lower = model.lower()
-            if any(kw in model_lower for kw in gen_keywords):
-                return True
-
+            lowered = model.lower()
+            return any(
+                keyword in lowered
+                for keyword in (
+                    "image",
+                    "video",
+                    "generative",
+                    "dall-e",
+                    "stable-diffusion",
+                )
+            )
         return False
 
     def _build_generation_request(self, ctx: PipelineContext) -> GenerationRequest:
-        """从 PipelineContext 构建 GenerationRequest.
-
-        提取上下文中的 prompt、参考图、目标分辨率等信息。
-
-        Args:
-            ctx: 管线上下文
-
-        Returns:
-            GenerationRequest 实例
-        """
-        # 提取 prompt
-        prompt = self._extract_prompt(ctx)
-
-        # 从请求中提取目标分辨率
-        generation_options = ctx.request.get("generation_options", {})
-        if (
-            isinstance(generation_options, dict)
-            and generation_options.get("width")
-            and generation_options.get("height")
-        ):
-            target_resolution = (
-                int(generation_options["width"]),
-                int(generation_options["height"]),
-            )
-        else:
-            target_resolution = ctx.request.get("target_resolution", (1920, 1080))
-        if isinstance(target_resolution, list):
-            target_resolution = tuple(target_resolution)
-
-        # 提取 target_fps
-        target_fps = ctx.request.get("target_fps", 60)
-
-        # 提取 api_key_id
-        api_key_id = ctx.request.get("api_key_id", "")
-        if not api_key_id and ctx.user_id:
-            api_key_id = ctx.user_id
-
-        # media_type 由意图分类的 pipeline_kind 决定（generation:video → video）
-        # 否则 GenerationRequest 默认 "image"，confirm_draft 永远走图片放大分支。
+        options = self._generation_options(ctx)
+        video_plan = self._video_plan(ctx)
         media_type = "video" if ctx.pipeline_kind == "generation:video" else "image"
-        generation_options = ctx.request.get("generation_options", {})
-        quality = (
-            generation_options.get("quality", "standard")
-            if isinstance(generation_options, dict)
-            else "standard"
-        )
-        preset_id = (
-            generation_options.get("preset_id")
-            if isinstance(generation_options, dict)
-            else None
-        )
-        required_vram_gb = (
-            generation_options.get("required_vram_gb")
-            if isinstance(generation_options, dict)
-            else None
-        )
+
+        target_resolution = self._target_resolution(ctx, options)
+        quality = str(options.get("quality") or "standard")
+        preset_id = self._optional_text(options.get("preset_id"))
+        required_vram = options.get("required_vram_gb")
+        source_prompt = self._extract_original_prompt(ctx)
+
+        if media_type == "video" and video_plan:
+            keyframe_prompt = self._required_plan_text(
+                video_plan, "keyframe_prompt"
+            )
+            motion_prompt = self._required_plan_text(
+                video_plan, "motion_prompt"
+            )
+            duration_seconds, target_fps, normalized_count = (
+                self._normalize_video_timing(
+                    video_plan.get("duration_seconds"),
+                    video_plan.get("fps"),
+                )
+            )
+            supplied_count = self._positive_integer(
+                video_plan.get("frame_count"), "frame_count"
+            )
+            raw_count = round(duration_seconds * target_fps)
+            if supplied_count not in {raw_count, normalized_count}:
+                raise ValueError("video_plan_frame_count_mismatch")
+            frame_count = normalized_count
+            # Keep the shared plan and persisted request snapshot consistent.
+            video_plan["frame_count"] = frame_count
+            prompt_language = self._required_plan_text(
+                video_plan, "prompt_language"
+            )
+            keyframe_language = self._required_plan_text(
+                video_plan, "keyframe_language"
+            )
+            motion_language = self._required_plan_text(
+                video_plan, "motion_language"
+            )
+            language_fallback_reason = self._optional_text(
+                video_plan.get("language_fallback_reason")
+            )
+            source_draft_id = self._optional_text(
+                video_plan.get("source_draft_id")
+            )
+            source_image_sha256 = self._optional_text(
+                video_plan.get("source_image_sha256")
+            )
+            prompt = keyframe_prompt
+        else:
+            prompt = self._extract_prompt(ctx)
+            keyframe_prompt = None
+            motion_prompt = None
+            if media_type == "video":
+                duration_seconds, target_fps, frame_count = (
+                    self._normalize_video_timing(
+                        options.get(
+                            "duration_seconds",
+                            ctx.request.get("duration_seconds", 5.0),
+                        ),
+                        options.get("fps", ctx.request.get("target_fps", 8)),
+                    )
+                )
+            else:
+                duration_seconds = self._finite_positive_number(
+                    options.get(
+                        "duration_seconds",
+                        ctx.request.get("duration_seconds", 5.0),
+                    ),
+                    "duration_seconds",
+                )
+                target_fps = self._positive_integer(
+                    options.get("fps", ctx.request.get("target_fps", 8)),
+                    "fps",
+                )
+                frame_count = None
+            prompt_language = None
+            keyframe_language = None
+            motion_language = None
+            language_fallback_reason = None
+            source_draft_id = self._optional_text(
+                options.get("source_draft_id")
+                or ctx.request.get("source_draft_id")
+            )
+            source_image_sha256 = self._optional_text(
+                options.get("source_image_sha256")
+                or ctx.request.get("source_image_sha256")
+            )
 
         return GenerationRequest(
             prompt=prompt,
-            source_prompt=self._extract_original_prompt(ctx),
+            source_prompt=source_prompt,
             reference_images=self._extract_reference_images(ctx),
             target_resolution=target_resolution,
             target_fps=target_fps,
             media_type=media_type,
+            duration_seconds=duration_seconds,
+            frame_count=frame_count,
+            source_draft_id=source_draft_id,
+            source_image_sha256=source_image_sha256,
+            keyframe_prompt=keyframe_prompt,
+            motion_prompt=motion_prompt,
+            prompt_language=prompt_language,
+            keyframe_language=keyframe_language,
+            motion_language=motion_language,
+            language_fallback_reason=language_fallback_reason,
             quality=quality,
             preset_id=preset_id,
             required_vram_gb=(
-                float(required_vram_gb) if required_vram_gb is not None else None
+                float(required_vram) if required_vram is not None else None
             ),
-            api_key_id=api_key_id or "",
+            api_key_id=self._api_key_id(ctx),
             request_id=ctx.request_id,
             trace_id=ctx.trace_id,
         )
 
+    @classmethod
+    def _normalize_video_timing(
+        cls,
+        duration_value: Any,
+        fps_value: Any,
+    ) -> tuple[float, int, int]:
+        duration = cls._finite_positive_number(
+            duration_value, "duration_seconds"
+        )
+        if not any(
+            math.isclose(duration, allowed)
+            for allowed in _SUPPORTED_VIDEO_DURATIONS
+        ):
+            raise ValueError("video_duration_unsupported")
+        fps = cls._positive_integer(fps_value, "fps")
+        if fps > _MAX_VIDEO_FPS:
+            raise ValueError("fps_out_of_range")
+        requested_count = round(duration * fps)
+        normalized_count = ((requested_count - 1 + 3) // 4) * 4 + 1
+        if normalized_count <= 0 or normalized_count > _MAX_VIDEO_FRAMES:
+            raise ValueError("frame_count_out_of_range")
+        return duration, fps, normalized_count
+
+    @staticmethod
+    def _generation_options(ctx: PipelineContext) -> dict[str, Any]:
+        options = ctx.request.get("generation_options", {})
+        return options if isinstance(options, dict) else {}
+
+    @staticmethod
+    def _video_plan(ctx: PipelineContext) -> dict[str, Any] | None:
+        generation = ctx.extra.get(NS_GENERATION_OPTIMIZATION, {})
+        if not isinstance(generation, dict):
+            return None
+        director = generation.get("ai_director", {})
+        if not isinstance(director, dict):
+            return None
+        plan = director.get("video_plan")
+        return plan if isinstance(plan, dict) else None
+
+    @staticmethod
+    def _target_resolution(
+        ctx: PipelineContext,
+        options: dict[str, Any],
+    ) -> tuple[int, int]:
+        if options.get("width") and options.get("height"):
+            result: Any = (int(options["width"]), int(options["height"]))
+        else:
+            result = ctx.request.get("target_resolution", (1920, 1080))
+        if isinstance(result, list):
+            result = tuple(result)
+        if (
+            not isinstance(result, tuple)
+            or len(result) != 2
+            or any(
+                isinstance(value, bool) or not isinstance(value, int) or value <= 0
+                for value in result
+            )
+        ):
+            raise ValueError("invalid_target_resolution")
+        return result
+
+    @staticmethod
+    def _api_key_id(ctx: PipelineContext) -> str:
+        value = ctx.request.get("api_key_id", "")
+        if not value and ctx.user_id:
+            value = ctx.user_id
+        return str(value or "")
+
+    @staticmethod
+    def _required_plan_text(plan: dict[str, Any], key: str) -> str:
+        value = plan.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"invalid_video_plan:{key}")
+        return value.strip()
+
+    @staticmethod
+    def _finite_positive_number(value: Any, name: str) -> float:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or float(value) <= 0
+        ):
+            raise ValueError(f"{name} must be a finite positive number")
+        return float(value)
+
+    @staticmethod
+    def _positive_integer(value: Any, name: str) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"{name} must be a positive integer")
+        return value
+
+    @staticmethod
+    def _optional_text(value: Any) -> str | None:
+        return value.strip() if isinstance(value, str) and value.strip() else None
+
     @staticmethod
     def _extract_reference_images(ctx: PipelineContext) -> list[MediaContent]:
-        """Preserve the latest user-supplied image for img2img / img2video."""
         media_opt = ctx.extra.get("media_optimization", {})
-        results = media_opt.get("per_media_results", [])
+        results = (
+            media_opt.get("per_media_results", [])
+            if isinstance(media_opt, dict)
+            else []
+        )
         references: list[MediaContent] = []
         for result in results:
             if isinstance(result, MediaContent):
@@ -408,23 +462,27 @@ class DraftGeneratorPlugin:
         if references:
             return references
 
-        for url in ctx.request.get("reference_image_urls", []):
-            if not isinstance(url, str) or not url:
-                continue
-            mime_type = None
-            if url.startswith("data:image/"):
-                mime_type = url[5:].split(";", 1)[0]
-            references.append(
-                MediaContent(
-                    media_type=MediaType.IMAGE,
-                    source_url=url,
-                    mime_type=mime_type,
-                )
-            )
+        urls = ctx.request.get("reference_image_urls", [])
+        if isinstance(urls, list):
+            for url in urls:
+                if isinstance(url, str) and url:
+                    references.append(
+                        MediaContent(
+                            media_type=MediaType.IMAGE,
+                            source_url=url,
+                            mime_type=(
+                                url[5:].split(";", 1)[0]
+                                if url.startswith("data:image/")
+                                else None
+                            ),
+                        )
+                    )
         if references:
             return references
 
         messages = ctx.request.get("messages", [])
+        if not isinstance(messages, list):
+            return references
         for message in reversed(messages):
             if not isinstance(message, dict) or message.get("role") != "user":
                 continue
@@ -440,14 +498,15 @@ class DraftGeneratorPlugin:
                         else image_url
                     )
                     if isinstance(url, str) and url:
-                        mime_type = None
-                        if url.startswith("data:image/"):
-                            mime_type = url[5:].split(";", 1)[0]
                         references.append(
                             MediaContent(
                                 media_type=MediaType.IMAGE,
                                 source_url=url,
-                                mime_type=mime_type,
+                                mime_type=(
+                                    url[5:].split(";", 1)[0]
+                                    if url.startswith("data:image/")
+                                    else None
+                                ),
                             )
                         )
             break
@@ -456,69 +515,37 @@ class DraftGeneratorPlugin:
     @staticmethod
     def _extract_original_prompt(ctx: PipelineContext) -> str:
         messages = ctx.request.get("messages", [])
-        for message in reversed(messages):
-            if message.get("role") != "user":
-                continue
-            content = message.get("content", "")
-            if isinstance(content, str):
-                return content
-            if isinstance(content, list):
-                return " ".join(
-                    str(part.get("text", ""))
-                    for part in content
-                    if isinstance(part, dict) and part.get("type") == "text"
-                )
-        return ""
-
-    def _extract_prompt(self, ctx: PipelineContext) -> str:
-        """从请求中提取用户 prompt.
-
-        优先使用 AI Director 优化后的 prompt（如果有）。
-
-        Args:
-            ctx: 管线上下文
-
-        Returns:
-            用户 prompt 字符串
-        """
-        # 优先使用 AI Director 优化后的 prompt
-        gen_opt = ctx.extra.get(NS_GENERATION_OPTIMIZATION, {})
-        ai_director_result = gen_opt.get("ai_director", {})
-        optimized_prompt = ai_director_result.get("optimized_prompt")
-        if optimized_prompt:
-            return optimized_prompt
-
-        # 从请求的 messages 中提取
-        messages = ctx.request.get("messages", [])
-        for msg in reversed(messages):
-            if msg.get("role") == "user":
-                content = msg.get("content", "")
+        if isinstance(messages, list):
+            for message in reversed(messages):
+                if not isinstance(message, dict) or message.get("role") != "user":
+                    continue
+                content = message.get("content", "")
                 if isinstance(content, str):
                     return content
                 if isinstance(content, list):
-                    text_parts = []
-                    for part in content:
-                        if isinstance(part, dict) and part.get("type") == "text":
-                            text_parts.append(part.get("text", ""))
-                    return " ".join(text_parts)
-                return ""
+                    return " ".join(
+                        str(part.get("text", ""))
+                        for part in content
+                        if isinstance(part, dict) and part.get("type") == "text"
+                    )
+        return str(ctx.request.get("prompt") or "")
 
-        # 直接从请求的 prompt 字段获取
-        return ctx.request.get("prompt", "")
+    def _extract_prompt(self, ctx: PipelineContext) -> str:
+        generation = ctx.extra.get(NS_GENERATION_OPTIMIZATION, {})
+        if isinstance(generation, dict):
+            director = generation.get("ai_director", {})
+            if isinstance(director, dict):
+                value = director.get("optimized_prompt")
+                if isinstance(value, str) and value:
+                    return value
+        return self._extract_original_prompt(ctx)
 
-    def _extract_keyframe_count(self, ctx: PipelineContext) -> int | None:
-        """从请求中提取显式指定的关键帧数量.
-
-        Args:
-            ctx: 管线上下文
-
-        Returns:
-            用户指定的关键帧数量，未指定时返回 None
-        """
-        keyframe_count = ctx.request.get("keyframe_count")
-        if keyframe_count is not None:
-            try:
-                return int(keyframe_count)
-            except (TypeError, ValueError):
-                return None
-        return None
+    @staticmethod
+    def _extract_keyframe_count(ctx: PipelineContext) -> int | None:
+        value = ctx.request.get("keyframe_count")
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
