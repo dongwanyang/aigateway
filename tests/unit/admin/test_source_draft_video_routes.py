@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -46,16 +48,29 @@ def _request_body() -> dict[str, object]:
 
 
 def test_source_video_route_is_installed_in_fresh_process():
+    api_src = Path(routes_module.__file__).resolve().parents[1]
+    repo_root = api_src.parents[1]
+    core_src = repo_root / "aigateway-core" / "src"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(
+        [
+            str(api_src),
+            str(core_src),
+            env.get("PYTHONPATH", ""),
+        ]
+    )
     code = """
+import aigateway_api
 from aigateway_api import admin_routes
 paths = {getattr(route, 'path', '') for route in admin_routes.router.routes}
-assert '/draft/{source_draft_id}/video' in paths, sorted(paths)
+assert '/draft/{source_draft_id}/video' in paths, (aigateway_api.__file__, sorted(paths))
 """
     result = subprocess.run(
         [sys.executable, "-c", code],
         check=False,
         capture_output=True,
         text=True,
+        env=env,
     )
     assert result.returncode == 0, result.stderr or result.stdout
 
