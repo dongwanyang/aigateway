@@ -1,4 +1,4 @@
-import { useCallback } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 import { createVideoDraftFromSource } from '@/api/sourceDraftVideo'
 import type { ChatDraftState, ChatPageMessage, ChatSession } from '@/types'
 import { persistSessions, titleFromMessages } from '@/services/chatStorage'
@@ -21,6 +21,11 @@ export interface CreateSourceDraftVideoInput {
   chatSessionId: string
 }
 
+export interface SourceDraftVideoActions {
+  create: (input: CreateSourceDraftVideoInput) => Promise<void>
+  cancel: () => void
+}
+
 function patchSession(
   sessions: ChatSession[],
   sessionId: string,
@@ -38,16 +43,39 @@ function patchSession(
   })
 }
 
-export function useSourceDraftVideo() {
+export function useSourceDraftVideo(): SourceDraftVideoActions {
   const setSessions = useChatStore(state => state.setSessions)
   const setStreaming = useChatStore(state => state.setStreaming)
   const setError = useChatStore(state => state.setError)
   const setPendingAssistantId = useChatStore(state => state.setPendingAssistantId)
+  const controllerRef = useRef<AbortController | null>(null)
 
-  return useCallback(async (input: CreateSourceDraftVideoInput): Promise<void> => {
+  const cancel = useCallback(() => {
+    const controller = controllerRef.current
+    if (!controller) return
+    controllerRef.current = null
+    controller.abort()
+    setPendingAssistantId(null)
+    setStreaming(false)
+  }, [setPendingAssistantId, setStreaming])
+
+  useEffect(() => () => {
+    controllerRef.current?.abort()
+    controllerRef.current = null
+  }, [])
+
+  const create = useCallback(async (
+    input: CreateSourceDraftVideoInput,
+  ): Promise<void> => {
     const motionPrompt = input.motionPrompt.trim()
-    if (!motionPrompt || useChatStore.getState().streaming) return
+    if (
+      !motionPrompt
+      || controllerRef.current
+      || useChatStore.getState().streaming
+    ) return
 
+    const controller = new AbortController()
+    controllerRef.current = controller
     const userId = nextMessageId()
     const assistantId = nextMessageId()
     const now = Date.now()
@@ -92,12 +120,18 @@ export function useSourceDraftVideo() {
     }
 
     try {
-      const created = await createVideoDraftFromSource(input.sourceDraftId, {
-        motionPrompt,
-        durationSeconds: input.durationSeconds,
-        fps: input.fps,
-        chatSessionId: input.chatSessionId,
-      })
+      const created = await createVideoDraftFromSource(
+        input.sourceDraftId,
+        {
+          motionPrompt,
+          durationSeconds: input.durationSeconds,
+          fps: input.fps,
+          chatSessionId: input.chatSessionId,
+        },
+        controller.signal,
+      )
+      if (controller.signal.aborted) throw new Error('source_draft_video_cancelled')
+
       const draft: SourceAwareDraft = {
         draftId: created.draft_id,
         previewUrl: created.preview_url,
@@ -114,26 +148,32 @@ export function useSourceDraftVideo() {
         awaitingDraft: true,
         awaitingDraftSince: Date.now(),
       }))
-      setPendingAssistantId(null)
+      if (controllerRef.current === controller) setPendingAssistantId(null)
 
-      const result = await pollDraftUntilSettled(created.draft_id, progress => {
-        patchAssistant(message => {
-          if (!message.draft || message.draft.draftId !== created.draft_id) return message
-          const nextDraft = message.draft as SourceAwareDraft
-          return {
-            ...message,
-            draft: {
-              ...nextDraft,
-              status: progress.status === 'pending' ? 'pending' : 'generating',
-              stage: progress.stage ?? nextDraft.stage,
-              progress: typeof progress.progress === 'number'
-                ? Math.min(1, Math.max(0, progress.progress))
-                : nextDraft.progress,
-              progressSource: progress.progressSource ?? nextDraft.progressSource,
-            },
-          }
-        })
-      })
+      const result = await pollDraftUntilSettled(
+        created.draft_id,
+        progress => {
+          patchAssistant(message => {
+            if (!message.draft || message.draft.draftId !== created.draft_id) {
+              return message
+            }
+            const nextDraft = message.draft as SourceAwareDraft
+            return {
+              ...message,
+              draft: {
+                ...nextDraft,
+                status: progress.status === 'pending' ? 'pending' : 'generating',
+                stage: progress.stage ?? nextDraft.stage,
+                progress: typeof progress.progress === 'number'
+                  ? Math.min(1, Math.max(0, progress.progress))
+                  : nextDraft.progress,
+                progressSource: progress.progressSource ?? nextDraft.progressSource,
+              },
+            }
+          })
+        },
+        controller.signal,
+      )
 
       if (result.kind === 'ready') {
         patchAssistant(message => {
@@ -152,6 +192,16 @@ export function useSourceDraftVideo() {
             awaitingDraft: false,
           }
         })
+      } else if (result.kind === 'cancelled') {
+        patchAssistant(message => ({
+          ...message,
+          draft: message.draft ? {
+            ...(message.draft as SourceAwareDraft),
+            status: 'cancelled',
+            errorMessage: result.message,
+          } : message.draft,
+          awaitingDraft: false,
+        }))
       } else if (result.kind !== 'duplicate') {
         patchAssistant(message => ({
           ...message,
@@ -164,18 +214,40 @@ export function useSourceDraftVideo() {
         }))
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : '创建视频草稿失败'
-      setError(message)
-      patchAssistant(current => ({
-        ...current,
-        content: message,
-        error: true,
-        awaitingDraft: false,
-      }))
+      if (controller.signal.aborted) {
+        patchAssistant(current => current.draft ? {
+          ...current,
+          draft: {
+            ...(current.draft as SourceAwareDraft),
+            status: 'cancelled',
+            errorMessage: '已停止',
+          },
+          awaitingDraft: false,
+        } : {
+          ...current,
+          content: '已停止',
+          incomplete: true,
+          awaitingDraft: false,
+        })
+      } else {
+        const message = error instanceof Error ? error.message : '创建视频草稿失败'
+        setError(message)
+        patchAssistant(current => ({
+          ...current,
+          content: message,
+          error: true,
+          awaitingDraft: false,
+        }))
+      }
     } finally {
-      setPendingAssistantId(null)
-      setStreaming(false)
+      if (controllerRef.current === controller) {
+        controllerRef.current = null
+        setPendingAssistantId(null)
+        setStreaming(false)
+      }
       try { persistSessions(useChatStore.getState().sessions) } catch { /* ignore */ }
     }
   }, [setError, setPendingAssistantId, setSessions, setStreaming])
+
+  return { create, cancel }
 }
