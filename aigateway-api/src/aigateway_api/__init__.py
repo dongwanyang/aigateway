@@ -136,11 +136,23 @@ def _install_gpu_routes() -> None:
 
 
 def _install_source_draft_video_routes() -> None:
-    """Install the authenticated existing-image-to-video endpoint."""
+    """Install the authenticated existing-image-to-video endpoint exactly once."""
     from . import admin_routes
-    from .source_draft_video_routes import install_source_draft_video_routes
+    from .source_draft_video_routes import router as source_draft_video_router
 
-    install_source_draft_video_routes(admin_routes.router)
+    route_path = "/draft/{source_draft_id}/video"
+    if not any(
+        getattr(route, "path", None) == route_path
+        for route in admin_routes.router.routes
+    ):
+        admin_routes.router.include_router(source_draft_video_router)
+
+    # Fail fast during startup rather than silently shipping an unreachable API.
+    if not any(
+        getattr(route, "path", None) == route_path
+        for route in admin_routes.router.routes
+    ):
+        raise RuntimeError("source_draft_video_route_install_failed")
 
 
 def _install_config_schema_parser() -> None:
@@ -164,5 +176,6 @@ _allow_config_precondition_header()
 _preload_cors_origins()
 _install_admin_security_guards()
 _install_gpu_routes()
-_install_source_draft_video_routes()
 _install_config_schema_parser()
+# Install this route last because package bootstrap imports can mutate routers.
+_install_source_draft_video_routes()
