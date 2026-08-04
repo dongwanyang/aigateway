@@ -128,6 +128,25 @@ class DraftGeneratorStrategy(_impl.DraftGeneratorStrategy):
             memory_requirement_gb=memory_requirement_gb,
         )
 
+    async def _mark_draft_confirmation_failed(
+        self,
+        draft: Any,
+        reason: str,
+    ) -> None:
+        """Rollback a failed confirm without retaining stale ComfyUI state.
+
+        A confirmation failure returns the accepted preview to ``pending`` so it
+        can be retried. The previous prompt binding and node-level progress must
+        be cleared at the same time; otherwise status reconciliation can inspect
+        the disappeared prompt during the next confirmation's preparation phase
+        and incorrectly roll the new attempt back before it submits to ComfyUI.
+        """
+        draft.comfy_prompt_id = None
+        generation_params = getattr(draft, "generation_params", None)
+        if isinstance(generation_params, dict):
+            generation_params["progress_source"] = "stage"
+        await super()._mark_draft_confirmation_failed(draft, reason)
+
     def _public_comfyui_error_code(
         self,
         exc: BaseException,
