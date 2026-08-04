@@ -53,6 +53,42 @@ def test_generation_timing_policy_loads_from_yaml_values() -> None:
     assert timing.video_max_fps == 24
     assert timing.video_min_frames == 5
     assert timing.video_max_frames == 241
+    assert config.validate() == []
+
+
+def test_generation_timing_policy_rejects_cross_field_conflicts() -> None:
+    config = GenerationOptimizationConfig()
+    timing = config.draft_workflow
+    timing.video_supported_durations_seconds = (3, 8)
+    timing.video_default_duration_seconds = 5
+    timing.video_default_fps = 61
+    timing.video_max_fps = 60
+    timing.video_min_frames = 100
+    timing.video_max_frames = 80
+
+    errors = config.validate()
+
+    assert any("video_default_duration_seconds 必须属于" in error for error in errors)
+    assert any("video_default_fps 不得大于" in error for error in errors)
+    assert any("video_min_frames 不得大于" in error for error in errors)
+
+
+def test_generation_timing_policy_rejects_invalid_duration_allowlist() -> None:
+    config = GenerationOptimizationConfig()
+    config.draft_workflow.video_supported_durations_seconds = ()
+
+    errors = config.validate()
+
+    assert any("video_supported_durations_seconds 必须是非空" in error for error in errors)
+
+
+def test_generation_timing_policy_rejects_unrepresentable_default_frames() -> None:
+    config = GenerationOptimizationConfig()
+    config.draft_workflow.video_max_frames = 40
+
+    errors = config.validate()
+
+    assert any("默认视频时序归一化后" in error for error in errors)
 
 
 def test_runtime_and_template_timing_policy_match_code_defaults() -> None:
