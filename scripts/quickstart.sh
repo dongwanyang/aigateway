@@ -326,8 +326,6 @@ trap 'rm -f "$tmp_state"' EXIT
   echo "COMFYUI_VRAM_FLAG=$comfyui_vram_flag"
   echo "COMPOSE_PROFILES=$compose_profiles"
 } > "$tmp_state"
-mv "$tmp_state" "$STATE_FILE"
-trap - EXIT
 
 config_source="$ROOT_DIR/config.yaml"
 if [[ "$reset_config" == "true" ]]; then
@@ -362,6 +360,12 @@ if [[ "$accelerator" == "cuda" && "$needs_studio" == "true" \
 else
   rm -f "$GPU_COMPOSE_FILE"
 fi
+
+# Publish the install state only after both runtime configuration and optional
+# GPU topology generation have succeeded. A failed render therefore leaves the
+# last known-good state file in place instead of advertising an uncommitted plan.
+mv "$tmp_state" "$STATE_FILE"
+trap - EXIT
 
 if [[ ! -f "$ROOT_DIR/.env" ]]; then
   cp "$ROOT_DIR/.env.example" "$ROOT_DIR/.env"
