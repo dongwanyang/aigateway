@@ -111,16 +111,11 @@ class DraftGeneratorStrategy(_impl.DraftGeneratorStrategy):
             )
         return draft
 
-    async def _generate_draft_async(self, *args, **kwargs):
-        """Freeze the exact approved video keyframe after preview persistence."""
-        await super()._generate_draft_async(*args, **kwargs)
-        draft_id = kwargs.get("draft_id") or (args[0] if args else None)
-        if not draft_id:
-            return
-        draft = await self._load_draft(str(draft_id))
+    @staticmethod
+    def _freeze_video_keyframe(draft: Any) -> None:
+        """Attach the exact preview digest before a video draft becomes visible."""
         if (
-            draft is None
-            or draft.media_type != "video"
+            draft.media_type != "video"
             or draft.status != _impl.DRAFT_STATUS_PENDING
             or not draft.previews
         ):
@@ -137,10 +132,13 @@ class DraftGeneratorStrategy(_impl.DraftGeneratorStrategy):
             if params.get("has_reference_image")
             else "generated_keyframe"
         )
-        await self._store_draft(
-            draft,
-            max(1, int(draft.expires_at - time.time())),
-        )
+
+    async def _store_draft(self, draft, ttl_seconds):
+        # Hashing happens before the same write that exposes status=pending, so
+        # confirmation can never observe an approved video preview without its
+        # frozen identity.
+        self._freeze_video_keyframe(draft)
+        await super()._store_draft(draft, ttl_seconds)
 
     async def _generate_video_with_comfyui(self, draft):
         """Generate Wan video from the frozen keyframe and motion-only prompt."""
