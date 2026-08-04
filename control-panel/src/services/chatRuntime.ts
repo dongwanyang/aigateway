@@ -95,6 +95,7 @@ export async function pollDraftUntilSettled(
       if (signal?.aborted) return { kind: 'cancelled', message: '已停止' }
       try {
         const response = await getDraftPreview(draftId)
+        if (signal?.aborted) return { kind: 'cancelled', message: '已停止' }
         if (!response.previewDataUrl) {
           onProgress?.({
             status: response.status ?? 'running',
