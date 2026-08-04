@@ -106,7 +106,8 @@ class ComfyUIConfig:
     )
     video_width: int = 512
     video_height: int = 288
-    video_frames: int = 17
+    # Compatibility fallback: 5 seconds at 8 FPS, normalized to Wan's 4n+1 rule.
+    video_frames: int = 41
     video_fps: float = 8.0
     video_steps: int = 20
     video_cfg: float = 5.0
