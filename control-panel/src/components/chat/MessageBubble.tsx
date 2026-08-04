@@ -39,7 +39,13 @@ export default function MessageBubble({
   if (msg.role === 'user') {
     return (
       <div className="flex justify-end mb-4">
-        <div className="max-w-[70%] px-4 py-2 rounded-lg" style={{ backgroundColor: 'var(--color-primary)', color: 'var(--color-text-inverse)' }}>
+        <div
+          className="max-w-[70%] px-4 py-2 rounded-lg"
+          style={{
+            backgroundColor: 'var(--color-primary)',
+            color: 'var(--color-text-inverse)',
+          }}
+        >
           {msg.referenceImageDataUrl && (
             <img
               src={msg.referenceImageDataUrl}
@@ -61,7 +67,9 @@ export default function MessageBubble({
           style={{
             backgroundColor: 'var(--color-bg-overlay)',
             color: 'var(--color-text-primary)',
-            border: msg.error ? '1px solid var(--color-danger)' : '1px solid var(--color-border)',
+            border: msg.error
+              ? '1px solid var(--color-danger)'
+              : '1px solid var(--color-border)',
           }}
         >
           <RoutingBadge intent={msg.intent} model={msg.model} />
@@ -69,7 +77,9 @@ export default function MessageBubble({
             draft={msg.draft}
             onConfirm={() => onConfirmDraft?.(msg.id)}
             onReject={() => onRejectDraft?.(msg.id)}
-            onCreateVideo={() => onCreateVideoFromDraft?.(msg.id)}
+            onCreateVideo={onCreateVideoFromDraft
+              ? () => onCreateVideoFromDraft(msg.id)
+              : undefined}
           />
         </div>
       </div>
@@ -84,7 +94,9 @@ export default function MessageBubble({
         style={{
           backgroundColor: 'var(--color-bg-overlay)',
           color: 'var(--color-text-primary)',
-          border: msg.error ? '1px solid var(--color-danger)' : '1px solid var(--color-border)',
+          border: msg.error
+            ? '1px solid var(--color-danger)'
+            : '1px solid var(--color-border)',
         }}
       >
         <RoutingBadge intent={msg.intent} model={msg.model} />
@@ -108,10 +120,20 @@ export default function MessageBubble({
                 {msg.content}
                 {isStreaming && <span className="animate-pulse">▌</span>}
                 {!isStreaming && msg.incomplete && (
-                  <span className="text-xs ml-1" style={{ color: 'var(--color-text-secondary)' }}>(已中断)</span>
+                  <span
+                    className="text-xs ml-1"
+                    style={{ color: 'var(--color-text-secondary)' }}
+                  >
+                    (已中断)
+                  </span>
                 )}
                 {msg.videoId && !msg.content && !isStreaming && (
-                  <span className="text-xs ml-1" style={{ color: 'var(--color-text-secondary)' }}>视频生成中...</span>
+                  <span
+                    className="text-xs ml-1"
+                    style={{ color: 'var(--color-text-secondary)' }}
+                  >
+                    视频生成中...
+                  </span>
                 )}
               </p>
             )}
