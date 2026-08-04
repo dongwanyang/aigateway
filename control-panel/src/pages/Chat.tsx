@@ -34,7 +34,10 @@ export default function Chat() {
     send, stop, clearActive,
     confirmDraftMsg, rejectDraftMsg,
   } = useChatSessions()
-  const createSourceDraftVideo = useSourceDraftVideo()
+  const {
+    create: createSourceDraftVideo,
+    cancel: cancelSourceDraftVideo,
+  } = useSourceDraftVideo()
   const [selectedVideoSource, setSelectedVideoSource] = useState<SelectedVideoSource | null>(null)
   const chatHeight = 'calc(100vh - 56px - 48px)'
 
@@ -54,7 +57,9 @@ export default function Chat() {
   }
 
   const messages = active?.messages ?? []
-  const lastAssistant = [...messages].reverse().find(message => message.role === 'assistant')
+  const lastAssistant = [...messages].reverse().find(
+    message => message.role === 'assistant',
+  )
   const streamingId = streaming ? (lastAssistant?.id ?? null) : null
 
   const selectImageDraftForVideo = (messageId: string) => {
@@ -69,6 +74,31 @@ export default function Chat() {
       draftId: message.draft.draftId,
       previewDataUrl: message.draft.resultDataUrl ?? message.draft.previewDataUrl,
     })
+  }
+
+  const stopAll = () => {
+    cancelSourceDraftVideo()
+    stop()
+  }
+
+  const handleNewSession = () => {
+    cancelSourceDraftVideo()
+    newSession()
+  }
+
+  const handleSelectSession = (sessionId: string) => {
+    cancelSourceDraftVideo()
+    selectSession(sessionId)
+  }
+
+  const handleDeleteSession = (sessionId: string) => {
+    cancelSourceDraftVideo()
+    deleteSession(sessionId)
+  }
+
+  const handleClearActive = () => {
+    cancelSourceDraftVideo()
+    clearActive()
   }
 
   const handleSend = (
@@ -100,9 +130,9 @@ export default function Chat() {
       <SessionList
         sessions={sessions}
         activeId={activeId}
-        onNew={newSession}
-        onSelect={selectSession}
-        onDelete={deleteSession}
+        onNew={handleNewSession}
+        onSelect={handleSelectSession}
+        onDelete={handleDeleteSession}
       />
       <div className="flex flex-col flex-1 min-w-0 pl-3">
         <div className="flex items-center justify-between px-1 py-2">
@@ -110,7 +140,7 @@ export default function Chat() {
             {active?.title || '聊天'}
           </h2>
           <button
-            onClick={clearActive}
+            onClick={handleClearActive}
             disabled={streaming || messages.length === 0}
             className="flex items-center gap-1 px-2 py-1 rounded-md text-sm cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
             style={{ color: 'var(--color-text-secondary)' }}
@@ -168,8 +198,9 @@ export default function Chat() {
           <ChatComposer
             streaming={streaming}
             disabled={false}
+            sourceImageMode={Boolean(selectedVideoSource)}
             onSend={handleSend}
-            onStop={stop}
+            onStop={stopAll}
             presets={Array.isArray(presetsQuery.data) ? presetsQuery.data : []}
             presetsLoading={presetsQuery.isLoading || presetsQuery.isFetching}
             presetsError={presetsQuery.error instanceof Error ? presetsQuery.error.message : null}
