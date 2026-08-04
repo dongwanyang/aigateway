@@ -17,6 +17,7 @@ interface DraftCardProps {
 export default function DraftCard({ draft, onConfirm, onReject, onCreateVideo }: DraftCardProps) {
   const sourceDraftId = (draft as SourceAwareDraft).sourceDraftId
   const busy = ['queued', 'running', 'generating', 'refining', 'confirming', 'rejecting'].includes(draft.status)
+  const completed = ['confirmed', 'completed'].includes(draft.status)
   const terminal = draft.status === 'expired' || draft.status === 'error' || draft.status === 'cancelled'
   const progressPercent = typeof draft.progress === 'number'
     ? Math.round(Math.min(1, Math.max(0, draft.progress)) * 100)
@@ -46,10 +47,10 @@ export default function DraftCard({ draft, onConfirm, onReject, onCreateVideo }:
   })()
   const stageLabel = stageText ? ` · ${stageText}` : ''
   const canCreateVideo = draft.mediaType === 'image'
-    && ['confirmed', 'completed'].includes(draft.status)
+    && completed
     && !draft.resultLost
     && Boolean(onCreateVideo)
-  const showDraftActions = !['confirmed', 'completed', 'expired', 'cancelled'].includes(draft.status)
+  const showDraftActions = !['expired', 'cancelled'].includes(draft.status)
 
   return (
     <div className="flex flex-col gap-2" style={{ minWidth: 220 }}>
@@ -81,7 +82,7 @@ export default function DraftCard({ draft, onConfirm, onReject, onCreateVideo }:
           <Loader2 size={12} className="animate-spin" /> 正在重新生成草稿…
         </span>
       )}
-      {(draft.status === 'confirmed' || draft.status === 'completed') && (
+      {completed && (
         <span className="text-xs" style={{ color: 'var(--color-success, #16a34a)' }}>
           {draft.resultLost
             ? `✓ 已确认 · 刷新后仅保留预览(${draft.mediaType === 'video' ? '视频' : '高清图'}未缓存,需重新生成)`
@@ -115,7 +116,7 @@ export default function DraftCard({ draft, onConfirm, onReject, onCreateVideo }:
         </div>
       )}
 
-      {(draft.status === 'confirmed' || draft.status === 'completed') && draft.resultDataUrl ? (
+      {completed && draft.resultDataUrl ? (
         draft.mediaType === 'video' ? (
           <video src={draft.resultDataUrl} controls playsInline className="max-w-full rounded-md" />
         ) : (
@@ -151,14 +152,14 @@ export default function DraftCard({ draft, onConfirm, onReject, onCreateVideo }:
         <div className="flex gap-2">
           <button
             onClick={onConfirm}
-            disabled={busy}
+            disabled={busy || completed}
             className="flex items-center gap-1 px-3 py-1.5 rounded-md text-sm cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
             style={{ backgroundColor: 'var(--color-primary)', color: 'var(--color-text-inverse)' }}
           >
             {(draft.status === 'confirming' || draft.status === 'refining') ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
             {draft.mediaType === 'video' ? '确认生成视频' : '确认生成高清图'}
           </button>
-          {!sourceDraftId && (
+          {!sourceDraftId && !completed && (
             <button
               onClick={onReject}
               disabled={busy}
