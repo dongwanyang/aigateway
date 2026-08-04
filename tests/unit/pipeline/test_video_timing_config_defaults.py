@@ -32,6 +32,29 @@ def test_generation_timing_policy_defaults() -> None:
     assert timing.video_max_frames == 481
 
 
+def test_generation_timing_policy_loads_from_yaml_values() -> None:
+    config = GenerationOptimizationConfig.load_from_dict(
+        {
+            "draft_workflow": {
+                "video_default_duration_seconds": 3,
+                "video_supported_durations_seconds": [3, 5],
+                "video_default_fps": 12,
+                "video_max_fps": 24,
+                "video_min_frames": 5,
+                "video_max_frames": 241,
+            },
+        },
+    )
+    timing = config.draft_workflow
+
+    assert timing.video_default_duration_seconds == 3
+    assert timing.video_supported_durations_seconds == (3, 5)
+    assert timing.video_default_fps == 12
+    assert timing.video_max_fps == 24
+    assert timing.video_min_frames == 5
+    assert timing.video_max_frames == 241
+
+
 def test_runtime_and_template_timing_policy_match_code_defaults() -> None:
     timing = GenerationOptimizationConfig().draft_workflow
 
