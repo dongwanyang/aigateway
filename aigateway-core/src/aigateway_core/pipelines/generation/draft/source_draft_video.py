@@ -70,11 +70,18 @@ def _normalize_frames(
     ):
         raise DraftWorkflowError("video_duration_unsupported")
 
+    min_frames = int(config.video_min_frames)
+    max_frames = int(config.video_max_frames)
+    if min_frames <= 0 or max_frames < min_frames:
+        raise DraftWorkflowError("video_duration_unsupported")
+
     requested = round(duration * fps)
-    requested = max(config.video_min_frames, requested)
-    requested = min(config.video_max_frames, requested)
+    # Do not silently stretch or truncate the requested duration when the
+    # deployment frame range is inconsistent with an advertised duration.
+    if requested < min_frames or requested > max_frames:
+        raise DraftWorkflowError("video_duration_unsupported")
     frame_count = ((requested - 1 + 3) // 4) * 4 + 1
-    if frame_count > config.video_max_frames:
+    if frame_count < min_frames or frame_count > max_frames:
         raise DraftWorkflowError("video_duration_unsupported")
     return duration, fps, frame_count
 
