@@ -498,6 +498,23 @@ gpu_scheduler:
   device_overrides: []
   topology_auto_apply: false
   topology_reconcile_interval_seconds: 10
+  # The gateway container has no GPU access (CUDA_VISIBLE_DEVICES=-1), so
+  # nvidia-smi discovery returns 0 devices. Declare the ComfyUI-owned device
+  # statically so the scheduler topology is complete and generation can run.
+  devices:
+  - uuid: GPU-4f8b6f95-99ae-2fe2-13fc-f8bf217cf980
+    name: Tesla T4
+    total_memory_gb: 15.0
+  workers:
+  - worker_id: comfyui-gpu-0
+    device_uuid: GPU-4f8b6f95-99ae-2fe2-13fc-f8bf217cf980
+    server_url: http://comfyui:8188
+    public_url: http://localhost:8188
+    capabilities:
+    - image
+    - video
+    - upscale
+    memory_total_gb: 15.0
 generation_optimization:
   enabled: true
   preset_store_dir: /app/data/generation-presets

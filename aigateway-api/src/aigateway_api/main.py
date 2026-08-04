@@ -390,6 +390,28 @@ async def lifespan(app: "FastAPI"):
 
     gpu_devices = await asyncio.to_thread(discover_nvidia_devices)
     logger.info("GPU inventory discovered: %d device(s)", len(gpu_devices))
+
+    # When the gateway container lacks direct GPU access (CUDA_VISIBLE_DEVICES=-1
+    # or no nvidia-smi), fall back to static device declarations in config so that
+    # the scheduler can still map workers to device UUIDs for shared-GPU topology.
+    if not gpu_devices:
+        from aigateway_core.shared.gpu_scheduler import GpuDevice as _GpuDevice
+
+        static_devices = gpu_scheduler_raw.get("devices", [])
+        if isinstance(static_devices, list):
+            for entry in static_devices:
+                if not isinstance(entry, dict) or not entry.get("uuid"):
+                    continue
+                gpu_devices.append(_GpuDevice(
+                    uuid=str(entry["uuid"]),
+                    logical_index=int(entry.get("index", 0)),
+                    name=str(entry.get("name", "remote")),
+                    total_memory_gb=float(entry.get("total_memory_gb", 0)),
+                    free_memory_gb=float(entry.get("free_memory_gb", entry.get("total_memory_gb", 0))),
+                ))
+            if gpu_devices:
+                logger.info("GPU devices loaded from static config: %d device(s)", len(gpu_devices))
+
     metrics_collector = get_metrics_collector()
     gpu_coordinator = GpuResourceCoordinator(
         GpuSchedulerConfig.from_mapping(gpu_scheduler_raw),
