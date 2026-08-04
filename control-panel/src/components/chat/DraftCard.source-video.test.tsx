@@ -27,7 +27,8 @@ describe('DraftCard existing image to video flow', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '基于此图生成视频' }))
     expect(onCreateVideo).toHaveBeenCalledTimes(1)
-    expect(screen.queryByRole('button', { name: '确认生成高清图' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '确认生成高清图' })).toBeDisabled()
+    expect(screen.queryByRole('button', { name: '重新生成' })).not.toBeInTheDocument()
   })
 
   it('keeps a source-derived video immutable in the UI', () => {
@@ -49,7 +50,7 @@ describe('DraftCard existing image to video flow', () => {
     )
 
     expect(screen.getByText('来源图片已冻结 · 确认后由 ComfyUI 生成视频')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '确认生成视频' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '确认生成视频' })).toBeEnabled()
     expect(screen.queryByRole('button', { name: '重新生成' })).not.toBeInTheDocument()
   })
 })
