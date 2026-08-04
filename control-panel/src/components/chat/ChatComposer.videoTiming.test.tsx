@@ -24,38 +24,43 @@ describe('ChatComposer video timing', () => {
     expect(onSend).toHaveBeenCalledWith('生成一段五秒视频')
   })
 
-  it('sends an explicit duration and the supported default FPS', async () => {
-    const onSend = vi.fn()
-    const user = userEvent.setup()
+  it.each([
+    ['3', 3, '生成一段三秒视频'],
+    ['8', 8, '生成一段八秒视频'],
+  ] as const)(
+    'sends an explicit %s-second duration and resets timing after submission',
+    async (selectedValue, expectedDuration, prompt) => {
+      const onSend = vi.fn()
+      const user = userEvent.setup()
 
-    render(
-      <ChatComposer
-        streaming={false}
-        disabled={false}
-        onSend={onSend}
-        onStop={vi.fn()}
-      />,
-    )
+      render(
+        <ChatComposer
+          streaming={false}
+          disabled={false}
+          onSend={onSend}
+          onStop={vi.fn()}
+        />,
+      )
 
-    await user.selectOptions(
-      screen.getByRole('combobox', { name: '视频时长' }),
-      '8',
-    )
-    await user.type(screen.getByPlaceholderText(/输入消息/), '生成一段八秒视频')
-    await user.keyboard('{Enter}')
+      const durationSelect = screen.getByRole('combobox', { name: '视频时长' })
+      await user.selectOptions(durationSelect, selectedValue)
+      await user.type(screen.getByPlaceholderText(/输入消息/), prompt)
+      await user.keyboard('{Enter}')
 
-    expect(onSend).toHaveBeenCalledWith('生成一段八秒视频', {
-      generationOptions: {
-        backend: 'auto',
-        preset_id: undefined,
-        quality: 'standard',
-        prompt_mode: 'auto',
-        width: undefined,
-        height: undefined,
-        duration_seconds: 8,
-        fps: 8,
-      },
-      referenceImage: undefined,
-    })
-  })
+      expect(onSend).toHaveBeenCalledWith(prompt, {
+        generationOptions: {
+          backend: 'auto',
+          preset_id: undefined,
+          quality: 'standard',
+          prompt_mode: 'auto',
+          width: undefined,
+          height: undefined,
+          duration_seconds: expectedDuration,
+          fps: 8,
+        },
+        referenceImage: undefined,
+      })
+      expect(durationSelect).toHaveValue('5')
+    },
+  )
 })
