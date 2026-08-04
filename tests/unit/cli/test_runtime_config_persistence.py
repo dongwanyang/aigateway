@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
 import shutil
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 import yaml
@@ -172,3 +175,90 @@ def test_quickstart_generates_and_clears_host_gpu_inventory(tmp_path: Path) -> N
     assert "inventory_source" not in downgraded_scheduler
     assert "devices" not in downgraded_scheduler
     assert "workers" not in downgraded_scheduler
+
+
+def test_failed_render_keeps_last_known_good_install_state(tmp_path: Path) -> None:
+    script = _fixture_repo(tmp_path)
+    environment = {"PATH": _without_nvidia(tmp_path)}
+    _run(
+        script,
+        "--non-interactive",
+        "--edition",
+        "lite",
+        "--distribution",
+        "source",
+        "--no-start",
+        env=environment,
+    )
+
+    state_path = tmp_path / ".aigateway-install.env"
+    previous_state = state_path.read_bytes()
+    runtime_path = tmp_path / ".aigateway/runtime/config.yaml"
+    broken = yaml.safe_load(runtime_path.read_text(encoding="utf-8"))
+    broken["plugins"] = []
+    runtime_path.write_text(
+        yaml.safe_dump(broken, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    failed = subprocess.run(
+        [
+            "bash",
+            str(script),
+            "--non-interactive",
+            "--edition",
+            "knowledge",
+            "--no-start",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, **environment},
+    )
+
+    assert failed.returncode != 0
+    assert state_path.read_bytes() == previous_state
+    assert "base config is missing plugin" in failed.stderr
+
+
+def test_deployment_renderer_waits_for_runtime_config_lock(tmp_path: Path) -> None:
+    script = _fixture_repo(tmp_path)
+    renderer = script.parent / "render-deployment-config.py"
+    source = tmp_path / "config.yaml"
+    output = tmp_path / ".aigateway/runtime/config.yaml"
+    output.parent.mkdir(parents=True)
+    lock_path = Path(str(output) + ".lock")
+
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                str(renderer),
+                "--source",
+                str(source),
+                "--output",
+                str(output),
+                "--edition",
+                "lite",
+                "--accelerator",
+                "cpu",
+                "--embedding-mode",
+                "container",
+                "--comfyui-mode",
+                "remote",
+                "--comfyui-url",
+                "http://comfyui.invalid",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        time.sleep(0.25)
+        assert process.poll() is None
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        stdout, stderr = process.communicate(timeout=10)
+
+    assert process.returncode == 0, (stdout, stderr)
+    rendered = yaml.safe_load(output.read_text(encoding="utf-8"))
+    assert rendered["deployment"]["edition"] == "lite"
