@@ -550,7 +550,7 @@ generation_optimization:
       allowed_video_vaes: ["wan2.2_vae.safetensors"] # 视频 VAE 白名单
       video_width: 512       # T4 低显存安全默认值；必须是 16 的倍数
       video_height: 288      # 视频高度；必须是 16 的倍数
-      video_frames: 17       # 约 2 秒草稿视频（8 fps）
+      video_frames: 41       # 5 秒默认视频（8 fps，按 Wan 4n+1 规则归一化）
       video_fps: 8           # 视频帧率
       video_steps: 20        # 视频采样步数
       video_cfg: 5
