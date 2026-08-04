@@ -72,7 +72,7 @@ export default function Chat() {
     ) return
     setSelectedVideoSource({
       draftId: message.draft.draftId,
-      previewDataUrl: message.draft.resultDataUrl ?? message.draft.previewDataUrl,
+      previewDataUrl: message.draft.previewDataUrl ?? message.draft.resultDataUrl,
     })
   }
 
