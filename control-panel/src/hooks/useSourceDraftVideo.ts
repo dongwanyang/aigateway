@@ -43,6 +43,23 @@ function patchSession(
   })
 }
 
+function terminalTextMessage(
+  message: ChatPageMessage,
+  content: string,
+  error: boolean,
+): ChatPageMessage {
+  return {
+    ...message,
+    content,
+    intent: null,
+    model: undefined,
+    error,
+    incomplete: false,
+    awaitingDraft: false,
+    awaitingDraftSince: undefined,
+  }
+}
+
 export function useSourceDraftVideo(): SourceDraftVideoActions {
   const setSessions = useChatStore(state => state.setSessions)
   const setStreaming = useChatStore(state => state.setStreaming)
@@ -223,21 +240,19 @@ export function useSourceDraftVideo(): SourceDraftVideoActions {
             errorMessage: '已停止',
           },
           awaitingDraft: false,
-        } : {
-          ...current,
-          content: '已停止',
-          incomplete: true,
-          awaitingDraft: false,
-        })
+        } : terminalTextMessage(current, '已停止', false))
       } else {
         const message = error instanceof Error ? error.message : '创建视频草稿失败'
         setError(message)
-        patchAssistant(current => ({
+        patchAssistant(current => current.draft ? {
           ...current,
-          content: message,
-          error: true,
+          draft: {
+            ...(current.draft as SourceAwareDraft),
+            status: 'error',
+            errorMessage: message,
+          },
           awaitingDraft: false,
-        }))
+        } : terminalTextMessage(current, message, true))
       }
     } finally {
       if (controllerRef.current === controller) {
