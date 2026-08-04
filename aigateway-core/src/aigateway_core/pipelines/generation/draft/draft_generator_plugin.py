@@ -1,6 +1,5 @@
-"""
-DraftGeneratorPlugin — progressive generation workflow adapter.
-"""
+"""DraftGeneratorPlugin — progressive generation workflow adapter."""
+
 from __future__ import annotations
 
 import math
@@ -22,6 +21,9 @@ from aigateway_core.pipelines.generation.draft.draft_generator import (
 from aigateway_core.prefix.media.types import MediaContent, MediaType
 
 NS_GENERATION_OPTIMIZATION = "generation_optimization"
+_SUPPORTED_VIDEO_DURATIONS = (3.0, 5.0, 8.0)
+_MAX_VIDEO_FPS = 60
+_MAX_VIDEO_FRAMES = 481
 
 
 class DraftGeneratorPlugin:
@@ -77,6 +79,7 @@ class DraftGeneratorPlugin:
                 return ctx
 
             request = self._build_generation_request(ctx)
+            self._assert_video_plan_ready(ctx, request)
             backend = str(options.get("backend") or "auto")
             try:
                 await self._strategy.check_local_dependencies(request)
@@ -141,6 +144,7 @@ class DraftGeneratorPlugin:
                     "preview_count": len(draft_result.previews),
                     "status": draft_result.status,
                     "has_video_plan": bool(request.motion_prompt),
+                    "frame_count": request.frame_count,
                 },
             )
             ctx.should_stop = True
@@ -156,6 +160,40 @@ class DraftGeneratorPlugin:
                 "error": str(exc),
             }
         return ctx
+
+    def _assert_video_plan_ready(
+        self,
+        ctx: PipelineContext,
+        request: GenerationRequest,
+    ) -> None:
+        if request.media_type != "video":
+            return
+        generation = ctx.extra.get(NS_GENERATION_OPTIMIZATION, {})
+        director = (
+            generation.get("ai_director", {})
+            if isinstance(generation, dict)
+            else {}
+        )
+        if not isinstance(director, dict):
+            return
+        if director.get("error") and not request.motion_prompt:
+            raise DraftWorkflowError("video_prompt_plan_unavailable")
+        plan = director.get("video_plan")
+        if not isinstance(plan, dict):
+            return
+        fallback_reason = self._optional_text(plan.get("fallback_reason"))
+        prompt_language = self._optional_text(plan.get("prompt_language"))
+        keyframe_language = self._optional_text(plan.get("keyframe_language"))
+        motion_language = self._optional_text(plan.get("motion_language"))
+        requires_conversion = bool(
+            prompt_language
+            and (
+                (keyframe_language and keyframe_language != prompt_language)
+                or (motion_language and motion_language != prompt_language)
+            )
+        )
+        if fallback_reason and requires_conversion:
+            raise DraftWorkflowError("video_prompt_plan_unavailable")
 
     def _is_generation_request(self, ctx: PipelineContext) -> bool:
         if ctx.request.get("draft_workflow") or ctx.request.get("enable_draft"):
@@ -197,16 +235,21 @@ class DraftGeneratorPlugin:
             motion_prompt = self._required_plan_text(
                 video_plan, "motion_prompt"
             )
-            duration_seconds = self._finite_positive_number(
-                video_plan.get("duration_seconds"), "duration_seconds"
+            duration_seconds, target_fps, normalized_count = (
+                self._normalize_video_timing(
+                    video_plan.get("duration_seconds"),
+                    video_plan.get("fps"),
+                )
             )
-            target_fps = self._positive_integer(video_plan.get("fps"), "fps")
-            frame_count = self._positive_integer(
+            supplied_count = self._positive_integer(
                 video_plan.get("frame_count"), "frame_count"
             )
-            expected_count = round(duration_seconds * target_fps)
-            if frame_count != expected_count:
+            raw_count = round(duration_seconds * target_fps)
+            if supplied_count not in {raw_count, normalized_count}:
                 raise ValueError("video_plan_frame_count_mismatch")
+            frame_count = normalized_count
+            # Keep the shared plan and persisted request snapshot consistent.
+            video_plan["frame_count"] = frame_count
             prompt_language = self._required_plan_text(
                 video_plan, "prompt_language"
             )
@@ -230,22 +273,29 @@ class DraftGeneratorPlugin:
             prompt = self._extract_prompt(ctx)
             keyframe_prompt = None
             motion_prompt = None
-            duration_seconds = self._finite_positive_number(
-                options.get(
+            if media_type == "video":
+                duration_seconds, target_fps, frame_count = (
+                    self._normalize_video_timing(
+                        options.get(
+                            "duration_seconds",
+                            ctx.request.get("duration_seconds", 5.0),
+                        ),
+                        options.get("fps", ctx.request.get("target_fps", 8)),
+                    )
+                )
+            else:
+                duration_seconds = self._finite_positive_number(
+                    options.get(
+                        "duration_seconds",
+                        ctx.request.get("duration_seconds", 5.0),
+                    ),
                     "duration_seconds",
-                    ctx.request.get("duration_seconds", 5.0),
-                ),
-                "duration_seconds",
-            )
-            target_fps = self._positive_integer(
-                options.get("fps", ctx.request.get("target_fps", 8)),
-                "fps",
-            )
-            frame_count = (
-                round(duration_seconds * target_fps)
-                if media_type == "video"
-                else None
-            )
+                )
+                target_fps = self._positive_integer(
+                    options.get("fps", ctx.request.get("target_fps", 8)),
+                    "fps",
+                )
+                frame_count = None
             prompt_language = None
             keyframe_language = None
             motion_language = None
@@ -285,6 +335,29 @@ class DraftGeneratorPlugin:
             request_id=ctx.request_id,
             trace_id=ctx.trace_id,
         )
+
+    @classmethod
+    def _normalize_video_timing(
+        cls,
+        duration_value: Any,
+        fps_value: Any,
+    ) -> tuple[float, int, int]:
+        duration = cls._finite_positive_number(
+            duration_value, "duration_seconds"
+        )
+        if not any(
+            math.isclose(duration, allowed)
+            for allowed in _SUPPORTED_VIDEO_DURATIONS
+        ):
+            raise ValueError("video_duration_unsupported")
+        fps = cls._positive_integer(fps_value, "fps")
+        if fps > _MAX_VIDEO_FPS:
+            raise ValueError("fps_out_of_range")
+        requested_count = round(duration * fps)
+        normalized_count = ((requested_count - 1 + 3) // 4) * 4 + 1
+        if normalized_count <= 0 or normalized_count > _MAX_VIDEO_FRAMES:
+            raise ValueError("frame_count_out_of_range")
+        return duration, fps, normalized_count
 
     @staticmethod
     def _generation_options(ctx: PipelineContext) -> dict[str, Any]:
