@@ -37,9 +37,10 @@ function errorMessage(body: unknown, fallback: string): string {
 export async function createVideoDraftFromSource(
   sourceDraftId: string,
   request: CreateSourceDraftVideoRequest,
+  signal?: AbortSignal,
 ): Promise<SourceDraftVideoResponse> {
   const response = await fetch(
-    `${API_BASE}/api/v1/generation/drafts/${encodeURIComponent(sourceDraftId)}/video`,
+    `${API_BASE}/admin/draft/${encodeURIComponent(sourceDraftId)}/video`,
     {
       method: 'POST',
       credentials: 'include',
@@ -50,6 +51,7 @@ export async function createVideoDraftFromSource(
         fps: request.fps,
         chat_session_id: request.chatSessionId,
       }),
+      signal,
     },
   )
   if (!response.ok) {
