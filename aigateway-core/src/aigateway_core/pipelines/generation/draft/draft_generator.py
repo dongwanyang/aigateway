@@ -146,6 +146,18 @@ class DraftGeneratorStrategy(_impl.DraftGeneratorStrategy):
 
         return await asyncio.shield(task)
 
+    async def reject_draft(self, draft_id: str):
+        """Prevent source-result video drafts from replacing their frozen image."""
+        draft = await self.get_draft(draft_id)
+        if (
+            draft is not None
+            and draft.media_type == "video"
+            and str(draft.generation_params.get("source_kind") or "")
+            == "draft_result"
+        ):
+            raise DraftWorkflowError("source_draft_immutable")
+        return await super().reject_draft(draft_id)
+
     @staticmethod
     def _source_kind(draft: Any) -> str:
         params = draft.generation_params
@@ -180,8 +192,6 @@ class DraftGeneratorStrategy(_impl.DraftGeneratorStrategy):
         if expected_hash and (
             not frozen_draft_id or frozen_draft_id == draft.draft_id
         ):
-            # Backfill the marker for drafts created by the first implementation
-            # without changing their already-frozen digest.
             params["source_image_frozen_draft_id"] = draft.draft_id
             params.setdefault("source_kind", cls._source_kind(draft))
             return
@@ -214,10 +224,6 @@ class DraftGeneratorStrategy(_impl.DraftGeneratorStrategy):
             raise DraftWorkflowError("video_keyframe_integrity_mismatch")
 
     async def _store_draft(self, draft, ttl_seconds):
-        # Hashing happens before the same write that exposes status=pending, so
-        # confirmation can never observe an approved video preview without its
-        # frozen identity. The per-draft marker prevents confirmation rollback
-        # from accepting modified bytes as a new baseline.
         self._freeze_video_keyframe(draft)
         await super()._store_draft(draft, ttl_seconds)
 
@@ -228,10 +234,6 @@ class DraftGeneratorStrategy(_impl.DraftGeneratorStrategy):
             if params.get("source_image_sha256") and not params.get(
                 "source_image_frozen_draft_id"
             ):
-                # Drafts created by the first freeze implementation have a
-                # digest but no per-draft marker. Backfill the old identity
-                # before the base implementation copies the parameters into a
-                # newly generated draft, allowing that new draft to re-freeze.
                 params["source_image_frozen_draft_id"] = old_draft.draft_id
         return await super()._regenerate_draft(old_draft)
 
