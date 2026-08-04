@@ -33,8 +33,24 @@ bash scripts/quickstart.sh \
   --build
 ```
 
-安装器原子写入 `.aigateway/runtime/config.yaml`，不修改仓库基础
-`config.yaml`。切换套餐会复用并保留 Redis、Qdrant、模型、监控及业务数据卷。
+首次安装时，安装器从仓库 `config.yaml` 原子生成
+`.aigateway/runtime/config.yaml`，不修改仓库基础配置。首次安装完成后，运行配置
+成为可变配置源：控制台保存的 provider、模型、路由和其他配置会写入该文件，
+后续 quickstart 重建会以它为输入，只刷新套餐、平台、ComfyUI、Embedding 和
+GPU 拓扑等部署拥有的字段。
+
+切换套餐会复用并保留 Redis、Qdrant、模型、监控及业务数据卷。只有明确希望
+丢弃控制台修改、恢复仓库默认配置时才使用：
+
+```bash
+bash scripts/quickstart.sh \
+  --non-interactive \
+  --reset-config \
+  --no-start
+```
+
+`--reset-config` 是破坏性配置重置，不应加入日常重建命令。它不会删除数据库、
+模型或 Docker 数据卷，但会用仓库 `config.yaml` 替换当前运行配置中的可变设置。
 
 公开参数：
 
@@ -49,6 +65,7 @@ bash scripts/quickstart.sh \
 --production
 --install-models
 --build
+--reset-config
 --no-start
 --show-plan
 --down
@@ -63,6 +80,7 @@ bash scripts/quickstart.sh \
 
 ```bash
 # 复用 .aigateway-install.env 中原有 Edition、GPU 拓扑和服务模式
+# 同时保留 .aigateway/runtime/config.yaml 中的控制台配置修改
 BUILDKIT_PROGRESS=plain \
   bash scripts/quickstart.sh \
     --non-interactive \
@@ -85,6 +103,12 @@ BUILDKIT_PROGRESS=plain \
 `docker compose build --no-cache`。安装器会同时加载 `.env` 和
 `.aigateway-install.env`，选择正确的 Docker target、GHCR cache 引用、CUDA
 覆盖文件及动态生成的 GPU 拓扑文件。
+
+CUDA 本地容器模式下，`scripts/render-gpu-topology.py` 每次根据当前宿主机
+`nvidia-smi` 结果刷新 `.aigateway/runtime/config.yaml` 中的
+`gpu_scheduler.devices`、`gpu_scheduler.workers` 和 `inventory_source`。仓库
+`config.yaml` 不保存任何机器专属 GPU UUID。切换到 CPU、MPS、native 或 remote
+ComfyUI 时，安装器会清除旧的本地 GPU inventory，避免过期 UUID 被误报为可用。
 
 不要让自动化工具或编码代理默认执行以下命令：
 
