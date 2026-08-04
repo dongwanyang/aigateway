@@ -141,13 +141,31 @@ def _install_source_draft_video_routes() -> None:
     from .source_draft_video_routes import router as source_draft_video_router
 
     route_path = "/draft/{source_draft_id}/video"
-    if not any(
+    if any(
         getattr(route, "path", None) == route_path
         for route in admin_routes.router.routes
     ):
-        admin_routes.router.include_router(source_draft_video_router)
+        return
 
-    # Fail fast during startup rather than silently shipping an unreachable API.
+    source_routes = [
+        route
+        for route in source_draft_video_router.routes
+        if getattr(route, "path", None) == route_path
+    ]
+    if not source_routes:
+        available = sorted(
+            str(getattr(route, "path", ""))
+            for route in source_draft_video_router.routes
+        )
+        raise RuntimeError(
+            f"source_draft_video_route_definition_missing:{available}"
+        )
+
+    # The package bootstrap already has fully-built APIRoute objects. Appending
+    # those objects avoids FastAPI include_router() cloning during a circular
+    # package import, which can otherwise leave the shared admin router empty.
+    admin_routes.router.routes.extend(source_routes)
+
     if not any(
         getattr(route, "path", None) == route_path
         for route in admin_routes.router.routes
