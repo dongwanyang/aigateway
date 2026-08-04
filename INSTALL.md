@@ -57,6 +57,74 @@ bash scripts/quickstart.sh \
 旧 `runtime/rag/vision/full profile`、`--accelerator` 和 `--add/--remove`
 接口不再接受；检测到旧状态时安装器停止并显示迁移命令。
 
+## 重建容器与 BuildKit 缓存
+
+已有安装需要从当前源码重建时，继续使用安装器，不要重新拼装 Compose 命令：
+
+```bash
+# 复用 .aigateway-install.env 中原有 Edition、GPU 拓扑和服务模式
+BUILDKIT_PROGRESS=plain \
+  bash scripts/quickstart.sh \
+    --non-interactive \
+    --distribution source \
+    --build
+```
+
+首次安装或需要显式切换套餐时再指定 Edition：
+
+```bash
+BUILDKIT_PROGRESS=plain \
+  bash scripts/quickstart.sh \
+    --non-interactive \
+    --edition full \
+    --distribution source \
+    --build
+```
+
+`--build` 表示执行源码镜像构建，仍然允许正常使用缓存；它不等同于
+`docker compose build --no-cache`。安装器会同时加载 `.env` 和
+`.aigateway-install.env`，选择正确的 Docker target、GHCR cache 引用、CUDA
+覆盖文件及动态生成的 GPU 拓扑文件。
+
+不要让自动化工具或编码代理默认执行以下命令：
+
+```bash
+# 缺少安装状态，可能回退到 Lite target 和错误的 cache 引用
+docker compose build
+docker compose up --build
+
+# 明确禁用或删除缓存，只用于有证据的缓存损坏排查
+docker compose build --no-cache
+docker builder prune
+docker system prune -a
+```
+
+缓存分为两层：
+
+- 当前 Docker builder 的本地 BuildKit layer/cache mount；
+- GHCR 已发布镜像携带的 inline cache，供新机器或空 builder 通过
+  Compose `cache_from=type=registry` 导入。
+
+镜像发布流水线同时导出 GitHub Actions cache 和 inline cache。若使用的是该
+修复之前发布的旧镜像，它不包含 inline cache，首次源码构建仍可能较慢；发布
+一次新镜像后，新的本地环境才能从 GHCR 导入缓存。
+
+以下变化会产生合理的 cache miss：
+
+- 修改 `aigateway-core/pyproject.toml` 或 `aigateway-api/pyproject.toml`；
+- 在 Lite、Knowledge、Studio、Full 或 CPU/CUDA target 之间切换；
+- 修改 PyTorch、ComfyUI 或 ComfyUI Manager 版本参数；
+- 基础镜像 digest 变化，或主动要求重新拉取基础镜像；
+- 清理/切换 Docker builder，且对应 GHCR 镜像尚无 inline cache。
+
+普通 Python 源码变化只应使末端本地包安装层失效，不应重新安装 PyTorch、
+CUDA 和全部系统依赖。构建日志中应看到 `importing cache manifest from`
+以及大量 `CACHED`。可用以下命令检查当前 builder 的缓存占用：
+
+```bash
+docker buildx du
+```
+
 ## 平台行为
 
 ### Linux / Windows NVIDIA
@@ -123,10 +191,11 @@ Gateway、ComfyUI、Embedding、Redis、Qdrant 与 Prometheus 保持内部或仅
 ## 故障排查
 
 ```bash
-docker compose --env-file .aigateway-install.env config
-docker compose --env-file .aigateway-install.env ps
+docker compose --env-file .env --env-file .aigateway-install.env config
+docker compose --env-file .env --env-file .aigateway-install.env ps
 docker compose logs --tail=200 gateway
 docker system df -v
+docker buildx du
 ```
 
 若宿主机 `nvidia-smi` 报内核模块与用户态库版本不一致，先重启以加载已安装
