@@ -4,7 +4,7 @@ Claude and other coding agents must read and follow [`AGENTS.md`](AGENTS.md) bef
 
 ## Cached container rebuilds
 
-For an existing installation, rebuild from the current checkout through the installer so the persisted Edition, accelerator, Compose profiles, generated GPU topology, image target, and registry cache reference are preserved:
+For an existing installation, rebuild from the current checkout through the installer so the persisted Edition, accelerator, Compose profiles, generated GPU topology, image target, registry cache reference, and control-panel configuration changes are preserved:
 
 ```bash
 BUILDKIT_PROGRESS=plain \
@@ -14,7 +14,11 @@ BUILDKIT_PROGRESS=plain \
     --build
 ```
 
-For a first installation or an intentional Edition change, add the required `--edition lite|knowledge|studio|full` argument.
+After the first installation, `.aigateway/runtime/config.yaml` is the mutable runtime source of truth. A normal quickstart run re-renders deployment-owned fields from that file; it must not replace it wholesale with repository `config.yaml`. Provider/model removals and other settings saved from the control panel therefore survive image rebuilds.
+
+For a first installation or an intentional Edition change, add the required `--edition lite|knowledge|studio|full` argument. Use `--reset-config` only when the user explicitly wants to discard the runtime configuration and restore repository defaults. Do not add `--reset-config` to routine rebuild commands.
+
+CUDA device and worker inventory is generated from the current host by `scripts/render-gpu-topology.py`. Never commit a machine-specific GPU UUID to `config.yaml`; generated `gpu_scheduler.devices`, `gpu_scheduler.workers`, and `gpu_scheduler.inventory_source` belong only in `.aigateway/runtime/config.yaml`.
 
 `--build` requests a source build but does **not** bypass BuildKit cache. Do not replace the command above with bare `docker compose build` or `docker compose up --build`: those commands do not automatically load `.aigateway-install.env`, and can silently select the default Lite target or the wrong GHCR cache image.
 
