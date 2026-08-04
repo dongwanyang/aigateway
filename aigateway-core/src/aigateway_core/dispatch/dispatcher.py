@@ -774,7 +774,7 @@ class RequestDispatcher:
                                  "reference_image_urls", []
                              ),
                              "generation_options": (
-                                 body.generation_options.model_dump()
+                                 body.generation_options.model_dump(exclude_none=True)
                                  if getattr(body, "generation_options", None)
                                  else {}
                              )},

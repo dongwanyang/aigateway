@@ -21,9 +21,6 @@ from aigateway_core.pipelines.generation.draft.draft_generator import (
 from aigateway_core.prefix.media.types import MediaContent, MediaType
 
 NS_GENERATION_OPTIMIZATION = "generation_optimization"
-_SUPPORTED_VIDEO_DURATIONS = (3.0, 5.0, 8.0)
-_MAX_VIDEO_FPS = 60
-_MAX_VIDEO_FRAMES = 481
 
 
 class DraftGeneratorPlugin:
@@ -78,8 +75,27 @@ class DraftGeneratorPlugin:
                 }
                 return ctx
 
-            request = self._build_generation_request(ctx)
-            self._assert_video_plan_ready(ctx, request)
+            try:
+                request = self._build_generation_request(ctx)
+                self._assert_video_plan_ready(ctx, request)
+            except ValueError as exc:
+                duration_ms = (time.monotonic() - started_at) * 1000.0
+                ctx.extra.setdefault(NS_GENERATION_OPTIMIZATION, {})[
+                    "draft_generator"
+                ] = {
+                    "applicable": False,
+                    "reason": "invalid_generation_options",
+                    "local_error": str(exc),
+                    "duration_ms": duration_ms,
+                }
+                ctx.add_plugin_trace(
+                    "draft_generator",
+                    duration_ms,
+                    "failed",
+                    payload={"reason": "invalid_generation_options"},
+                )
+                ctx.should_stop = True
+                return ctx
             backend = str(options.get("backend") or "auto")
             try:
                 await self._strategy.check_local_dependencies(request)
@@ -146,23 +162,6 @@ class DraftGeneratorPlugin:
                     "has_video_plan": bool(request.motion_prompt),
                     "frame_count": request.frame_count,
                 },
-            )
-            ctx.should_stop = True
-        except ValueError as exc:
-            duration_ms = (time.monotonic() - started_at) * 1000.0
-            ctx.extra.setdefault(NS_GENERATION_OPTIMIZATION, {})[
-                "draft_generator"
-            ] = {
-                "applicable": False,
-                "reason": "invalid_generation_options",
-                "local_error": str(exc),
-                "duration_ms": duration_ms,
-            }
-            ctx.add_plugin_trace(
-                "draft_generator",
-                duration_ms,
-                "failed",
-                payload={"reason": "invalid_generation_options"},
             )
             ctx.should_stop = True
         except Exception as exc:
@@ -295,21 +294,39 @@ class DraftGeneratorPlugin:
                     self._normalize_video_timing(
                         options.get(
                             "duration_seconds",
-                            ctx.request.get("duration_seconds", 5.0),
+                            ctx.request.get(
+                                "duration_seconds",
+                                self._config.draft_workflow.video_default_duration_seconds,
+                            ),
                         ),
-                        options.get("fps", ctx.request.get("target_fps", 8)),
+                        options.get(
+                            "fps",
+                            ctx.request.get(
+                                "target_fps",
+                                self._config.draft_workflow.video_default_fps,
+                            ),
+                        ),
                     )
                 )
             else:
                 duration_seconds = self._finite_positive_number(
                     options.get(
                         "duration_seconds",
-                        ctx.request.get("duration_seconds", 5.0),
+                        ctx.request.get(
+                            "duration_seconds",
+                            self._config.draft_workflow.video_default_duration_seconds,
+                        ),
                     ),
                     "duration_seconds",
                 )
                 target_fps = self._positive_integer(
-                    options.get("fps", ctx.request.get("target_fps", 8)),
+                    options.get(
+                        "fps",
+                        ctx.request.get(
+                            "target_fps",
+                            self._config.draft_workflow.video_default_fps,
+                        ),
+                    ),
                     "fps",
                 )
                 frame_count = None
@@ -353,26 +370,44 @@ class DraftGeneratorPlugin:
             trace_id=ctx.trace_id,
         )
 
-    @classmethod
     def _normalize_video_timing(
-        cls,
+        self,
         duration_value: Any,
         fps_value: Any,
     ) -> tuple[float, int, int]:
-        duration = cls._finite_positive_number(
+        timing = self._config.draft_workflow
+        duration = self._finite_positive_number(
             duration_value, "duration_seconds"
         )
-        if not any(
+        supported_durations = tuple(
+            self._finite_positive_number(value, "video_supported_duration")
+            for value in timing.video_supported_durations_seconds
+        )
+        if not supported_durations or not any(
             math.isclose(duration, allowed)
-            for allowed in _SUPPORTED_VIDEO_DURATIONS
+            for allowed in supported_durations
         ):
             raise ValueError("video_duration_unsupported")
-        fps = cls._positive_integer(fps_value, "fps")
-        if fps > _MAX_VIDEO_FPS:
+
+        fps = self._positive_integer(fps_value, "fps")
+        max_fps = self._positive_integer(timing.video_max_fps, "video_max_fps")
+        if fps > max_fps:
             raise ValueError("fps_out_of_range")
-        requested_count = round(duration * fps)
+
+        min_frames = self._positive_integer(
+            timing.video_min_frames, "video_min_frames"
+        )
+        max_frames = self._positive_integer(
+            timing.video_max_frames, "video_max_frames"
+        )
+        if min_frames > max_frames:
+            raise ValueError("video_frame_range_invalid")
+
+        requested_count = max(min_frames, round(duration * fps))
+        if requested_count > max_frames:
+            raise ValueError("frame_count_out_of_range")
         normalized_count = ((requested_count - 1 + 3) // 4) * 4 + 1
-        if normalized_count <= 0 or normalized_count > _MAX_VIDEO_FRAMES:
+        if normalized_count < min_frames or normalized_count > max_frames:
             raise ValueError("frame_count_out_of_range")
         return duration, fps, normalized_count
 
