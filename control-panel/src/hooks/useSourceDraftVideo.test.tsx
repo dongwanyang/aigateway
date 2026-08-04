@@ -38,7 +38,11 @@ beforeEach(() => {
 describe('useSourceDraftVideo terminal states', () => {
   it('turns pre-draft cancellation into a terminal text message', async () => {
     api.createVideoDraftFromSource.mockImplementation(
-      (_draftId, _request, signal: AbortSignal) => new Promise((_resolve, reject) => {
+      (
+        _draftId: string,
+        _request: unknown,
+        signal: AbortSignal,
+      ) => new Promise((_resolve, reject) => {
         signal.addEventListener('abort', () => {
           reject(new DOMException('Aborted', 'AbortError'))
         }, { once: true })
@@ -46,7 +50,7 @@ describe('useSourceDraftVideo terminal states', () => {
     )
     const { result } = renderHook(() => useSourceDraftVideo())
 
-    let creation: Promise<void>
+    let creation = Promise.resolve()
     act(() => {
       creation = result.current.create(input)
     })
@@ -58,7 +62,8 @@ describe('useSourceDraftVideo terminal states', () => {
     })
 
     const state = useChatStore.getState()
-    const assistant = state.sessions[0].messages.at(-1)
+    const messages = state.sessions[0].messages
+    const assistant = messages[messages.length - 1]
     expect(assistant).toMatchObject({
       role: 'assistant',
       content: '已停止',
@@ -83,7 +88,8 @@ describe('useSourceDraftVideo terminal states', () => {
     })
 
     const state = useChatStore.getState()
-    const assistant = state.sessions[0].messages.at(-1)
+    const messages = state.sessions[0].messages
+    const assistant = messages[messages.length - 1]
     expect(assistant).toMatchObject({
       role: 'assistant',
       content: '无权使用该图片草稿。',
