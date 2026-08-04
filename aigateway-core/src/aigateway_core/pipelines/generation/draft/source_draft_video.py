@@ -132,7 +132,7 @@ async def create_video_draft_from_source(
 
     try:
         source_bytes = await strategy.get_result_bytes(source_draft_id)
-    except Exception as exc:
+    except DraftWorkflowError as exc:
         raise DraftWorkflowError("source_draft_not_found") from exc
     if not source_bytes:
         raise DraftWorkflowError("source_draft_not_found")
