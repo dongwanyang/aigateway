@@ -14,7 +14,6 @@ export function classifyContent(
 ): ContentKind {
   if (intent === 'generation:image') return 'image'
   if (intent === 'generation:video') return 'video'
-  // content 启发式兜底
   if (/^https?:\/\//i.test(content) || /^data:image\//i.test(content)) return 'image'
   if (/id=[\w-]+/.test(content) && /poll\s+\/v1\/videos\//.test(content)) return 'video'
   return 'text'
@@ -26,9 +25,17 @@ interface MessageBubbleProps {
   pendingAssistantId: string | null
   onConfirmDraft?: (msgId: string) => void
   onRejectDraft?: (msgId: string) => void
+  onCreateVideoFromDraft?: (msgId: string) => void
 }
 
-export default function MessageBubble({ msg, isStreaming, pendingAssistantId, onConfirmDraft, onRejectDraft }: MessageBubbleProps) {
+export default function MessageBubble({
+  msg,
+  isStreaming,
+  pendingAssistantId,
+  onConfirmDraft,
+  onRejectDraft,
+  onCreateVideoFromDraft,
+}: MessageBubbleProps) {
   if (msg.role === 'user') {
     return (
       <div className="flex justify-end mb-4">
@@ -46,7 +53,6 @@ export default function MessageBubble({ msg, isStreaming, pendingAssistantId, on
     )
   }
 
-  // 草稿消息分支:渲染 DraftCard(不进 text/image/video 的 content 分类)
   if (msg.draft) {
     return (
       <div className="flex justify-start mb-4">
@@ -63,6 +69,7 @@ export default function MessageBubble({ msg, isStreaming, pendingAssistantId, on
             draft={msg.draft}
             onConfirm={() => onConfirmDraft?.(msg.id)}
             onReject={() => onRejectDraft?.(msg.id)}
+            onCreateVideo={() => onCreateVideoFromDraft?.(msg.id)}
           />
         </div>
       </div>
@@ -94,7 +101,6 @@ export default function MessageBubble({ msg, isStreaming, pendingAssistantId, on
         )}
         {kind === 'text' && (
           <>
-            {/* 空占位且 pendingAssistantId 匹配时显示三点"正在思考" */}
             {!msg.content && pendingAssistantId === msg.id ? (
               <TypingDots />
             ) : (
