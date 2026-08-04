@@ -1,60 +1,17 @@
-PR27 validation started at 2026-08-04T12:41:36Z
-HEAD=4be33053019fd1993894904457bb02dcb69848fb
+PR27 validation started at 2026-08-04T12:47:52Z
+HEAD=79f6641849f7023d98d40d4c79bc023b39b4afee
 INSTALL_CORE=0
 INSTALL_API=0
 INSTALL_CLI=0
-FOCUSED_TESTS=2
-FULL_UNIT_TESTS=2
-RUFF=1
+INSTALL_PILLOW_TEST_PREREQ=0
+FOCUSED_TESTS=1
+FULL_UNIT_TESTS=1
+CHANGED_FILES_RUFF=0
+FULL_REPO_RUFF_BASELINE=1
 OVERALL_STATUS=1
-PR27 validation finished at 2026-08-04T12:42:02Z
+PR27 validation finished at 2026-08-04T12:47:52Z
 
-=== INSTALL LOG (tail 120) ===
-  Using cached coverage-7.15.3-cp312-cp312-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl.metadata (8.6 kB)
-Collecting httptools>=0.8.0 (from uvicorn[standard]>=0.27.0->aigateway-api==0.1.1.0)
-  Using cached httptools-0.8.0-cp312-cp312-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl.metadata (3.5 kB)
-Collecting uvloop>=0.15.1 (from uvicorn[standard]>=0.27.0->aigateway-api==0.1.1.0)
-  Using cached uvloop-0.22.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (4.9 kB)
-Collecting watchfiles>=0.20 (from uvicorn[standard]>=0.27.0->aigateway-api==0.1.1.0)
-  Using cached watchfiles-1.2.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (4.9 kB)
-Collecting charset_normalizer<4,>=2 (from requests->tiktoken<1.0,>=0.8.0->litellm>=1.30.0->aigateway-api==0.1.1.0)
-  Using cached charset_normalizer-3.4.9-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (41 kB)
-Collecting urllib3<3,>=1.26 (from requests->tiktoken<1.0,>=0.8.0->litellm>=1.30.0->aigateway-api==0.1.1.0)
-  Using cached urllib3-2.7.0-py3-none-any.whl.metadata (6.9 kB)
-Using cached fastapi-0.141.1-py3-none-any.whl (131 kB)
-Using cached annotated_doc-0.0.5-py3-none-any.whl (5.3 kB)
-Using cached gunicorn-26.0.0-py3-none-any.whl (212 kB)
-Using cached hiredis-3.4.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (313 kB)
-Using cached litellm-1.95.0-cp312-cp312-manylinux_2_28_x86_64.whl (26.3 MB)
-Using cached aiohttp-3.14.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (1.8 MB)
-Using cached click-8.4.2-py3-none-any.whl (119 kB)
-Using cached fastuuid-0.14.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (278 kB)
-Using cached importlib_metadata-8.9.0-py3-none-any.whl (27 kB)
-Using cached jinja2-3.1.6-py3-none-any.whl (134 kB)
-Using cached jsonschema-4.26.0-py3-none-any.whl (90 kB)
-Using cached multidict-6.7.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (256 kB)
-Using cached openai-2.53.0-py3-none-any.whl (1.7 MB)
-Using cached distro-1.9.0-py3-none-any.whl (20 kB)
-Using cached jiter-0.16.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (343 kB)
-Using cached pydantic-2.13.4-py3-none-any.whl (472 kB)
-Using cached pydantic_core-2.46.4-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (2.1 MB)
-Using cached python_dotenv-1.2.2-py3-none-any.whl (22 kB)
-Using cached tiktoken-0.13.0-cp312-cp312-manylinux_2_28_x86_64.whl (1.1 MB)
-Using cached tokenizers-0.23.1-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (3.3 MB)
-Using cached huggingface_hub-1.26.0-py3-none-any.whl (780 kB)
-Using cached hf_xet-1.6.0-cp38-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (4.5 MB)
-Using cached yarl-1.24.5-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (109 kB)
-Using cached aiohappyeyeballs-2.7.1-py3-none-any.whl (15 kB)
-Using cached aiosignal-1.4.0-py3-none-any.whl (7.5 kB)
-Using cached annotated_types-0.8.0-py3-none-any.whl (13 kB)
-Using cached attrs-26.1.0-py3-none-any.whl (67 kB)
-Using cached filelock-3.32.2-py3-none-any.whl (98 kB)
-Using cached frozenlist-1.8.0-cp312-cp312-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl (242 kB)
-Using cached fsspec-2026.7.0-py3-none-any.whl (206 kB)
-Using cached jsonschema_specifications-2025.9.1-py3-none-any.whl (18 kB)
-Using cached markupsafe-3.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (22 kB)
-Using cached mypy-2.3.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (15.3 MB)
-Using cached ast_serialize-0.6.0-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (1.3 MB)
+=== INSTALL LOG (tail 80) ===
 Using cached librt-0.13.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (531 kB)
 Using cached mypy_extensions-1.1.0-py3-none-any.whl (5.0 kB)
 Using cached packaging-26.2-py3-none-any.whl (100 kB)
@@ -88,7 +45,7 @@ Building wheels for collected packages: aigateway-api
   Building editable for aigateway-api (pyproject.toml): started
   Building editable for aigateway-api (pyproject.toml): finished with status 'done'
   Created wheel for aigateway-api: filename=aigateway_api-0.1.1.0-py3-none-any.whl size=1387 sha256=ac7b9259c79b8da1d0c97c235258bd2f10d6265423357376387d48338bcb4803
-  Stored in directory: /tmp/pip-ephem-wheel-cache-ukrh7mf9/wheels/0f/b5/45/d3c8fec10afdad2b50bda4d3d1073f05dc881d7d1473772251
+  Stored in directory: /tmp/pip-ephem-wheel-cache-e2evj9k2/wheels/0f/b5/45/d3c8fec10afdad2b50bda4d3d1073f05dc881d7d1473772251
 Successfully built aigateway-api
 Installing collected packages: zipp, uvloop, urllib3, typing-inspection, tqdm, sniffio, ruff, rpds-py, regex, python-multipart, python-dotenv, pygments, pydantic-core, propcache, pluggy, pathspec, packaging, mypy_extensions, multidict, MarkupSafe, librt, jiter, iniconfig, httptools, hiredis, hf-xet, fsspec, frozenlist, filelock, fastuuid, distro, coverage, click, charset_normalizer, attrs, ast-serialize, annotated-types, annotated-doc, aiohappyeyeballs, yarl, watchfiles, uvicorn, starlette, requests, referencing, pytest, pydantic, mypy, jinja2, importlib-metadata, gunicorn, aiosignal, tiktoken, pytest-cov, pytest-asyncio, openai, jsonschema-specifications, huggingface-hub, fastapi, aiohttp, tokenizers, jsonschema, litellm, aigateway-api
 
@@ -125,266 +82,629 @@ Building wheels for collected packages: aigateway-cli
   Building editable for aigateway-cli (pyproject.toml): started
   Building editable for aigateway-cli (pyproject.toml): finished with status 'done'
   Created wheel for aigateway-cli: filename=aigateway_cli-0.1.1.0-py3-none-any.whl size=1428 sha256=a418056730a658ff2ba7b4f55a84ee84f5a2c37b5154ac877145ad211078fd71
-  Stored in directory: /tmp/pip-ephem-wheel-cache-715pwpra/wheels/63/7f/0f/8e4645261aba6e0456c139d170a384f078f2ae28357b5e2b56
+  Stored in directory: /tmp/pip-ephem-wheel-cache-6c2z9x2r/wheels/63/7f/0f/8e4645261aba6e0456c139d170a384f078f2ae28357b5e2b56
 Successfully built aigateway-cli
 Installing collected packages: mdurl, markdown-it-py, rich, aigateway-cli
 
 Successfully installed aigateway-cli-0.1.1.0 markdown-it-py-4.2.0 mdurl-0.1.2 rich-15.0.0
+Collecting Pillow
+  Using cached pillow-12.3.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl.metadata (9.1 kB)
+Using cached pillow-12.3.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl (6.9 MB)
+Installing collected packages: Pillow
+Successfully installed Pillow-12.3.0
 
-=== FOCUSED TEST LOG (tail 400) ===
+=== CHANGED FILES RUFF LOG (tail 300) ===
+Found 6 errors (6 fixed, 0 remaining).
+All checks passed!
 
-==================================== ERRORS ====================================
-_____ ERROR collecting tests/unit/pipeline/test_draft_video_plan_wiring.py _____
-ImportError while importing test module '/home/runner/work/aigateway/aigateway/tests/unit/pipeline/test_draft_video_plan_wiring.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/unit/pipeline/test_draft_video_plan_wiring.py:15: in <module>
-    from aigateway_core.pipelines.generation.draft.draft_generator import (
-aigateway-core/src/aigateway_core/pipelines/generation/draft/__init__.py:3: in <module>
-    from . import draft_generator as _strategy
-aigateway-core/src/aigateway_core/pipelines/generation/draft/draft_generator.py:10: in <module>
-    from . import _draft_generator_impl as _impl
-aigateway-core/src/aigateway_core/pipelines/generation/draft/_draft_generator_impl.py:35: in <module>
-    from PIL import Image, ImageOps
-E   ModuleNotFoundError: No module named 'PIL'
-____ ERROR collecting tests/unit/pipeline/test_draft_generator_strategy.py _____
-ImportError while importing test module '/home/runner/work/aigateway/aigateway/tests/unit/pipeline/test_draft_generator_strategy.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/unit/pipeline/test_draft_generator_strategy.py:41: in <module>
-    from aigateway_core.pipelines.generation.draft.draft_generator import (
-aigateway-core/src/aigateway_core/pipelines/generation/draft/__init__.py:3: in <module>
-    from . import draft_generator as _strategy
-aigateway-core/src/aigateway_core/pipelines/generation/draft/draft_generator.py:10: in <module>
-    from . import _draft_generator_impl as _impl
-aigateway-core/src/aigateway_core/pipelines/generation/draft/_draft_generator_impl.py:35: in <module>
-    from PIL import Image, ImageOps
-E   ModuleNotFoundError: No module named 'PIL'
+=== FOCUSED TEST LOG (tail 500) ===
+...............................................FFFF..................... [ 56%]
+.......................................................                  [100%]
+=================================== FAILURES ===================================
+_ TestAIDirectorStrategyOptimizePrompt.test_short_prompt_expansion_with_images _
+
+self = <tests.unit.pipeline.test_ai_director_strategy.TestAIDirectorStrategyOptimizePrompt object at 0x7faff3b97e60>
+default_config = AIDirectorConfig(enabled=True, rewrite_model='gpt-4o-mini', timeout_seconds=10.0, max_prompt_length=2000, min_prompt_length=10, prompt_confirmation_enabled=True)
+pipeline_ctx = PipelineContext(request={'model': 'test-model', 'messages': []}, trace_id='test-trace-001', response=None, should_stop...ser_id=None, extra={}, pipeline_kind='understanding', is_multimodal=False, total_token_savings=0, request_context=None)
+
+    @pytest.mark.asyncio
+    async def test_short_prompt_expansion_with_images(self, default_config, pipeline_ctx):
+        """Short prompt with reference images should include image hints."""
+        config = AIDirectorConfig(
+            min_prompt_length=20,  # "cat" is shorter than this
+            timeout_seconds=10.0,
+        )
+    
+        bridge = AsyncMock()
+        bridge.completion = AsyncMock(
+            return_value={
+                "data": {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": (
+                                    "【主体】一只橘色猫咪\n"
+                                    "【动作】安静地坐着\n"
+                                    "【环境】温暖的室内\n"
+                                    "【镜头】特写，平视角度"
+                                )
+                            }
+                        }
+                    ]
+                },
+                "_meta": {"cost": 0.0001},
+            }
+        )
+    
+        ref_image = MediaContent(
+            media_type=MediaType.IMAGE,
+            mime_type="image/png",
+            size_bytes=1024,
+            metadata={"description": "an orange tabby cat", "style": "realistic"},
+        )
+    
+        strategy = AIDirectorStrategy(config=config, litellm_bridge=bridge)
+        await strategy.optimize_prompt(
+            prompt="cat",
+            reference_images=[ref_image],
+            config=config,
+            ctx=pipeline_ctx,
+        )
+    
+        # Verify the bridge was called with a message containing image hints
+        call_args = bridge.completion.call_args
+        messages = call_args.kwargs.get("messages") or call_args[1].get("messages", [])
+        user_msg = messages[-1]["content"]
+>       assert "参考图片信息" in user_msg
+E       AssertionError: assert '参考图片信息' in '上一个结果没有使用要求的 en。请严格改为 en，保留引号内文字，只输出最终结构化提示词。'
+
+tests/unit/pipeline/test_ai_director_strategy.py:272: AssertionError
+_ TestAIDirectorStrategyOptimizePrompt.test_normal_prompt_uses_rewrite_system_prompt _
+
+self = <tests.unit.pipeline.test_ai_director_strategy.TestAIDirectorStrategyOptimizePrompt object at 0x7faff3a9ad80>
+default_config = AIDirectorConfig(enabled=True, rewrite_model='gpt-4o-mini', timeout_seconds=10.0, max_prompt_length=2000, min_prompt_length=10, prompt_confirmation_enabled=True)
+pipeline_ctx = PipelineContext(request={'model': 'test-model', 'messages': []}, trace_id='test-trace-001', response=None, should_stop...ser_id=None, extra={}, pipeline_kind='understanding', is_multimodal=False, total_token_savings=0, request_context=None)
+mock_bridge = <AsyncMock id='140393658738464'>
+
+    @pytest.mark.asyncio
+    async def test_normal_prompt_uses_rewrite_system_prompt(
+        self, default_config, pipeline_ctx, mock_bridge
+    ):
+        """Normal (non-short) prompt should use the standard rewrite system prompt."""
+        strategy = AIDirectorStrategy(
+            config=default_config, litellm_bridge=mock_bridge
+        )
+        await strategy.optimize_prompt(
+            prompt="a girl dancing in the rain with an umbrella",
+            reference_images=[],
+            config=default_config,
+            ctx=pipeline_ctx,
+        )
+    
+        call_args = mock_bridge.completion.call_args
+        messages = call_args.kwargs.get("messages") or call_args[1].get("messages", [])
+        system_msg = messages[0]["content"]
+>       assert system_msg == _REWRITE_SYSTEM_PROMPT
+E       AssertionError: assert '你是一位专业的 AI 生...现在画面中的文字保持原样。' == '你是一位专业的 AI 生...必须原样保留，不要翻译\n'
+E         
+E         Skipping 404 identical leading characters in diff, use -v to show
+E           须原样保留，不要翻译
+E         + 
+E         + 
+E         + 语言策略：用户主要语言为 en；目标模型支持的输出语言已选择为 en。视觉描述与四个标题必须使用 en；引号内要求出现在画面中的文字保持原样。
+
+tests/unit/pipeline/test_ai_director_strategy.py:297: AssertionError
+_ TestAIDirectorStrategyOptimizePrompt.test_default_system_prompts_require_english_for_sdxl[\u4f60\u662f\u4e00\u4f4d\u4e13\u4e1a\u7684 AI \u751f\u6210\u5bfc\u6f14\u3002\u4f60\u7684\u4efb\u52a1\u662f\u5c06\u7528\u6237\u63d0\u4f9b\u7684\u7b80\u77ed\u6216\u6a21\u7cca\u7684\u751f\u6210\u63d0\u793a\u8bcd\u6539\u5199\u4e3a\u7ed3\u6784\u5316\u7684\u4e13\u4e1a\u63d0\u793a\u8bcd\u3002\n\n\u6539\u5199\u540e\u7684\u63d0\u793a\u8bcd\u5fc5\u987b\u5305\u542b\u4ee5\u4e0b\u56db\u4e2a\u90e8\u5206\uff1a\nSubject: \u8be6\u7ec6\u63cf\u8ff0\u753b\u9762\u4e2d\u7684\u4e3b\u8981\u5bf9\u8c61\u3001\u89d2\u8272\u3001\u7269\u4f53\u7b49\uff0c\u5305\u62ec\u5916\u89c2\u3001\u670d\u88c5\u3001\u8868\u60c5\u7b49\u7ec6\u8282\nAction: \u63cf\u8ff0\u4e3b\u4f53\u6b63\u5728\u8fdb\u884c\u7684\u52a8\u4f5c\u6216\u59ff\u6001\nEnvironment: \u63cf\u8ff0\u573a\u666f\u7684\u80cc\u666f\u3001\u5149\u7167\u3001\u5929\u6c14\u3001\u65f6\u95f4\u7b49\u73af\u5883\u56e0\u7d20\nCamera: \u63cf\u8ff0\u62cd\u6444\u89d2\u5ea6\u3001\u666f\u522b\u3001\u8fd0\u955c\u65b9\u5f0f\u7b49\u6444\u5f71\u53c2\u6570\n\n\u89c4\u5219\uff1a\n1. \u4fdd\u7559\u7528\u6237\u539f\u59cb\u610f\u56fe\uff0c\u4e0d\u8981\u6dfb\u52a0\u4e0e\u539f\u610f\u65e0\u5173\u7684\u5185\u5bb9\n2. \u4f7f\u7528\u5177\u4f53\u3001\u7cbe\u786e\u7684\u63cf\u8ff0\u8bcd\u6c47\n3. \u5982\u679c\u539f\u59cb prompt \u7f3a\u5c11\u67d0\u4e2a\u7ef4\u5ea6\u7684\u4fe1\u606f\uff0c\u6839\u636e\u4e0a\u4e0b\u6587\u5408\u7406\u8865\u5145\n4. \u8f93\u51fa\u5fc5\u987b\u7b80\u6d01\u9ad8\u6548\uff0c\u907f\u514d\u5197\u4f59\u91cd\u590d\n5. \u76f4\u63a5\u8f93\u51fa\u6539\u5199\u7ed3\u679c\uff0c\u4e0d\u8981\u6dfb\u52a0\u4efb\u4f55\u89e3\u91ca\u6027\u6587\u5b57\n6. \u8f93\u51fa\u8bed\u8a00\u7531\u8c03\u7528\u65b9\u63d0\u4f9b\u7684\u76ee\u6807\u6a21\u578b\u8bed\u8a00\u7b56\u7565\u51b3\u5b9a\uff1b\u76ee\u6807\u6a21\u578b\u652f\u6301\u7528\u6237\u4e3b\u8981\u8bed\u8a00\u65f6\u4fdd\u7559\u8be5\u8bed\u8a00\uff0c\u5426\u5219\u663e\u5f0f\u8f6c\u6362\u4e3a\u76ee\u6807\u6a21\u578b\u652f\u6301\u7684\u8bed\u8a00\n7. \u7528\u6237\u8981\u6c42\u753b\u9762\u4e2d\u51fa\u73b0\u7684\u7279\u5b9a\u6587\u5b57\u5fc5\u987b\u539f\u6837\u4fdd\u7559\uff0c\u4e0d\u8981\u7ffb\u8bd1\n] _
+
+self = <tests.unit.pipeline.test_ai_director_strategy.TestAIDirectorStrategyOptimizePrompt object at 0x7faff3a98410>
+system_prompt = '你是一位专业的 AI 生成导演。你的任务是将用户提供的简短或模糊的生成提示词改写为结构化的专业提示词。\n\n改写后的提示词必须包含以下四个部分：\nSubject: 详细描述画面中的主要对象、角色、物体等，包括外观、服装、表情等细节...n5. 直接输出改写结果，不要添加任何解释性文字\n6. 输出语言由调用方提供的目标模型语言策略决定；目标模型支持用户主要语言时保留该语言，否则显式转换为目标模型支持的语言\n7. 用户要求画面中出现的特定文字必须原样保留，不要翻译\n'
+
+    @pytest.mark.parametrize(
+        "system_prompt",
+        [_REWRITE_SYSTEM_PROMPT, _EXPAND_SYSTEM_PROMPT],
+    )
+    def test_default_system_prompts_require_english_for_sdxl(self, system_prompt):
+        """Default optimization must produce text SDXL's CLIP can understand."""
+>       assert "必须使用自然、准确的英文" in system_prompt
+E       AssertionError: assert '必须使用自然、准确的英文' in '你是一位专业的 AI 生成导演。你的任务是将用户提供的简短或模糊的生成提示词改写为结构化的专业提示词。\n\n改写后的提示词必须包含以下四个部分：\nSubject: 详细描述画面中的主要对象、角色、物体等，包括外观、服装、表情等细节...n5. 直接输出改写结果，不要添加任何解释性文字\n6. 输出语言由调用方提供的目标模型语言策略决定；目标模型支持用户主要语言时保留该语言，否则显式转换为目标模型支持的语言\n7. 用户要求画面中出现的特定文字必须原样保留，不要翻译\n'
+
+tests/unit/pipeline/test_ai_director_strategy.py:305: AssertionError
+_ TestAIDirectorStrategyOptimizePrompt.test_default_system_prompts_require_english_for_sdxl[\u4f60\u662f\u4e00\u4f4d\u4e13\u4e1a\u7684 AI \u751f\u6210\u5bfc\u6f14\u3002\u7528\u6237\u63d0\u4f9b\u4e86\u4e00\u4e2a\u975e\u5e38\u7b80\u77ed\u7684\u63d0\u793a\u8bcd\uff0c\u8bf7\u6839\u636e\u63d0\u793a\u8bcd\u5185\u5bb9\u548c\u53c2\u8003\u56fe\u7247\u63cf\u8ff0\uff0c\u5c06\u5176\u6269\u5c55\u4e3a\u7ed3\u6784\u5316\u7684\u4e13\u4e1a\u63d0\u793a\u8bcd\u3002\n\n\u6539\u5199\u540e\u7684\u63d0\u793a\u8bcd\u5fc5\u987b\u5305\u542b\u4ee5\u4e0b\u56db\u4e2a\u90e8\u5206\uff1a\nSubject: \u8be6\u7ec6\u63cf\u8ff0\u753b\u9762\u4e2d\u7684\u4e3b\u8981\u5bf9\u8c61\u3001\u89d2\u8272\u3001\u7269\u4f53\u7b49\nAction: \u63cf\u8ff0\u4e3b\u4f53\u6b63\u5728\u8fdb\u884c\u7684\u52a8\u4f5c\u6216\u59ff\u6001\nEnvironment: \u63cf\u8ff0\u573a\u666f\u7684\u80cc\u666f\u3001\u5149\u7167\u3001\u5929\u6c14\u3001\u65f6\u95f4\u7b49\nCamera: \u63cf\u8ff0\u62cd\u6444\u89d2\u5ea6\u3001\u666f\u522b\u3001\u8fd0\u955c\u65b9\u5f0f\u7b49\n\n\u89c4\u5219\uff1a\n1. \u57fa\u4e8e\u7b80\u77ed\u63d0\u793a\u8bcd\u8fdb\u884c\u5408\u7406\u7684\u521b\u610f\u6269\u5c55\n2. \u5982\u679c\u6709\u53c2\u8003\u56fe\u7247\u4fe1\u606f\uff0c\u4ece\u4e2d\u63a8\u65ad\u98ce\u683c\u548c\u6c1b\u56f4\n3. \u4f7f\u7528\u5177\u4f53\u3001\u7cbe\u786e\u7684\u63cf\u8ff0\u8bcd\u6c47\n4. \u76f4\u63a5\u8f93\u51fa\u6539\u5199\u7ed3\u679c\uff0c\u4e0d\u8981\u6dfb\u52a0\u4efb\u4f55\u89e3\u91ca\u6027\u6587\u5b57\n5. \u8f93\u51fa\u8bed\u8a00\u7531\u8c03\u7528\u65b9\u63d0\u4f9b\u7684\u76ee\u6807\u6a21\u578b\u8bed\u8a00\u7b56\u7565\u51b3\u5b9a\uff1b\u76ee\u6807\u6a21\u578b\u652f\u6301\u7528\u6237\u4e3b\u8981\u8bed\u8a00\u65f6\u4fdd\u7559\u8be5\u8bed\u8a00\uff0c\u5426\u5219\u663e\u5f0f\u8f6c\u6362\u4e3a\u76ee\u6807\u6a21\u578b\u652f\u6301\u7684\u8bed\u8a00\n6. \u7528\u6237\u8981\u6c42\u753b\u9762\u4e2d\u51fa\u73b0\u7684\u7279\u5b9a\u6587\u5b57\u5fc5\u987b\u539f\u6837\u4fdd\u7559\uff0c\u4e0d\u8981\u7ffb\u8bd1\n] _
+
+self = <tests.unit.pipeline.test_ai_director_strategy.TestAIDirectorStrategyOptimizePrompt object at 0x7faff3a98560>
+system_prompt = '你是一位专业的 AI 生成导演。用户提供了一个非常简短的提示词，请根据提示词内容和参考图片描述，将其扩展为结构化的专业提示词。\n\n改写后的提示词必须包含以下四个部分：\nSubject: 详细描述画面中的主要对象、角色、物体等\n...n4. 直接输出改写结果，不要添加任何解释性文字\n5. 输出语言由调用方提供的目标模型语言策略决定；目标模型支持用户主要语言时保留该语言，否则显式转换为目标模型支持的语言\n6. 用户要求画面中出现的特定文字必须原样保留，不要翻译\n'
+
+    @pytest.mark.parametrize(
+        "system_prompt",
+        [_REWRITE_SYSTEM_PROMPT, _EXPAND_SYSTEM_PROMPT],
+    )
+    def test_default_system_prompts_require_english_for_sdxl(self, system_prompt):
+        """Default optimization must produce text SDXL's CLIP can understand."""
+>       assert "必须使用自然、准确的英文" in system_prompt
+E       AssertionError: assert '必须使用自然、准确的英文' in '你是一位专业的 AI 生成导演。用户提供了一个非常简短的提示词，请根据提示词内容和参考图片描述，将其扩展为结构化的专业提示词。\n\n改写后的提示词必须包含以下四个部分：\nSubject: 详细描述画面中的主要对象、角色、物体等\n...n4. 直接输出改写结果，不要添加任何解释性文字\n5. 输出语言由调用方提供的目标模型语言策略决定；目标模型支持用户主要语言时保留该语言，否则显式转换为目标模型支持的语言\n6. 用户要求画面中出现的特定文字必须原样保留，不要翻译\n'
+
+tests/unit/pipeline/test_ai_director_strategy.py:305: AssertionError
 =========================== short test summary info ============================
-ERROR tests/unit/pipeline/test_draft_video_plan_wiring.py
-ERROR tests/unit/pipeline/test_draft_generator_strategy.py
-!!!!!!!!!!!!!!!!!!! Interrupted: 2 errors during collection !!!!!!!!!!!!!!!!!!!!
-2 errors in 1.12s
+FAILED tests/unit/pipeline/test_ai_director_strategy.py::TestAIDirectorStrategyOptimizePrompt::test_short_prompt_expansion_with_images - AssertionError: assert '参考图片信息' in '上一个结果没有使用要求的 en。请严格改为 en，保留引号内文字，只输出最终结构化提示词。'
+FAILED tests/unit/pipeline/test_ai_director_strategy.py::TestAIDirectorStrategyOptimizePrompt::test_normal_prompt_uses_rewrite_system_prompt - AssertionError: assert '你是一位专业的 AI 生...现在画面中的文字保持原样。' == '你是一位专业的 AI 生...必须原样保留，不要翻译\n'
+  
+  Skipping 404 identical leading characters in diff, use -v to show
+    须原样保留，不要翻译
+  + 
+  + 
+  + 语言策略：用户主要语言为 en；目标模型支持的输出语言已选择为 en。视觉描述与四个标题必须使用 en；引号内要求出现在画面中的文字保持原样。
+FAILED tests/unit/pipeline/test_ai_director_strategy.py::TestAIDirectorStrategyOptimizePrompt::test_default_system_prompts_require_english_for_sdxl[\u4f60\u662f\u4e00\u4f4d\u4e13\u4e1a\u7684 AI \u751f\u6210\u5bfc\u6f14\u3002\u4f60\u7684\u4efb\u52a1\u662f\u5c06\u7528\u6237\u63d0\u4f9b\u7684\u7b80\u77ed\u6216\u6a21\u7cca\u7684\u751f\u6210\u63d0\u793a\u8bcd\u6539\u5199\u4e3a\u7ed3\u6784\u5316\u7684\u4e13\u4e1a\u63d0\u793a\u8bcd\u3002\n\n\u6539\u5199\u540e\u7684\u63d0\u793a\u8bcd\u5fc5\u987b\u5305\u542b\u4ee5\u4e0b\u56db\u4e2a\u90e8\u5206\uff1a\nSubject: \u8be6\u7ec6\u63cf\u8ff0\u753b\u9762\u4e2d\u7684\u4e3b\u8981\u5bf9\u8c61\u3001\u89d2\u8272\u3001\u7269\u4f53\u7b49\uff0c\u5305\u62ec\u5916\u89c2\u3001\u670d\u88c5\u3001\u8868\u60c5\u7b49\u7ec6\u8282\nAction: \u63cf\u8ff0\u4e3b\u4f53\u6b63\u5728\u8fdb\u884c\u7684\u52a8\u4f5c\u6216\u59ff\u6001\nEnvironment: \u63cf\u8ff0\u573a\u666f\u7684\u80cc\u666f\u3001\u5149\u7167\u3001\u5929\u6c14\u3001\u65f6\u95f4\u7b49\u73af\u5883\u56e0\u7d20\nCamera: \u63cf\u8ff0\u62cd\u6444\u89d2\u5ea6\u3001\u666f\u522b\u3001\u8fd0\u955c\u65b9\u5f0f\u7b49\u6444\u5f71\u53c2\u6570\n\n\u89c4\u5219\uff1a\n1. \u4fdd\u7559\u7528\u6237\u539f\u59cb\u610f\u56fe\uff0c\u4e0d\u8981\u6dfb\u52a0\u4e0e\u539f\u610f\u65e0\u5173\u7684\u5185\u5bb9\n2. \u4f7f\u7528\u5177\u4f53\u3001\u7cbe\u786e\u7684\u63cf\u8ff0\u8bcd\u6c47\n3. \u5982\u679c\u539f\u59cb prompt \u7f3a\u5c11\u67d0\u4e2a\u7ef4\u5ea6\u7684\u4fe1\u606f\uff0c\u6839\u636e\u4e0a\u4e0b\u6587\u5408\u7406\u8865\u5145\n4. \u8f93\u51fa\u5fc5\u987b\u7b80\u6d01\u9ad8\u6548\uff0c\u907f\u514d\u5197\u4f59\u91cd\u590d\n5. \u76f4\u63a5\u8f93\u51fa\u6539\u5199\u7ed3\u679c\uff0c\u4e0d\u8981\u6dfb\u52a0\u4efb\u4f55\u89e3\u91ca\u6027\u6587\u5b57\n6. \u8f93\u51fa\u8bed\u8a00\u7531\u8c03\u7528\u65b9\u63d0\u4f9b\u7684\u76ee\u6807\u6a21\u578b\u8bed\u8a00\u7b56\u7565\u51b3\u5b9a\uff1b\u76ee\u6807\u6a21\u578b\u652f\u6301\u7528\u6237\u4e3b\u8981\u8bed\u8a00\u65f6\u4fdd\u7559\u8be5\u8bed\u8a00\uff0c\u5426\u5219\u663e\u5f0f\u8f6c\u6362\u4e3a\u76ee\u6807\u6a21\u578b\u652f\u6301\u7684\u8bed\u8a00\n7. \u7528\u6237\u8981\u6c42\u753b\u9762\u4e2d\u51fa\u73b0\u7684\u7279\u5b9a\u6587\u5b57\u5fc5\u987b\u539f\u6837\u4fdd\u7559\uff0c\u4e0d\u8981\u7ffb\u8bd1\n] - AssertionError: assert '必须使用自然、准确的英文' in '你是一位专业的 AI 生成导演。你的任务是将用户提供的简短或模糊的生成提示词改写为结构化的专业提示词。\n\n改写后的提示词必须包含以下四个部分：\nSubject: 详细描述画面中的主要对象、角色、物体等，包括外观、服装、表情等细节...n5. 直接输出改写结果，不要添加任何解释性文字\n6. 输出语言由调用方提供的目标模型语言策略决定；目标模型支持用户主要语言时保留该语言，否则显式转换为目标模型支持的语言\n7. 用户要求画面中出现的特定文字必须原样保留，不要翻译\n'
+FAILED tests/unit/pipeline/test_ai_director_strategy.py::TestAIDirectorStrategyOptimizePrompt::test_default_system_prompts_require_english_for_sdxl[\u4f60\u662f\u4e00\u4f4d\u4e13\u4e1a\u7684 AI \u751f\u6210\u5bfc\u6f14\u3002\u7528\u6237\u63d0\u4f9b\u4e86\u4e00\u4e2a\u975e\u5e38\u7b80\u77ed\u7684\u63d0\u793a\u8bcd\uff0c\u8bf7\u6839\u636e\u63d0\u793a\u8bcd\u5185\u5bb9\u548c\u53c2\u8003\u56fe\u7247\u63cf\u8ff0\uff0c\u5c06\u5176\u6269\u5c55\u4e3a\u7ed3\u6784\u5316\u7684\u4e13\u4e1a\u63d0\u793a\u8bcd\u3002\n\n\u6539\u5199\u540e\u7684\u63d0\u793a\u8bcd\u5fc5\u987b\u5305\u542b\u4ee5\u4e0b\u56db\u4e2a\u90e8\u5206\uff1a\nSubject: \u8be6\u7ec6\u63cf\u8ff0\u753b\u9762\u4e2d\u7684\u4e3b\u8981\u5bf9\u8c61\u3001\u89d2\u8272\u3001\u7269\u4f53\u7b49\nAction: \u63cf\u8ff0\u4e3b\u4f53\u6b63\u5728\u8fdb\u884c\u7684\u52a8\u4f5c\u6216\u59ff\u6001\nEnvironment: \u63cf\u8ff0\u573a\u666f\u7684\u80cc\u666f\u3001\u5149\u7167\u3001\u5929\u6c14\u3001\u65f6\u95f4\u7b49\nCamera: \u63cf\u8ff0\u62cd\u6444\u89d2\u5ea6\u3001\u666f\u522b\u3001\u8fd0\u955c\u65b9\u5f0f\u7b49\n\n\u89c4\u5219\uff1a\n1. \u57fa\u4e8e\u7b80\u77ed\u63d0\u793a\u8bcd\u8fdb\u884c\u5408\u7406\u7684\u521b\u610f\u6269\u5c55\n2. \u5982\u679c\u6709\u53c2\u8003\u56fe\u7247\u4fe1\u606f\uff0c\u4ece\u4e2d\u63a8\u65ad\u98ce\u683c\u548c\u6c1b\u56f4\n3. \u4f7f\u7528\u5177\u4f53\u3001\u7cbe\u786e\u7684\u63cf\u8ff0\u8bcd\u6c47\n4. \u76f4\u63a5\u8f93\u51fa\u6539\u5199\u7ed3\u679c\uff0c\u4e0d\u8981\u6dfb\u52a0\u4efb\u4f55\u89e3\u91ca\u6027\u6587\u5b57\n5. \u8f93\u51fa\u8bed\u8a00\u7531\u8c03\u7528\u65b9\u63d0\u4f9b\u7684\u76ee\u6807\u6a21\u578b\u8bed\u8a00\u7b56\u7565\u51b3\u5b9a\uff1b\u76ee\u6807\u6a21\u578b\u652f\u6301\u7528\u6237\u4e3b\u8981\u8bed\u8a00\u65f6\u4fdd\u7559\u8be5\u8bed\u8a00\uff0c\u5426\u5219\u663e\u5f0f\u8f6c\u6362\u4e3a\u76ee\u6807\u6a21\u578b\u652f\u6301\u7684\u8bed\u8a00\n6. \u7528\u6237\u8981\u6c42\u753b\u9762\u4e2d\u51fa\u73b0\u7684\u7279\u5b9a\u6587\u5b57\u5fc5\u987b\u539f\u6837\u4fdd\u7559\uff0c\u4e0d\u8981\u7ffb\u8bd1\n] - AssertionError: assert '必须使用自然、准确的英文' in '你是一位专业的 AI 生成导演。用户提供了一个非常简短的提示词，请根据提示词内容和参考图片描述，将其扩展为结构化的专业提示词。\n\n改写后的提示词必须包含以下四个部分：\nSubject: 详细描述画面中的主要对象、角色、物体等\n...n4. 直接输出改写结果，不要添加任何解释性文字\n5. 输出语言由调用方提供的目标模型语言策略决定；目标模型支持用户主要语言时保留该语言，否则显式转换为目标模型支持的语言\n6. 用户要求画面中出现的特定文字必须原样保留，不要翻译\n'
+4 failed, 123 passed in 1.95s
 
-=== FULL UNIT LOG (tail 400) ===
+=== FULL UNIT LOG (tail 500) ===
 
-==================================== ERRORS ====================================
-__ ERROR collecting tests/unit/pipeline/test_comfyui_progressive_workflow.py ___
-ImportError while importing test module '/home/runner/work/aigateway/aigateway/tests/unit/pipeline/test_comfyui_progressive_workflow.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/unit/pipeline/test_comfyui_progressive_workflow.py:17: in <module>
-    from aigateway_core.pipelines.generation.draft import _draft_generator_impl as impl
-aigateway-core/src/aigateway_core/pipelines/generation/draft/__init__.py:3: in <module>
-    from . import draft_generator as _strategy
-aigateway-core/src/aigateway_core/pipelines/generation/draft/draft_generator.py:10: in <module>
-    from . import _draft_generator_impl as _impl
-aigateway-core/src/aigateway_core/pipelines/generation/draft/_draft_generator_impl.py:35: in <module>
-    from PIL import Image, ImageOps
-E   ModuleNotFoundError: No module named 'PIL'
-_____ ERROR collecting tests/unit/pipeline/test_comfyui_recovery_errors.py _____
-ImportError while importing test module '/home/runner/work/aigateway/aigateway/tests/unit/pipeline/test_comfyui_recovery_errors.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/unit/pipeline/test_comfyui_recovery_errors.py:12: in <module>
-    from aigateway_core.pipelines.generation.draft.draft_generator import (
-aigateway-core/src/aigateway_core/pipelines/generation/draft/__init__.py:3: in <module>
-    from . import draft_generator as _strategy
-aigateway-core/src/aigateway_core/pipelines/generation/draft/draft_generator.py:10: in <module>
-    from . import _draft_generator_impl as _impl
-aigateway-core/src/aigateway_core/pipelines/generation/draft/_draft_generator_impl.py:35: in <module>
-    from PIL import Image, ImageOps
-E   ModuleNotFoundError: No module named 'PIL'
-_ ERROR collecting tests/unit/pipeline/test_draft_confirmation_recovery_state.py _
-ImportError while importing test module '/home/runner/work/aigateway/aigateway/tests/unit/pipeline/test_draft_confirmation_recovery_state.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/unit/pipeline/test_draft_confirmation_recovery_state.py:11: in <module>
-    from aigateway_core.pipelines.generation.draft.draft_generator import (
-aigateway-core/src/aigateway_core/pipelines/generation/draft/__init__.py:3: in <module>
-    from . import draft_generator as _strategy
-aigateway-core/src/aigateway_core/pipelines/generation/draft/draft_generator.py:10: in <module>
-    from . import _draft_generator_impl as _impl
-aigateway-core/src/aigateway_core/pipelines/generation/draft/_draft_generator_impl.py:35: in <module>
-    from PIL import Image, ImageOps
-E   ModuleNotFoundError: No module named 'PIL'
-_____ ERROR collecting tests/unit/pipeline/test_draft_generator_plugin.py ______
-ImportError while importing test module '/home/runner/work/aigateway/aigateway/tests/unit/pipeline/test_draft_generator_plugin.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/unit/pipeline/test_draft_generator_plugin.py:26: in <module>
-    from aigateway_core.pipelines.generation.draft.draft_generator_plugin import (
-aigateway-core/src/aigateway_core/pipelines/generation/draft/__init__.py:3: in <module>
-    from . import draft_generator as _strategy
-aigateway-core/src/aigateway_core/pipelines/generation/draft/draft_generator.py:10: in <module>
-    from . import _draft_generator_impl as _impl
-aigateway-core/src/aigateway_core/pipelines/generation/draft/_draft_generator_impl.py:35: in <module>
-    from PIL import Image, ImageOps
-E   ModuleNotFoundError: No module named 'PIL'
-____ ERROR collecting tests/unit/pipeline/test_draft_generator_strategy.py _____
-ImportError while importing test module '/home/runner/work/aigateway/aigateway/tests/unit/pipeline/test_draft_generator_strategy.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/unit/pipeline/test_draft_generator_strategy.py:41: in <module>
-    from aigateway_core.pipelines.generation.draft.draft_generator import (
-aigateway-core/src/aigateway_core/pipelines/generation/draft/__init__.py:3: in <module>
-    from . import draft_generator as _strategy
-aigateway-core/src/aigateway_core/pipelines/generation/draft/draft_generator.py:10: in <module>
-    from . import _draft_generator_impl as _impl
-aigateway-core/src/aigateway_core/pipelines/generation/draft/_draft_generator_impl.py:35: in <module>
-    from PIL import Image, ImageOps
-E   ModuleNotFoundError: No module named 'PIL'
-_______ ERROR collecting tests/unit/pipeline/test_draft_gpu_scheduler.py _______
-ImportError while importing test module '/home/runner/work/aigateway/aigateway/tests/unit/pipeline/test_draft_gpu_scheduler.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/unit/pipeline/test_draft_gpu_scheduler.py:8: in <module>
-    from aigateway_core.pipelines.generation.draft.draft_generator import (
-aigateway-core/src/aigateway_core/pipelines/generation/draft/__init__.py:3: in <module>
-    from . import draft_generator as _strategy
-aigateway-core/src/aigateway_core/pipelines/generation/draft/draft_generator.py:10: in <module>
-    from . import _draft_generator_impl as _impl
-aigateway-core/src/aigateway_core/pipelines/generation/draft/_draft_generator_impl.py:35: in <module>
-    from PIL import Image, ImageOps
-E   ModuleNotFoundError: No module named 'PIL'
-_ ERROR collecting tests/unit/pipeline/test_draft_registration_config_contract.py _
-ImportError while importing test module '/home/runner/work/aigateway/aigateway/tests/unit/pipeline/test_draft_registration_config_contract.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/unit/pipeline/test_draft_registration_config_contract.py:9: in <module>
-    from aigateway_core.pipelines.generation.draft.draft_generator import (
-aigateway-core/src/aigateway_core/pipelines/generation/draft/__init__.py:3: in <module>
-    from . import draft_generator as _strategy
-aigateway-core/src/aigateway_core/pipelines/generation/draft/draft_generator.py:10: in <module>
-    from . import _draft_generator_impl as _impl
-aigateway-core/src/aigateway_core/pipelines/generation/draft/_draft_generator_impl.py:35: in <module>
-    from PIL import Image, ImageOps
-E   ModuleNotFoundError: No module named 'PIL'
-_____ ERROR collecting tests/unit/pipeline/test_draft_video_plan_wiring.py _____
-ImportError while importing test module '/home/runner/work/aigateway/aigateway/tests/unit/pipeline/test_draft_video_plan_wiring.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/unit/pipeline/test_draft_video_plan_wiring.py:15: in <module>
-    from aigateway_core.pipelines.generation.draft.draft_generator import (
-aigateway-core/src/aigateway_core/pipelines/generation/draft/__init__.py:3: in <module>
-    from . import draft_generator as _strategy
-aigateway-core/src/aigateway_core/pipelines/generation/draft/draft_generator.py:10: in <module>
-    from . import _draft_generator_impl as _impl
-aigateway-core/src/aigateway_core/pipelines/generation/draft/_draft_generator_impl.py:35: in <module>
-    from PIL import Image, ImageOps
-E   ModuleNotFoundError: No module named 'PIL'
-_ ERROR collecting tests/unit/pipeline/test_generation_optimization_registration.py _
-ImportError while importing test module '/home/runner/work/aigateway/aigateway/tests/unit/pipeline/test_generation_optimization_registration.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/unit/pipeline/test_generation_optimization_registration.py:23: in <module>
-    from aigateway_core.pipelines.generation.registration import (
-aigateway-core/src/aigateway_core/pipelines/generation/registration.py:31: in <module>
-    from aigateway_core.pipelines.generation.draft.draft_generator_plugin import (
-aigateway-core/src/aigateway_core/pipelines/generation/draft/__init__.py:3: in <module>
-    from . import draft_generator as _strategy
-aigateway-core/src/aigateway_core/pipelines/generation/draft/draft_generator.py:10: in <module>
-    from . import _draft_generator_impl as _impl
-aigateway-core/src/aigateway_core/pipelines/generation/draft/_draft_generator_impl.py:35: in <module>
-    from PIL import Image, ImageOps
-E   ModuleNotFoundError: No module named 'PIL'
-___ ERROR collecting tests/unit/pipeline/test_qwen_image_selection_policy.py ___
-ImportError while importing test module '/home/runner/work/aigateway/aigateway/tests/unit/pipeline/test_qwen_image_selection_policy.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/unit/pipeline/test_qwen_image_selection_policy.py:8: in <module>
-    from aigateway_core.pipelines.generation.draft.draft_generator import (
-aigateway-core/src/aigateway_core/pipelines/generation/draft/__init__.py:3: in <module>
-    from . import draft_generator as _strategy
-aigateway-core/src/aigateway_core/pipelines/generation/draft/draft_generator.py:10: in <module>
-    from . import _draft_generator_impl as _impl
-aigateway-core/src/aigateway_core/pipelines/generation/draft/_draft_generator_impl.py:35: in <module>
-    from PIL import Image, ImageOps
-E   ModuleNotFoundError: No module named 'PIL'
-_______ ERROR collecting tests/unit/pipeline/test_realesrgan_upscale.py ________
-ImportError while importing test module '/home/runner/work/aigateway/aigateway/tests/unit/pipeline/test_realesrgan_upscale.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/unit/pipeline/test_realesrgan_upscale.py:10: in <module>
-    from aigateway_core.pipelines.generation.draft.draft_generator import (
-aigateway-core/src/aigateway_core/pipelines/generation/draft/__init__.py:3: in <module>
-    from . import draft_generator as _strategy
-aigateway-core/src/aigateway_core/pipelines/generation/draft/draft_generator.py:10: in <module>
-    from . import _draft_generator_impl as _impl
-aigateway-core/src/aigateway_core/pipelines/generation/draft/_draft_generator_impl.py:35: in <module>
-    from PIL import Image, ImageOps
-E   ModuleNotFoundError: No module named 'PIL'
-_________ ERROR collecting tests/unit/test_merge_readiness_followup.py _________
-ImportError while importing test module '/home/runner/work/aigateway/aigateway/tests/unit/test_merge_readiness_followup.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/unit/test_merge_readiness_followup.py:36: in <module>
-    from aigateway_core.pipelines.generation.draft.draft_generator import (
-aigateway-core/src/aigateway_core/pipelines/generation/draft/__init__.py:3: in <module>
-    from . import draft_generator as _strategy
-aigateway-core/src/aigateway_core/pipelines/generation/draft/draft_generator.py:10: in <module>
-    from . import _draft_generator_impl as _impl
-aigateway-core/src/aigateway_core/pipelines/generation/draft/_draft_generator_impl.py:35: in <module>
-    from PIL import Image, ImageOps
-E   ModuleNotFoundError: No module named 'PIL'
-_____ ERROR collecting tests/unit/test_qa_report_2026_08_02_regressions.py _____
-ImportError while importing test module '/home/runner/work/aigateway/aigateway/tests/unit/test_qa_report_2026_08_02_regressions.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/unit/test_qa_report_2026_08_02_regressions.py:17: in <module>
-    from aigateway_core.pipelines.generation.draft.draft_generator import (
-aigateway-core/src/aigateway_core/pipelines/generation/draft/__init__.py:3: in <module>
-    from . import draft_generator as _strategy
-aigateway-core/src/aigateway_core/pipelines/generation/draft/draft_generator.py:10: in <module>
-    from . import _draft_generator_impl as _impl
-aigateway-core/src/aigateway_core/pipelines/generation/draft/_draft_generator_impl.py:35: in <module>
-    from PIL import Image, ImageOps
-E   ModuleNotFoundError: No module named 'PIL'
+tests/unit/auth/test_key_store_lua_integration.py:53: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+aigateway-core/src/aigateway_core/shared/redis_client.py:72: in connect
+    await self.redis.ping()
+/opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/site-packages/redis/asyncio/client.py:929: in execute_command
+    conn = self.connection or await pool.get_connection()
+                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/site-packages/redis/utils.py:249: in async_wrapper
+    return await func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/site-packages/redis/asyncio/connection.py:2824: in get_connection
+    await self.ensure_connection(connection)
+/opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/site-packages/redis/asyncio/connection.py:2865: in ensure_connection
+    await connection.connect()
+/opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/site-packages/redis/asyncio/connection.py:819: in connect
+    await self.retry.call_with_retry(
+/opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/site-packages/redis/asyncio/retry.py:81: in call_with_retry
+    raise error
+/opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/site-packages/redis/asyncio/retry.py:69: in call_with_retry
+    return await do()
+           ^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <redis.asyncio.connection.Connection(host=localhost,port=6379,db=0)>
+check_health = True, retry_socket_connect = False
+
+    async def connect_check_health(
+        self, check_health: bool = True, retry_socket_connect: bool = True
+    ):
+        if self.is_connected:
+            return
+        # Track actual retry attempts for error reporting
+        actual_retry_attempts = 0
+    
+        def failure_callback(error, failure_count):
+            nonlocal actual_retry_attempts
+            actual_retry_attempts = failure_count
+            return self.disconnect(error=error, failure_count=failure_count)
+    
+        try:
+            if retry_socket_connect:
+                await self.retry.call_with_retry(
+                    lambda: self._connect(),
+                    failure_callback,
+                    with_failure_count=True,
+                )
+            else:
+                await self._connect()
+        except asyncio.CancelledError:
+            raise  # in 3.7 and earlier, this is an Exception, not BaseException
+        except (socket.timeout, asyncio.TimeoutError):
+            e = TimeoutError("Timeout connecting to server")
+            await record_error_count(
+                server_address=getattr(self, "host", None),
+                server_port=getattr(self, "port", None),
+                network_peer_address=getattr(self, "host", None),
+                network_peer_port=getattr(self, "port", None),
+                error_type=e,
+                retry_attempts=actual_retry_attempts,
+                is_internal=False,
+            )
+            raise e
+        except OSError as e:
+            e = ConnectionError(self._error_message(e))
+            await record_error_count(
+                server_address=getattr(self, "host", None),
+                server_port=getattr(self, "port", None),
+                network_peer_address=getattr(self, "host", None),
+                network_peer_port=getattr(self, "port", None),
+                error_type=e,
+                retry_attempts=actual_retry_attempts,
+                is_internal=False,
+            )
+>           raise e
+E           redis.exceptions.ConnectionError: Error Multiple exceptions: [Errno 111] Connect call failed ('::1', 6379, 0, 0), [Errno 111] Connect call failed ('127.0.0.1', 6379) connecting to localhost:6379.
+
+/opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/site-packages/redis/asyncio/connection.py:876: ConnectionError
+=================================== FAILURES ===================================
+__________________ test_build_symbol_chunks_progress_callback __________________
+
+tmp_path = PosixPath('/tmp/pytest-of-runner/pytest-1/test_build_symbol_chunks_progr0')
+
+    def test_build_symbol_chunks_progress_callback(tmp_path: Path) -> None:
+        """build_symbol_chunks 循环前知道 total, 每 200 符号回写 progress_cb。"""
+        from aigateway_core.pipelines.understanding.code_rag.splitter import (
+            build_symbol_chunks,
+        )
+    
+>       repo = _build_codegraph_repo(
+            tmp_path,
+            {"mod.py": "\n".join(f"def fn_{i}():\n    return {i}\n" for i in range(5))},
+        )
+
+tests/unit/admin/test_code_rag_helpers.py:348: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+tmp_path = PosixPath('/tmp/pytest-of-runner/pytest-1/test_build_symbol_chunks_progr0')
+files = {'mod.py': 'def fn_0():\n    return 0\n\ndef fn_1():\n    return 1\n\ndef fn_2():\n    return 2\n\ndef fn_3():\n    return 3\n\ndef fn_4():\n    return 4\n'}
+
+    def _build_codegraph_repo(tmp_path: Path, files: dict[str, str]) -> Path:
+        """用真实 codegraph CLI 构建一个微型仓库,返回 repo 目录(graph_repo_path)。
+    
+        files: {rel_path: content},rel_path 相对 repo 根。源码放在 src/ 下(与
+        graph_builder 的 symlink 约定一致 → db file_path 带 src/ 前缀)。
+        需要本机装了 @colbymchenry/codegraph CLI;没装则 skip。
+        """
+        import shutil
+        import subprocess
+    
+        if not shutil.which("codegraph"):
+>           pytest.fail("codegraph CLI 未安装,跳过真实图谱测试")
+E           Failed: codegraph CLI 未安装,跳过真实图谱测试
+
+tests/unit/admin/test_code_rag_helpers.py:296: Failed
+________________ test_get_callers_callees_db_direct_matches_cli ________________
+
+tmp_path = PosixPath('/tmp/pytest-of-runner/pytest-1/test_get_callers_callees_db_di0')
+
+    def test_get_callers_callees_db_direct_matches_cli(tmp_path: Path) -> None:
+        """db 直读后 get_callers/get_callees 与旧 CLI 结果一致。"""
+        from aigateway_core.pipelines.understanding.code_rag import graph_query
+        from aigateway_core.pipelines.understanding.code_rag.graph_query import (
+            get_callees,
+            get_callers,
+        )
+    
+>       repo = _build_codegraph_repo(
+            tmp_path,
+            # hash_password 必须有定义,否则 codegraph 不建节点 → 无 login→hash_password 边。
+            # 与 test_lookup_symbol_metadata_reads_codegraph_sqlite_schema 同款 fixture。
+            {"auth.py": "def login():\n    return hash_password()\ndef hash_password():\n    return 'h'\ndef register():\n    return login()\n"},
+        )
+
+tests/unit/admin/test_code_rag_helpers.py:376: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+tmp_path = PosixPath('/tmp/pytest-of-runner/pytest-1/test_get_callers_callees_db_di0')
+files = {'auth.py': "def login():\n    return hash_password()\ndef hash_password():\n    return 'h'\ndef register():\n    return login()\n"}
+
+    def _build_codegraph_repo(tmp_path: Path, files: dict[str, str]) -> Path:
+        """用真实 codegraph CLI 构建一个微型仓库,返回 repo 目录(graph_repo_path)。
+    
+        files: {rel_path: content},rel_path 相对 repo 根。源码放在 src/ 下(与
+        graph_builder 的 symlink 约定一致 → db file_path 带 src/ 前缀)。
+        需要本机装了 @colbymchenry/codegraph CLI;没装则 skip。
+        """
+        import shutil
+        import subprocess
+    
+        if not shutil.which("codegraph"):
+>           pytest.fail("codegraph CLI 未安装,跳过真实图谱测试")
+E           Failed: codegraph CLI 未安装,跳过真实图谱测试
+
+tests/unit/admin/test_code_rag_helpers.py:296: Failed
+__________ test_lookup_symbol_metadata_reads_codegraph_sqlite_schema ___________
+
+tmp_path = PosixPath('/tmp/pytest-of-runner/pytest-1/test_lookup_symbol_metadata_re0')
+
+    def test_lookup_symbol_metadata_reads_codegraph_sqlite_schema(tmp_path: Path) -> None:
+        """lookup_symbol_metadata 走 codegraph CLI(重构后),验证 callers/callees/imports。"""
+        from aigateway_core.pipelines.understanding.code_rag.graph_query import (
+            lookup_symbol_metadata,
+        )
+    
+>       repo = _build_codegraph_repo(
+            tmp_path,
+            {
+                "auth.py": (
+                    "import jwt\n"
+                    "def login():\n"
+                    "    return hash_password()\n"
+                    "def hash_password():\n"
+                    "    return 'h'\n"
+                    "def register():\n"
+                    "    return login()\n"
+                ),
+            },
+        )
+
+tests/unit/admin/test_code_rag_helpers.py:581: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+tmp_path = PosixPath('/tmp/pytest-of-runner/pytest-1/test_lookup_symbol_metadata_re0')
+files = {'auth.py': "import jwt\ndef login():\n    return hash_password()\ndef hash_password():\n    return 'h'\ndef register():\n    return login()\n"}
+
+    def _build_codegraph_repo(tmp_path: Path, files: dict[str, str]) -> Path:
+        """用真实 codegraph CLI 构建一个微型仓库,返回 repo 目录(graph_repo_path)。
+    
+        files: {rel_path: content},rel_path 相对 repo 根。源码放在 src/ 下(与
+        graph_builder 的 symlink 约定一致 → db file_path 带 src/ 前缀)。
+        需要本机装了 @colbymchenry/codegraph CLI;没装则 skip。
+        """
+        import shutil
+        import subprocess
+    
+        if not shutil.which("codegraph"):
+>           pytest.fail("codegraph CLI 未安装,跳过真实图谱测试")
+E           Failed: codegraph CLI 未安装,跳过真实图谱测试
+
+tests/unit/admin/test_code_rag_helpers.py:296: Failed
+______ test_lookup_symbol_metadata_matches_graph_path_with_builder_prefix ______
+
+tmp_path = PosixPath('/tmp/pytest-of-runner/pytest-1/test_lookup_symbol_metadata_ma0')
+
+    def test_lookup_symbol_metadata_matches_graph_path_with_builder_prefix(tmp_path: Path) -> None:
+        """graph_builder 把源码 symlink 成 work_dir/src 后, codegraph 存的 file_path
+        带 src/ 前缀 (src/auth.py), 与调用方传入的相对源根路径 (auth.py) 对不上.
+        查询端按后缀归一化匹配, 否则符号 miss → chunk_type 退化成 module。
+        """
+        from aigateway_core.pipelines.understanding.code_rag.graph_query import (
+            lookup_symbol_metadata,
+        )
+    
+>       repo = _build_codegraph_repo(
+            tmp_path,
+            {"auth.py": "def login():\n    return 1\n"},
+        )
+
+tests/unit/admin/test_code_rag_helpers.py:614: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+tmp_path = PosixPath('/tmp/pytest-of-runner/pytest-1/test_lookup_symbol_metadata_ma0')
+files = {'auth.py': 'def login():\n    return 1\n'}
+
+    def _build_codegraph_repo(tmp_path: Path, files: dict[str, str]) -> Path:
+        """用真实 codegraph CLI 构建一个微型仓库,返回 repo 目录(graph_repo_path)。
+    
+        files: {rel_path: content},rel_path 相对 repo 根。源码放在 src/ 下(与
+        graph_builder 的 symlink 约定一致 → db file_path 带 src/ 前缀)。
+        需要本机装了 @colbymchenry/codegraph CLI;没装则 skip。
+        """
+        import shutil
+        import subprocess
+    
+        if not shutil.which("codegraph"):
+>           pytest.fail("codegraph CLI 未安装,跳过真实图谱测试")
+E           Failed: codegraph CLI 未安装,跳过真实图谱测试
+
+tests/unit/admin/test_code_rag_helpers.py:296: Failed
+_______ test_lookup_related_symbols_strips_builder_prefix_from_file_path _______
+
+tmp_path = PosixPath('/tmp/pytest-of-runner/pytest-1/test_lookup_related_symbols_st0')
+
+    def test_lookup_related_symbols_strips_builder_prefix_from_file_path(tmp_path: Path) -> None:
+        """retrieval 端用 impact 返回的 file_path 去 Qdrant scroll 相关 chunk,
+        而 Qdrant 存的是 splitter 路径 (无 src/ 前缀). impact 必须把 graph 节点的
+        前缀剥掉, 否则 scroll 永远 miss, 相关符号增强失效。
+        """
+        from aigateway_core.pipelines.understanding.code_rag.graph_query import (
+            lookup_related_symbols_strict,
+        )
+    
+>       repo = _build_codegraph_repo(
+            tmp_path,
+            {
+                "auth.py": "from utils import helper\n\ndef login():\n    return helper()\n",
+                "utils.py": "def helper():\n    return 'ok'\n",
+            },
+        )
+
+tests/unit/admin/test_code_rag_helpers.py:634: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+tmp_path = PosixPath('/tmp/pytest-of-runner/pytest-1/test_lookup_related_symbols_st0')
+files = {'auth.py': 'from utils import helper\n\ndef login():\n    return helper()\n', 'utils.py': "def helper():\n    return 'ok'\n"}
+
+    def _build_codegraph_repo(tmp_path: Path, files: dict[str, str]) -> Path:
+        """用真实 codegraph CLI 构建一个微型仓库,返回 repo 目录(graph_repo_path)。
+    
+        files: {rel_path: content},rel_path 相对 repo 根。源码放在 src/ 下(与
+        graph_builder 的 symlink 约定一致 → db file_path 带 src/ 前缀)。
+        需要本机装了 @colbymchenry/codegraph CLI;没装则 skip。
+        """
+        import shutil
+        import subprocess
+    
+        if not shutil.which("codegraph"):
+>           pytest.fail("codegraph CLI 未安装,跳过真实图谱测试")
+E           Failed: codegraph CLI 未安装,跳过真实图谱测试
+
+tests/unit/admin/test_code_rag_helpers.py:296: Failed
+________________ test_split_code_directory_writes_symbol_names _________________
+
+tmp_path = PosixPath('/tmp/pytest-of-runner/pytest-1/test_split_code_directory_writ0')
+
+    def test_split_code_directory_writes_symbol_names(tmp_path) -> None:
+        """回归:切完的 chunk 字典必须携带 function_name/class_name,
+        否则 code_rag_routes 侧的 strict-lookup 拿到 symbol=None 直接短路。
+        """
+        from aigateway_core.pipelines.understanding.code_rag.splitter import (
+            split_code_directory,
+        )
+    
+        src = tmp_path / "auth.py"
+        src.write_text(
+            "def login(user):\n"
+            "    return user\n"
+            "\n"
+            "class UserService:\n"
+            "    def register(self):\n"
+            "        pass\n",
+            encoding="utf-8",
+        )
+    
+        with pytest.warns(DeprecationWarning, match="langchain-community"):
+>           chunks = split_code_directory(str(tmp_path), ignore_patterns=[])
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/admin/test_code_rag_helpers.py:820: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/admin/conftest.py:32: in wrapped_split_code_directory
+    return original(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+root_dir = '/tmp/pytest-of-runner/pytest-1/test_split_code_directory_writ0'
+ignore_patterns = [], chunk_size = 2000, chunk_overlap = 200
+parser_threshold = 500
+
+    def split_code_directory(
+        root_dir: str,
+        ignore_patterns: list[str],
+        *,
+        chunk_size: int = 2000,
+        chunk_overlap: int = 200,
+        parser_threshold: int = 500,
+    ) -> list[dict[str, Any]]:
+        """遍历 root_dir 下所有源码,按 AST 边界切成规范化的 chunk 字典.
+    
+        每个 chunk 字典包含:
+          file_path/filename/language/chunk_index/chunk_text/start_line/end_line
+    
+        实现要点:
+        - 先按后缀白名单(_CODE_SUFFIXES)枚举文件,天然跳过二进制/媒体/压缩包等,
+          避免 GenericLoader 在整目录加载时因单个二进制文件解码失败而整体抛异常。
+        - 逐个文件调 GenericLoader.from_filesystem(path=file),单文件解析失败只 log
+          warning 并跳过,不影响其他文件(与 spec 的"file parse failure: skip"一致)。
+        - 忽略规则: 只要文件路径中包含任一 ignore_patterns 中的子串就跳过。
+        """
+>       from langchain_community.document_loaders.generic import GenericLoader
+E       ModuleNotFoundError: No module named 'langchain_community'
+
+aigateway-core/src/aigateway_core/pipelines/understanding/code_rag/splitter.py:214: ModuleNotFoundError
+_ TestAIDirectorStrategyOptimizePrompt.test_short_prompt_expansion_with_images _
+
+self = <tests.unit.pipeline.test_ai_director_strategy.TestAIDirectorStrategyOptimizePrompt object at 0x7f24ae38a8a0>
+default_config = AIDirectorConfig(enabled=True, rewrite_model='gpt-4o-mini', timeout_seconds=10.0, max_prompt_length=2000, min_prompt_length=10, prompt_confirmation_enabled=True)
+pipeline_ctx = PipelineContext(request={'model': 'test-model', 'messages': []}, trace_id='test-trace-001', response=None, should_stop...ser_id=None, extra={}, pipeline_kind='understanding', is_multimodal=False, total_token_savings=0, request_context=None)
+
+    @pytest.mark.asyncio
+    async def test_short_prompt_expansion_with_images(self, default_config, pipeline_ctx):
+        """Short prompt with reference images should include image hints."""
+        config = AIDirectorConfig(
+            min_prompt_length=20,  # "cat" is shorter than this
+            timeout_seconds=10.0,
+        )
+    
+        bridge = AsyncMock()
+        bridge.completion = AsyncMock(
+            return_value={
+                "data": {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": (
+                                    "【主体】一只橘色猫咪\n"
+                                    "【动作】安静地坐着\n"
+                                    "【环境】温暖的室内\n"
+                                    "【镜头】特写，平视角度"
+                                )
+                            }
+                        }
+                    ]
+                },
+                "_meta": {"cost": 0.0001},
+            }
+        )
+    
+        ref_image = MediaContent(
+            media_type=MediaType.IMAGE,
+            mime_type="image/png",
+            size_bytes=1024,
+            metadata={"description": "an orange tabby cat", "style": "realistic"},
+        )
+    
+        strategy = AIDirectorStrategy(config=config, litellm_bridge=bridge)
+        await strategy.optimize_prompt(
+            prompt="cat",
+            reference_images=[ref_image],
+            config=config,
+            ctx=pipeline_ctx,
+        )
+    
+        # Verify the bridge was called with a message containing image hints
+        call_args = bridge.completion.call_args
+        messages = call_args.kwargs.get("messages") or call_args[1].get("messages", [])
+        user_msg = messages[-1]["content"]
+>       assert "参考图片信息" in user_msg
+E       AssertionError: assert '参考图片信息' in '上一个结果没有使用要求的 en。请严格改为 en，保留引号内文字，只输出最终结构化提示词。'
+
+tests/unit/pipeline/test_ai_director_strategy.py:272: AssertionError
+_ TestAIDirectorStrategyOptimizePrompt.test_normal_prompt_uses_rewrite_system_prompt _
+
+self = <tests.unit.pipeline.test_ai_director_strategy.TestAIDirectorStrategyOptimizePrompt object at 0x7f24ae3884a0>
+default_config = AIDirectorConfig(enabled=True, rewrite_model='gpt-4o-mini', timeout_seconds=10.0, max_prompt_length=2000, min_prompt_length=10, prompt_confirmation_enabled=True)
+pipeline_ctx = PipelineContext(request={'model': 'test-model', 'messages': []}, trace_id='test-trace-001', response=None, should_stop...ser_id=None, extra={}, pipeline_kind='understanding', is_multimodal=False, total_token_savings=0, request_context=None)
+mock_bridge = <AsyncMock id='139795399993696'>
+
+    @pytest.mark.asyncio
+    async def test_normal_prompt_uses_rewrite_system_prompt(
+        self, default_config, pipeline_ctx, mock_bridge
+    ):
+        """Normal (non-short) prompt should use the standard rewrite system prompt."""
+        strategy = AIDirectorStrategy(
+            config=default_config, litellm_bridge=mock_bridge
+        )
+        await strategy.optimize_prompt(
+            prompt="a girl dancing in the rain with an umbrella",
+            reference_images=[],
+            config=default_config,
+            ctx=pipeline_ctx,
+        )
+    
+        call_args = mock_bridge.completion.call_args
+        messages = call_args.kwargs.get("messages") or call_args[1].get("messages", [])
+        system_msg = messages[0]["content"]
+>       assert system_msg == _REWRITE_SYSTEM_PROMPT
+E       AssertionError: assert '你是一位专业的 AI 生...现在画面中的文字保持原样。' == '你是一位专业的 AI 生...必须原样保留，不要翻译\n'
+E         
+E         Skipping 404 identical leading characters in diff, use -v to show
+E           须原样保留，不要翻译
+E         + 
+E         + 
+E         + 语言策略：用户主要语言为 en；目标模型支持的输出语言已选择为 en。视觉描述与四个标题必须使用 en；引号内要求出现在画面中的文字保持原样。
+
+tests/unit/pipeline/test_ai_director_strategy.py:297: AssertionError
+_ TestAIDirectorStrategyOptimizePrompt.test_default_system_prompts_require_english_for_sdxl[\u4f60\u662f\u4e00\u4f4d\u4e13\u4e1a\u7684 AI \u751f\u6210\u5bfc\u6f14\u3002\u4f60\u7684\u4efb\u52a1\u662f\u5c06\u7528\u6237\u63d0\u4f9b\u7684\u7b80\u77ed\u6216\u6a21\u7cca\u7684\u751f\u6210\u63d0\u793a\u8bcd\u6539\u5199\u4e3a\u7ed3\u6784\u5316\u7684\u4e13\u4e1a\u63d0\u793a\u8bcd\u3002\n\n\u6539\u5199\u540e\u7684\u63d0\u793a\u8bcd\u5fc5\u987b\u5305\u542b\u4ee5\u4e0b\u56db\u4e2a\u90e8\u5206\uff1a\nSubject: \u8be6\u7ec6\u63cf\u8ff0\u753b\u9762\u4e2d\u7684\u4e3b\u8981\u5bf9\u8c61\u3001\u89d2\u8272\u3001\u7269\u4f53\u7b49\uff0c\u5305\u62ec\u5916\u89c2\u3001\u670d\u88c5\u3001\u8868\u60c5\u7b49\u7ec6\u8282\nAction: \u63cf\u8ff0\u4e3b\u4f53\u6b63\u5728\u8fdb\u884c\u7684\u52a8\u4f5c\u6216\u59ff\u6001\nEnvironment: \u63cf\u8ff0\u573a\u666f\u7684\u80cc\u666f\u3001\u5149\u7167\u3001\u5929\u6c14\u3001\u65f6\u95f4\u7b49\u73af\u5883\u56e0\u7d20\nCamera: \u63cf\u8ff0\u62cd\u6444\u89d2\u5ea6\u3001\u666f\u522b\u3001\u8fd0\u955c\u65b9\u5f0f\u7b49\u6444\u5f71\u53c2\u6570\n\n\u89c4\u5219\uff1a\n1. \u4fdd\u7559\u7528\u6237\u539f\u59cb\u610f\u56fe\uff0c\u4e0d\u8981\u6dfb\u52a0\u4e0e\u539f\u610f\u65e0\u5173\u7684\u5185\u5bb9\n2. \u4f7f\u7528\u5177\u4f53\u3001\u7cbe\u786e\u7684\u63cf\u8ff0\u8bcd\u6c47\n3. \u5982\u679c\u539f\u59cb prompt \u7f3a\u5c11\u67d0\u4e2a\u7ef4\u5ea6\u7684\u4fe1\u606f\uff0c\u6839\u636e\u4e0a\u4e0b\u6587\u5408\u7406\u8865\u5145\n4. \u8f93\u51fa\u5fc5\u987b\u7b80\u6d01\u9ad8\u6548\uff0c\u907f\u514d\u5197\u4f59\u91cd\u590d\n5. \u76f4\u63a5\u8f93\u51fa\u6539\u5199\u7ed3\u679c\uff0c\u4e0d\u8981\u6dfb\u52a0\u4efb\u4f55\u89e3\u91ca\u6027\u6587\u5b57\n6. \u8f93\u51fa\u8bed\u8a00\u7531\u8c03\u7528\u65b9\u63d0\u4f9b\u7684\u76ee\u6807\u6a21\u578b\u8bed\u8a00\u7b56\u7565\u51b3\u5b9a\uff1b\u76ee\u6807\u6a21\u578b\u652f\u6301\u7528\u6237\u4e3b\u8981\u8bed\u8a00\u65f6\u4fdd\u7559\u8be5\u8bed\u8a00\uff0c\u5426\u5219\u663e\u5f0f\u8f6c\u6362\u4e3a\u76ee\u6807\u6a21\u578b\u652f\u6301\u7684\u8bed\u8a00\n7. \u7528\u6237\u8981\u6c42\u753b\u9762\u4e2d\u51fa\u73b0\u7684\u7279\u5b9a\u6587\u5b57\u5fc5\u987b\u539f\u6837\u4fdd\u7559\uff0c\u4e0d\u8981\u7ffb\u8bd1\n] _
+
+self = <tests.unit.pipeline.test_ai_director_strategy.TestAIDirectorStrategyOptimizePrompt object at 0x7f24ae389610>
+system_prompt = '你是一位专业的 AI 生成导演。你的任务是将用户提供的简短或模糊的生成提示词改写为结构化的专业提示词。\n\n改写后的提示词必须包含以下四个部分：\nSubject: 详细描述画面中的主要对象、角色、物体等，包括外观、服装、表情等细节...n5. 直接输出改写结果，不要添加任何解释性文字\n6. 输出语言由调用方提供的目标模型语言策略决定；目标模型支持用户主要语言时保留该语言，否则显式转换为目标模型支持的语言\n7. 用户要求画面中出现的特定文字必须原样保留，不要翻译\n'
+
+    @pytest.mark.parametrize(
+        "system_prompt",
+        [_REWRITE_SYSTEM_PROMPT, _EXPAND_SYSTEM_PROMPT],
+    )
+    def test_default_system_prompts_require_english_for_sdxl(self, system_prompt):
+        """Default optimization must produce text SDXL's CLIP can understand."""
+>       assert "必须使用自然、准确的英文" in system_prompt
+E       AssertionError: assert '必须使用自然、准确的英文' in '你是一位专业的 AI 生成导演。你的任务是将用户提供的简短或模糊的生成提示词改写为结构化的专业提示词。\n\n改写后的提示词必须包含以下四个部分：\nSubject: 详细描述画面中的主要对象、角色、物体等，包括外观、服装、表情等细节...n5. 直接输出改写结果，不要添加任何解释性文字\n6. 输出语言由调用方提供的目标模型语言策略决定；目标模型支持用户主要语言时保留该语言，否则显式转换为目标模型支持的语言\n7. 用户要求画面中出现的特定文字必须原样保留，不要翻译\n'
+
+tests/unit/pipeline/test_ai_director_strategy.py:305: AssertionError
+_ TestAIDirectorStrategyOptimizePrompt.test_default_system_prompts_require_english_for_sdxl[\u4f60\u662f\u4e00\u4f4d\u4e13\u4e1a\u7684 AI \u751f\u6210\u5bfc\u6f14\u3002\u7528\u6237\u63d0\u4f9b\u4e86\u4e00\u4e2a\u975e\u5e38\u7b80\u77ed\u7684\u63d0\u793a\u8bcd\uff0c\u8bf7\u6839\u636e\u63d0\u793a\u8bcd\u5185\u5bb9\u548c\u53c2\u8003\u56fe\u7247\u63cf\u8ff0\uff0c\u5c06\u5176\u6269\u5c55\u4e3a\u7ed3\u6784\u5316\u7684\u4e13\u4e1a\u63d0\u793a\u8bcd\u3002\n\n\u6539\u5199\u540e\u7684\u63d0\u793a\u8bcd\u5fc5\u987b\u5305\u542b\u4ee5\u4e0b\u56db\u4e2a\u90e8\u5206\uff1a\nSubject: \u8be6\u7ec6\u63cf\u8ff0\u753b\u9762\u4e2d\u7684\u4e3b\u8981\u5bf9\u8c61\u3001\u89d2\u8272\u3001\u7269\u4f53\u7b49\nAction: \u63cf\u8ff0\u4e3b\u4f53\u6b63\u5728\u8fdb\u884c\u7684\u52a8\u4f5c\u6216\u59ff\u6001\nEnvironment: \u63cf\u8ff0\u573a\u666f\u7684\u80cc\u666f\u3001\u5149\u7167\u3001\u5929\u6c14\u3001\u65f6\u95f4\u7b49\nCamera: \u63cf\u8ff0\u62cd\u6444\u89d2\u5ea6\u3001\u666f\u522b\u3001\u8fd0\u955c\u65b9\u5f0f\u7b49\n\n\u89c4\u5219\uff1a\n1. \u57fa\u4e8e\u7b80\u77ed\u63d0\u793a\u8bcd\u8fdb\u884c\u5408\u7406\u7684\u521b\u610f\u6269\u5c55\n2. \u5982\u679c\u6709\u53c2\u8003\u56fe\u7247\u4fe1\u606f\uff0c\u4ece\u4e2d\u63a8\u65ad\u98ce\u683c\u548c\u6c1b\u56f4\n3. \u4f7f\u7528\u5177\u4f53\u3001\u7cbe\u786e\u7684\u63cf\u8ff0\u8bcd\u6c47\n4. \u76f4\u63a5\u8f93\u51fa\u6539\u5199\u7ed3\u679c\uff0c\u4e0d\u8981\u6dfb\u52a0\u4efb\u4f55\u89e3\u91ca\u6027\u6587\u5b57\n5. \u8f93\u51fa\u8bed\u8a00\u7531\u8c03\u7528\u65b9\u63d0\u4f9b\u7684\u76ee\u6807\u6a21\u578b\u8bed\u8a00\u7b56\u7565\u51b3\u5b9a\uff1b\u76ee\u6807\u6a21\u578b\u652f\u6301\u7528\u6237\u4e3b\u8981\u8bed\u8a00\u65f6\u4fdd\u7559\u8be5\u8bed\u8a00\uff0c\u5426\u5219\u663e\u5f0f\u8f6c\u6362\u4e3a\u76ee\u6807\u6a21\u578b\u652f\u6301\u7684\u8bed\u8a00\n6. \u7528\u6237\u8981\u6c42\u753b\u9762\u4e2d\u51fa\u73b0\u7684\u7279\u5b9a\u6587\u5b57\u5fc5\u987b\u539f\u6837\u4fdd\u7559\uff0c\u4e0d\u8981\u7ffb\u8bd1\n] _
+
+self = <tests.unit.pipeline.test_ai_director_strategy.TestAIDirectorStrategyOptimizePrompt object at 0x7f24ae389640>
+system_prompt = '你是一位专业的 AI 生成导演。用户提供了一个非常简短的提示词，请根据提示词内容和参考图片描述，将其扩展为结构化的专业提示词。\n\n改写后的提示词必须包含以下四个部分：\nSubject: 详细描述画面中的主要对象、角色、物体等\n...n4. 直接输出改写结果，不要添加任何解释性文字\n5. 输出语言由调用方提供的目标模型语言策略决定；目标模型支持用户主要语言时保留该语言，否则显式转换为目标模型支持的语言\n6. 用户要求画面中出现的特定文字必须原样保留，不要翻译\n'
+
+    @pytest.mark.parametrize(
+        "system_prompt",
+        [_REWRITE_SYSTEM_PROMPT, _EXPAND_SYSTEM_PROMPT],
+    )
+    def test_default_system_prompts_require_english_for_sdxl(self, system_prompt):
+        """Default optimization must produce text SDXL's CLIP can understand."""
+>       assert "必须使用自然、准确的英文" in system_prompt
+E       AssertionError: assert '必须使用自然、准确的英文' in '你是一位专业的 AI 生成导演。用户提供了一个非常简短的提示词，请根据提示词内容和参考图片描述，将其扩展为结构化的专业提示词。\n\n改写后的提示词必须包含以下四个部分：\nSubject: 详细描述画面中的主要对象、角色、物体等\n...n4. 直接输出改写结果，不要添加任何解释性文字\n5. 输出语言由调用方提供的目标模型语言策略决定；目标模型支持用户主要语言时保留该语言，否则显式转换为目标模型支持的语言\n6. 用户要求画面中出现的特定文字必须原样保留，不要翻译\n'
+
+tests/unit/pipeline/test_ai_director_strategy.py:305: AssertionError
 =============================== warnings summary ===============================
 ../../../../../opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/site-packages/fastapi/testclient.py:1
   /opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
@@ -392,83 +712,64 @@ E   ModuleNotFoundError: No module named 'PIL'
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
 =========================== short test summary info ============================
-ERROR tests/unit/pipeline/test_comfyui_progressive_workflow.py
-ERROR tests/unit/pipeline/test_comfyui_recovery_errors.py
-ERROR tests/unit/pipeline/test_draft_confirmation_recovery_state.py
-ERROR tests/unit/pipeline/test_draft_generator_plugin.py
-ERROR tests/unit/pipeline/test_draft_generator_strategy.py
-ERROR tests/unit/pipeline/test_draft_gpu_scheduler.py
-ERROR tests/unit/pipeline/test_draft_registration_config_contract.py
-ERROR tests/unit/pipeline/test_draft_video_plan_wiring.py
-ERROR tests/unit/pipeline/test_generation_optimization_registration.py
-ERROR tests/unit/pipeline/test_qwen_image_selection_policy.py
-ERROR tests/unit/pipeline/test_realesrgan_upscale.py
-ERROR tests/unit/test_merge_readiness_followup.py
-ERROR tests/unit/test_qa_report_2026_08_02_regressions.py
-!!!!!!!!!!!!!!!!!!! Interrupted: 13 errors during collection !!!!!!!!!!!!!!!!!!!
-1 warning, 13 errors in 3.26s
+FAILED tests/unit/admin/test_code_rag_helpers.py::test_build_symbol_chunks_progress_callback - Failed: codegraph CLI 未安装,跳过真实图谱测试
+FAILED tests/unit/admin/test_code_rag_helpers.py::test_get_callers_callees_db_direct_matches_cli - Failed: codegraph CLI 未安装,跳过真实图谱测试
+FAILED tests/unit/admin/test_code_rag_helpers.py::test_lookup_symbol_metadata_reads_codegraph_sqlite_schema - Failed: codegraph CLI 未安装,跳过真实图谱测试
+FAILED tests/unit/admin/test_code_rag_helpers.py::test_lookup_symbol_metadata_matches_graph_path_with_builder_prefix - Failed: codegraph CLI 未安装,跳过真实图谱测试
+FAILED tests/unit/admin/test_code_rag_helpers.py::test_lookup_related_symbols_strips_builder_prefix_from_file_path - Failed: codegraph CLI 未安装,跳过真实图谱测试
+FAILED tests/unit/admin/test_code_rag_helpers.py::test_split_code_directory_writes_symbol_names - ModuleNotFoundError: No module named 'langchain_community'
+FAILED tests/unit/pipeline/test_ai_director_strategy.py::TestAIDirectorStrategyOptimizePrompt::test_short_prompt_expansion_with_images - AssertionError: assert '参考图片信息' in '上一个结果没有使用要求的 en。请严格改为 en，保留引号内文字，只输出最终结构化提示词。'
+FAILED tests/unit/pipeline/test_ai_director_strategy.py::TestAIDirectorStrategyOptimizePrompt::test_normal_prompt_uses_rewrite_system_prompt - AssertionError: assert '你是一位专业的 AI 生...现在画面中的文字保持原样。' == '你是一位专业的 AI 生...必须原样保留，不要翻译\n'
+  
+  Skipping 404 identical leading characters in diff, use -v to show
+    须原样保留，不要翻译
+  + 
+  + 
+  + 语言策略：用户主要语言为 en；目标模型支持的输出语言已选择为 en。视觉描述与四个标题必须使用 en；引号内要求出现在画面中的文字保持原样。
+FAILED tests/unit/pipeline/test_ai_director_strategy.py::TestAIDirectorStrategyOptimizePrompt::test_default_system_prompts_require_english_for_sdxl[\u4f60\u662f\u4e00\u4f4d\u4e13\u4e1a\u7684 AI \u751f\u6210\u5bfc\u6f14\u3002\u4f60\u7684\u4efb\u52a1\u662f\u5c06\u7528\u6237\u63d0\u4f9b\u7684\u7b80\u77ed\u6216\u6a21\u7cca\u7684\u751f\u6210\u63d0\u793a\u8bcd\u6539\u5199\u4e3a\u7ed3\u6784\u5316\u7684\u4e13\u4e1a\u63d0\u793a\u8bcd\u3002\n\n\u6539\u5199\u540e\u7684\u63d0\u793a\u8bcd\u5fc5\u987b\u5305\u542b\u4ee5\u4e0b\u56db\u4e2a\u90e8\u5206\uff1a\nSubject: \u8be6\u7ec6\u63cf\u8ff0\u753b\u9762\u4e2d\u7684\u4e3b\u8981\u5bf9\u8c61\u3001\u89d2\u8272\u3001\u7269\u4f53\u7b49\uff0c\u5305\u62ec\u5916\u89c2\u3001\u670d\u88c5\u3001\u8868\u60c5\u7b49\u7ec6\u8282\nAction: \u63cf\u8ff0\u4e3b\u4f53\u6b63\u5728\u8fdb\u884c\u7684\u52a8\u4f5c\u6216\u59ff\u6001\nEnvironment: \u63cf\u8ff0\u573a\u666f\u7684\u80cc\u666f\u3001\u5149\u7167\u3001\u5929\u6c14\u3001\u65f6\u95f4\u7b49\u73af\u5883\u56e0\u7d20\nCamera: \u63cf\u8ff0\u62cd\u6444\u89d2\u5ea6\u3001\u666f\u522b\u3001\u8fd0\u955c\u65b9\u5f0f\u7b49\u6444\u5f71\u53c2\u6570\n\n\u89c4\u5219\uff1a\n1. \u4fdd\u7559\u7528\u6237\u539f\u59cb\u610f\u56fe\uff0c\u4e0d\u8981\u6dfb\u52a0\u4e0e\u539f\u610f\u65e0\u5173\u7684\u5185\u5bb9\n2. \u4f7f\u7528\u5177\u4f53\u3001\u7cbe\u786e\u7684\u63cf\u8ff0\u8bcd\u6c47\n3. \u5982\u679c\u539f\u59cb prompt \u7f3a\u5c11\u67d0\u4e2a\u7ef4\u5ea6\u7684\u4fe1\u606f\uff0c\u6839\u636e\u4e0a\u4e0b\u6587\u5408\u7406\u8865\u5145\n4. \u8f93\u51fa\u5fc5\u987b\u7b80\u6d01\u9ad8\u6548\uff0c\u907f\u514d\u5197\u4f59\u91cd\u590d\n5. \u76f4\u63a5\u8f93\u51fa\u6539\u5199\u7ed3\u679c\uff0c\u4e0d\u8981\u6dfb\u52a0\u4efb\u4f55\u89e3\u91ca\u6027\u6587\u5b57\n6. \u8f93\u51fa\u8bed\u8a00\u7531\u8c03\u7528\u65b9\u63d0\u4f9b\u7684\u76ee\u6807\u6a21\u578b\u8bed\u8a00\u7b56\u7565\u51b3\u5b9a\uff1b\u76ee\u6807\u6a21\u578b\u652f\u6301\u7528\u6237\u4e3b\u8981\u8bed\u8a00\u65f6\u4fdd\u7559\u8be5\u8bed\u8a00\uff0c\u5426\u5219\u663e\u5f0f\u8f6c\u6362\u4e3a\u76ee\u6807\u6a21\u578b\u652f\u6301\u7684\u8bed\u8a00\n7. \u7528\u6237\u8981\u6c42\u753b\u9762\u4e2d\u51fa\u73b0\u7684\u7279\u5b9a\u6587\u5b57\u5fc5\u987b\u539f\u6837\u4fdd\u7559\uff0c\u4e0d\u8981\u7ffb\u8bd1\n] - AssertionError: assert '必须使用自然、准确的英文' in '你是一位专业的 AI 生成导演。你的任务是将用户提供的简短或模糊的生成提示词改写为结构化的专业提示词。\n\n改写后的提示词必须包含以下四个部分：\nSubject: 详细描述画面中的主要对象、角色、物体等，包括外观、服装、表情等细节...n5. 直接输出改写结果，不要添加任何解释性文字\n6. 输出语言由调用方提供的目标模型语言策略决定；目标模型支持用户主要语言时保留该语言，否则显式转换为目标模型支持的语言\n7. 用户要求画面中出现的特定文字必须原样保留，不要翻译\n'
+FAILED tests/unit/pipeline/test_ai_director_strategy.py::TestAIDirectorStrategyOptimizePrompt::test_default_system_prompts_require_english_for_sdxl[\u4f60\u662f\u4e00\u4f4d\u4e13\u4e1a\u7684 AI \u751f\u6210\u5bfc\u6f14\u3002\u7528\u6237\u63d0\u4f9b\u4e86\u4e00\u4e2a\u975e\u5e38\u7b80\u77ed\u7684\u63d0\u793a\u8bcd\uff0c\u8bf7\u6839\u636e\u63d0\u793a\u8bcd\u5185\u5bb9\u548c\u53c2\u8003\u56fe\u7247\u63cf\u8ff0\uff0c\u5c06\u5176\u6269\u5c55\u4e3a\u7ed3\u6784\u5316\u7684\u4e13\u4e1a\u63d0\u793a\u8bcd\u3002\n\n\u6539\u5199\u540e\u7684\u63d0\u793a\u8bcd\u5fc5\u987b\u5305\u542b\u4ee5\u4e0b\u56db\u4e2a\u90e8\u5206\uff1a\nSubject: \u8be6\u7ec6\u63cf\u8ff0\u753b\u9762\u4e2d\u7684\u4e3b\u8981\u5bf9\u8c61\u3001\u89d2\u8272\u3001\u7269\u4f53\u7b49\nAction: \u63cf\u8ff0\u4e3b\u4f53\u6b63\u5728\u8fdb\u884c\u7684\u52a8\u4f5c\u6216\u59ff\u6001\nEnvironment: \u63cf\u8ff0\u573a\u666f\u7684\u80cc\u666f\u3001\u5149\u7167\u3001\u5929\u6c14\u3001\u65f6\u95f4\u7b49\nCamera: \u63cf\u8ff0\u62cd\u6444\u89d2\u5ea6\u3001\u666f\u522b\u3001\u8fd0\u955c\u65b9\u5f0f\u7b49\n\n\u89c4\u5219\uff1a\n1. \u57fa\u4e8e\u7b80\u77ed\u63d0\u793a\u8bcd\u8fdb\u884c\u5408\u7406\u7684\u521b\u610f\u6269\u5c55\n2. \u5982\u679c\u6709\u53c2\u8003\u56fe\u7247\u4fe1\u606f\uff0c\u4ece\u4e2d\u63a8\u65ad\u98ce\u683c\u548c\u6c1b\u56f4\n3. \u4f7f\u7528\u5177\u4f53\u3001\u7cbe\u786e\u7684\u63cf\u8ff0\u8bcd\u6c47\n4. \u76f4\u63a5\u8f93\u51fa\u6539\u5199\u7ed3\u679c\uff0c\u4e0d\u8981\u6dfb\u52a0\u4efb\u4f55\u89e3\u91ca\u6027\u6587\u5b57\n5. \u8f93\u51fa\u8bed\u8a00\u7531\u8c03\u7528\u65b9\u63d0\u4f9b\u7684\u76ee\u6807\u6a21\u578b\u8bed\u8a00\u7b56\u7565\u51b3\u5b9a\uff1b\u76ee\u6807\u6a21\u578b\u652f\u6301\u7528\u6237\u4e3b\u8981\u8bed\u8a00\u65f6\u4fdd\u7559\u8be5\u8bed\u8a00\uff0c\u5426\u5219\u663e\u5f0f\u8f6c\u6362\u4e3a\u76ee\u6807\u6a21\u578b\u652f\u6301\u7684\u8bed\u8a00\n6. \u7528\u6237\u8981\u6c42\u753b\u9762\u4e2d\u51fa\u73b0\u7684\u7279\u5b9a\u6587\u5b57\u5fc5\u987b\u539f\u6837\u4fdd\u7559\uff0c\u4e0d\u8981\u7ffb\u8bd1\n] - AssertionError: assert '必须使用自然、准确的英文' in '你是一位专业的 AI 生成导演。用户提供了一个非常简短的提示词，请根据提示词内容和参考图片描述，将其扩展为结构化的专业提示词。\n\n改写后的提示词必须包含以下四个部分：\nSubject: 详细描述画面中的主要对象、角色、物体等\n...n4. 直接输出改写结果，不要添加任何解释性文字\n5. 输出语言由调用方提供的目标模型语言策略决定；目标模型支持用户主要语言时保留该语言，否则显式转换为目标模型支持的语言\n6. 用户要求画面中出现的特定文字必须原样保留，不要翻译\n'
+ERROR tests/unit/auth/test_key_store_lua_integration.py::test_lua_check_quota_passes_under_limits - redis.exceptions.ConnectionError: Error Multiple exceptions: [Errno 111] Connect call failed ('::1', 6379, 0, 0), [Errno 111] Connect call failed ('127.0.0.1', 6379) connecting to localhost:6379.
+ERROR tests/unit/auth/test_key_store_lua_integration.py::test_lua_check_quota_rejects_daily_limit - redis.exceptions.ConnectionError: Error Multiple exceptions: [Errno 111] Connect call failed ('::1', 6379, 0, 0), [Errno 111] Connect call failed ('127.0.0.1', 6379) connecting to localhost:6379.
+ERROR tests/unit/auth/test_key_store_lua_integration.py::test_lua_check_quota_rejects_rpm - redis.exceptions.ConnectionError: Error Multiple exceptions: [Errno 111] Connect call failed ('::1', 6379, 0, 0), [Errno 111] Connect call failed ('127.0.0.1', 6379) connecting to localhost:6379.
+ERROR tests/unit/auth/test_key_store_lua_integration.py::test_lua_check_quota_rejects_tpm - redis.exceptions.ConnectionError: Error Multiple exceptions: [Errno 111] Connect call failed ('::1', 6379, 0, 0), [Errno 111] Connect call failed ('127.0.0.1', 6379) connecting to localhost:6379.
+ERROR tests/unit/auth/test_key_store_lua_integration.py::test_lua_check_quota_rejects_monthly_cost - redis.exceptions.ConnectionError: Error Multiple exceptions: [Errno 111] Connect call failed ('::1', 6379, 0, 0), [Errno 111] Connect call failed ('127.0.0.1', 6379) connecting to localhost:6379.
+ERROR tests/unit/auth/test_key_store_lua_integration.py::test_lua_check_quota_group_level_reject - redis.exceptions.ConnectionError: Error Multiple exceptions: [Errno 111] Connect call failed ('::1', 6379, 0, 0), [Errno 111] Connect call failed ('127.0.0.1', 6379) connecting to localhost:6379.
+ERROR tests/unit/auth/test_key_store_lua_integration.py::test_lua_increments_group_counters - redis.exceptions.ConnectionError: Error Multiple exceptions: [Errno 111] Connect call failed ('::1', 6379, 0, 0), [Errno 111] Connect call failed ('127.0.0.1', 6379) connecting to localhost:6379.
+ERROR tests/unit/auth/test_key_store_lua_integration.py::test_lua_writes_quota_period_records - redis.exceptions.ConnectionError: Error Multiple exceptions: [Errno 111] Connect call failed ('::1', 6379, 0, 0), [Errno 111] Connect call failed ('127.0.0.1', 6379) connecting to localhost:6379.
+ERROR tests/unit/auth/test_key_store_lua_integration.py::test_lua_atomicity_concurrent - redis.exceptions.ConnectionError: Error Multiple exceptions: [Errno 111] Connect call failed ('::1', 6379, 0, 0), [Errno 111] Connect call failed ('127.0.0.1', 6379) connecting to localhost:6379.
+10 failed, 2140 passed, 1 warning, 9 errors in 44.49s
 
-=== RUFF LOG (tail 400) ===
-13 | |     _REWRITE_SYSTEM_PROMPT,
-14 | |     AIDirectorStrategy,
-15 | |     _detect_prompt_language,
-16 | |     _ensure_consistency_constraint,
-17 | | )
-   | |_^
+=== FULL RUFF BASELINE LOG (tail 300) ===
+9 | | )
+  | |_^
 help: Organize imports
   |
-7 | import pytest
+3 | import pytest
   -
-8 | from aigateway_core.dispatch.context import PipelineContext
-  |
-
-F401 [*] `math` imported but unused
- --> tests/unit/pipeline/test_ai_director_video_plan.py:4:8
-  |
-3 | import asyncio
-4 | import math
-  |        ^^^^
-5 | from unittest.mock import AsyncMock
-  |
-help: Remove unused import: `math`
-  |
-3 | import asyncio
-  - import math
-4 | from unittest.mock import AsyncMock
+4 | from aigateway_api.config_security import ConfigValidationError
   |
 
 I001 [*] Import block is un-sorted or un-formatted
-  --> tests/unit/pipeline/test_ai_director_video_plugin.py:1:1
+  --> tests/unit/auth/test_sqlite_quota_periods.py:2:1
    |
- 1 | / from __future__ import annotations
- 2 | |
- 3 | | from unittest.mock import AsyncMock, MagicMock
- 4 | |
- 5 | | import pytest
- 6 | |
- 7 | | from aigateway_core.dispatch.context import PipelineContext
- 8 | | from aigateway_core.pipelines.generation._common.config import (
- 9 | |     AIDirectorConfig,
-10 | |     GenerationOptimizationConfig,
-11 | | )
-12 | | from aigateway_core.pipelines.generation._common.models import (
-13 | |     PromptOptimizationResult,
-14 | |     VideoGenerationPlan,
-15 | | )
-16 | | from aigateway_core.pipelines.generation.director.ai_director import (
-17 | |     AIDirectorStrategy,
-18 | | )
-19 | | from aigateway_core.pipelines.generation.director.ai_director_plugin import (
-20 | |     NS_GENERATION_OPTIMIZATION,
-21 | |     AIDirectorPlugin,
-22 | | )
-   | |_^
+ 1 |   """Period rollover and multi-connection regression tests for SQLite quotas."""
+ 2 | / from __future__ import annotations
+ 3 | |
+ 4 | | import asyncio
+ 5 | | import json
+ 6 | | from concurrent.futures import ThreadPoolExecutor
+ 7 | | from datetime import UTC, datetime
+ 8 | |
+ 9 | | import pytest
+10 | |
+11 | | from aigateway_core.shared.auth.sqlite_store import SQLiteStore, _hash_key
+   | |__________________________________________________________________________^
 help: Organize imports
-  |
-5 | import pytest
-  -
-6 | from aigateway_core.dispatch.context import PipelineContext
-  |
+   |
+9  | import pytest
+   -
+10 | from aigateway_core.shared.auth.sqlite_store import SQLiteStore, _hash_key
+   |
 
 I001 [*] Import block is un-sorted or un-formatted
   --> tests/unit/pipeline/test_draft_confirmation_recovery_state.py:3:1
@@ -492,55 +793,6 @@ help: Organize imports
 9  | import pytest
    -
 10 | from aigateway_core.pipelines.generation.draft.draft_generator import (
-   |
-
-I001 [*] Import block is un-sorted or un-formatted
-  --> tests/unit/pipeline/test_draft_video_plan_wiring.py:1:1
-   |
- 1 | / from __future__ import annotations
- 2 | |
- 3 | | import asyncio
- 4 | | from types import SimpleNamespace
- 5 | | from unittest.mock import AsyncMock, MagicMock
- 6 | |
- 7 | | import pytest
- 8 | |
- 9 | | from aigateway_core.dispatch.context import PipelineContext
-10 | | from aigateway_core.pipelines.generation._common.config import (
-11 | |     DraftWorkflowConfig,
-12 | |     GenerationOptimizationConfig,
-13 | | )
-14 | | from aigateway_core.pipelines.generation._common.models import DraftResult
-15 | | from aigateway_core.pipelines.generation.draft.draft_generator import (
-16 | |     DraftGeneratorStrategy,
-17 | | )
-18 | | from aigateway_core.pipelines.generation.draft.draft_generator_plugin import (
-19 | |     NS_GENERATION_OPTIMIZATION,
-20 | |     DraftGeneratorPlugin,
-21 | | )
-   | |_^
-help: Organize imports
-  |
-7 | import pytest
-  -
-8 | from aigateway_core.dispatch.context import PipelineContext
-  |
-
-F401 [*] `aigateway_core.pipelines.generation._common.config.DraftWorkflowConfig` imported but unused
-  --> tests/unit/pipeline/test_draft_video_plan_wiring.py:11:5
-   |
- 9 | from aigateway_core.dispatch.context import PipelineContext
-10 | from aigateway_core.pipelines.generation._common.config import (
-11 |     DraftWorkflowConfig,
-   |     ^^^^^^^^^^^^^^^^^^^
-12 |     GenerationOptimizationConfig,
-13 | )
-   |
-help: Remove unused import: `aigateway_core.pipelines.generation._common.config.DraftWorkflowConfig`
-   |
-10 | from aigateway_core.pipelines.generation._common.config import (
-   -     DraftWorkflowConfig,
-11 |     GenerationOptimizationConfig,
    |
 
 I001 [*] Import block is un-sorted or un-formatted
@@ -572,27 +824,6 @@ help: Organize imports
    -     _ORPHANED_PLUGIN_TASKS,
 11 |     execute_plugin,
    |
-
-I001 [*] Import block is un-sorted or un-formatted
-  --> tests/unit/pipeline/test_video_generation_models.py:1:1
-   |
- 1 | / from __future__ import annotations
- 2 | |
- 3 | | from dataclasses import asdict
- 4 | |
- 5 | | import pytest
- 6 | |
- 7 | | from aigateway_core.pipelines.generation._common.models import (
- 8 | |     GenerationRequest,
- 9 | |     VideoGenerationPlan,
-10 | | )
-   | |_^
-help: Organize imports
-  |
-5 | import pytest
-  -
-6 | from aigateway_core.pipelines.generation._common.models import (
-  |
 
 I001 [*] Import block is un-sorted or un-formatted
  --> tests/unit/streaming/test_sse_terminal_precedence.py:2:1
@@ -807,5 +1038,5 @@ help: Organize imports
 9 | from aigateway_api import gpu_routes
   |
 
-Found 19 errors.
-[*] 17 fixable with the `--fix` option (2 hidden fixes can be enabled with the `--unsafe-fixes` option).
+Found 13 errors.
+[*] 11 fixable with the `--fix` option (2 hidden fixes can be enabled with the `--unsafe-fixes` option).

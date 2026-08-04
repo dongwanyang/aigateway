@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import asdict
 
 import pytest
-
 from aigateway_core.pipelines.generation._common.models import (
     GenerationRequest,
     VideoGenerationPlan,

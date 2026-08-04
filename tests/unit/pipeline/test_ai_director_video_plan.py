@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import math
 from unittest.mock import AsyncMock
 
 import pytest
-
 from aigateway_core.dispatch.context import PipelineContext
 from aigateway_core.pipelines.generation._common.config import AIDirectorConfig
 from aigateway_core.pipelines.generation.director.ai_director import (
