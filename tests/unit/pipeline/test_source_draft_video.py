@@ -29,6 +29,7 @@ class FakeStrategy:
         self._stored: DraftResult | None = None
         self.dependency_request = None
         self.dependency_error: Exception | None = None
+        self.result_error: Exception | None = None
         self._config = SimpleNamespace(
             video_supported_durations_seconds=(3, 5, 8),
             video_max_fps=60,
@@ -48,6 +49,8 @@ class FakeStrategy:
         return self._source if draft_id == self._source.draft_id else None
 
     async def get_result_bytes(self, draft_id: str) -> bytes:
+        if self.result_error is not None:
+            raise self.result_error
         if draft_id != self._source.draft_id:
             raise DraftWorkflowError("Draft not found or expired")
         return self._result
@@ -222,6 +225,26 @@ async def test_dependency_failure_does_not_persist_a_video_draft():
     )
 
     with pytest.raises(DraftWorkflowError, match="comfyui_missing_dependencies"):
+        await create_video_draft_from_source(
+            strategy,
+            source_draft_id="source-image",
+            motion_prompt="move",
+            duration_seconds=5,
+            fps=8,
+            chat_session_id="session-1",
+            user_id="user-1",
+            group_id="group-1",
+        )
+
+    assert strategy._stored is None
+
+
+@pytest.mark.asyncio
+async def test_storage_failure_is_not_mapped_to_source_not_found():
+    strategy = FakeStrategy(source_image_draft(), b"source")
+    strategy.result_error = OSError("permission denied")
+
+    with pytest.raises(OSError, match="permission denied"):
         await create_video_draft_from_source(
             strategy,
             source_draft_id="source-image",
