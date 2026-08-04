@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import time
 from typing import Any
 
 from aigateway_core.pipelines.generation._common.exceptions import DraftWorkflowError
@@ -52,6 +53,87 @@ class DraftGeneratorStrategy(_impl.DraftGeneratorStrategy):
             raise DraftWorkflowError(self._configuration_error)
         return await super().check_local_dependencies(*args, **kwargs)
 
+    async def submit_draft(
+        self,
+        request,
+        config,
+        keyframe_count=None,
+        chat_session_id=None,
+        user_id=None,
+        group_id=None,
+    ):
+        """Persist the complete video plan before background generation runs."""
+        if request.media_type == "video" and request.keyframe_prompt:
+            request.prompt = request.keyframe_prompt
+        draft = await super().submit_draft(
+            request,
+            config,
+            keyframe_count,
+            chat_session_id,
+            user_id,
+            group_id,
+        )
+        if request.media_type == "video":
+            params = draft.generation_params
+            params.update(
+                {
+                    "source_prompt": request.source_prompt or request.prompt,
+                    "keyframe_prompt": request.keyframe_prompt or request.prompt,
+                    "motion_prompt": request.motion_prompt or request.prompt,
+                    "prompt_language": request.prompt_language,
+                    "keyframe_language": request.keyframe_language,
+                    "motion_language": request.motion_language,
+                    "language_fallback_reason": request.language_fallback_reason,
+                    "duration_seconds": request.duration_seconds,
+                    "fps": request.target_fps,
+                    "frame_count": request.frame_count,
+                    "source_draft_id": request.source_draft_id,
+                    "source_image_sha256": request.source_image_sha256,
+                }
+            )
+            # ``generation_params`` is shared with the just-created background
+            # task, so this update is visible before its first scheduling turn.
+            await self._store_draft(
+                draft,
+                max(1, int(draft.expires_at - time.time())),
+            )
+        return draft
+
+    async def _generate_video_with_comfyui(self, draft):
+        """Use the persisted motion prompt; never reuse the static keyframe text."""
+        if not self._comfyui_config.video_enabled:
+            raise DraftWorkflowError("comfyui_video_not_enabled")
+        if not draft.previews:
+            raise DraftWorkflowError("Video draft has no approved keyframe")
+        await self._ensure_storage_capacity()
+        input_name = await self._upload_image(
+            draft.previews[0], f"video-keyframe-{draft.draft_id}.png"
+        )
+        motion_prompt = str(
+            draft.generation_params.get("motion_prompt")
+            or draft.generation_params.get("prompt")
+            or ""
+        )
+        workflow = self._build_video_workflow(
+            input_name=input_name,
+            prompt=motion_prompt,
+            seed=int(draft.generation_params.get("seed", 0)),
+            draft_id=draft.draft_id,
+        )
+        async with self._comfyui_semaphore:
+            client_id = self._comfy_client_id(draft.draft_id, "video")
+            prompt_id = await self._submit_workflow(workflow, client_id=client_id)
+            await self._record_comfy_job(draft.draft_id, prompt_id, "refining")
+            result = await self._poll_result(
+                prompt_id,
+                timeout=self._comfyui_config.video_execution_timeout,
+                trace_id=str(draft.generation_params.get("trace_id") or ""),
+                draft_id=draft.draft_id,
+                progress_client_id=client_id,
+                progress_stage="refining",
+            )
+        return result
+
     @staticmethod
     def _pool_has_worker(status: Any, capability: str) -> bool:
         """Return whether the scheduler has a valid worker/device capability pair."""
@@ -77,13 +159,6 @@ class DraftGeneratorStrategy(_impl.DraftGeneratorStrategy):
         return False
 
     def _scheduler_manages_comfyui(self, status: Any) -> bool:
-        """Return whether this ComfyUI endpoint belongs to the local GPU pool.
-
-        Explicit workers are authoritative. ``AIGATEWAY_SHARED_GPU`` preserves
-        fail-closed behavior during local quickstart startup even if generated
-        topology is accidentally missing. A remote/external ComfyUI endpoint has
-        neither signal and must not drain or lock local Gateway devices.
-        """
         configured = bool(
             getattr(self._comfyui_config, "scheduler_managed", False)
         )
@@ -105,13 +180,6 @@ class DraftGeneratorStrategy(_impl.DraftGeneratorStrategy):
         preferred_worker_id: str | None = None,
         memory_requirement_gb: float = 0.0,
     ) -> tuple[Any, Any | None]:
-        """Use the shared pool only for scheduler-managed local workers.
-
-        Local ComfyUI workers share physical devices with Gateway components and
-        therefore must be allocated through ``generation_lease()``. External or
-        remote ComfyUI endpoints do not own local devices and execute through the
-        fixed URL without draining, fencing or locking any local Gateway GPU.
-        """
         coordinator = self._gpu_coordinator
         if coordinator is not None and coordinator.config.enabled:
             status = coordinator.status()
@@ -133,14 +201,6 @@ class DraftGeneratorStrategy(_impl.DraftGeneratorStrategy):
         draft: Any,
         reason: str,
     ) -> None:
-        """Rollback a failed confirm without retaining stale ComfyUI state.
-
-        A confirmation failure returns the accepted preview to ``pending`` so it
-        can be retried. The previous prompt binding and node-level progress must
-        be cleared at the same time; otherwise status reconciliation can inspect
-        the disappeared prompt during the next confirmation's preparation phase
-        and incorrectly roll the new attempt back before it submits to ComfyUI.
-        """
         draft.comfy_prompt_id = None
         generation_params = getattr(draft, "generation_params", None)
         if isinstance(generation_params, dict):

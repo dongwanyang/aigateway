@@ -1,15 +1,10 @@
 """
 数据模型 — 生成优化层核心数据结构
 ===================================
-
-定义 Generation Optimization Layer 使用的核心请求/响应数据结构，
-包括生成请求、评估结果、路由决策、压缩结果、草图结果、模板和成本记录。
-
-需求: 1.1, 2.1, 2.7, 3.1, 4.3, 5.1, 7.1, 8.2
 """
-
 from __future__ import annotations
 
+import math
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -20,36 +15,7 @@ from aigateway_core.prefix.media.types import MediaContent
 
 @dataclass
 class GenerationRequest:
-    """生成请求 — 包含优化所需的全部信息.
-
-    封装用户提交的生成请求及其相关参数，是生成优化管线各阶段的
-    统一输入数据结构。
-
-    Attributes:
-        prompt: 用户提示词
-        source_prompt: 未经 AI Director 改写的原始用户提示词
-        reference_images: 参考图列表（MediaContent 对象）
-        target_model: 模型覆盖，指定时绕过路由直接使用该模型
-        routing_hint: 路由提示，如 "best quality"、"cheapest" 或具体模型名
-        required_modality: 所需模态类别，决定路由筛选的模型类型
-            "llm" — 纯文本语言模型
-            "mllm" — 多模态理解模型
-            "generative" — 生成模型（默认）
-        template_name: 提示词模板名称，指定时跳过 AI Director 改写
-        template_variables: 模板占位符变量值映射
-        character_id: 角色 ID，用于特征缓存查找和复用
-        target_resolution: 目标分辨率 (width, height)
-        target_fps: 目标帧率（视频生成时使用）
-        media_type: 媒体类型 "image" | "video"
-        duration_seconds: 目标视频时长（秒）
-        source_draft_id: 作为视频关键帧来源的已完成图片草稿 ID
-        keyframe_prompt: 只描述静态关键帧的提示词
-        motion_prompt: 只描述动作、运镜和一致性约束的提示词
-        prompt_language: 提示词主要语言
-        injection_method: 特征注入方式 ("ip-adapter" | "controlnet")
-        api_key_id: API Key 标识符，用于资源隔离
-        request_id: 请求唯一标识，默认自动生成 uuid4
-    """
+    """生成请求 — 包含优化所需的全部信息."""
 
     prompt: str
     source_prompt: str | None = None
@@ -61,14 +27,19 @@ class GenerationRequest:
     template_variables: dict[str, str] = field(default_factory=dict)
     character_id: str | None = None
     target_resolution: tuple[int, int] = (1920, 1080)
-    target_fps: int = 60
-    media_type: str = "image"  # "image" | "video"
+    target_fps: int = 8
+    media_type: str = "image"
     duration_seconds: float = 5.0
+    frame_count: int | None = None
     source_draft_id: str | None = None
+    source_image_sha256: str | None = None
     keyframe_prompt: str | None = None
     motion_prompt: str | None = None
     prompt_language: str | None = None
-    quality: str = "standard"  # standard | creative_refine | faithful_4k
+    keyframe_language: str | None = None
+    motion_language: str | None = None
+    language_fallback_reason: str | None = None
+    quality: str = "standard"
     preset_id: str | None = None
     required_vram_gb: float | None = None
     injection_method: str = "ip-adapter"
@@ -79,34 +50,23 @@ class GenerationRequest:
 
 @dataclass
 class VideoGenerationPlan:
-    """视频请求的结构化提示词与时序计划.
-
-    ``keyframe_prompt`` 只描述静态首帧画面；``motion_prompt`` 只描述动作、
-    运镜与主体一致性约束。计划一旦写入草稿快照，确认阶段不得重新优化。
-
-    Attributes:
-        source_prompt: 用户原始视频描述
-        keyframe_prompt: 用于关键帧模型的静态画面提示词
-        motion_prompt: 用于 Wan2.2 的动作与运镜提示词
-        prompt_language: 提示词主要语言，如 "zh" 或 "en"
-        duration_seconds: 用户请求的视频时长
-        fps: 目标帧率
-        frame_count: 由时长和 FPS 得出的帧数（PR2 接入模型约束归一化）
-        source_draft_id: 可选的来源图片草稿 ID
-        source_image_sha256: 可选的冻结来源图片哈希
-        fallback_reason: 结构化生成失败时的可观测降级原因
-    """
+    """视频请求的结构化提示词与时序计划."""
 
     source_prompt: str
     keyframe_prompt: str
     motion_prompt: str
     prompt_language: str
+    keyframe_language: str
+    motion_language: str
     duration_seconds: float
     fps: int
     frame_count: int
     source_draft_id: str | None = None
     source_image_sha256: str | None = None
     fallback_reason: str | None = None
+    language_fallback_reason: str | None = None
+    model_used: str | None = None
+    cost_usd: float = 0.0
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -114,29 +74,32 @@ class VideoGenerationPlan:
             "keyframe_prompt",
             "motion_prompt",
             "prompt_language",
+            "keyframe_language",
+            "motion_language",
         ):
             value = getattr(self, field_name)
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{field_name} must be a non-empty string")
-        if self.duration_seconds <= 0:
-            raise ValueError("duration_seconds must be greater than zero")
-        if self.fps <= 0:
-            raise ValueError("fps must be greater than zero")
-        if self.frame_count <= 0:
-            raise ValueError("frame_count must be greater than zero")
+        if (
+            isinstance(self.duration_seconds, bool)
+            or not isinstance(self.duration_seconds, (int, float))
+            or not math.isfinite(float(self.duration_seconds))
+            or self.duration_seconds <= 0
+        ):
+            raise ValueError("duration_seconds must be a finite positive number")
+        if isinstance(self.fps, bool) or not isinstance(self.fps, int) or self.fps <= 0:
+            raise ValueError("fps must be a positive integer")
+        if (
+            isinstance(self.frame_count, bool)
+            or not isinstance(self.frame_count, int)
+            or self.frame_count <= 0
+        ):
+            raise ValueError("frame_count must be a positive integer")
 
 
 @dataclass
 class ComplexityEvaluation:
-    """复杂度评估结果.
-
-    意图评估器分析生成请求后输出的评估结果，包含总分和各维度明细。
-
-    Attributes:
-        score: 复杂度评分，范围 0-100
-        factors: 各评估维度评分明细，如 subject_count、interaction_type 等
-        recommended_model: 基于评分推荐的模型标识符
-    """
+    """复杂度评估结果."""
 
     score: int
     factors: dict[str, Any] = field(default_factory=dict)
@@ -145,21 +108,7 @@ class ComplexityEvaluation:
 
 @dataclass
 class RoutingDecision:
-    """路由决策结果.
-
-    模型路由器选择目标模型后输出的决策记录，包含选中模型信息和决策原因。
-
-    Attributes:
-        selected_model: 选中的模型标识符
-        selected_provider: 选中的 provider 名称
-        reason: 路由原因
-            "complexity" — 基于复杂度评分选择
-            "hint" — 基于用户路由提示选择
-            "override" — 用户直接指定模型
-            "fallback" — 降级到备选模型
-        complexity_score: 本次路由使用的复杂度评分
-        estimated_cost: 预估单次调用成本 (USD)
-    """
+    """路由决策结果."""
 
     selected_model: str
     selected_provider: str
@@ -170,18 +119,7 @@ class RoutingDecision:
 
 @dataclass
 class PromptOptimizationResult:
-    """Prompt 优化结果.
-
-    AI Director 对用户 prompt 进行改写或模板应用后的输出结果。
-
-    Attributes:
-        optimized_prompt: 优化后的 prompt
-        original_prompt: 原始用户 prompt
-        template_used: 使用的模板名称（如果是模板应用）
-        model_used: 改写使用的模型名称（如果是模型改写）
-        cost_usd: 改写模型调用成本 (USD)
-        duration_ms: 优化耗时（毫秒）
-    """
+    """Prompt 优化结果."""
 
     optimized_prompt: str
     original_prompt: str
@@ -189,21 +127,14 @@ class PromptOptimizationResult:
     model_used: str | None = None
     cost_usd: float = 0.0
     duration_ms: float = 0.0
+    source_language: str | None = None
+    output_language: str | None = None
+    language_fallback_reason: str | None = None
 
 
 @dataclass
 class CompressionResult:
-    """Token 压缩结果.
-
-    视觉 Token 压缩器对参考图进行语义级压缩后的输出结果。
-
-    Attributes:
-        feature_vector: 提取的特征向量
-        original_token_count: 原始 Token 估算数（= file_size_bytes / 4）
-        compressed_token_count: 压缩后 Token 数（= Feature Vector 维度数）
-        compression_ratio: 实际压缩比
-        duration_ms: 压缩耗时（毫秒）
-    """
+    """Token 压缩结果."""
 
     feature_vector: list[float]
     original_token_count: int
@@ -214,30 +145,7 @@ class CompressionResult:
 
 @dataclass
 class DraftResult:
-    """草图生成结果.
-
-    Draft-to-HiRes 工作流中生成的低分辨率预览结果。
-
-    Attributes:
-        draft_id: 唯一草图标识
-        previews: 预览图/关键帧列表（bytes 数据）
-        generation_params: 生成参数快照
-        created_at: 创建时间戳（Unix 秒）
-        expires_at: 过期时间戳（Unix 秒）
-        attempt_number: 当前重试次数
-        max_attempts: 最大允许重试次数
-        status: 草图状态
-            "generating" — 后台生成中（异步任务未完成）
-            "pending" — 等待用户确认
-            "confirming" — 用户已确认，正在提交/生成最终结果
-            "confirmed" — 已确认，可执行放大
-            "rejected" — 已拒绝，可重新生成
-            "expired" — 已过期，资源已释放
-        media_type: 媒体类型 "image" | "video"，写 meta.json 供清理/读取分流
-        session_id: 关联的聊天会话 ID（用于文件存储和会话级清理）
-        user_id: 草稿所有者用户 ID（用于权限校验）
-        group_id: 草稿所属群组 ID（用于权限校验）
-    """
+    """草图生成结果."""
 
     draft_id: str
     previews: list[bytes]
@@ -251,7 +159,6 @@ class DraftResult:
     session_id: str | None = None
     user_id: str | None = None
     group_id: str | None = None
-    """视频任务提交后 Agnes 返回的 video_id,用于刷新后重新轮询 /v1/videos/{id}。仅 media_type=='video' 确认后有值。"""
     video_id: str | None = None
     progress: float = 0.0
     stage: str = "queued"
@@ -263,7 +170,6 @@ class DraftResult:
     error: str | None = None
 
 
-# DraftResult 合法状态值
 DRAFT_STATUS_GENERATING = "generating"
 DRAFT_STATUS_QUEUED = "queued"
 DRAFT_STATUS_RUNNING = "running"
@@ -294,17 +200,7 @@ DRAFT_VALID_STATUSES = (
 
 @dataclass
 class UpscaleResult:
-    """高清放大结果.
-
-    用户确认草图后执行超分辨率放大的输出结果。
-
-    Attributes:
-        draft_id: 关联的草图标识
-        output_data: 放大后的图像/视频数据
-        target_resolution: 目标分辨率 (width, height)
-        algorithm_used: 使用的放大算法名称
-        duration_ms: 放大耗时（毫秒）
-    """
+    """高清放大结果."""
 
     draft_id: str
     output_data: bytes
@@ -315,16 +211,7 @@ class UpscaleResult:
 
 @dataclass
 class VideoSubmitResult:
-    """视频任务提交结果.
-
-    用户确认视频草稿后调 Agnes /videos 提交异步任务的输出。
-    与 UpscaleResult 平行 —— confirm_draft 按 media_type 返回二者之一。
-
-    Attributes:
-        draft_id: 关联的草图标识
-        video_id: Agnes /videos 返回的任务 id,前端据此轮询 GET /v1/videos/{id}
-        status: 任务状态,提交成功后为 "generating"
-    """
+    """视频任务提交结果."""
 
     draft_id: str
     video_id: str
@@ -333,18 +220,7 @@ class VideoSubmitResult:
 
 @dataclass
 class PromptTemplate:
-    """提示词模板.
-
-    用户预先配置的结构化提示词模板，支持 {{variable_name}} 占位符语法。
-
-    Attributes:
-        name: 模板名称（1-64 字符，允许字母数字、连字符、下划线）
-        content: 模板内容（最多 10000 字符）
-        description: 模板描述（最多 500 字符）
-        api_key_id: 所属 API Key 标识符
-        created_at: 创建时间戳（Unix 秒）
-        updated_at: 最后更新时间戳（Unix 秒）
-    """
+    """提示词模板."""
 
     name: str
     content: str
@@ -355,31 +231,12 @@ class PromptTemplate:
 
     @property
     def variables(self) -> list[str]:
-        """提取模板中的占位符变量名.
-
-        扫描 content 中所有 {{variable_name}} 格式的占位符，
-        返回去重后的变量名列表。
-
-        Returns:
-            变量名列表，例如 ["subject", "style", "background"]
-        """
         return re.findall(r"\{\{(\w+)\}\}", self.content)
 
 
 @dataclass
 class CostSavingRecord:
-    """单次请求的成本节省记录.
-
-    记录一次生成请求经过优化管线后各策略带来的成本节省明细。
-
-    Attributes:
-        request_id: 关联的请求标识
-        model_routing_saving_usd: 模型路由节省 (premium_price - actual_price)
-        token_compression_saving_usd: Token 压缩节省
-        prompt_optimization_saving_usd: Prompt 优化净节省（减少重试 - Director 成本）
-        total_saving_usd: 总节省 = 各策略节省之和
-        timestamp: 记录时间戳（Unix 秒）
-    """
+    """单次请求的成本节省记录."""
 
     request_id: str
     model_routing_saving_usd: float = 0.0
