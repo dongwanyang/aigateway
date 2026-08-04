@@ -1,0 +1,58 @@
+name: PR2 Sync Video Defaults
+
+on:
+  push:
+    branches:
+      - agent/pr2-video-duration-parameters
+    paths:
+      - .github/workflows/pr2-sync-video-defaults.yml
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/pr2-video-duration-parameters
+          fetch-depth: 0
+
+      - name: Synchronize tests and template
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          test_path = Path('tests/unit/integration/test_integration_config_loading.py')
+          test_text = test_path.read_text(encoding='utf-8')
+          old_test = '        assert c.video_frames == 17\n'
+          new_test = (
+              '        assert c.video_frames == 41\n'
+              '        assert c.video_fps == 8.0\n'
+          )
+          if test_text.count(old_test) != 1:
+              raise SystemExit('expected one stale video frame assertion')
+          test_path.write_text(test_text.replace(old_test, new_test), encoding='utf-8')
+
+          template_path = Path('config.yaml.template')
+          template_text = template_path.read_text(encoding='utf-8')
+          old_template = '      video_frames: 17       # 约 2 秒草稿视频（8 fps）\n'
+          new_template = '      video_frames: 41       # 5 秒默认视频（8 fps，按 Wan 4n+1 规则归一化）\n'
+          if template_text.count(old_template) != 1:
+              raise SystemExit('expected one stale template video frame default')
+          template_path.write_text(
+              template_text.replace(old_template, new_template),
+              encoding='utf-8',
+          )
+          PY
+
+      - name: Commit synchronized defaults
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/pr2-sync-video-defaults.yml
+          git add tests/unit/integration/test_integration_config_loading.py config.yaml.template
+          git commit -m "fix: synchronize five-second video defaults"
+          git push origin HEAD:agent/pr2-video-duration-parameters
