@@ -20,18 +20,33 @@ export interface SourceDraftVideoResponse {
   expires_at: number
 }
 
-function errorMessage(body: unknown, fallback: string): string {
-  if (!body || typeof body !== 'object') return fallback
+export class SourceDraftVideoError extends Error {
+  readonly code: string
+  readonly status: number
+
+  constructor(message: string, code: string, status: number) {
+    super(message)
+    this.name = 'SourceDraftVideoError'
+    this.code = code
+    this.status = status
+  }
+}
+
+function errorDetails(body: unknown, fallback: string): { code: string; message: string } {
+  if (!body || typeof body !== 'object') {
+    return { code: 'unknown_error', message: fallback }
+  }
   const value = body as {
     error?: { code?: string; message?: string }
     detail?: { error?: { code?: string; message?: string } } | string
   }
-  if (typeof value.detail === 'string') return value.detail
-  return value.error?.message
-    ?? value.error?.code
-    ?? (typeof value.detail === 'object' ? value.detail?.error?.message : undefined)
-    ?? (typeof value.detail === 'object' ? value.detail?.error?.code : undefined)
-    ?? fallback
+  const nested = typeof value.detail === 'object' ? value.detail?.error : undefined
+  return {
+    code: value.error?.code ?? nested?.code ?? 'unknown_error',
+    message: value.error?.message
+      ?? nested?.message
+      ?? (typeof value.detail === 'string' ? value.detail : fallback),
+  }
 }
 
 export async function createVideoDraftFromSource(
@@ -55,8 +70,10 @@ export async function createVideoDraftFromSource(
     },
   )
   if (!response.ok) {
+    const fallback = `创建视频草稿失败: HTTP ${response.status}`
     const body = await response.json().catch(() => null) as unknown
-    throw new Error(errorMessage(body, `创建视频草稿失败: HTTP ${response.status}`))
+    const details = errorDetails(body, fallback)
+    throw new SourceDraftVideoError(details.message, details.code, response.status)
   }
   return response.json() as Promise<SourceDraftVideoResponse>
 }
