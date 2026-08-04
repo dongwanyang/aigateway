@@ -2,6 +2,13 @@ import { useEffect, useState, useRef, type KeyboardEvent } from 'react'
 import { ImagePlus, RefreshCw, Send, Square, X } from 'lucide-react'
 import type { GenerationPreset } from '@/api/client'
 import type { ChatReferenceImage, GenerationOptions } from '@/types'
+import {
+  DEFAULT_VIDEO_DURATION_SECONDS,
+  DEFAULT_VIDEO_FPS,
+  VIDEO_DURATION_OPTIONS,
+  type VideoDurationSeconds,
+  type VideoGenerationOptions,
+} from '@/types/videoGeneration'
 
 const MAX_REFERENCE_IMAGE_BYTES = 10 * 1024 * 1024
 const REFERENCE_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp'])
@@ -45,6 +52,9 @@ export default function ChatComposer({
   const [presetId, setPresetId] = useState('')
   const [quality, setQuality] = useState<NonNullable<GenerationOptions['quality']>>('standard')
   const [size, setSize] = useState('')
+  const [videoDurationSeconds, setVideoDurationSeconds] = useState<VideoDurationSeconds>(
+    DEFAULT_VIDEO_DURATION_SECONDS,
+  )
   const [referenceImage, setReferenceImage] = useState<ChatReferenceImage | null>(null)
   const [referenceError, setReferenceError] = useState<string | null>(null)
   const taRef = useRef<HTMLTextAreaElement>(null)
@@ -62,22 +72,28 @@ export default function ChatComposer({
   function submit() {
     const t = text.trim()
     if (!t || streaming || disabled) return
-    if (backend === 'auto' && !presetId && quality === 'standard' && !size) {
+    const hasCustomVideoTiming = videoDurationSeconds !== DEFAULT_VIDEO_DURATION_SECONDS
+    if (backend === 'auto' && !presetId && quality === 'standard' && !size && !hasCustomVideoTiming) {
       if (referenceImage) onSend(t, { referenceImage })
       else onSend(t)
     } else {
       const [width, height] = size
         ? size.split('x').map(value => Number(value))
         : [undefined, undefined]
+      const generationOptions: VideoGenerationOptions = {
+        backend,
+        preset_id: presetId || undefined,
+        quality,
+        prompt_mode: 'auto',
+        width,
+        height,
+      }
+      if (hasCustomVideoTiming) {
+        generationOptions.duration_seconds = videoDurationSeconds
+        generationOptions.fps = DEFAULT_VIDEO_FPS
+      }
       onSend(t, {
-        generationOptions: {
-          backend,
-          preset_id: presetId || undefined,
-          quality,
-          prompt_mode: 'auto',
-          width,
-          height,
-        },
+        generationOptions,
         referenceImage: referenceImage ?? undefined,
       })
     }
@@ -206,6 +222,23 @@ export default function ChatComposer({
             <option value="1024x1024">1024 × 1024</option>
             <option value="1344x768">1344 × 768</option>
             <option value="768x1344">768 × 1344</option>
+          </select>
+        </label>
+        <label
+          className="text-xs"
+          style={{ color: 'var(--color-text-secondary)' }}
+          title={`仅对视频生成生效，按 ${DEFAULT_VIDEO_FPS} FPS 归一化为 Wan2.2 支持的帧数`}
+        >
+          视频时长{' '}
+          <select
+            aria-label="视频时长"
+            disabled={streaming || disabled}
+            value={videoDurationSeconds}
+            onChange={event => setVideoDurationSeconds(Number(event.target.value) as VideoDurationSeconds)}
+          >
+            {VIDEO_DURATION_OPTIONS.map(duration => (
+              <option key={duration} value={duration}>{duration} 秒</option>
+            ))}
           </select>
         </label>
       </div>
