@@ -24,6 +24,23 @@ def test_missing_anaphoric_video_reference_is_rejected():
     assert reference_image_required(body) is True
 
 
+@pytest.mark.parametrize(
+    "content",
+    [
+        "请解释这张图片和视频的区别",
+        "这张图片适合做视频封面吗",
+        "What is the difference between this image and a video?",
+    ],
+)
+def test_non_generation_image_video_questions_are_not_rejected(content):
+    body = SimpleNamespace(
+        messages=[{"role": "user", "content": content}],
+        generation_options={},
+    )
+
+    assert reference_image_required(body) is False
+
+
 def test_uploaded_image_or_source_draft_satisfies_reference_requirement():
     uploaded = SimpleNamespace(
         messages=[
