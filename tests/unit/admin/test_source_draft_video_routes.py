@@ -34,6 +34,15 @@ def _app(auth_dependency) -> FastAPI:
     return app
 
 
+def _request_body() -> dict[str, object]:
+    return {
+        "motion_prompt": "move",
+        "duration_seconds": 5,
+        "fps": 8,
+        "chat_session_id": "session-1",
+    }
+
+
 def test_source_video_route_installer_is_idempotent(monkeypatch):
     source_router = APIRouter()
 
@@ -123,12 +132,7 @@ async def test_source_video_route_requires_admin_authentication(monkeypatch):
     ) as client:
         response = await client.post(
             "/admin/draft/source-image/video",
-            json={
-                "motion_prompt": "move",
-                "duration_seconds": 5,
-                "fps": 8,
-                "chat_session_id": "session-1",
-            },
+            json=_request_body(),
         )
 
     assert response.status_code == 401
@@ -170,13 +174,38 @@ async def test_source_video_route_maps_domain_errors(
     ) as client:
         response = await client.post(
             "/admin/draft/source-image/video",
-            json={
-                "motion_prompt": "move",
-                "duration_seconds": 5,
-                "fps": 8,
-                "chat_session_id": "session-1",
-            },
+            json=_request_body(),
         )
 
     assert response.status_code == status_code
     assert response.json()["detail"]["error"]["code"] == code
+
+
+@pytest.mark.asyncio
+async def test_source_video_route_maps_unexpected_storage_failure_to_500(
+    monkeypatch,
+):
+    async def authenticated():
+        return {"user_id": "user-1", "group_id": "group-1"}
+
+    app = _app(authenticated)
+    monkeypatch.setattr(
+        routes_module,
+        "create_video_draft_from_source",
+        AsyncMock(side_effect=OSError("permission denied")),
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.post(
+            "/admin/draft/source-image/video",
+            json=_request_body(),
+        )
+
+    assert response.status_code == 500
+    assert response.json()["detail"]["error"] == {
+        "code": "internal_error",
+        "message": "创建视频草稿时发生内部错误。",
+    }
