@@ -36,6 +36,21 @@ def test_video_timing_survives_api_request_validation(
     }
 
 
+def test_omitted_video_timing_stays_absent_from_pipeline_options() -> None:
+    body = ChatCompletionRequest.model_validate(
+        {
+            "model": "auto",
+            "messages": [{"role": "user", "content": "生成一张图片"}],
+            "generation_options": {"backend": "local"},
+        },
+    )
+
+    assert body.generation_options is not None
+    pipeline_options = body.generation_options.model_dump(exclude_none=True)
+    assert "duration_seconds" not in pipeline_options
+    assert "fps" not in pipeline_options
+
+
 @pytest.mark.parametrize("duration_seconds", [0, 4, 9, True, "5"])
 def test_api_rejects_unsupported_video_durations(duration_seconds: object) -> None:
     with pytest.raises(ValidationError):
