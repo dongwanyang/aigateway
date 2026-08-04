@@ -43,6 +43,9 @@ def render(
     knowledge = edition in {"knowledge", "full"}
     studio = edition in {"studio", "full"}
     external_embedding = knowledge and embedding_mode in {"native", "remote"}
+    local_comfyui_pool = bool(
+        studio and accelerator == "cuda" and comfyui_mode == "container"
+    )
 
     for name in ("rag_retriever", "prompt_compress", "conv_compressor"):
         _plugin(config, name)["enabled"] = knowledge
@@ -111,9 +114,7 @@ def render(
     comfy = draft.setdefault("comfyui", {})
     comfy["server_url"] = comfyui_url.rstrip("/")
     comfy["required"] = True
-    comfy["scheduler_managed"] = bool(
-        studio and accelerator == "cuda" and comfyui_mode == "container"
-    )
+    comfy["scheduler_managed"] = local_comfyui_pool
     token = generation.setdefault("token_compressor", {})
     token.setdefault("clip", {})["device"] = (
         "auto" if studio and accelerator == "cuda" else "cpu"
@@ -127,6 +128,15 @@ def render(
     scheduler.setdefault("comfyui_devices", "auto")
     scheduler.setdefault("gateway_fallback", "cpu")
     scheduler.setdefault("comfyui_dynamic_vram_enabled", False)
+
+    # ``devices`` and ``workers`` are generated from the current host inventory
+    # by render-gpu-topology.py.  They must not survive a switch to CPU, MPS,
+    # native ComfyUI, or a remote endpoint, otherwise a stale local UUID could be
+    # advertised as runnable after an edition/topology change.
+    if not local_comfyui_pool:
+        scheduler.pop("devices", None)
+        scheduler.pop("workers", None)
+        scheduler.pop("inventory_source", None)
 
     config["deployment"] = {
         "edition": edition,
