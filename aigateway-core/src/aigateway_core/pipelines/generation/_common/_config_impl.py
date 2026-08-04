@@ -91,6 +91,12 @@ class DraftWorkflowConfig:
         preview_video_fps: 预览视频帧率 (默认: 8, 范围: 1-30)
         target_fps: 目标帧率 (默认: 60, 范围: 24-120)
         target_fps_range: 允许的目标帧率范围 (默认: (24, 120))
+        video_default_duration_seconds: 默认视频时长/秒 (默认: 5)
+        video_supported_durations_seconds: 允许的视频时长档位 (默认: (3, 5, 8))
+        video_default_fps: 默认视频帧率 (默认: 8)
+        video_max_fps: 最大视频帧率 (默认: 60)
+        video_min_frames: 视频最小帧数 (默认: 1)
+        video_max_frames: 视频最大帧数 (默认: 481)
         upscale_algorithm: 放大算法名称 (默认: "real-esrgan")
         draft_model: 草稿预览生成使用的图像模型 (默认: "agnes-image-2.1-flash")
         store_dir: 草稿文件存储根目录 (默认: "/app/data/drafts")。
@@ -109,6 +115,12 @@ class DraftWorkflowConfig:
     preview_video_fps: int = 8
     target_fps: int = 60
     target_fps_range: tuple[int, int] = (24, 120)
+    video_default_duration_seconds: int = 5
+    video_supported_durations_seconds: tuple[int, ...] = (3, 5, 8)
+    video_default_fps: int = 8
+    video_max_fps: int = 60
+    video_min_frames: int = 1
+    video_max_frames: int = 481
     upscale_algorithm: str = "real-esrgan"
     draft_model: str = "agnes-image-2.1-flash"
     store_dir: str = "/app/data/drafts"
@@ -218,6 +230,11 @@ _VALIDATION_RULES: dict[str, dict[str, tuple[float, float]]] = {
         "preview_keyframe_interval_seconds": (1, 60),
         "preview_video_fps": (1, 30),
         "target_fps": (24, 120),
+        "video_default_duration_seconds": (1, 300),
+        "video_default_fps": (1, 60),
+        "video_max_fps": (1, 60),
+        "video_min_frames": (1, 10000),
+        "video_max_frames": (1, 10000),
     },
     "token_compressor": {
         "target_compression_ratio": (0.2, 0.9),

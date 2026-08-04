@@ -501,6 +501,12 @@ generation_optimization:
     enabled: true             # 是否启用本地草图生成工作流
     store_dir: /app/data/drafts       # 草稿、预览和确认结果的持久化根目录
     retention_period_hours: 24        # 草稿会话保留时长（小时）
+    video_default_duration_seconds: 5 # 默认视频时长（秒）
+    video_supported_durations_seconds: [3, 5, 8] # 允许的时长档位
+    video_default_fps: 8      # 默认视频帧率
+    video_max_fps: 60         # 服务端允许的最大视频帧率
+    video_min_frames: 1       # Wan 工作流最小帧数边界
+    video_max_frames: 481     # Wan 工作流最大帧数边界
     comfyui:
       server_url: "http://comfyui:8188"  # Compose 内网地址；不直接暴露公网
       public_url: "http://localhost:8188" # 浏览器打开 ComfyUI/Manager 的地址
