@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import os
 import tempfile
 from pathlib import Path
@@ -19,6 +21,19 @@ def _plugin(config: dict[str, Any], name: str) -> dict[str, Any]:
         if item.get("name") == name:
             return item
     raise ValueError(f"base config is missing plugin {name!r}")
+
+
+@contextlib.contextmanager
+def _config_write_lock(path: Path):
+    """Share the runtime config lock used by control-panel transactions."""
+    lock_path = Path(str(path) + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def render(
@@ -192,18 +207,22 @@ def main() -> int:
     parser.add_argument("--monitoring", action="store_true")
     parser.add_argument("--shared-gpu", action="store_true")
     args = parser.parse_args()
-    config = render(
-        args.source,
-        edition=args.edition,
-        accelerator=args.accelerator,
-        embedding_mode=args.embedding_mode,
-        comfyui_mode=args.comfyui_mode,
-        comfyui_url=args.comfyui_url,
-        embedding_url=args.embedding_url,
-        monitoring=args.monitoring,
-        shared_gpu=args.shared_gpu,
-    )
-    _atomic_dump(args.output, config)
+    # Keep the lock across source read, deployment mutation and atomic replace.
+    # When source == output this prevents a control-panel save from landing
+    # between our read and write and being silently overwritten.
+    with _config_write_lock(args.output):
+        config = render(
+            args.source,
+            edition=args.edition,
+            accelerator=args.accelerator,
+            embedding_mode=args.embedding_mode,
+            comfyui_mode=args.comfyui_mode,
+            comfyui_url=args.comfyui_url,
+            embedding_url=args.embedding_url,
+            monitoring=args.monitoring,
+            shared_gpu=args.shared_gpu,
+        )
+        _atomic_dump(args.output, config)
     return 0
 
 
