@@ -125,6 +125,39 @@ def _error_response(error: str) -> tuple[int, str, str]:
     return 500, "internal_error", "创建视频草稿时发生内部错误。"
 
 
+def _domain_http_exception(
+    exc: BaseException,
+    *,
+    source_draft_id: str,
+    chat_session_id: str,
+) -> HTTPException:
+    status, code, message = _error_response(str(exc))
+    context = {
+        "source_draft_id": source_draft_id,
+        "chat_session_id": chat_session_id,
+        "error_code": code,
+    }
+    if status >= 500:
+        logger.error("source_draft_video.create_failed", extra=context)
+    else:
+        logger.warning("source_draft_video.create_rejected", extra=context)
+    return HTTPException(
+        status_code=status,
+        detail={"error": {"code": code, "message": message}},
+    )
+
+
+def _is_reloaded_draft_workflow_error(exc: BaseException) -> bool:
+    """Recognize the same domain exception after plugin/test module reloads.
+
+    Reloading the exceptions module creates a distinct Python class object, so
+    an exception raised by the reloaded helper is not ``isinstance`` of the
+    route module's original import. Restrict the fallback to the exact domain
+    class name; arbitrary exceptions still fail closed as internal errors.
+    """
+    return type(exc).__name__ == "DraftWorkflowError"
+
+
 @router.post(
     "/draft/{source_draft_id}/video",
     response_model=SourceDraftVideoResponse,
@@ -152,30 +185,18 @@ async def create_video_from_source_draft(
     except HTTPException:
         raise
     except DraftWorkflowError as exc:
-        status, code, message = _error_response(str(exc))
-        if status >= 500:
-            logger.error(
-                "source_draft_video.create_failed",
-                extra={
-                    "source_draft_id": source_draft_id,
-                    "chat_session_id": body.chat_session_id,
-                    "error_code": code,
-                },
-            )
-        else:
-            logger.warning(
-                "source_draft_video.create_rejected",
-                extra={
-                    "source_draft_id": source_draft_id,
-                    "chat_session_id": body.chat_session_id,
-                    "error_code": code,
-                },
-            )
-        raise HTTPException(
-            status_code=status,
-            detail={"error": {"code": code, "message": message}},
+        raise _domain_http_exception(
+            exc,
+            source_draft_id=source_draft_id,
+            chat_session_id=body.chat_session_id,
         ) from exc
     except Exception as exc:
+        if _is_reloaded_draft_workflow_error(exc):
+            raise _domain_http_exception(
+                exc,
+                source_draft_id=source_draft_id,
+                chat_session_id=body.chat_session_id,
+            ) from exc
         logger.exception(
             "source_draft_video.create_unhandled",
             extra={
