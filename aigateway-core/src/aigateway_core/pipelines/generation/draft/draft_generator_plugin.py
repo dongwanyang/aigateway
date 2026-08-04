@@ -164,6 +164,7 @@ class DraftGeneratorPlugin:
                 "failed",
                 payload={"reason": "invalid_generation_options"},
             )
+            ctx.should_stop = True
         except Exception as exc:
             duration_ms = (time.monotonic() - started_at) * 1000.0
             ctx.extra.setdefault(NS_GENERATION_OPTIMIZATION, {})[
