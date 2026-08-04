@@ -100,6 +100,8 @@ def _preload_cors_origins() -> None:
     if normalized:
         bootstrap_origins = ",".join(normalized)
         os.environ["AI_GATEWAY_CORS_ORIGINS"] = bootstrap_origins
+        # Store the synthetic value itself. ConfigManager can then distinguish
+        # it from an operator/test override written after package import.
         os.environ[_CORS_YAML_BOOTSTRAP_MARKER] = bootstrap_origins
 
 
@@ -113,6 +115,9 @@ def _install_admin_security_guards() -> None:
         prune_removed_model_references,
     )
 
+    # Secure route handlers resolve these globals at request time. Replacing the
+    # narrow legacy helpers here preserves their public test/import surface while
+    # installing the complete scalar-reference validation contract.
     security_routes._configured_model_names = configured_model_names
     security_routes._prune_removed_model_references = (
         prune_removed_model_references
