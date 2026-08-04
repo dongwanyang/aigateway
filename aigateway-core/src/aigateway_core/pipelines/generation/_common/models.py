@@ -27,6 +27,7 @@ class GenerationRequest:
 
     Attributes:
         prompt: 用户提示词
+        source_prompt: 未经 AI Director 改写的原始用户提示词
         reference_images: 参考图列表（MediaContent 对象）
         target_model: 模型覆盖，指定时绕过路由直接使用该模型
         routing_hint: 路由提示，如 "best quality"、"cheapest" 或具体模型名
@@ -39,6 +40,12 @@ class GenerationRequest:
         character_id: 角色 ID，用于特征缓存查找和复用
         target_resolution: 目标分辨率 (width, height)
         target_fps: 目标帧率（视频生成时使用）
+        media_type: 媒体类型 "image" | "video"
+        duration_seconds: 目标视频时长（秒）
+        source_draft_id: 作为视频关键帧来源的已完成图片草稿 ID
+        keyframe_prompt: 只描述静态关键帧的提示词
+        motion_prompt: 只描述动作、运镜和一致性约束的提示词
+        prompt_language: 提示词主要语言
         injection_method: 特征注入方式 ("ip-adapter" | "controlnet")
         api_key_id: API Key 标识符，用于资源隔离
         request_id: 请求唯一标识，默认自动生成 uuid4
@@ -56,6 +63,11 @@ class GenerationRequest:
     target_resolution: tuple[int, int] = (1920, 1080)
     target_fps: int = 60
     media_type: str = "image"  # "image" | "video"
+    duration_seconds: float = 5.0
+    source_draft_id: str | None = None
+    keyframe_prompt: str | None = None
+    motion_prompt: str | None = None
+    prompt_language: str | None = None
     quality: str = "standard"  # standard | creative_refine | faithful_4k
     preset_id: str | None = None
     required_vram_gb: float | None = None
@@ -63,6 +75,55 @@ class GenerationRequest:
     api_key_id: str = ""
     request_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     trace_id: str = ""
+
+
+@dataclass
+class VideoGenerationPlan:
+    """视频请求的结构化提示词与时序计划.
+
+    ``keyframe_prompt`` 只描述静态首帧画面；``motion_prompt`` 只描述动作、
+    运镜与主体一致性约束。计划一旦写入草稿快照，确认阶段不得重新优化。
+
+    Attributes:
+        source_prompt: 用户原始视频描述
+        keyframe_prompt: 用于关键帧模型的静态画面提示词
+        motion_prompt: 用于 Wan2.2 的动作与运镜提示词
+        prompt_language: 提示词主要语言，如 "zh" 或 "en"
+        duration_seconds: 用户请求的视频时长
+        fps: 目标帧率
+        frame_count: 由时长和 FPS 得出的帧数（PR2 接入模型约束归一化）
+        source_draft_id: 可选的来源图片草稿 ID
+        source_image_sha256: 可选的冻结来源图片哈希
+        fallback_reason: 结构化生成失败时的可观测降级原因
+    """
+
+    source_prompt: str
+    keyframe_prompt: str
+    motion_prompt: str
+    prompt_language: str
+    duration_seconds: float
+    fps: int
+    frame_count: int
+    source_draft_id: str | None = None
+    source_image_sha256: str | None = None
+    fallback_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "source_prompt",
+            "keyframe_prompt",
+            "motion_prompt",
+            "prompt_language",
+        ):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field_name} must be a non-empty string")
+        if self.duration_seconds <= 0:
+            raise ValueError("duration_seconds must be greater than zero")
+        if self.fps <= 0:
+            raise ValueError("fps must be greater than zero")
+        if self.frame_count <= 0:
+            raise ValueError("frame_count must be greater than zero")
 
 
 @dataclass
