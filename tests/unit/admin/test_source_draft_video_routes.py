@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -8,7 +10,7 @@ import pytest
 from aigateway_core.pipelines.generation._common.exceptions import (
     DraftWorkflowError,
 )
-from fastapi import APIRouter, FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException
 from httpx import ASGITransport, AsyncClient
 
 
@@ -43,26 +45,19 @@ def _request_body() -> dict[str, object]:
     }
 
 
-def test_source_video_route_installer_is_idempotent(monkeypatch):
-    source_router = APIRouter()
-
-    @source_router.post("/probe")
-    async def probe():
-        return {"ok": True}
-
-    monkeypatch.setattr(routes_module, "router", source_router)
-    admin_router = APIRouter()
-
-    routes_module.install_source_draft_video_routes(admin_router)
-    routes_module.install_source_draft_video_routes(admin_router)
-
-    matching = [
-        route
-        for route in admin_router.routes
-        if getattr(route, "path", "") == "/probe"
-    ]
-    assert len(matching) == 1
-    assert "POST" in set(getattr(matching[0], "methods", set()) or set())
+def test_source_video_route_is_installed_in_fresh_process():
+    code = """
+from aigateway_api import admin_routes
+paths = {getattr(route, 'path', '') for route in admin_routes.router.routes}
+assert '/draft/{source_draft_id}/video' in paths, sorted(paths)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
 
 
 @pytest.mark.asyncio
