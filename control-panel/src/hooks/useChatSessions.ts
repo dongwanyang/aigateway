@@ -395,6 +395,7 @@ export function useChatSessions(): UseChatSessions {
   ) => {
     patchSessionMessage(sessionId, assistantId, message => ({
       ...message,
+      error: false,
       intent: draft.mediaType === 'image' ? 'generation:image' : 'generation:video',
       model: 'draft',
       draft,
@@ -542,19 +543,33 @@ export function useChatSessions(): UseChatSessions {
       }))
     }).catch(error => {
       if (controller.signal.aborted) return
-      const message = error instanceof Error ? error.message : '取消失败'
-      setError(`停止生成失败: ${message}`)
+      const reason = error instanceof Error ? error.message : '取消失败'
+      const errorCode = (error as Error & { code?: string }).code ?? ''
+      const unconfirmed = errorCode === 'comfyui_cancellation_unconfirmed'
+      setError(
+        unconfirmed
+          ? 'ComfyUI 未确认任务已停止，任务将继续运行并保持跟踪。'
+          : `停止生成失败: ${reason}`,
+      )
       patchSessionMessage(sessionId, assistantId, current => ({
         ...current,
-        content: '停止失败，正在恢复任务状态',
-        error: true,
+        content: unconfirmed
+          ? '停止未确认，正在恢复任务状态'
+          : '停止失败，正在恢复任务状态',
+        error: !unconfirmed,
         incomplete: false,
         awaitingDraft: true,
         awaitingDraftSince: current.awaitingDraftSince ?? Date.now(),
         draft: current.draft ? {
           ...current.draft,
-          stage: current.draft.stage === 'cancelling' ? 'running' : current.draft.stage,
-          errorMessage: `停止失败: ${message}`,
+          stage: unconfirmed
+            ? 'cancellation_unconfirmed'
+            : current.draft.stage === 'cancelling'
+              ? 'running'
+              : current.draft.stage,
+          errorMessage: unconfirmed
+            ? '停止未确认，任务继续运行'
+            : `停止失败: ${reason}`,
         } : current.draft,
       }))
       resumedSessionIds.delete(sessionId)
