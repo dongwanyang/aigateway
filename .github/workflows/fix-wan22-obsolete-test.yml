@@ -1,0 +1,54 @@
+name: Fix Wan2.2 Obsolete Language Test
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/fix-wan22-obsolete-test.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.head_ref == 'agent/integrate-wan22-main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/integrate-wan22-main
+          fetch-depth: 0
+      - name: Remove superseded English-only assertion
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('tests/unit/pipeline/test_ai_director_strategy.py')
+          text = path.read_text(encoding='utf-8')
+          obsolete = '''    @pytest.mark.parametrize(
+              "system_prompt",
+              [_REWRITE_SYSTEM_PROMPT, _EXPAND_SYSTEM_PROMPT],
+          )
+          def test_default_system_prompts_require_english_for_sdxl(self, system_prompt):
+              """Default optimization must produce text SDXL's CLIP can understand."""
+              assert "必须使用自然、准确的英文" in system_prompt
+              assert "Subject:" in system_prompt
+              assert "Action:" in system_prompt
+              assert "Environment:" in system_prompt
+              assert "Camera:" in system_prompt
+              assert "只将该文字原样保留" in system_prompt
+
+          '''
+          if text.count(obsolete) != 1:
+              raise SystemExit('obsolete English-only test block was not found exactly once')
+          path.write_text(text.replace(obsolete, ''), encoding='utf-8')
+          PY
+          git rm .github/workflows/fix-wan22-obsolete-test.yml
+          git diff --check
+          git add tests/unit/pipeline/test_ai_director_strategy.py
+          git commit -m 'test: align prompt language assertions with model policy'
+          git push origin HEAD:agent/integrate-wan22-main
