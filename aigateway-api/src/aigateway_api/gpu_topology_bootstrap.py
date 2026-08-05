@@ -12,7 +12,9 @@ import hashlib
 import json
 import logging
 import os
+import stat
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -181,10 +183,14 @@ def _remap_overrides(
 ) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
+
     result: list[dict[str, Any]] = []
-    for raw in value:
+    unresolved: list[str] = []
+    for position, raw in enumerate(value):
         if not isinstance(raw, dict) or not raw.get("uuid"):
-            continue
+            raise RuntimeError(
+                "GPU device override is malformed at index " + str(position)
+            )
         override = dict(raw)
         uuid = str(override["uuid"])
         if uuid not in current_by_uuid:
@@ -193,13 +199,15 @@ def _remap_overrides(
                 current_by_index.get(old_index) if old_index is not None else None
             )
             if replacement is None:
-                logger.warning(
-                    "Dropping stale GPU device override during topology bootstrap",
-                    extra={"device_uuid": uuid},
-                )
+                unresolved.append(uuid)
                 continue
             override["uuid"] = str(replacement["uuid"])
         result.append(override)
+    if unresolved:
+        raise RuntimeError(
+            "GPU device overrides reference devices that cannot be remapped: "
+            + ", ".join(sorted(unresolved))
+        )
     return result
 
 
@@ -279,6 +287,18 @@ def _pool_expected(runtime: dict[str, Any], scheduler: dict[str, Any]) -> bool:
     return shared_gpu or scheduler_managed or bool(workers)
 
 
+def _inventory_required(runtime: dict[str, Any], scheduler: dict[str, Any]) -> bool:
+    if _pool_expected(runtime, scheduler):
+        return True
+    if scheduler.get("devices") or scheduler.get("device_overrides"):
+        return True
+    for field in ("gateway_devices", "comfyui_devices"):
+        selector = scheduler.get(field)
+        if isinstance(selector, list) and bool(selector):
+            return True
+    return False
+
+
 def _validate_topology(
     scheduler: dict[str, Any],
     devices: list[dict[str, Any]],
@@ -319,32 +339,90 @@ def _validate_topology(
         )
 
 
-def _normalize_cuda_visible_devices(devices: list[dict[str, Any]]) -> None:
+def _normalize_cuda_visible_devices(
+    devices: list[dict[str, Any]],
+    *,
+    previous_index_by_uuid: dict[str, int],
+) -> bool:
     current = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
     if not current:
-        return
+        return False
+
     tokens = [token.strip() for token in current.split(",") if token.strip()]
+    current_uuids = {str(item["uuid"]) for item in devices}
     current_indices = {str(int(item["index"])) for item in devices}
-    uses_uuid = any(token.startswith("GPU-") for token in tokens)
-    invalid_index = any(
-        not token.isdigit() or token not in current_indices for token in tokens
-    )
-    if uses_uuid or invalid_index:
-        normalized = ",".join(str(int(item["index"])) for item in devices)
-        os.environ["CUDA_VISIBLE_DEVICES"] = normalized
-        logger.warning(
-            "Replaced stale CUDA_VISIBLE_DEVICES with current logical indices",
-            extra={"previous": current, "current": normalized},
+    normalized: list[str] = []
+    unresolved: list[str] = []
+    for token in tokens:
+        if token in current_uuids or token in current_indices:
+            normalized.append(token)
+            continue
+
+        old_index = previous_index_by_uuid.get(token)
+        if old_index is None and len(tokens) == 1 and len(devices) == 1:
+            old_index = int(devices[0]["index"])
+        replacement = str(old_index) if old_index is not None else None
+        if replacement is None or replacement not in current_indices:
+            unresolved.append(token)
+        else:
+            normalized.append(replacement)
+    if unresolved:
+        raise RuntimeError(
+            "CUDA_VISIBLE_DEVICES references devices that cannot be remapped: "
+            + ", ".join(sorted(unresolved))
         )
+
+    normalized_value = ",".join(dict.fromkeys(normalized))
+    if normalized_value == current:
+        return False
+    os.environ["CUDA_VISIBLE_DEVICES"] = normalized_value
+    logger.warning(
+        "Replaced stale CUDA_VISIBLE_DEVICES with current logical indices",
+        extra={"previous": current, "current": normalized_value},
+    )
+    return True
+
+
+def _atomic_yaml(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except FileNotFoundError:
+        mode = 0o600
+
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{path.name}.", dir=path.parent, text=True
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            os.fchmod(handle.fileno(), mode)
+            yaml.safe_dump(
+                value,
+                handle,
+                sort_keys=False,
+                allow_unicode=True,
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory_fd = os.open(
+            path.parent,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def bootstrap_gpu_topology() -> bool:
     """Refresh UUID telemetry and worker mappings before scheduler startup."""
-    devices = _discover_devices()
-    if not devices:
-        return False
-    _normalize_cuda_visible_devices(devices)
-
     config_path = Path(
         os.environ.get("AI_GATEWAY_CONFIG_PATH", "./config.yaml")
     ).expanduser()
@@ -363,9 +441,21 @@ def bootstrap_gpu_topology() -> bool:
             if not isinstance(scheduler, dict) or scheduler.get("enabled", True) is False:
                 return False
 
+            devices = _discover_devices()
+            if not devices:
+                if _inventory_required(runtime, scheduler):
+                    raise RuntimeError(
+                        "GPU topology reconciliation requires a current NVIDIA inventory"
+                    )
+                return False
+
             current_by_uuid = {str(item["uuid"]): item for item in devices}
             current_by_index = {int(item["index"]): item for item in devices}
             previous_index_by_uuid = _previous_index_by_uuid(scheduler)
+            visibility_changed = _normalize_cuda_visible_devices(
+                devices,
+                previous_index_by_uuid=previous_index_by_uuid,
+            )
             updated = dict(scheduler)
             updated["gateway_devices"] = _remap_selector(
                 scheduler.get("gateway_devices", "auto"),
@@ -403,13 +493,9 @@ def bootstrap_gpu_topology() -> bool:
             )
 
             if updated == scheduler:
-                return False
+                return visibility_changed
             runtime["gpu_scheduler"] = updated
-            rendered = yaml.safe_dump(runtime, sort_keys=False, allow_unicode=True)
-            with config_path.open("w", encoding="utf-8") as handle:
-                handle.write(rendered)
-                handle.flush()
-                os.fsync(handle.fileno())
+            _atomic_yaml(config_path, runtime)
             logger.warning(
                 "GPU topology reconciled before scheduler startup",
                 extra={
