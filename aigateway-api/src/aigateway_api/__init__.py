@@ -97,6 +97,13 @@ def _preload_cors_origins() -> None:
         os.environ[_CORS_YAML_BOOTSTRAP_MARKER] = bootstrap_origins
 
 
+def _install_unified_source_contract() -> None:
+    """Extend the chat request model with the documented source draft field."""
+    from .unified_source_contract import install_unified_source_contract
+
+    install_unified_source_contract()
+
+
 def _install_admin_security_guards() -> None:
     """Install sensitive-route, transactional-config and ownership replacements."""
     from . import admin_routes, security_routes
@@ -225,6 +232,7 @@ def _install_config_schema_parser() -> None:
 _ensure_core_src()
 _allow_config_precondition_header()
 _preload_cors_origins()
+_install_unified_source_contract()
 _install_video_request_guards()
 _install_video_generation_observability()
 _install_admin_security_guards()
