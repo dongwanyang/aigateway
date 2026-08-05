@@ -1,29 +1,15 @@
 from __future__ import annotations
 
-import importlib.util
 from pathlib import Path
 
 import pytest
 import yaml
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-MODULE_PATH = (
-    REPO_ROOT
-    / "aigateway-api"
-    / "src"
-    / "aigateway_api"
-    / "gpu_topology_bootstrap.py"
-)
-
 
 def _module():
-    spec = importlib.util.spec_from_file_location(
-        "gpu_topology_bootstrap_incomplete", MODULE_PATH
-    )
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    from aigateway_api import gpu_topology_bootstrap
+
+    return gpu_topology_bootstrap
 
 
 def _gpu():
