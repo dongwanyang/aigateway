@@ -85,24 +85,28 @@ def strategy(tmp_path) -> DraftGeneratorStrategy:
     )
 
 
-@pytest.mark.asyncio
-async def test_cancel_request_stops_owned_background_task_and_persists_cancelled(
-    strategy: DraftGeneratorStrategy,
-) -> None:
+def _draft(status: str, *, draft_id: str, request_id: str) -> DraftResult:
     now = time.time()
-    draft = DraftResult(
-        draft_id="draft-1",
+    return DraftResult(
+        draft_id=draft_id,
         previews=[],
-        generation_params={"request_id": "request-1", "trace_id": "trace-1"},
+        generation_params={"request_id": request_id, "trace_id": "trace-1"},
         created_at=now,
         expires_at=now + 3600,
-        status=DRAFT_STATUS_RUNNING,
+        status=status,
         media_type="image",
         session_id="session-1",
         user_id="user-1",
         group_id=None,
-        stage="running",
+        stage=status,
     )
+
+
+@pytest.mark.asyncio
+async def test_cancel_request_stops_owned_background_task_and_persists_cancelled(
+    strategy: DraftGeneratorStrategy,
+) -> None:
+    draft = _draft(DRAFT_STATUS_RUNNING, draft_id="draft-1", request_id="request-1")
     await strategy._store_draft(draft, 3600)
     await strategy.register_request_draft(
         "request-1",
@@ -130,6 +134,32 @@ async def test_cancel_request_stops_owned_background_task_and_persists_cancelled
     assert stored is not None
     assert stored.status == DRAFT_STATUS_CANCELLED
     assert stored.stage == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_state_still_cleans_late_owned_task(
+    strategy: DraftGeneratorStrategy,
+) -> None:
+    draft = _draft(
+        DRAFT_STATUS_CANCELLED,
+        draft_id="draft-cancelled",
+        request_id="request-cancelled",
+    )
+    await strategy._store_draft(draft, 3600)
+    task = asyncio.create_task(
+        asyncio.sleep(60),
+        name="draft-generate-draft-cancelled",
+    )
+    strategy._bg_tasks.add(task)
+    strategy._draft_tasks[draft.draft_id] = task
+
+    result = await strategy.cancel_draft(draft.draft_id)
+
+    assert task.done()
+    assert result.status == DRAFT_STATUS_CANCELLED
+    stored = await strategy.get_draft(draft.draft_id)
+    assert stored is not None
+    assert stored.status == DRAFT_STATUS_CANCELLED
 
 
 @pytest.mark.asyncio
