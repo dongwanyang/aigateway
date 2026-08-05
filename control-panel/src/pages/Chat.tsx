@@ -4,7 +4,10 @@ import { useAuth } from '@/contexts/AuthContext'
 import { useQuery } from '@tanstack/react-query'
 import { getGenerationPresets } from '@/api/client'
 import { queryKeys } from '@/query/keys'
-import { cancelLatestSessionGeneration } from '@/services/cancelSessionGeneration'
+import {
+  cancelAllSessionGenerations,
+  cancelLatestSessionGeneration,
+} from '@/services/cancelSessionGeneration'
 import SessionList from '@/components/chat/SessionList'
 import ChatTimeline from '@/components/chat/ChatTimeline'
 import ChatComposer from '@/components/chat/ChatComposer'
@@ -127,6 +130,16 @@ export default function Chat() {
     if (activeId) void cancelLatestSessionGeneration(activeId)
   }
 
+  const handleDeleteSession = async (sessionId: string) => {
+    if (!await cancelAllSessionGenerations(sessionId)) return
+    await deleteSession(sessionId)
+  }
+
+  const handleClearActive = async () => {
+    if (!activeId || !await cancelAllSessionGenerations(activeId)) return
+    clearActive()
+  }
+
   return (
     <div className="flex" style={{ height: chatHeight }}>
       <SessionList
@@ -134,7 +147,7 @@ export default function Chat() {
         activeId={activeId}
         onNew={newSession}
         onSelect={selectSession}
-        onDelete={deleteSession}
+        onDelete={sessionId => { void handleDeleteSession(sessionId) }}
       />
       <div className="flex flex-col flex-1 min-w-0 pl-3">
         <div className="flex items-center justify-between px-1 py-2">
@@ -142,7 +155,7 @@ export default function Chat() {
             {active?.title || '聊天'}
           </h2>
           <button
-            onClick={clearActive}
+            onClick={() => { void handleClearActive() }}
             disabled={generationBusy || messages.length === 0}
             className="flex items-center gap-1 px-2 py-1 rounded-md text-sm cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
             style={{ color: 'var(--color-text-secondary)' }}
