@@ -4,7 +4,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from aigateway_api.gpu_queue_handoff import install_gpu_queue_handoff
@@ -24,13 +24,14 @@ async def test_health_wrapper_response_contains_runtime_identity(monkeypatch) ->
     router = APIRouter()
 
     @router.get("/health")
-    async def health() -> JSONResponse:
+    async def health(request: Request) -> JSONResponse:
+        assert request is not None
         return JSONResponse(content={"data": {"status": "healthy"}, "message": "success"})
 
     install_runtime_identity(router)
     install_runtime_identity(router)
     route = next(item for item in router.routes if item.path == "/health")
-    response = await route.endpoint()
+    response = await route.endpoint(SimpleNamespace())
     payload = json.loads(response.body)
 
     assert payload["data"]["commit_sha"] == "commit-abc"
