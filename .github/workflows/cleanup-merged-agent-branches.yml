@@ -1,0 +1,63 @@
+name: Cleanup merged agent branches
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/cleanup-merged-agent-branches.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Delete merged and superseded branches
+        shell: bash
+        run: |
+          set -uo pipefail
+          branches=(
+            'agent/fix-gpu-topology-self-heal'
+            'agent/fix-qa-report-2026-08-02'
+            'agent/fix-wan22-design-compliance'
+            'agent/integrate-wan22-main'
+            'agent/pr1-wan22-language-prompt-plan'
+            'agent/pr2-video-duration-parameters'
+            'agent/pr3-keyframe-confirmation-safety'
+            'agent/pr3-rebase-staging'
+            'agent/pr3-rebase-staging-2'
+            'agent/pr4-existing-image-to-video'
+            'agent/pr5-request-fixes-e2e'
+            'agent/pr5-request-fixes-e2e-rebuild'
+          )
+
+          failures=()
+          for branch in "${branches[@]}"; do
+            if git ls-remote --exit-code --heads origin "refs/heads/${branch}" >/dev/null 2>&1; then
+              if git push origin --delete "$branch"; then
+                echo "deleted: $branch"
+              else
+                echo "failed: $branch" >&2
+                failures+=("$branch")
+              fi
+            else
+              echo "already absent: $branch"
+            fi
+          done
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/cleanup-merged-agent-branches.yml
+          git commit -m 'ci: remove temporary branch cleanup workflow'
+          git push origin HEAD:main
+
+          if ((${#failures[@]})); then
+            printf 'Branches not deleted:\n' >&2
+            printf ' - %s\n' "${failures[@]}" >&2
+            exit 1
+          fi
