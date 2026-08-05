@@ -55,9 +55,27 @@ def _record(draft_id: str) -> dict[str, object | None]:
 
 
 @pytest.mark.asyncio
-async def test_get_request_returns_202_until_draft_index_exists() -> None:
+async def test_get_request_returns_unregistered_before_index_exists() -> None:
     strategy = SimpleNamespace(
         resolve_request=AsyncMock(return_value=(None, None))
+    )
+
+    response = await get_generation_request(
+        "request-1",
+        _request(strategy),
+        chat_session_id="session-1",
+        auth={"user_id": "user-1", "group_id": None},
+    )
+
+    assert isinstance(response, JSONResponse)
+    assert response.status_code == 202
+    assert json.loads(response.body)["status"] == "unregistered"
+
+
+@pytest.mark.asyncio
+async def test_get_request_returns_resolving_after_pending_index_exists() -> None:
+    strategy = SimpleNamespace(
+        resolve_request=AsyncMock(return_value=(None, _record("")))
     )
 
     response = await get_generation_request(
