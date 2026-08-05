@@ -23,7 +23,9 @@ services:
       AI_GATEWAY_EMBEDDING_API_BASE: ${EMBEDDING_API_BASE:-}
       AI_GATEWAY_EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
       AI_GATEWAY_CUDA_MEMORY_FRACTION: ${GATEWAY_CUDA_MEMORY_FRACTION:-}
-      CUDA_VISIBLE_DEVICES: ${GATEWAY_CUDA_VISIBLE_DEVICES:-0}
+      # Do not consume a persisted physical GPU UUID here. CUDA deployments
+      # either receive logical indices from the generated topology override or
+      # see every GPU exposed by the NVIDIA container runtime.
       PYTORCH_CUDA_ALLOC_CONF: ${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
     volumes:
       - ${AIGATEWAY_RUNTIME_CONFIG:-./config.yaml}:/app/config.yaml
