@@ -29,6 +29,10 @@ def _reconcile_gpu_topology() -> None:
     """Refresh stale GPU UUID state before CUDA-aware modules are imported."""
     if os.environ.get("AI_GATEWAY_ACCELERATOR", "").strip().lower() != "cuda":
         return
+    # ``-1`` is an explicit operator request to keep Gateway off CUDA. The host
+    # topology controller can still reconcile local ComfyUI workers independently.
+    if os.environ.get("CUDA_VISIBLE_DEVICES", "").strip() == "-1":
+        return
     from .gpu_topology_bootstrap import bootstrap_gpu_topology
 
     bootstrap_gpu_topology()
