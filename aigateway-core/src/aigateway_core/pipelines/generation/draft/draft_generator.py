@@ -146,6 +146,18 @@ class DraftGeneratorStrategy(_impl.DraftGeneratorStrategy):
 
         return await asyncio.shield(task)
 
+    async def reject_draft(self, draft_id: str):
+        """Prevent source-result video drafts from replacing their frozen image."""
+        draft = await self.get_draft(draft_id)
+        if (
+            draft is not None
+            and draft.media_type == "video"
+            and str(draft.generation_params.get("source_kind") or "")
+            == "draft_result"
+        ):
+            raise DraftWorkflowError("source_draft_immutable")
+        return await super().reject_draft(draft_id)
+
     @staticmethod
     def _source_kind(draft: Any) -> str:
         params = draft.generation_params

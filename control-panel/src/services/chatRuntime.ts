@@ -10,9 +10,6 @@ export const pollingDraftIds = new Set<string>()
 export const VIDEO_POLL_INTERVAL_MS = 5_000
 export const VIDEO_POLL_MAX_ATTEMPTS = 360
 export const DRAFT_POLL_INTERVAL_MS = 1_000
-// Backend image execution timeout is 20 minutes on the supported T4 profile.
-// Keep the browser window slightly longer so the backend, not the UI, owns the
-// terminal timeout and can cancel the matching ComfyUI job first.
 export const DRAFT_POLL_MAX_ATTEMPTS = 1_260
 
 export function nextMessageId(): string {
@@ -37,6 +34,7 @@ export type DraftPollResult =
   | { kind: 'duplicate' }
   | { kind: 'ready'; previewDataUrl: string }
   | { kind: 'expired'; message: string }
+  | { kind: 'cancelled'; message: string }
   | { kind: 'error'; message: string }
 
 export function describeDraftFailure(message: string): string {
@@ -69,20 +67,35 @@ export interface DraftPollProgress {
   progressSource?: string
 }
 
+function waitUntilNextPoll(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve()
+  return new Promise(resolve => {
+    const timer = setTimeout(done, DRAFT_POLL_INTERVAL_MS)
+    function done() {
+      clearTimeout(timer)
+      signal.removeEventListener('abort', done)
+      resolve()
+    }
+    signal.addEventListener('abort', done, { once: true })
+  })
+}
+
 export async function pollDraftUntilSettled(
   draftId: string,
   onProgress?: (progress: DraftPollProgress) => void,
+  signal?: AbortSignal,
 ): Promise<DraftPollResult> {
   if (pollingDraftIds.has(draftId)) return { kind: 'duplicate' }
+  if (signal?.aborted) return { kind: 'cancelled', message: '已停止' }
   pollingDraftIds.add(draftId)
   try {
     for (let attempt = 0; attempt < DRAFT_POLL_MAX_ATTEMPTS; attempt += 1) {
-      await wait(DRAFT_POLL_INTERVAL_MS)
+      if (signal) await waitUntilNextPoll(signal)
+      else await wait(DRAFT_POLL_INTERVAL_MS)
+      if (signal?.aborted) return { kind: 'cancelled', message: '已停止' }
       try {
         const response = await getDraftPreview(draftId)
-        // 202 in-progress responses carry a status (generating/queued/running/
-        // refining) but no previewDataUrl — keep polling until the 200 with
-        // the data URL lands. Only a present previewDataUrl means ready.
+        if (signal?.aborted) return { kind: 'cancelled', message: '已停止' }
         if (!response.previewDataUrl) {
           onProgress?.({
             status: response.status ?? 'running',
@@ -92,9 +105,15 @@ export async function pollDraftUntilSettled(
           })
           continue
         }
-        onProgress?.({ status: 'pending', stage: 'preview_ready', progress: 1, progressSource: 'complete' })
+        onProgress?.({
+          status: 'pending',
+          stage: 'preview_ready',
+          progress: 1,
+          progressSource: 'complete',
+        })
         return { kind: 'ready', previewDataUrl: response.previewDataUrl }
       } catch (error) {
+        if (signal?.aborted) return { kind: 'cancelled', message: '已停止' }
         const message = error instanceof Error ? error.message : '预览加载失败'
         if (message.includes('not_found') || message.includes('expired')) {
           return { kind: 'expired', message }
@@ -119,19 +138,6 @@ export async function pollDraftUntilSettled(
   } finally {
     pollingDraftIds.delete(draftId)
   }
-}
-
-function waitUntilNextPoll(signal: AbortSignal): Promise<void> {
-  if (signal.aborted) return Promise.resolve()
-  return new Promise(resolve => {
-    const timer = setTimeout(done, DRAFT_POLL_INTERVAL_MS)
-    function done() {
-      clearTimeout(timer)
-      signal.removeEventListener('abort', done)
-      resolve()
-    }
-    signal.addEventListener('abort', done, { once: true })
-  })
 }
 
 /** Poll status while the blocking confirmation request performs local refine. */

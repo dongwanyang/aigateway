@@ -9,13 +9,20 @@ interface ChatTimelineProps {
   pendingAssistantId: string | null
   onConfirmDraft?: (msgId: string) => void
   onRejectDraft?: (msgId: string) => void
+  onCreateVideoFromDraft?: (msgId: string) => void
 }
 
-export default function ChatTimeline({ messages, streaming, streamingId, pendingAssistantId, onConfirmDraft, onRejectDraft }: ChatTimelineProps) {
+export default function ChatTimeline({
+  messages,
+  streaming,
+  streamingId,
+  pendingAssistantId,
+  onConfirmDraft,
+  onRejectDraft,
+  onCreateVideoFromDraft,
+}: ChatTimelineProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
-  // 用户是否贴近底部(距底 < 120px 视为"在底部")。只有贴近底部时才自动跟随,
-  // 否则用户主动上滚回看历史时,新 token 不会把视图拽下去。
   const atBottomRef = useRef(true)
 
   const handleScroll = () => {
@@ -26,8 +33,6 @@ export default function ChatTimeline({ messages, streaming, streamingId, pending
   }
 
   useEffect(() => {
-    // 流式期间每个 token 都会触发本 effect;若仍用 'smooth',多个平滑动画互相
-    // 抢占 → 卡顿。流式时改 'auto'(瞬移),非流式(新消息/历史载入)才平滑。
     if (!atBottomRef.current) return
     bottomRef.current?.scrollIntoView({ behavior: streaming ? 'auto' : 'smooth' })
   }, [messages, streaming])
@@ -39,14 +44,15 @@ export default function ChatTimeline({ messages, streaming, streamingId, pending
       className="flex flex-col overflow-y-auto"
       style={{ height: '100%' }}
     >
-      {messages.map(m => (
+      {messages.map(message => (
         <MessageBubble
-          key={m.id}
-          msg={m}
-          isStreaming={streaming && m.id === streamingId}
+          key={message.id}
+          msg={message}
+          isStreaming={streaming && message.id === streamingId}
           pendingAssistantId={pendingAssistantId}
           onConfirmDraft={onConfirmDraft}
           onRejectDraft={onRejectDraft}
+          onCreateVideoFromDraft={onCreateVideoFromDraft}
         />
       ))}
       <div ref={bottomRef} />

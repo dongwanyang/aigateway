@@ -135,6 +135,44 @@ def _install_gpu_routes() -> None:
     install_gpu_routes(admin_routes.router)
 
 
+def _install_source_draft_video_routes() -> None:
+    """Install the authenticated existing-image-to-video endpoint exactly once."""
+    from . import admin_routes
+    from .source_draft_video_routes import router as source_draft_video_router
+
+    route_path = "/draft/{source_draft_id}/video"
+    if any(
+        getattr(route, "path", None) == route_path
+        for route in admin_routes.router.routes
+    ):
+        return
+
+    source_routes = [
+        route
+        for route in source_draft_video_router.routes
+        if getattr(route, "path", None) == route_path
+    ]
+    if not source_routes:
+        available = sorted(
+            str(getattr(route, "path", ""))
+            for route in source_draft_video_router.routes
+        )
+        raise RuntimeError(
+            f"source_draft_video_route_definition_missing:{available}"
+        )
+
+    # The package bootstrap already has fully-built APIRoute objects. Appending
+    # those objects avoids FastAPI include_router() cloning during a circular
+    # package import, which can otherwise leave the shared admin router empty.
+    admin_routes.router.routes.extend(source_routes)
+
+    if not any(
+        getattr(route, "path", None) == route_path
+        for route in admin_routes.router.routes
+    ):
+        raise RuntimeError("source_draft_video_route_install_failed")
+
+
 def _install_config_schema_parser() -> None:
     """Install YAML-aware schema parsing and remove the legacy write route."""
     from . import routes
@@ -157,3 +195,5 @@ _preload_cors_origins()
 _install_admin_security_guards()
 _install_gpu_routes()
 _install_config_schema_parser()
+# Install this route last because package bootstrap imports can mutate routers.
+_install_source_draft_video_routes()
