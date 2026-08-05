@@ -1,4 +1,4 @@
-import { waitForGenerationRequestDraft } from './generationRequest'
+import { waitForGenerationRequestState } from './generationRequest'
 import type { ApiError, ChatCompletionRequest } from '@/types'
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? ''
@@ -78,7 +78,7 @@ async function recoverDraftAfterTransportFailure(
   chatSessionId: string,
   signal?: AbortSignal,
 ): Promise<ChatResponse | null> {
-  const state = await waitForGenerationRequestDraft(
+  const state = await waitForGenerationRequestState(
     requestId,
     chatSessionId,
     signal,
