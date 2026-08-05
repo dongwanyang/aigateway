@@ -369,12 +369,12 @@ class DraftGeneratorStrategy(_impl.DraftGeneratorStrategy):
                 running_ids = {
                     item[1]
                     for item in queue.get("queue_running", [])
-                    if isinstance(item, list) and len(item) > 1
+                    if isinstance(item, (list, tuple)) and len(item) > 1
                 }
                 pending_ids = {
                     item[1]
                     for item in queue.get("queue_pending", [])
-                    if isinstance(item, list) and len(item) > 1
+                    if isinstance(item, (list, tuple)) and len(item) > 1
                 }
                 if prompt_id in pending_ids:
                     await client.post(
@@ -407,7 +407,13 @@ class DraftGeneratorStrategy(_impl.DraftGeneratorStrategy):
         draft = await self.get_draft(draft_id)
         if draft is None:
             raise DraftWorkflowError("generation_request_not_found")
-        if draft.status in _TERMINAL_DRAFT_STATUSES:
+        # A cancelled record may still own a live task because a cancellation
+        # tombstone can win the state-write race before the local task lookup.
+        # Re-run cancellation cleanup idempotently for cancelled drafts.
+        if (
+            draft.status in _TERMINAL_DRAFT_STATUSES
+            and draft.status != DRAFT_STATUS_CANCELLED
+        ):
             return draft
 
         request_id = str(draft.generation_params.get("request_id") or "")
@@ -446,9 +452,14 @@ class DraftGeneratorStrategy(_impl.DraftGeneratorStrategy):
             )
 
         if draft.comfy_prompt_id:
+            get_worker = (
+                getattr(self._gpu_coordinator, "get_worker", None)
+                if self._gpu_coordinator is not None
+                else None
+            )
             worker = (
-                self._gpu_coordinator.get_worker(draft.worker_id)
-                if self._gpu_coordinator is not None and draft.worker_id
+                get_worker(draft.worker_id)
+                if callable(get_worker) and draft.worker_id
                 else None
             )
             await self._cancel_comfy_prompt(
@@ -728,6 +739,28 @@ class DraftGeneratorStrategy(_impl.DraftGeneratorStrategy):
         workers = status.get("workers") if isinstance(status, dict) else []
         return configured or shared_env or bool(workers)
 
+    async def _await_cancelable_operation(
+        self,
+        draft_id: str,
+        awaitable: Any,
+        *,
+        task_name: str,
+    ) -> Any:
+        task = asyncio.create_task(awaitable, name=task_name)
+        try:
+            while not task.done():
+                if await self._draft_cancel_requested(draft_id):
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                    raise asyncio.CancelledError
+                await asyncio.sleep(0.25)
+            return await task
+        except asyncio.CancelledError:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            raise
+
     async def _run_on_comfy_worker(
         self,
         draft_id: str,
@@ -741,13 +774,17 @@ class DraftGeneratorStrategy(_impl.DraftGeneratorStrategy):
         if coordinator is not None and coordinator.config.enabled:
             status = coordinator.status()
             if not self._scheduler_manages_comfyui(status):
-                if await self._draft_cancel_requested(draft_id):
-                    raise asyncio.CancelledError
-                return await operation(), None
+                result = await self._await_cancelable_operation(
+                    draft_id,
+                    operation(),
+                    task_name=f"draft-worker-{draft_id}",
+                )
+                return result, None
             if not self._pool_has_worker(status, capability):
                 raise DraftWorkflowError(_GPU_TOPOLOGY_ERROR)
 
-        worker_task = asyncio.create_task(
+        result = await self._await_cancelable_operation(
+            draft_id,
             super()._run_on_comfy_worker(
                 draft_id,
                 capability,
@@ -755,21 +792,9 @@ class DraftGeneratorStrategy(_impl.DraftGeneratorStrategy):
                 preferred_worker_id=preferred_worker_id,
                 memory_requirement_gb=memory_requirement_gb,
             ),
-            name=f"draft-worker-{draft_id}",
+            task_name=f"draft-worker-{draft_id}",
         )
-        try:
-            while not worker_task.done():
-                if await self._draft_cancel_requested(draft_id):
-                    worker_task.cancel()
-                    await asyncio.gather(worker_task, return_exceptions=True)
-                    raise asyncio.CancelledError
-                await asyncio.sleep(0.25)
-            return await worker_task
-        except asyncio.CancelledError:
-            if not worker_task.done():
-                worker_task.cancel()
-                await asyncio.gather(worker_task, return_exceptions=True)
-            raise
+        return result
 
     async def _mark_draft_confirmation_failed(
         self,
