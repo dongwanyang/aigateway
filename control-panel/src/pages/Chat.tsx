@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react'
 import { useChatSessions } from '@/hooks/useChatSessions'
-import { useSourceDraftVideo } from '@/hooks/useSourceDraftVideo'
 import { useAuth } from '@/contexts/AuthContext'
 import { useQuery } from '@tanstack/react-query'
 import { getGenerationPresets } from '@/api/client'
@@ -20,6 +19,10 @@ interface SelectedVideoSource {
   previewDataUrl?: string
 }
 
+type SourceAwareGenerationOptions = GenerationOptions & {
+  source_draft_id?: string
+}
+
 export default function Chat() {
   const { isAuthenticated } = useAuth()
   const presetsQuery = useQuery({
@@ -34,10 +37,6 @@ export default function Chat() {
     send, stop, clearActive,
     confirmDraftMsg, rejectDraftMsg,
   } = useChatSessions()
-  const {
-    create: createSourceDraftVideo,
-    cancel: cancelSourceDraftVideo,
-  } = useSourceDraftVideo()
   const [selectedVideoSource, setSelectedVideoSource] = useState<SelectedVideoSource | null>(null)
   const chatHeight = 'calc(100vh - 56px - 48px)'
 
@@ -76,31 +75,6 @@ export default function Chat() {
     })
   }
 
-  const stopAll = () => {
-    cancelSourceDraftVideo()
-    stop()
-  }
-
-  const handleNewSession = () => {
-    cancelSourceDraftVideo()
-    newSession()
-  }
-
-  const handleSelectSession = (sessionId: string) => {
-    cancelSourceDraftVideo()
-    selectSession(sessionId)
-  }
-
-  const handleDeleteSession = (sessionId: string) => {
-    cancelSourceDraftVideo()
-    deleteSession(sessionId)
-  }
-
-  const handleClearActive = () => {
-    cancelSourceDraftVideo()
-    clearActive()
-  }
-
   const handleSend = (
     text: string,
     opts?: {
@@ -111,14 +85,16 @@ export default function Chat() {
     if (selectedVideoSource && activeId) {
       const source = selectedVideoSource
       setSelectedVideoSource(null)
-      void createSourceDraftVideo({
-        sourceDraftId: source.draftId,
-        sourcePreviewDataUrl: source.previewDataUrl,
-        motionPrompt: text,
-        durationSeconds: opts?.generationOptions?.duration_seconds
+      const sourceOptions: SourceAwareGenerationOptions = {
+        backend: opts?.generationOptions?.backend ?? 'local',
+        ...opts?.generationOptions,
+        source_draft_id: source.draftId,
+        duration_seconds: opts?.generationOptions?.duration_seconds
           ?? DEFAULT_VIDEO_DURATION_SECONDS,
         fps: opts?.generationOptions?.fps ?? DEFAULT_VIDEO_FPS,
-        chatSessionId: activeId,
+      }
+      void send(text, {
+        generationOptions: sourceOptions,
       })
       return
     }
@@ -130,9 +106,9 @@ export default function Chat() {
       <SessionList
         sessions={sessions}
         activeId={activeId}
-        onNew={handleNewSession}
-        onSelect={handleSelectSession}
-        onDelete={handleDeleteSession}
+        onNew={newSession}
+        onSelect={selectSession}
+        onDelete={deleteSession}
       />
       <div className="flex flex-col flex-1 min-w-0 pl-3">
         <div className="flex items-center justify-between px-1 py-2">
@@ -140,7 +116,7 @@ export default function Chat() {
             {active?.title || '聊天'}
           </h2>
           <button
-            onClick={handleClearActive}
+            onClick={clearActive}
             disabled={streaming || messages.length === 0}
             className="flex items-center gap-1 px-2 py-1 rounded-md text-sm cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
             style={{ color: 'var(--color-text-secondary)' }}
@@ -200,7 +176,7 @@ export default function Chat() {
             disabled={false}
             sourceImageMode={Boolean(selectedVideoSource)}
             onSend={handleSend}
-            onStop={stopAll}
+            onStop={stop}
             presets={Array.isArray(presetsQuery.data) ? presetsQuery.data : []}
             presetsLoading={presetsQuery.isLoading || presetsQuery.isFetching}
             presetsError={presetsQuery.error instanceof Error ? presetsQuery.error.message : null}
