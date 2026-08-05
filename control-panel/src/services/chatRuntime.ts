@@ -140,19 +140,6 @@ export async function pollDraftUntilSettled(
   }
 }
 
-function waitUntilNextPoll(signal: AbortSignal): Promise<void> {
-  if (signal.aborted) return Promise.resolve()
-  return new Promise(resolve => {
-    const timer = setTimeout(done, DRAFT_POLL_INTERVAL_MS)
-    function done() {
-      clearTimeout(timer)
-      signal.removeEventListener('abort', done)
-      resolve()
-    }
-    signal.addEventListener('abort', done, { once: true })
-  })
-}
-
 /** Poll status while the blocking confirmation request performs local refine. */
 export async function pollDraftProgressUntilStopped(
   draftId: string,
