@@ -260,25 +260,62 @@ def _remap_workers(
     return workers
 
 
+def _pool_expected(runtime: dict[str, Any], scheduler: dict[str, Any]) -> bool:
+    deployment = runtime.get("deployment", {})
+    shared_gpu = (
+        bool(deployment.get("shared_gpu", False))
+        if isinstance(deployment, dict)
+        else False
+    )
+    generation = runtime.get("generation_optimization", {})
+    draft = generation.get("draft_workflow", {}) if isinstance(generation, dict) else {}
+    comfy = draft.get("comfyui", {}) if isinstance(draft, dict) else {}
+    scheduler_managed = (
+        bool(comfy.get("scheduler_managed", False))
+        if isinstance(comfy, dict)
+        else False
+    )
+    workers = scheduler.get("workers", [])
+    return shared_gpu or scheduler_managed or bool(workers)
+
+
 def _validate_topology(
-    scheduler: dict[str, Any], devices: list[dict[str, Any]]
+    scheduler: dict[str, Any],
+    devices: list[dict[str, Any]],
+    *,
+    pool_expected: bool,
 ) -> None:
     device_uuids = {str(item["uuid"]) for item in devices}
     workers = scheduler.get("workers", [])
-    worker_uuids = (
-        {
-            str(item.get("device_uuid"))
-            for item in workers
-            if isinstance(item, dict) and item.get("device_uuid")
-        }
+    worker_list = (
+        [item for item in workers if isinstance(item, dict)]
         if isinstance(workers, list)
-        else set()
+        else []
     )
+    if pool_expected and not worker_list:
+        raise RuntimeError(
+            "GPU scheduler topology incomplete; local ComfyUI pool has no workers"
+        )
+    worker_uuids = {
+        str(item.get("device_uuid"))
+        for item in worker_list
+        if item.get("device_uuid")
+    }
     missing = worker_uuids - device_uuids
     if missing:
         raise RuntimeError(
             "GPU scheduler topology incomplete; worker UUIDs are absent from "
             "the current local inventory: " + ", ".join(sorted(missing))
+        )
+    worker_ids = [str(item.get("worker_id") or "") for item in worker_list]
+    if not all(worker_ids) or len(worker_ids) != len(set(worker_ids)):
+        raise RuntimeError(
+            "GPU scheduler topology incomplete; ComfyUI worker IDs are not unique"
+        )
+    logical_indices = [item.get("logical_index") for item in worker_list]
+    if len(logical_indices) != len(set(logical_indices)):
+        raise RuntimeError(
+            "GPU scheduler topology incomplete; multiple workers target one GPU"
         )
 
 
@@ -359,7 +396,11 @@ def bootstrap_gpu_topology() -> bool:
             updated["inventory_fingerprint"] = _inventory_fingerprint(
                 updated, devices
             )
-            _validate_topology(updated, runtime_inventory)
+            _validate_topology(
+                updated,
+                runtime_inventory,
+                pool_expected=_pool_expected(runtime, scheduler),
+            )
 
             if updated == scheduler:
                 return False
