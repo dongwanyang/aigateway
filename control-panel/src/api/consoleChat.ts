@@ -1,6 +1,9 @@
+import { getGenerationRequest } from './generationRequest'
 import type { ApiError, ChatCompletionRequest } from '@/types'
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? ''
+const RECOVERY_ATTEMPTS = 120
+const RECOVERY_INTERVAL_MS = 250
 
 async function ensureAuthHeaders(): Promise<Record<string, string>> {
   return { 'Content-Type': 'application/json' }
@@ -72,6 +75,46 @@ function errorDetails(body: unknown, fallback: string): { code: string; message:
   }
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => window.setTimeout(resolve, ms))
+}
+
+async function recoverDraftAfterTransportFailure(
+  requestId: string,
+  chatSessionId: string,
+): Promise<ChatResponse | null> {
+  for (let attempt = 0; attempt < RECOVERY_ATTEMPTS; attempt += 1) {
+    try {
+      const state = await getGenerationRequest(requestId, chatSessionId)
+      if (state.draft_id && state.preview_url && state.media_type) {
+        return {
+          kind: 'draft',
+          draftId: state.draft_id,
+          previewUrl: state.preview_url,
+          mediaType: state.media_type,
+          generationParams: {
+            request_id: state.request_id,
+            workflow_version: state.workflow_version,
+          },
+        }
+      }
+      if (state.status === 'cancelled') {
+        throw new ChatRequestError('生成请求已取消', 'generation_cancelled', 409)
+      }
+      await sleep(state.retry_after_ms ?? RECOVERY_INTERVAL_MS)
+    } catch (error) {
+      if (error instanceof ChatRequestError) throw error
+      const status = (error as Error & { status?: number }).status
+      const code = (error as Error & { code?: string }).code
+      if (status === 403 || status === 410 || code === 'generation_request_expired') {
+        return null
+      }
+      await sleep(RECOVERY_INTERVAL_MS)
+    }
+  }
+  return null
+}
+
 export async function requestChatCompletion(
   body: ChatCompletionRequest & { chat_session_id?: string },
   signal?: AbortSignal,
@@ -84,13 +127,27 @@ export async function requestChatCompletion(
     'Accept': 'text/event-stream',
   }
   if (requestId) requestHeaders['X-Request-ID'] = requestId
-  const res = await fetch(`${API_BASE}/admin/console/chat/completions`, {
-    method: 'POST',
-    credentials: 'include',
-    headers: requestHeaders,
-    body: JSON.stringify({ ...body, messages, stream: true }),
-    signal,
-  })
+
+  let res: Response
+  try {
+    res = await fetch(`${API_BASE}/admin/console/chat/completions`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: requestHeaders,
+      body: JSON.stringify({ ...body, messages, stream: true }),
+      signal,
+    })
+  } catch (error) {
+    if (signal?.aborted) throw error
+    if (requestId && body.chat_session_id) {
+      const recovered = await recoverDraftAfterTransportFailure(
+        requestId,
+        body.chat_session_id,
+      )
+      if (recovered) return recovered
+    }
+    throw error
+  }
 
   if (!res.ok) {
     let details = { code: 'unknown_error', message: `HTTP ${res.status}` }
