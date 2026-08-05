@@ -148,6 +148,13 @@ def _install_verified_draft_cancellation() -> None:
     install_verified_draft_cancellation()
 
 
+def _install_draft_rejection_lifecycle() -> None:
+    """Move request recovery atomically to regenerated drafts."""
+    from .draft_rejection_lifecycle import install_draft_rejection_lifecycle
+
+    install_draft_rejection_lifecycle()
+
+
 def _install_gpu_queue_handoff() -> None:
     """Prevent idle reservation from blocking FIFO generation handoff."""
     from .gpu_queue_handoff import install_gpu_queue_handoff
@@ -245,6 +252,7 @@ _install_unified_source_contract()
 _install_video_request_guards()
 _install_video_generation_observability()
 _install_verified_draft_cancellation()
+_install_draft_rejection_lifecycle()
 _install_admin_security_guards()
 _install_draft_confirm_routes()
 _install_draft_request_routes()
