@@ -78,7 +78,7 @@ async function cancelMessageGeneration(
   }))
 
   try {
-    await cancelGenerationRequestAndWait(requestId, sessionId)
+    const cancelled = await cancelGenerationRequestAndWait(requestId, sessionId)
     patchSessionMessage(sessionId, message.id, current => ({
       ...current,
       content: current.content && current.content !== '正在停止…'
@@ -92,6 +92,8 @@ async function cancelMessageGeneration(
       awaitingDraftSince: undefined,
       draft: current.draft ? {
         ...current.draft,
+        draftId: cancelled.draft_id ?? current.draft.draftId,
+        previewUrl: cancelled.preview_url ?? current.draft.previewUrl,
         status: 'cancelled',
         stage: 'cancelled',
         progress: 0,
