@@ -34,10 +34,13 @@ _LOG_GUARD_ATTR = "_aigateway_api_output_status_guard"
 
 
 def _is_text_completion(body: Any) -> bool:
-    """Return whether the request expects an assistant text response."""
+    """Return whether the request may produce an assistant text response.
+
+    Generation options are routing hints, not a reliable modality signal. Auto
+    requests can carry image/video controls and still be classified as text from
+    the prompt, so only an explicitly media-named model bypasses text guards.
+    """
     model = str(getattr(body, "model", "") or "").lower()
-    if getattr(body, "generation_options", None) is not None:
-        return False
     return not any(marker in model for marker in ("image", "video"))
 
 

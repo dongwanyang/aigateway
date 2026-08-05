@@ -140,12 +140,74 @@ def _install_admin_security_guards() -> None:
     admin_routes._assert_draft_owner = assert_draft_owner
 
 
+def _install_draft_confirm_routes() -> None:
+    """Replace legacy confirmation with stable errors and fail-closed ownership."""
+    from . import admin_routes
+    from .draft_confirm_routes import install_draft_confirm_routes
+
+    install_draft_confirm_routes(admin_routes.router)
+
+
 def _install_gpu_routes() -> None:
     """Install authenticated GPU diagnostics and memory-release endpoints."""
     from . import admin_routes
     from .gpu_routes import install_gpu_routes
 
     install_gpu_routes(admin_routes.router)
+
+
+def _install_source_draft_video_routes() -> None:
+    """Install the authenticated existing-image-to-video endpoint exactly once."""
+    from . import admin_routes
+    from .source_draft_video_routes import router as source_draft_video_router
+
+    route_path = "/draft/{source_draft_id}/video"
+    if any(
+        getattr(route, "path", None) == route_path
+        for route in admin_routes.router.routes
+    ):
+        return
+
+    source_routes = [
+        route
+        for route in source_draft_video_router.routes
+        if getattr(route, "path", None) == route_path
+    ]
+    if not source_routes:
+        available = sorted(
+            str(getattr(route, "path", ""))
+            for route in source_draft_video_router.routes
+        )
+        raise RuntimeError(
+            f"source_draft_video_route_definition_missing:{available}"
+        )
+
+    # The package bootstrap already has fully-built APIRoute objects. Appending
+    # those objects avoids FastAPI include_router() cloning during a circular
+    # package import, which can otherwise leave the shared admin router empty.
+    admin_routes.router.routes.extend(source_routes)
+
+    if not any(
+        getattr(route, "path", None) == route_path
+        for route in admin_routes.router.routes
+    ):
+        raise RuntimeError("source_draft_video_route_install_failed")
+
+
+def _install_video_request_guards() -> None:
+    """Install request-bound progressive video semantic validation."""
+    from .video_request_guard import install_video_request_guard
+
+    install_video_request_guard()
+
+
+def _install_video_generation_observability() -> None:
+    """Install privacy-preserving Wan workflow submission logging."""
+    from .video_generation_observability import (
+        install_video_generation_observability,
+    )
+
+    install_video_generation_observability()
 
 
 def _install_config_schema_parser() -> None:
@@ -168,6 +230,11 @@ _ensure_core_src()
 _reconcile_gpu_topology()
 _allow_config_precondition_header()
 _preload_cors_origins()
+_install_video_request_guards()
+_install_video_generation_observability()
 _install_admin_security_guards()
+_install_draft_confirm_routes()
 _install_gpu_routes()
 _install_config_schema_parser()
+# Install this route last because package bootstrap imports can mutate routers.
+_install_source_draft_video_routes()

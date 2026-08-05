@@ -75,7 +75,7 @@ describe('CodeRelationPanel call graph explorer', () => {
     await user.type(screen.getByPlaceholderText('搜索文件或符号...'), 'missing')
 
     expect(await screen.findByText('没有找到匹配的文件')).toBeInTheDocument()
-    expect(api.listAllSymbols).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(api.listAllSymbols).toHaveBeenCalledTimes(1))
   })
 
   it('surfaces file and symbol failures and retries them', async () => {
