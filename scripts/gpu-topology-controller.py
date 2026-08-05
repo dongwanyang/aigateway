@@ -211,10 +211,10 @@ def reconcile(
         raise RuntimeError("quickstart runtime files are missing")
 
     config = _read_yaml(runtime_config)
-    scheduler = config.get("gpu_scheduler", {})
-    if not isinstance(scheduler, dict):
+    raw_scheduler = config.get("gpu_scheduler", {})
+    if not isinstance(raw_scheduler, dict):
         raise RuntimeError("gpu_scheduler must be an object")
-    if respect_auto_apply and scheduler.get("topology_auto_apply", False) is False:
+    if respect_auto_apply and raw_scheduler.get("topology_auto_apply", False) is False:
         logger.info("automatic GPU topology apply is disabled")
         return False
 
@@ -225,6 +225,9 @@ def reconcile(
     runtime_inventory = renderer._runtime_inventory(inventory)
     if not runtime_inventory:
         raise RuntimeError("no valid NVIDIA GPU inventory discovered")
+    scheduler = renderer.reconcile_scheduler_device_references(
+        inventory, raw_scheduler
+    )
     selected = renderer.select_comfyui_devices(inventory, scheduler)
     if not selected:
         raise RuntimeError("configured ComfyUI GPU UUID pool has no available devices")
@@ -292,10 +295,13 @@ def reconcile(
 
         with _config_write_lock(runtime_config) as config_handle:
             latest = _read_locked_yaml(config_handle, runtime_config)
-            latest_scheduler = latest.get("gpu_scheduler", {})
-            if not isinstance(latest_scheduler, dict) or _fingerprint(
-                latest_scheduler, inventory
-            ) != fingerprint:
+            raw_latest_scheduler = latest.get("gpu_scheduler", {})
+            if not isinstance(raw_latest_scheduler, dict):
+                raise RuntimeError("gpu_scheduler must be an object")
+            latest_scheduler = renderer.reconcile_scheduler_device_references(
+                inventory, raw_latest_scheduler
+            )
+            if _fingerprint(latest_scheduler, inventory) != fingerprint:
                 raise RuntimeError(
                     "GPU topology configuration changed during reconcile; retrying"
                 )
