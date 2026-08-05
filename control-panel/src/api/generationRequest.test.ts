@@ -167,7 +167,7 @@ describe('generation request lifecycle client', () => {
 
   it('fails after the registration grace when the POST never reached the server', async () => {
     vi.useFakeTimers()
-    const fetchMock = vi.fn().mockResolvedValue(Response.json({
+    const fetchMock = vi.fn().mockImplementation(async () => Response.json({
       request_id: 'request-missing',
       status: 'unregistered',
       retry_after_ms: 5_000,
@@ -175,16 +175,14 @@ describe('generation request lifecycle client', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     const recovery = waitForGenerationRequestState('request-missing', 'session-1')
-    const assertion = expect(recovery).rejects.toMatchObject({
+    const rejection = recovery.catch(error => error)
+
+    await vi.runAllTimersAsync()
+    await expect(rejection).resolves.toMatchObject({
       message: '生成请求未到达服务端，请重新提交',
       code: 'generation_request_not_registered',
       status: 404,
     })
-
-    // Run timers added by the awaited fetch/JSON microtasks as well as timers
-    // added by each subsequent retry callback.
-    await vi.runAllTimersAsync()
-    await assertion
     expect(fetchMock).toHaveBeenCalledTimes(3)
   })
 
