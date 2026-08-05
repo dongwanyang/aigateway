@@ -181,7 +181,10 @@ describe('generation request lifecycle client', () => {
       status: 404,
     })
 
-    await vi.advanceTimersByTimeAsync(10_000)
+    // The second timeout is scheduled only after the first fetch/microtask
+    // completes, so advance each retry interval separately.
+    await vi.advanceTimersByTimeAsync(5_000)
+    await vi.advanceTimersByTimeAsync(5_000)
     await assertion
     expect(fetchMock).toHaveBeenCalledTimes(3)
   })
