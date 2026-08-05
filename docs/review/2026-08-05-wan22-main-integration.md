@@ -32,6 +32,19 @@ The first coarse whole-file resolution was discarded after CI exposed that it
 had removed valid auto-merged frontend changes. The integration branch was then
 rebuilt from `main` with conflict-block-granular resolution.
 
+## Integration regressions corrected
+
+CI exposed and the integration branch corrected three merge-only defects:
+
+- duplicate `waitUntilNextPoll()` definition in the chat polling runtime;
+- duplicate reference-image selection handler in the chat composer;
+- an obsolete English-only AI Director test that contradicted the new
+  target-model-aware language policy already asserted by the adjacent test.
+
+The production language policy remains model-aware: it preserves a user's
+language when supported by the selected target model and converts explicitly
+when the target model requires another language.
+
 ## Validation gate
 
 The resolved head must pass the repository Test Coverage, Security and Benchmark
