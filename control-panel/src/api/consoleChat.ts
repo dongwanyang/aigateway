@@ -36,14 +36,6 @@ function contentFingerprint(content: unknown): string | null {
   }
 }
 
-/**
- * Remove only duplicate terminal user turns.
- *
- * Older useChatSessions code persisted the current user turn before constructing
- * the wire payload, then appended the same object again. This duplicated text
- * and image_url blocks. Restricting normalization to adjacent terminal user
- * turns preserves legitimate repeated prompts separated by an assistant reply.
- */
 export function normalizeChatMessages(
   messages: ChatCompletionRequest['messages'],
 ): ChatCompletionRequest['messages'] {
@@ -83,13 +75,19 @@ function errorDetails(body: unknown, fallback: string): { code: string; message:
 export async function requestChatCompletion(
   body: ChatCompletionRequest & { chat_session_id?: string },
   signal?: AbortSignal,
+  requestId?: string,
 ): Promise<ChatResponse> {
   const headers = await ensureAuthHeaders()
   const messages = normalizeChatMessages(body.messages)
+  const requestHeaders: Record<string, string> = {
+    ...headers,
+    'Accept': 'text/event-stream',
+  }
+  if (requestId) requestHeaders['X-Request-ID'] = requestId
   const res = await fetch(`${API_BASE}/admin/console/chat/completions`, {
     method: 'POST',
     credentials: 'include',
-    headers: { ...headers, 'Accept': 'text/event-stream' },
+    headers: requestHeaders,
     body: JSON.stringify({ ...body, messages, stream: true }),
     signal,
   })
@@ -99,7 +97,7 @@ export async function requestChatCompletion(
     try {
       details = errorDetails(await res.json(), details.message)
     } catch {
-      // Non-JSON error response (for example an nginx page); retain status text.
+      // Non-JSON error response; retain status text.
     }
     throw new ChatRequestError(details.message, details.code, res.status)
   }
