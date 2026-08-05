@@ -19,7 +19,7 @@ jobs:
         with:
           ref: agent/fix-wan22-design-compliance
           fetch-depth: 0
-      - name: Merge main with reviewed conflict policy
+      - name: Merge main with document-guided conflict policy
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -63,13 +63,19 @@ jobs:
               extra = sorted(conflicts - expected)
               raise SystemExit(f'unexpected conflict set; missing={missing}; extra={extra}')
 
-          prefer_theirs = {
+          # These files were not part of PR #40's intentional document-goal delta.
+          # Keep the already-merged main versions to preserve GPU topology safety,
+          # the canonical shared request types, and deployment config locking.
+          prefer_main = {
               'aigateway-core/src/aigateway_core/pipelines/generation/draft/draft_generator_plugin.py',
               'control-panel/src/types.ts',
               'scripts/render-deployment-config.py',
               'scripts/render-gpu-topology.py',
           }
           combine_both = {'docker-compose.yml'}
+
+          def is_separator(line: str) -> bool:
+              return line.rstrip('\r\n') == '======='
 
           def resolve(text: str, mode: str) -> str:
               lines = text.splitlines(keepends=True)
@@ -82,7 +88,7 @@ jobs:
                       continue
                   i += 1
                   ours: list[str] = []
-                  while i < len(lines) and not lines[i].startswith('======='):
+                  while i < len(lines) and not is_separator(lines[i]):
                       ours.append(lines[i])
                       i += 1
                   if i >= len(lines):
@@ -95,9 +101,9 @@ jobs:
                   if i >= len(lines):
                       raise ValueError('unterminated theirs block')
                   i += 1
-                  if mode == 'ours':
+                  if mode == 'pr40':
                       output.extend(ours)
-                  elif mode == 'theirs':
+                  elif mode == 'main':
                       output.extend(theirs)
                   elif mode == 'both':
                       output.extend(ours)
@@ -106,11 +112,19 @@ jobs:
                       raise ValueError(mode)
               return ''.join(output)
 
+          def has_conflict_markers(text: str) -> bool:
+              return any(
+                  line.startswith('<<<<<<< ')
+                  or is_separator(line)
+                  or line.startswith('>>>>>>> ')
+                  for line in text.splitlines(keepends=True)
+              )
+
           for name in sorted(conflicts):
-              mode = 'theirs' if name in prefer_theirs else 'both' if name in combine_both else 'ours'
+              mode = 'main' if name in prefer_main else 'both' if name in combine_both else 'pr40'
               path = Path(name)
               merged = resolve(path.read_text(encoding='utf-8'), mode)
-              if any(marker in merged for marker in ('<<<<<<< ', '=======', '>>>>>>> ')):
+              if has_conflict_markers(merged):
                   raise SystemExit(f'conflict marker remains in {name}')
               path.write_text(merged, encoding='utf-8')
               subprocess.run(['git', 'add', '--', name], check=True)
@@ -133,15 +147,15 @@ jobs:
           git push origin HEAD:agent/fix-wan22-design-compliance
           cat > /tmp/pr40-resolution.md <<EOF
           <!-- pr40-integration-resolution -->
-          ## PR #40 conflicts resolved
+          ## PR #40 conflicts resolved against implementation-plan goals
 
-          Integrated current \`main\` into the PR branch with conflict-block-granular resolution.
+          Integrated current \`main\` into the PR branch using the Wan2.2 implementation plan as the acceptance baseline.
 
-          - PR #40 lifecycle and request-recovery behavior retained in its intentional files.
-          - Current \`main\` retained for \`draft_generator_plugin.py\`, \`types.ts\`, and both GPU/deployment renderers.
-          - \`docker-compose.yml\` retains both runtime identity variables and GPU isolation configuration.
-          - Non-conflicting Git hunks from both branches were preserved.
-          - Temporary branch diagnostic workflow removed.
+          - Retained PR #40 request recovery, verified cancellation, source-draft ownership, frozen-input and runtime observability behavior.
+          - Retained current \`main\` for GPU topology/deployment renderers and canonical shared types where PR #40 had no intentional delta.
+          - Preserved both runtime identity variables and GPU isolation configuration in \`docker-compose.yml\`.
+          - Preserved all non-conflicting Git hunks from both branches.
+          - Removed the temporary branch diagnostic workflow.
 
           New head: \`$new_sha\`
           EOF
