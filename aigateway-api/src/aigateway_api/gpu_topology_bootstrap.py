@@ -12,9 +12,7 @@ import hashlib
 import json
 import logging
 import os
-import stat
 import subprocess
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -383,41 +381,30 @@ def _normalize_cuda_visible_devices(
     return True
 
 
-def _atomic_yaml(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _write_locked_yaml(
+    handle: Any,
+    value: dict[str, Any],
+    *,
+    original_text: str,
+) -> None:
+    # ``config.yaml`` is a single-file Docker bind mount. Replacing that mount
+    # point can fail with EBUSY, so serialize first and update the locked inode.
+    rendered = yaml.safe_dump(value, sort_keys=False, allow_unicode=True)
     try:
-        mode = stat.S_IMODE(path.stat().st_mode)
-    except FileNotFoundError:
-        mode = 0o600
-
-    descriptor, temporary = tempfile.mkstemp(
-        prefix=f".{path.name}.", dir=path.parent, text=True
-    )
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            os.fchmod(handle.fileno(), mode)
-            yaml.safe_dump(
-                value,
-                handle,
-                sort_keys=False,
-                allow_unicode=True,
-            )
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        directory_fd = os.open(
-            path.parent,
-            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
-        )
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        handle.seek(0)
+        handle.write(rendered)
+        handle.truncate()
+        handle.flush()
+        os.fsync(handle.fileno())
     except BaseException:
         try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
+            handle.seek(0)
+            handle.write(original_text)
+            handle.truncate()
+            handle.flush()
+            os.fsync(handle.fileno())
+        except BaseException:
+            logger.exception("Failed to restore GPU runtime configuration")
         raise
 
 
@@ -434,76 +421,97 @@ def bootstrap_gpu_topology() -> bool:
     with lock_path.open("a+", encoding="utf-8") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         try:
-            runtime = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-            if not isinstance(runtime, dict):
-                raise RuntimeError("GPU runtime configuration must be a YAML object")
-            scheduler = runtime.get("gpu_scheduler")
-            if not isinstance(scheduler, dict) or scheduler.get("enabled", True) is False:
-                return False
+            with config_path.open("r+", encoding="utf-8") as config_handle:
+                fcntl.flock(config_handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    config_handle.seek(0)
+                    original_text = config_handle.read()
+                    runtime = yaml.safe_load(original_text) or {}
+                    if not isinstance(runtime, dict):
+                        raise RuntimeError(
+                            "GPU runtime configuration must be a YAML object"
+                        )
+                    scheduler = runtime.get("gpu_scheduler")
+                    if (
+                        not isinstance(scheduler, dict)
+                        or scheduler.get("enabled", True) is False
+                    ):
+                        return False
 
-            devices = _discover_devices()
-            if not devices:
-                if _inventory_required(runtime, scheduler):
-                    raise RuntimeError(
-                        "GPU topology reconciliation requires a current NVIDIA inventory"
+                    devices = _discover_devices()
+                    if not devices:
+                        if _inventory_required(runtime, scheduler):
+                            raise RuntimeError(
+                                "GPU topology reconciliation requires a current "
+                                "NVIDIA inventory"
+                            )
+                        return False
+
+                    current_by_uuid = {
+                        str(item["uuid"]): item for item in devices
+                    }
+                    current_by_index = {
+                        int(item["index"]): item for item in devices
+                    }
+                    previous_index_by_uuid = _previous_index_by_uuid(scheduler)
+                    visibility_changed = _normalize_cuda_visible_devices(
+                        devices,
+                        previous_index_by_uuid=previous_index_by_uuid,
                     )
-                return False
+                    updated = dict(scheduler)
+                    updated["gateway_devices"] = _remap_selector(
+                        scheduler.get("gateway_devices", "auto"),
+                        current_by_uuid=current_by_uuid,
+                        current_by_index=current_by_index,
+                        previous_index_by_uuid=previous_index_by_uuid,
+                    )
+                    updated["comfyui_devices"] = _remap_selector(
+                        scheduler.get("comfyui_devices", "auto"),
+                        current_by_uuid=current_by_uuid,
+                        current_by_index=current_by_index,
+                        previous_index_by_uuid=previous_index_by_uuid,
+                    )
+                    updated["device_overrides"] = _remap_overrides(
+                        scheduler.get("device_overrides", []),
+                        current_by_uuid=current_by_uuid,
+                        current_by_index=current_by_index,
+                        previous_index_by_uuid=previous_index_by_uuid,
+                    )
+                    updated["workers"] = _remap_workers(
+                        scheduler.get("workers", []),
+                        current_by_index=current_by_index,
+                        previous_index_by_uuid=previous_index_by_uuid,
+                    )
+                    runtime_inventory = _runtime_inventory(devices)
+                    updated["devices"] = runtime_inventory
+                    updated["inventory_source"] = "host_generated"
+                    updated["inventory_fingerprint"] = _inventory_fingerprint(
+                        updated, devices
+                    )
+                    _validate_topology(
+                        updated,
+                        runtime_inventory,
+                        pool_expected=_pool_expected(runtime, scheduler),
+                    )
 
-            current_by_uuid = {str(item["uuid"]): item for item in devices}
-            current_by_index = {int(item["index"]): item for item in devices}
-            previous_index_by_uuid = _previous_index_by_uuid(scheduler)
-            visibility_changed = _normalize_cuda_visible_devices(
-                devices,
-                previous_index_by_uuid=previous_index_by_uuid,
-            )
-            updated = dict(scheduler)
-            updated["gateway_devices"] = _remap_selector(
-                scheduler.get("gateway_devices", "auto"),
-                current_by_uuid=current_by_uuid,
-                current_by_index=current_by_index,
-                previous_index_by_uuid=previous_index_by_uuid,
-            )
-            updated["comfyui_devices"] = _remap_selector(
-                scheduler.get("comfyui_devices", "auto"),
-                current_by_uuid=current_by_uuid,
-                current_by_index=current_by_index,
-                previous_index_by_uuid=previous_index_by_uuid,
-            )
-            updated["device_overrides"] = _remap_overrides(
-                scheduler.get("device_overrides", []),
-                current_by_uuid=current_by_uuid,
-                current_by_index=current_by_index,
-                previous_index_by_uuid=previous_index_by_uuid,
-            )
-            updated["workers"] = _remap_workers(
-                scheduler.get("workers", []),
-                current_by_index=current_by_index,
-                previous_index_by_uuid=previous_index_by_uuid,
-            )
-            runtime_inventory = _runtime_inventory(devices)
-            updated["devices"] = runtime_inventory
-            updated["inventory_source"] = "host_generated"
-            updated["inventory_fingerprint"] = _inventory_fingerprint(
-                updated, devices
-            )
-            _validate_topology(
-                updated,
-                runtime_inventory,
-                pool_expected=_pool_expected(runtime, scheduler),
-            )
-
-            if updated == scheduler:
-                return visibility_changed
-            runtime["gpu_scheduler"] = updated
-            _atomic_yaml(config_path, runtime)
-            logger.warning(
-                "GPU topology reconciled before scheduler startup",
-                extra={
-                    "device_count": len(devices),
-                    "worker_count": len(updated["workers"]),
-                },
-            )
-            return True
+                    if updated == scheduler:
+                        return visibility_changed
+                    runtime["gpu_scheduler"] = updated
+                    _write_locked_yaml(
+                        config_handle,
+                        runtime,
+                        original_text=original_text,
+                    )
+                    logger.warning(
+                        "GPU topology reconciled before scheduler startup",
+                        extra={
+                            "device_count": len(devices),
+                            "worker_count": len(updated["workers"]),
+                        },
+                    )
+                    return True
+                finally:
+                    fcntl.flock(config_handle.fileno(), fcntl.LOCK_UN)
         finally:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
