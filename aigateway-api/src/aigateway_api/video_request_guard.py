@@ -13,11 +13,17 @@ from aigateway_core.dispatch.dispatcher import RequestDispatcher
 _ORIGINAL_ATTR = "_aigateway_original_video_request_guard_dispatch"
 _GUARD_ATTR = "_aigateway_video_request_guard"
 
+# Explicit anaphoric references to an image/result that must already exist in the
+# request. Keep this separate from the generation-intent regex so ordinary
+# questions mentioning images and videos are not rejected.
 _ZH_REFERENCE_RE = re.compile(
-    r"(?:根据|基于|使用|用|把|让)?\s*(?:这|该|上面|刚才|之前|上一)(?:一)?(?:张|个)?\s*(?:图|图片|照片|画面)"
+    r"(?:根据|基于|使用|用|把|让|以|拿)?\s*"
+    r"(?:这|该|此|当前|上面|刚才|刚刚|之前|上一|刚生成(?:的)?|刚刚生成(?:的)?)"
+    r"(?:一)?(?:张|个)?\s*(?:图|图片|照片|画面|图像|结果)"
 )
 _EN_REFERENCE_RE = re.compile(
-    r"\b(?:this|that|the\s+above|previous|last)\s+(?:image|picture|photo|frame)\b",
+    r"\b(?:this|that|the\s+above|current|previous|last|just[-\s]+generated)\s+"
+    r"(?:image|picture|photo|frame|result)\b",
     re.IGNORECASE,
 )
 _ZH_VIDEO_GENERATION_RE = re.compile(
@@ -80,7 +86,7 @@ def _latest_user_turn(body: Any) -> tuple[str, bool]:
 
 
 def reference_image_required(body: Any) -> bool:
-    """Return whether an explicit image reference is missing for a video request."""
+    """Return whether an explicit existing-image reference is missing."""
     options = _generation_options(body)
     source_draft_id = options.get("source_draft_id") or _value(body, "source_draft_id", None)
     if isinstance(source_draft_id, str) and source_draft_id.strip():
