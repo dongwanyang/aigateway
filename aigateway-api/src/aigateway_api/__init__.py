@@ -27,6 +27,8 @@ def _ensure_core_src() -> None:
 
 def _reconcile_gpu_topology() -> None:
     """Refresh stale GPU UUID state before CUDA-aware modules are imported."""
+    if os.environ.get("AI_GATEWAY_ACCELERATOR", "").strip().lower() != "cuda":
+        return
     from .gpu_topology_bootstrap import bootstrap_gpu_topology
 
     bootstrap_gpu_topology()
