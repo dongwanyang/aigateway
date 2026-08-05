@@ -64,12 +64,12 @@ def _assert_request_record_owner(
         )
 
 
-def _resolving_response(request_id: str) -> JSONResponse:
+def _pending_response(request_id: str, request_status: str) -> JSONResponse:
     return JSONResponse(
         status_code=status.HTTP_202_ACCEPTED,
         content={
             "request_id": request_id,
-            "status": "resolving",
+            "status": request_status,
             "retry_after_ms": 250,
         },
     )
@@ -118,14 +118,17 @@ async def get_generation_request(
     strategy = _strategy(request)
     draft, record = await _resolved_record(strategy, request_id)
     if record is None:
-        return _resolving_response(request_id)
+        # The lookup may race the POST reaching this worker. Keep this distinct
+        # from a registered request so clients can bound only the registration
+        # grace period without imposing a timeout on real generation work.
+        return _pending_response(request_id, "unregistered")
     _assert_request_record_owner(record, auth, chat_session_id)
 
     terminal = terminal_request_status(record)
     if terminal is not None:
         return _terminal_payload(request_id, terminal)
     if draft is None and not str(record.get("draft_id") or ""):
-        return _resolving_response(request_id)
+        return _pending_response(request_id, "resolving")
     if draft is None:
         raise HTTPException(
             status_code=410,
