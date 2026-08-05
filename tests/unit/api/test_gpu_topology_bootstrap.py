@@ -1,27 +1,17 @@
 from __future__ import annotations
 
-import importlib.util
 from pathlib import Path
 
 import pytest
 import yaml
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-MODULE_PATH = (
-    REPO_ROOT
-    / "aigateway-api"
-    / "src"
-    / "aigateway_api"
-    / "gpu_topology_bootstrap.py"
-)
 
+def _module():
+    # Import through the installed package namespace so pytest-cov's
+    # ``--cov=aigateway_api`` source filter attributes execution correctly.
+    from aigateway_api import gpu_topology_bootstrap
 
-def _module(name: str):
-    spec = importlib.util.spec_from_file_location(name, MODULE_PATH)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return gpu_topology_bootstrap
 
 
 def _current_gpu(uuid: str = "GPU-new", index: int = 0):
@@ -37,7 +27,7 @@ def _current_gpu(uuid: str = "GPU-new", index: int = 0):
 def test_bootstrap_remaps_stale_uuid_topology_and_cuda_visibility(
     tmp_path: Path, monkeypatch
 ) -> None:
-    module = _module("gpu_topology_bootstrap_remap")
+    module = _module()
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         yaml.safe_dump(
@@ -104,7 +94,7 @@ def test_bootstrap_remaps_stale_uuid_topology_and_cuda_visibility(
 def test_bootstrap_migrates_legacy_worker_using_previous_device_index(
     tmp_path: Path, monkeypatch
 ) -> None:
-    module = _module("gpu_topology_bootstrap_legacy")
+    module = _module()
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         yaml.safe_dump(
@@ -144,7 +134,7 @@ def test_bootstrap_migrates_legacy_worker_using_previous_device_index(
 def test_bootstrap_fails_closed_when_worker_cannot_be_mapped(
     tmp_path: Path, monkeypatch
 ) -> None:
-    module = _module("gpu_topology_bootstrap_fail_closed")
+    module = _module()
     config_path = tmp_path / "config.yaml"
     original = {
         "gpu_scheduler": {
@@ -180,7 +170,7 @@ def test_bootstrap_fails_closed_when_worker_cannot_be_mapped(
 def test_bootstrap_is_noop_without_nvidia_inventory(
     tmp_path: Path, monkeypatch
 ) -> None:
-    module = _module("gpu_topology_bootstrap_no_gpu")
+    module = _module()
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         yaml.safe_dump({"gpu_scheduler": {"enabled": True}}),
