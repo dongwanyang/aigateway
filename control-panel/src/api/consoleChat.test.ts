@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ChatCompletionRequest } from '@/types'
 
 const generationRequest = vi.hoisted(() => ({
-  getGenerationRequest: vi.fn(),
+  waitForGenerationRequestDraft: vi.fn(),
 }))
 
 vi.mock('./generationRequest', () => generationRequest)
@@ -12,7 +12,7 @@ import { normalizeChatMessages, requestChatCompletion } from './consoleChat'
 type Messages = ChatCompletionRequest['messages']
 
 afterEach(() => {
-  generationRequest.getGenerationRequest.mockReset()
+  generationRequest.waitForGenerationRequestDraft.mockReset()
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
 })
@@ -70,7 +70,7 @@ describe('normalizeChatMessages', () => {
 describe('requestChatCompletion response-loss recovery', () => {
   it('recovers the server-created draft after a non-abort transport failure', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')))
-    generationRequest.getGenerationRequest.mockResolvedValue({
+    generationRequest.waitForGenerationRequestDraft.mockResolvedValue({
       request_id: 'request-1',
       draft_id: 'draft-1',
       status: 'running',
@@ -102,10 +102,56 @@ describe('requestChatCompletion response-loss recovery', () => {
       },
     })
 
-    expect(generationRequest.getGenerationRequest).toHaveBeenCalledWith(
+    expect(generationRequest.waitForGenerationRequestDraft).toHaveBeenCalledWith(
       'request-1',
       'session-1',
+      undefined,
     )
+  })
+
+  it('stops draft recovery immediately for an ordinary text stream', async () => {
+    const transportError = new TypeError('Failed to fetch')
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(transportError))
+    generationRequest.waitForGenerationRequestDraft.mockResolvedValue({
+      request_id: 'request-text',
+      status: 'non_draft',
+    })
+
+    await expect(requestChatCompletion(
+      {
+        model: 'auto',
+        messages: [{ role: 'user', content: '解释一下什么是向量检索' }],
+        stream: true,
+        chat_session_id: 'session-1',
+      },
+      undefined,
+      'request-text',
+    )).rejects.toBe(transportError)
+
+    expect(generationRequest.waitForGenerationRequestDraft).toHaveBeenCalledTimes(1)
+  })
+
+  it('surfaces a persisted server failure instead of polling indefinitely', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')))
+    generationRequest.waitForGenerationRequestDraft.mockResolvedValue({
+      request_id: 'request-failed',
+      status: 'failed',
+      error: 'generation_request_failed',
+    })
+
+    await expect(requestChatCompletion(
+      {
+        model: 'auto',
+        messages: [{ role: 'user', content: '生成视频' }],
+        stream: true,
+        chat_session_id: 'session-1',
+      },
+      undefined,
+      'request-failed',
+    )).rejects.toMatchObject({
+      code: 'generation_request_failed',
+      status: 502,
+    })
   })
 
   it('does not recover after an explicit AbortSignal cancellation', async () => {
@@ -126,6 +172,6 @@ describe('requestChatCompletion response-loss recovery', () => {
       'request-1',
     )).rejects.toBe(abortError)
 
-    expect(generationRequest.getGenerationRequest).not.toHaveBeenCalled()
+    expect(generationRequest.waitForGenerationRequestDraft).not.toHaveBeenCalled()
   })
 })
