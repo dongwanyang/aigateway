@@ -87,12 +87,47 @@ def discover_devices() -> list[dict[str, Any]]:
 def _config_write_lock(path: Path):
     lock_path = Path(str(path) + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    with lock_path.open("a+", encoding="utf-8") as sibling_lock:
+        fcntl.flock(sibling_lock.fileno(), fcntl.LOCK_EX)
         try:
-            yield
+            with path.open("r+", encoding="utf-8") as config_handle:
+                fcntl.flock(config_handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield config_handle
+                finally:
+                    fcntl.flock(config_handle.fileno(), fcntl.LOCK_UN)
         finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            fcntl.flock(sibling_lock.fileno(), fcntl.LOCK_UN)
+
+
+def _read_locked_yaml(handle: Any, path: Path) -> dict[str, Any]:
+    handle.seek(0)
+    loaded = yaml.safe_load(handle.read()) or {}
+    if not isinstance(loaded, dict):
+        raise RuntimeError(f"expected YAML object: {path}")
+    return loaded
+
+
+def _write_locked_yaml(handle: Any, value: dict[str, Any]) -> None:
+    rendered = yaml.safe_dump(value, sort_keys=False, allow_unicode=True)
+    handle.seek(0)
+    original = handle.read()
+    try:
+        handle.seek(0)
+        handle.write(rendered)
+        handle.truncate()
+        handle.flush()
+        os.fsync(handle.fileno())
+    except BaseException:
+        try:
+            handle.seek(0)
+            handle.write(original)
+            handle.truncate()
+            handle.flush()
+            os.fsync(handle.fileno())
+        except BaseException:
+            pass
+        raise
 
 
 def _atomic_yaml(path: Path, value: dict[str, Any]) -> None:
@@ -296,10 +331,8 @@ def main() -> int:
     if not runtime_inventory:
         raise SystemExit("no valid NVIDIA GPU UUIDs discovered")
 
-    with _config_write_lock(args.runtime_config):
-        runtime = yaml.safe_load(
-            args.runtime_config.read_text(encoding="utf-8")
-        ) or {}
+    with _config_write_lock(args.runtime_config) as config_handle:
+        runtime = _read_locked_yaml(config_handle, args.runtime_config)
         scheduler = runtime.setdefault("gpu_scheduler", {})
         devices = select_comfyui_devices(inventory, scheduler)
         if not devices:
@@ -323,7 +356,7 @@ def main() -> int:
             }
         )
         _atomic_yaml(args.output_compose, compose)
-        _atomic_yaml(args.runtime_config, runtime)
+        _write_locked_yaml(config_handle, runtime)
     return 0
 
 
