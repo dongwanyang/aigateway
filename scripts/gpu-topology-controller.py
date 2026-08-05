@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reconcile GPU UUID topology and safely recreate affected local services."""
+"""Reconcile GPU runtime topology and safely recreate affected local services."""
 from __future__ import annotations
 
 import argparse
@@ -53,6 +53,36 @@ def _read_yaml(path: Path) -> dict[str, Any]:
     return loaded
 
 
+def _read_locked_yaml(handle: Any, path: Path) -> dict[str, Any]:
+    handle.seek(0)
+    loaded = yaml.safe_load(handle.read()) or {}
+    if not isinstance(loaded, dict):
+        raise RuntimeError(f"expected YAML object: {path}")
+    return loaded
+
+
+def _write_locked_yaml(handle: Any, value: dict[str, Any]) -> None:
+    rendered = yaml.safe_dump(value, sort_keys=False, allow_unicode=True)
+    handle.seek(0)
+    original = handle.read()
+    try:
+        handle.seek(0)
+        handle.write(rendered)
+        handle.truncate()
+        handle.flush()
+        os.fsync(handle.fileno())
+    except BaseException:
+        try:
+            handle.seek(0)
+            handle.write(original)
+            handle.truncate()
+            handle.flush()
+            os.fsync(handle.fileno())
+        except BaseException:
+            logger.exception("failed to restore runtime configuration")
+        raise
+
+
 def _read_state(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -83,6 +113,28 @@ def _fingerprint(
     }
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _validate_runtime_topology(
+    devices: list[dict[str, Any]], workers: list[dict[str, Any]]
+) -> None:
+    device_uuids = {
+        str(item.get("uuid")) for item in devices if item.get("uuid")
+    }
+    worker_uuids = {
+        str(item.get("device_uuid"))
+        for item in workers
+        if item.get("device_uuid")
+    }
+    missing = worker_uuids - device_uuids
+    if missing:
+        raise RuntimeError(
+            "generated GPU topology contains workers without local devices: "
+            + ", ".join(sorted(missing))
+        )
+    worker_ids = [str(item.get("worker_id") or "") for item in workers]
+    if not all(worker_ids) or len(worker_ids) != len(set(worker_ids)):
+        raise RuntimeError("generated GPU topology contains duplicate worker IDs")
 
 
 def _atomic_text(path: Path, value: str) -> None:
@@ -130,12 +182,17 @@ def _compose_command(
 def _config_write_lock(path: Path):
     lock_path = Path(str(path) + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    with lock_path.open("a+", encoding="utf-8") as sibling_lock:
+        fcntl.flock(sibling_lock.fileno(), fcntl.LOCK_EX)
         try:
-            yield
+            with path.open("r+", encoding="utf-8") as config_handle:
+                fcntl.flock(config_handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield config_handle
+                finally:
+                    fcntl.flock(config_handle.fileno(), fcntl.LOCK_UN)
         finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            fcntl.flock(sibling_lock.fileno(), fcntl.LOCK_UN)
 
 
 def reconcile(
@@ -154,10 +211,10 @@ def reconcile(
         raise RuntimeError("quickstart runtime files are missing")
 
     config = _read_yaml(runtime_config)
-    scheduler = config.get("gpu_scheduler", {})
-    if not isinstance(scheduler, dict):
+    raw_scheduler = config.get("gpu_scheduler", {})
+    if not isinstance(raw_scheduler, dict):
         raise RuntimeError("gpu_scheduler must be an object")
-    if respect_auto_apply and scheduler.get("topology_auto_apply", False) is False:
+    if respect_auto_apply and raw_scheduler.get("topology_auto_apply", False) is False:
         logger.info("automatic GPU topology apply is disabled")
         return False
 
@@ -165,6 +222,12 @@ def reconcile(
     inventory = renderer.discover_devices()
     if not inventory:
         raise RuntimeError("no NVIDIA GPU UUIDs discovered; retaining current topology")
+    runtime_inventory = renderer._runtime_inventory(inventory)
+    if not runtime_inventory:
+        raise RuntimeError("no valid NVIDIA GPU inventory discovered")
+    scheduler = renderer.reconcile_scheduler_device_references(
+        inventory, raw_scheduler
+    )
     selected = renderer.select_comfyui_devices(inventory, scheduler)
     if not selected:
         raise RuntimeError("configured ComfyUI GPU UUID pool has no available devices")
@@ -174,6 +237,7 @@ def reconcile(
         scheduler,
         gateway_devices=inventory,
     )
+    _validate_runtime_topology(runtime_inventory, workers)
     desired_compose = yaml.safe_dump(compose, sort_keys=False, allow_unicode=True)
     current_compose = (
         generated_compose.read_text(encoding="utf-8")
@@ -181,7 +245,16 @@ def reconcile(
         else ""
     )
     current_workers = scheduler.get("workers", [])
-    if current_compose == desired_compose and current_workers == workers:
+    current_devices = scheduler.get("devices", [])
+    current_inventory_source = scheduler.get("inventory_source")
+    current_inventory_fingerprint = scheduler.get("inventory_fingerprint")
+    if (
+        current_compose == desired_compose
+        and current_workers == workers
+        and current_devices == runtime_inventory
+        and current_inventory_source == "host_generated"
+        and current_inventory_fingerprint == fingerprint
+    ):
         if not controller_state.exists():
             # Quickstart already applied this initial topology before it
             # installs the controller; record it without a redundant restart.
@@ -206,7 +279,11 @@ def reconcile(
         candidate_path.write_text(desired_compose, encoding="utf-8")
         state = _read_state(install_state)
         validation = subprocess.run(
-            [*_compose_command(repo_root, install_state, candidate_path, state), "config", "--quiet"],
+            [
+                *_compose_command(repo_root, install_state, candidate_path, state),
+                "config",
+                "--quiet",
+            ],
             cwd=repo_root,
             capture_output=True,
             text=True,
@@ -216,29 +293,42 @@ def reconcile(
             detail = (validation.stderr or validation.stdout).strip()
             raise RuntimeError(f"generated Compose topology is invalid: {detail}")
 
-        with _config_write_lock(runtime_config):
-            latest = _read_yaml(runtime_config)
-            latest_scheduler = latest.get("gpu_scheduler", {})
-            if not isinstance(latest_scheduler, dict) or _fingerprint(
-                latest_scheduler, inventory
-            ) != fingerprint:
+        with _config_write_lock(runtime_config) as config_handle:
+            latest = _read_locked_yaml(config_handle, runtime_config)
+            raw_latest_scheduler = latest.get("gpu_scheduler", {})
+            if not isinstance(raw_latest_scheduler, dict):
+                raise RuntimeError("gpu_scheduler must be an object")
+            latest_scheduler = renderer.reconcile_scheduler_device_references(
+                inventory, raw_latest_scheduler
+            )
+            if _fingerprint(latest_scheduler, inventory) != fingerprint:
                 raise RuntimeError(
                     "GPU topology configuration changed during reconcile; retrying"
                 )
             candidate_config = dict(latest)
             candidate_scheduler = dict(latest_scheduler)
-            candidate_scheduler["workers"] = workers
+            candidate_scheduler.update(
+                {
+                    "inventory_source": "host_generated",
+                    "inventory_fingerprint": fingerprint,
+                    "devices": runtime_inventory,
+                    "workers": workers,
+                }
+            )
+            _validate_runtime_topology(
+                candidate_scheduler["devices"], candidate_scheduler["workers"]
+            )
             candidate_config["gpu_scheduler"] = candidate_scheduler
 
-            # The API and this controller share the same .lock file. Build the
-            # candidate from the latest full document while holding that lock,
-            # so unrelated provider/auth edits cannot be overwritten.
+            # The controller and container API coordinate through an exclusive
+            # flock on the mounted config inode. The sibling lock still
+            # serializes multiple host-side controller processes.
             _atomic_text(
                 controller_state,
                 json.dumps({"pending_fingerprint": fingerprint}) + "\n",
             )
             renderer._atomic_yaml(generated_compose, compose)
-            renderer._atomic_yaml(runtime_config, candidate_config)
+            _write_locked_yaml(config_handle, candidate_config)
         if apply:
             services = ["gateway", *compose["services"].keys()]
             services = list(dict.fromkeys(services))
@@ -259,14 +349,21 @@ def reconcile(
             )
             if completed.returncode != 0:
                 raise RuntimeError("docker compose topology apply failed")
-        with _config_write_lock(runtime_config):
-            applied = _read_yaml(runtime_config)
+        with _config_write_lock(runtime_config) as config_handle:
+            applied = _read_locked_yaml(config_handle, runtime_config)
             applied_scheduler = applied.get("gpu_scheduler", {})
             if not isinstance(applied_scheduler, dict) or _fingerprint(
                 applied_scheduler, inventory
             ) != fingerprint:
                 raise RuntimeError(
                     "GPU topology configuration changed during apply; retrying"
+                )
+            if (
+                applied_scheduler.get("devices") != runtime_inventory
+                or applied_scheduler.get("workers") != workers
+            ):
+                raise RuntimeError(
+                    "GPU topology devices/workers changed during apply; retrying"
                 )
             _atomic_text(
                 controller_state,

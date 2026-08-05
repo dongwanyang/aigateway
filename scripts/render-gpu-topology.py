@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate a UUID-stable, single-host ComfyUI worker topology."""
+"""Generate a logical-index-stable, single-host ComfyUI worker topology."""
 from __future__ import annotations
 
 import argparse
@@ -15,84 +15,164 @@ from typing import Any
 import yaml
 
 
-def discover_devices() -> list[dict[str, Any]]:
-    query = subprocess.run(
-        [
-            "nvidia-smi",
-            "--query-gpu=index,uuid,name,memory.total",
-            "--format=csv,noheader,nounits",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
+def _valid_inventory(devices: list[dict[str, Any]]) -> bool:
+    if not devices:
+        return False
+    indices = [int(item["index"]) for item in devices]
+    uuids = [str(item.get("uuid") or "") for item in devices]
+    return (
+        all(uuids)
+        and len(indices) == len(set(indices))
+        and len(uuids) == len(set(uuids))
     )
+
+
+def discover_devices() -> list[dict[str, Any]]:
+    try:
+        query = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,uuid,name,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        query = None
     devices: list[dict[str, Any]] = []
-    if query.returncode == 0:
-        for line in query.stdout.splitlines():
-            parts = [part.strip() for part in line.split(",", 3)]
-            if len(parts) != 4:
-                continue
-            try:
-                devices.append(
-                    {
-                        "index": int(parts[0]),
-                        "uuid": parts[1],
-                        "name": parts[2],
-                        "memory_total_mb": int(parts[3]),
-                    }
-                )
-            except ValueError:
-                continue
-    if devices:
-        return devices
+    lines = (
+        [line for line in query.stdout.splitlines() if line.strip()]
+        if query is not None and query.returncode == 0
+        else []
+    )
+    direct_valid = bool(lines)
+    for line in lines:
+        parts = [part.strip() for part in line.split(",", 3)]
+        if len(parts) != 4 or not parts[1]:
+            direct_valid = False
+            break
+        try:
+            devices.append(
+                {
+                    "index": int(parts[0]),
+                    "uuid": parts[1],
+                    "name": parts[2],
+                    "memory_total_mb": int(parts[3]),
+                }
+            )
+        except ValueError:
+            direct_valid = False
+            break
+    if direct_valid and _valid_inventory(devices):
+        return sorted(devices, key=lambda item: int(item["index"]))
 
     # Compatibility with older/fake nvidia-smi implementations that only
-    # support ``-L`` and the memory.total query independently.
-    listed = subprocess.run(
-        ["nvidia-smi", "-L"], capture_output=True, text=True, check=False
-    )
-    memory = subprocess.run(
-        [
-            "nvidia-smi",
-            "--query-gpu=memory.total",
-            "--format=csv,noheader,nounits",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    memory_values = [
-        int(value.strip())
-        for value in memory.stdout.splitlines()
-        if value.strip().isdigit()
-    ]
+    # support ``-L`` and the memory.total query independently. A partially
+    # parsed direct query is not accepted as a complete inventory.
+    try:
+        listed = subprocess.run(
+            ["nvidia-smi", "-L"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        memory = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if listed.returncode != 0 or memory.returncode != 0:
+        return []
+    try:
+        memory_values = [
+            int(value.strip())
+            for value in memory.stdout.splitlines()
+            if value.strip()
+        ]
+    except ValueError:
+        return []
     pattern = re.compile(r"GPU\s+(\d+):\s*(.*?)\s*\(UUID:\s*([^\)]+)\)")
-    for line in listed.stdout.splitlines():
+    gpu_lines = [
+        line for line in listed.stdout.splitlines() if line.strip().startswith("GPU ")
+    ]
+    devices = []
+    for line in gpu_lines:
         match = pattern.search(line)
         if not match:
-            continue
+            return []
         index = int(match.group(1))
+        if index >= len(memory_values):
+            return []
         devices.append(
             {
                 "index": index,
                 "uuid": match.group(3).strip(),
                 "name": match.group(2).strip(),
-                "memory_total_mb": memory_values[index] if index < len(memory_values) else 0,
+                "memory_total_mb": memory_values[index],
             }
         )
-    return devices
+    if not _valid_inventory(devices):
+        return []
+    return sorted(devices, key=lambda item: int(item["index"]))
 
 
 @contextlib.contextmanager
 def _config_write_lock(path: Path):
     lock_path = Path(str(path) + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    with lock_path.open("a+", encoding="utf-8") as sibling_lock:
+        fcntl.flock(sibling_lock.fileno(), fcntl.LOCK_EX)
         try:
-            yield
+            with path.open("r+", encoding="utf-8") as config_handle:
+                fcntl.flock(config_handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield config_handle
+                finally:
+                    fcntl.flock(config_handle.fileno(), fcntl.LOCK_UN)
         finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            fcntl.flock(sibling_lock.fileno(), fcntl.LOCK_UN)
+
+
+def _read_locked_yaml(handle: Any, path: Path) -> dict[str, Any]:
+    handle.seek(0)
+    loaded = yaml.safe_load(handle.read()) or {}
+    if not isinstance(loaded, dict):
+        raise RuntimeError(f"expected YAML object: {path}")
+    return loaded
+
+
+def _write_locked_yaml(handle: Any, value: dict[str, Any]) -> None:
+    rendered = yaml.safe_dump(value, sort_keys=False, allow_unicode=True)
+    handle.seek(0)
+    original = handle.read()
+    try:
+        handle.seek(0)
+        handle.write(rendered)
+        handle.truncate()
+        handle.flush()
+        os.fsync(handle.fileno())
+    except BaseException:
+        try:
+            handle.seek(0)
+            handle.write(original)
+            handle.truncate()
+            handle.flush()
+            os.fsync(handle.fileno())
+        except BaseException:
+            pass
+        raise
 
 
 def _atomic_yaml(path: Path, value: dict[str, Any]) -> None:
@@ -128,8 +208,11 @@ def render_topology(
         raise ValueError("comfyui_dynamic_vram_enabled must be a boolean")
     disable_dynamic_vram = "false" if dynamic_vram_enabled else "true"
     visible_gateway_devices = devices if gateway_devices is None else gateway_devices
+    # Physical UUIDs are stable only for one concrete GPU. Instance replacement
+    # changes them, while Docker/NVIDIA logical indices are resolved again on
+    # every container start. Persist UUIDs only as runtime telemetry below.
     gateway_visible_devices = ",".join(
-        str(device["uuid"]) for device in visible_gateway_devices
+        str(int(device["index"])) for device in visible_gateway_devices
     )
     services: dict[str, Any] = {
         "gateway": {
@@ -141,6 +224,7 @@ def render_topology(
         service = "comfyui" if position == 0 else f"comfyui-gpu-{position}"
         worker_id = f"comfyui-gpu-{position}"
         host_port = 8188 + position
+        logical_index = int(device["index"])
         worker_data_prefix = (
             "${AIGATEWAY_COMFY_DATA_DIR:-./comfyui}"
             if position == 0
@@ -156,7 +240,7 @@ def render_topology(
         ]
         override = {
             "environment": {
-                "CUDA_VISIBLE_DEVICES": device["uuid"],
+                "CUDA_VISIBLE_DEVICES": str(logical_index),
                 "COMFYUI_VRAM_FLAG": "${COMFYUI_VRAM_FLAG:-}",
                 "COMFYUI_DISABLE_DYNAMIC_VRAM": (
                     "${COMFYUI_DISABLE_DYNAMIC_VRAM:-"
@@ -195,6 +279,7 @@ def render_topology(
         workers.append(
             {
                 "worker_id": worker_id,
+                "logical_index": logical_index,
                 "device_uuid": device["uuid"],
                 "server_url": f"http://{service}:8188",
                 "public_url": f"http://localhost:{host_port}",
@@ -234,20 +319,129 @@ def _runtime_inventory(devices: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return result
 
 
+def _previous_index_by_uuid(scheduler: dict[str, Any]) -> dict[str, int]:
+    result: dict[str, int] = {}
+    devices = scheduler.get("devices", [])
+    if not isinstance(devices, list):
+        return result
+    for item in devices:
+        if not isinstance(item, dict) or not item.get("uuid"):
+            continue
+        raw_index = item.get("index", item.get("logical_index"))
+        if raw_index is None:
+            continue
+        try:
+            result[str(item["uuid"])] = int(raw_index)
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
+def _remap_uuid_selector(
+    value: Any,
+    *,
+    current_by_uuid: dict[str, dict[str, Any]],
+    current_by_index: dict[int, dict[str, Any]],
+    previous_index_by_uuid: dict[str, int],
+    field: str,
+) -> Any:
+    if value in (None, "auto"):
+        return "auto"
+    if not isinstance(value, list):
+        raise RuntimeError(f"{field} must be 'auto' or a UUID list")
+
+    remapped: list[str] = []
+    unresolved: list[str] = []
+    for raw in value:
+        uuid = str(raw)
+        if uuid in current_by_uuid:
+            remapped.append(uuid)
+            continue
+        old_index = previous_index_by_uuid.get(uuid)
+        replacement = current_by_index.get(old_index) if old_index is not None else None
+        if replacement is None:
+            unresolved.append(uuid)
+        else:
+            remapped.append(str(replacement["uuid"]))
+    if unresolved:
+        raise RuntimeError(
+            f"{field} references devices that cannot be remapped: "
+            + ", ".join(sorted(unresolved))
+        )
+    return list(dict.fromkeys(remapped))
+
+
+def reconcile_scheduler_device_references(
+    inventory: list[dict[str, Any]], scheduler: dict[str, Any]
+) -> dict[str, Any]:
+    """Refresh persisted UUID policy using its previous logical GPU slots."""
+    current_by_uuid = {
+        str(item.get("uuid")): item for item in inventory if item.get("uuid")
+    }
+    current_by_index = {
+        int(item["index"]): item for item in inventory if item.get("uuid")
+    }
+    previous_index_by_uuid = _previous_index_by_uuid(scheduler)
+    updated = dict(scheduler)
+    for field in ("gateway_devices", "comfyui_devices"):
+        updated[field] = _remap_uuid_selector(
+            scheduler.get(field, "auto"),
+            current_by_uuid=current_by_uuid,
+            current_by_index=current_by_index,
+            previous_index_by_uuid=previous_index_by_uuid,
+            field=field,
+        )
+
+    overrides = scheduler.get("device_overrides", [])
+    if not isinstance(overrides, list):
+        raise RuntimeError("device_overrides must be a list")
+    remapped_overrides: list[dict[str, Any]] = []
+    unresolved: list[str] = []
+    for position, raw in enumerate(overrides):
+        if not isinstance(raw, dict) or not raw.get("uuid"):
+            raise RuntimeError(
+                "GPU device override is malformed at index " + str(position)
+            )
+        override = dict(raw)
+        uuid = str(override["uuid"])
+        if uuid not in current_by_uuid:
+            old_index = previous_index_by_uuid.get(uuid)
+            replacement = (
+                current_by_index.get(old_index) if old_index is not None else None
+            )
+            if replacement is None:
+                unresolved.append(uuid)
+                continue
+            override["uuid"] = str(replacement["uuid"])
+        remapped_overrides.append(override)
+    if unresolved:
+        raise RuntimeError(
+            "device_overrides references devices that cannot be remapped: "
+            + ", ".join(sorted(unresolved))
+        )
+    updated["device_overrides"] = remapped_overrides
+    return updated
+
+
 def _select_devices(
     devices: list[dict[str, Any]],
     scheduler: dict[str, Any],
     selector_name: str,
 ) -> list[dict[str, Any]]:
     selector = scheduler.get(selector_name, "auto")
+    if selector not in (None, "auto") and not isinstance(selector, list):
+        raise RuntimeError(f"{selector_name} must be 'auto' or a UUID list")
     selected_uuids = (
         {str(item) for item in selector}
         if isinstance(selector, list)
         else None
     )
+    overrides = scheduler.get("device_overrides", [])
+    if not isinstance(overrides, list):
+        raise RuntimeError("device_overrides must be a list")
     disabled = {
         str(item.get("uuid"))
-        for item in scheduler.get("device_overrides", [])
+        for item in overrides
         if isinstance(item, dict) and item.get("enabled") is False
     }
     return [
@@ -286,16 +480,24 @@ def main() -> int:
     if not devices:
         raise SystemExit("no NVIDIA GPU UUIDs discovered")
 
-    inventory = devices
+    try:
+        inventory = sorted(devices, key=lambda item: int(item["index"]))
+    except (KeyError, TypeError, ValueError):
+        raise SystemExit("invalid NVIDIA GPU inventory") from None
+    if not _valid_inventory(inventory):
+        raise SystemExit("invalid NVIDIA GPU inventory")
     runtime_inventory = _runtime_inventory(inventory)
     if not runtime_inventory:
         raise SystemExit("no valid NVIDIA GPU UUIDs discovered")
 
-    with _config_write_lock(args.runtime_config):
-        runtime = yaml.safe_load(
-            args.runtime_config.read_text(encoding="utf-8")
-        ) or {}
-        scheduler = runtime.setdefault("gpu_scheduler", {})
+    with _config_write_lock(args.runtime_config) as config_handle:
+        runtime = _read_locked_yaml(config_handle, args.runtime_config)
+        raw_scheduler = runtime.setdefault("gpu_scheduler", {})
+        if not isinstance(raw_scheduler, dict):
+            raise RuntimeError("gpu_scheduler must be an object")
+        scheduler = reconcile_scheduler_device_references(
+            inventory, raw_scheduler
+        )
         devices = select_comfyui_devices(inventory, scheduler)
         if not devices:
             raise SystemExit(
@@ -317,8 +519,9 @@ def main() -> int:
                 "workers": workers,
             }
         )
+        runtime["gpu_scheduler"] = scheduler
         _atomic_yaml(args.output_compose, compose)
-        _atomic_yaml(args.runtime_config, runtime)
+        _write_locked_yaml(config_handle, runtime)
     return 0
 
 

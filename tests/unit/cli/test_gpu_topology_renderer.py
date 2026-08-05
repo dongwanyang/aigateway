@@ -4,6 +4,7 @@ import importlib.util
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = REPO_ROOT / "scripts/render-gpu-topology.py"
@@ -18,7 +19,9 @@ def _module():
 
 
 @pytest.mark.parametrize("count", [1, 2, 3])
-def test_render_topology_creates_one_uuid_bound_worker_per_gpu(count: int) -> None:
+def test_render_topology_uses_logical_indices_and_records_runtime_uuids(
+    count: int,
+) -> None:
     devices = [
         {
             "index": index,
@@ -30,15 +33,19 @@ def test_render_topology_creates_one_uuid_bound_worker_per_gpu(count: int) -> No
     ]
     compose, workers = _module().render_topology(devices)
     assert len(workers) == count
+    assert [item["logical_index"] for item in workers] == list(range(count))
     assert [item["device_uuid"] for item in workers] == [
         f"GPU-{index}" for index in range(count)
     ]
     assert compose["services"]["gateway"]["environment"]["CUDA_VISIBLE_DEVICES"] == ",".join(
-        f"GPU-{index}" for index in range(count)
+        str(index) for index in range(count)
     )
     for index, worker in enumerate(workers):
         service = "comfyui" if index == 0 else f"comfyui-gpu-{index}"
-        assert compose["services"][service]["environment"]["CUDA_VISIBLE_DEVICES"] == worker["device_uuid"]
+        assert (
+            compose["services"][service]["environment"]["CUDA_VISIBLE_DEVICES"]
+            == str(worker["logical_index"])
+        )
         assert (
             compose["services"][service]["environment"][
                 "COMFYUI_DISABLE_DYNAMIC_VRAM"
@@ -53,6 +60,16 @@ def test_render_topology_creates_one_uuid_bound_worker_per_gpu(count: int) -> No
             else f"workers/comfyui-gpu-{index}/output"
         )
         assert any(expected_output in value for value in volumes)
+
+
+def test_base_compose_preserves_operator_cuda_visibility_override() -> None:
+    compose = yaml.safe_load(
+        (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    )
+    assert (
+        compose["services"]["gateway"]["environment"]["CUDA_VISIBLE_DEVICES"]
+        == "${GATEWAY_CUDA_VISIBLE_DEVICES:-0}"
+    )
 
 
 def test_select_comfyui_devices_uses_uuid_pool_and_disabled_overrides() -> None:
@@ -91,10 +108,9 @@ def test_render_topology_can_enable_dynamic_vram_from_config() -> None:
         == "${COMFYUI_DISABLE_DYNAMIC_VRAM:-false}"
     )
 
+
 def test_main_preserves_disabled_scheduler(tmp_path, monkeypatch) -> None:
     import sys
-
-    import yaml
 
     inventory = tmp_path / "inventory.yaml"
     runtime = tmp_path / "config.yaml"
@@ -153,8 +169,9 @@ def test_gateway_visibility_includes_inventory_for_worker_coordination() -> None
         gateway_devices=inventory,
     )
 
+    assert [item["logical_index"] for item in workers] == [1]
     assert [item["device_uuid"] for item in workers] == ["GPU-b"]
     assert (
         compose["services"]["gateway"]["environment"]["CUDA_VISIBLE_DEVICES"]
-        == "GPU-a,GPU-b"
+        == "0,1"
     )
