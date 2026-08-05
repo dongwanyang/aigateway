@@ -3,8 +3,9 @@ import { requestChatCompletion } from '@/api/consoleChat'
 import { createVideoDraftFromSource } from '@/api/sourceDraftVideo'
 import {
   cancelGenerationRequest,
-  getGenerationRequest,
+  cancelGenerationRequestAndWait,
   newGenerationRequestId,
+  waitForGenerationRequestDraft,
 } from '@/api/generationRequest'
 import type { ChatReferenceImage, GenerationOptions } from '@/types'
 import {
@@ -79,16 +80,6 @@ function normalizeDraftProgress(progress: number | undefined): number | undefine
   return Math.min(1, Math.max(0, progress))
 }
 
-function delay(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const timer = window.setTimeout(resolve, ms)
-    signal?.addEventListener('abort', () => {
-      window.clearTimeout(timer)
-      reject(new DOMException('Aborted', 'AbortError'))
-    }, { once: true })
-  })
-}
-
 export interface UseChatSessions {
   sessions: ChatSession[]
   activeId: string | null
@@ -136,6 +127,7 @@ export function useChatSessions(): UseChatSessions {
   const flushRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const streamingRef = useRef(false)
   const recoveryControllersRef = useRef(new Map<string, AbortController>())
+  const cancellationControllersRef = useRef(new Map<string, AbortController>())
 
   useEffect(() => { sessionsRef.current = sessions }, [sessions])
   useEffect(() => { streamingRef.current = streaming }, [streaming])
@@ -156,14 +148,16 @@ export function useChatSessions(): UseChatSessions {
     }
   }, [sessions, activeId, setSessions, setActiveId])
 
-  const detachTransport = useCallback(() => {
+  const detachTransport = useCallback((preserveBusyState = false) => {
     abortRef.current?.abort()
     abortRef.current = null
     activeGenerationRef.current = null
     inflightRef.current = false
     resumeSessionRef.current = null
-    setPendingAssistantId(null)
-    setStreaming(false)
+    if (!preserveBusyState) {
+      setPendingAssistantId(null)
+      setStreaming(false)
+    }
   }, [setPendingAssistantId, setStreaming])
 
   useEffect(() => {
@@ -178,6 +172,8 @@ export function useChatSessions(): UseChatSessions {
       inflightRef.current = false
       recoveryControllersRef.current.forEach(controller => controller.abort())
       recoveryControllersRef.current.clear()
+      cancellationControllersRef.current.forEach(controller => controller.abort())
+      cancellationControllersRef.current.clear()
       if (flushRetryTimerRef.current) clearTimeout(flushRetryTimerRef.current)
     }
   }, [])
@@ -289,40 +285,6 @@ export function useChatSessions(): UseChatSessions {
       void cancelGenerationRequest(requestId, sessionId).catch(() => undefined)
     })
   }, [])
-
-  const stop = useCallback(() => {
-    const activeGeneration = activeGenerationRef.current
-    if (activeGeneration) {
-      cancelledRequestIdsRef.current.add(activeGeneration.requestId)
-      void cancelGenerationRequest(
-        activeGeneration.requestId,
-        activeGeneration.sessionId,
-      ).catch(error => {
-        console.warn('取消生成请求失败:', error instanceof Error ? error.message : error)
-      })
-      patchSessionMessage(
-        activeGeneration.sessionId,
-        activeGeneration.assistantId,
-        message => ({
-          ...message,
-          content: message.content || '已停止',
-          intent: null,
-          model: undefined,
-          incomplete: false,
-          awaitingDraft: false,
-          awaitingDraftSince: undefined,
-          draft: message.draft ? {
-            ...message.draft,
-            status: 'cancelled',
-            stage: 'cancelled',
-            errorMessage: '已停止',
-          } : message.draft,
-        }),
-      )
-    }
-    detachTransport()
-    flushToStorage()
-  }, [detachTransport, flushToStorage, patchSessionMessage])
 
   const newSession = useCallback(() => {
     // Switching context detaches the HTTP transport but leaves the server task
@@ -453,55 +415,166 @@ export function useChatSessions(): UseChatSessions {
     const controller = new AbortController()
     recoveryControllersRef.current.set(requestId, controller)
     try {
-      for (let attempt = 0; attempt < 120; attempt += 1) {
-        const state = await getGenerationRequest(requestId, sessionId, controller.signal)
-        if (state.status === 'cancelled') {
-          patchSessionMessage(sessionId, assistantId, message => ({
-            ...message,
-            content: message.content || '已停止',
-            intent: null,
-            model: undefined,
-            awaitingDraft: false,
-            awaitingDraftSince: undefined,
-            incomplete: false,
-          }))
-          return
-        }
-        if (state.draft_id && state.preview_url && state.media_type) {
-          attachDraft(sessionId, assistantId, {
-            draftId: state.draft_id,
-            previewUrl: state.preview_url,
-            mediaType: state.media_type,
-            status: normalizeDraftStatus(state.status),
-            stage: state.stage,
-            progress: normalizeDraftProgress(state.progress),
-            workflowVersion: state.workflow_version,
-            errorMessage: state.error ?? undefined,
-          })
-          return
-        }
-        await delay(state.retry_after_ms ?? 250, controller.signal)
-      }
-      throw new Error('generation_request_recovery_timeout')
-    } catch (e) {
-      if (controller.signal.aborted) return
-      const code = (e as Error & { code?: string }).code ?? (e instanceof Error ? e.message : '恢复失败')
-      if (code === 'generation_request_expired') {
+      const state = await waitForGenerationRequestDraft(
+        requestId,
+        sessionId,
+        controller.signal,
+      )
+      if (state.status === 'cancelled') {
         patchSessionMessage(sessionId, assistantId, message => ({
           ...message,
-          content: '生成请求已过期',
-          error: true,
+          content: message.content && message.content !== '正在停止…'
+            ? message.content
+            : '已停止',
           intent: null,
           model: undefined,
+          error: false,
           awaitingDraft: false,
           awaitingDraftSince: undefined,
+          incomplete: false,
+          draft: message.draft ? {
+            ...message.draft,
+            status: 'cancelled',
+            stage: 'cancelled',
+            progress: 0,
+            errorMessage: '已停止',
+          } : message.draft,
         }))
+        return
       }
+      if (state.draft_id && state.preview_url && state.media_type) {
+        attachDraft(sessionId, assistantId, {
+          draftId: state.draft_id,
+          previewUrl: state.preview_url,
+          mediaType: state.media_type,
+          status: normalizeDraftStatus(state.status),
+          stage: state.stage,
+          progress: normalizeDraftProgress(state.progress),
+          workflowVersion: state.workflow_version,
+          errorMessage: state.error ?? undefined,
+        })
+      }
+    } catch (e) {
+      if (controller.signal.aborted) {
+        // Module-level recovery markers survive React remounts. Remove the
+        // marker so a refreshed component can resume this request again.
+        resumedSessionIds.delete(sessionId)
+        return
+      }
+      const code = (e as Error & { code?: string }).code ?? (e instanceof Error ? e.message : '恢复失败')
+      const terminal = [
+        'generation_request_expired',
+        'generation_request_forbidden',
+        'unauthorized',
+      ].includes(code)
+      patchSessionMessage(sessionId, assistantId, message => ({
+        ...message,
+        content: code === 'generation_request_expired'
+          ? '生成请求已过期'
+          : `生成请求恢复失败: ${e instanceof Error ? e.message : code}`,
+        error: true,
+        intent: null,
+        model: undefined,
+        awaitingDraft: false,
+        awaitingDraftSince: undefined,
+        incomplete: false,
+      }))
+      if (!terminal) resumedSessionIds.delete(sessionId)
     } finally {
       recoveryControllersRef.current.delete(requestId)
       flushToStorage()
     }
   }, [attachDraft, flushToStorage, patchSessionMessage])
+
+  const stop = useCallback(() => {
+    const activeGeneration = activeGenerationRef.current
+    if (!activeGeneration) {
+      detachTransport()
+      flushToStorage()
+      return
+    }
+
+    const { requestId, sessionId, assistantId } = activeGeneration
+    if (cancellationControllersRef.current.has(requestId)) return
+    cancelledRequestIdsRef.current.add(requestId)
+    patchSessionMessage(sessionId, assistantId, message => ({
+      ...message,
+      content: message.content || '正在停止…',
+      error: false,
+      incomplete: false,
+      awaitingDraft: true,
+      awaitingDraftSince: message.awaitingDraftSince ?? Date.now(),
+      draft: message.draft ? {
+        ...message.draft,
+        stage: 'cancelling',
+        errorMessage: undefined,
+      } : message.draft,
+    }))
+    // Abort only the response transport. Keep the UI busy until the server has
+    // persisted the terminal cancellation state.
+    detachTransport(true)
+
+    const controller = new AbortController()
+    cancellationControllersRef.current.set(requestId, controller)
+    void cancelGenerationRequestAndWait(
+      requestId,
+      sessionId,
+      controller.signal,
+    ).then(() => {
+      patchSessionMessage(sessionId, assistantId, message => ({
+        ...message,
+        content: message.content && message.content !== '正在停止…'
+          ? message.content
+          : '已停止',
+        intent: null,
+        model: undefined,
+        error: false,
+        incomplete: false,
+        awaitingDraft: false,
+        awaitingDraftSince: undefined,
+        draft: message.draft ? {
+          ...message.draft,
+          status: 'cancelled',
+          stage: 'cancelled',
+          progress: 0,
+          errorMessage: '已停止',
+        } : message.draft,
+      }))
+    }).catch(error => {
+      if (controller.signal.aborted) return
+      const message = error instanceof Error ? error.message : '取消失败'
+      setError(`停止生成失败: ${message}`)
+      patchSessionMessage(sessionId, assistantId, current => ({
+        ...current,
+        content: '停止失败，正在恢复任务状态',
+        error: true,
+        incomplete: false,
+        awaitingDraft: true,
+        awaitingDraftSince: current.awaitingDraftSince ?? Date.now(),
+        draft: current.draft ? {
+          ...current.draft,
+          stage: current.draft.stage === 'cancelling' ? 'running' : current.draft.stage,
+          errorMessage: `停止失败: ${message}`,
+        } : current.draft,
+      }))
+      resumedSessionIds.delete(sessionId)
+      void recoverGenerationRequest(requestId, assistantId, sessionId)
+    }).finally(() => {
+      cancellationControllersRef.current.delete(requestId)
+      cancelledRequestIdsRef.current.delete(requestId)
+      setPendingAssistantId(null)
+      setStreaming(false)
+      flushToStorage()
+    })
+  }, [
+    detachTransport,
+    flushToStorage,
+    patchSessionMessage,
+    recoverGenerationRequest,
+    setError,
+    setPendingAssistantId,
+    setStreaming,
+  ])
 
   const send = useCallback(async (
     text: string,
@@ -665,17 +738,17 @@ export function useChatSessions(): UseChatSessions {
       setPendingAssistantId(null)
       flushToStorage()
     } catch (e) {
+      const explicitlyCancelled = controller.signal.aborted
+        && cancelledRequestIdsRef.current.has(requestId)
       if (controller.signal.aborted) {
-        const explicitlyCancelled = cancelledRequestIdsRef.current.has(requestId)
         if (explicitlyCancelled) {
           patchSessionMessage(sessionId, assistantId, message => ({
             ...message,
-            content: message.content || '已停止',
-            intent: null,
-            model: undefined,
+            content: message.content || '正在停止…',
+            error: false,
             incomplete: false,
-            awaitingDraft: false,
-            awaitingDraftSince: undefined,
+            awaitingDraft: true,
+            awaitingDraftSince: message.awaitingDraftSince ?? Date.now(),
           }))
         } else {
           // Transport detached during navigation/refresh. Preserve the request
@@ -704,8 +777,10 @@ export function useChatSessions(): UseChatSessions {
             : message.generationRequestId,
         }))
       }
-      setStreaming(false)
-      setPendingAssistantId(null)
+      if (!explicitlyCancelled) {
+        setStreaming(false)
+        setPendingAssistantId(null)
+      }
       flushToStorage()
     } finally {
       if (abortRef.current === controller) abortRef.current = null
@@ -714,7 +789,6 @@ export function useChatSessions(): UseChatSessions {
       }
       inflightRef.current = false
       if (isResume) resumeSessionRef.current = null
-      cancelledRequestIdsRef.current.delete(requestId)
     }
   }, [
     activeId,
