@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate a UUID-stable, single-host ComfyUI worker topology."""
+"""Generate a logical-index-stable, single-host ComfyUI worker topology."""
 from __future__ import annotations
 
 import argparse
@@ -128,8 +128,11 @@ def render_topology(
         raise ValueError("comfyui_dynamic_vram_enabled must be a boolean")
     disable_dynamic_vram = "false" if dynamic_vram_enabled else "true"
     visible_gateway_devices = devices if gateway_devices is None else gateway_devices
+    # Physical UUIDs are stable only for one concrete GPU. Instance replacement
+    # changes them, while Docker/NVIDIA logical indices are resolved again on
+    # every container start. Persist UUIDs only as runtime telemetry below.
     gateway_visible_devices = ",".join(
-        str(device["uuid"]) for device in visible_gateway_devices
+        str(int(device["index"])) for device in visible_gateway_devices
     )
     services: dict[str, Any] = {
         "gateway": {
@@ -141,6 +144,7 @@ def render_topology(
         service = "comfyui" if position == 0 else f"comfyui-gpu-{position}"
         worker_id = f"comfyui-gpu-{position}"
         host_port = 8188 + position
+        logical_index = int(device["index"])
         worker_data_prefix = (
             "${AIGATEWAY_COMFY_DATA_DIR:-./comfyui}"
             if position == 0
@@ -156,7 +160,7 @@ def render_topology(
         ]
         override = {
             "environment": {
-                "CUDA_VISIBLE_DEVICES": device["uuid"],
+                "CUDA_VISIBLE_DEVICES": str(logical_index),
                 "COMFYUI_VRAM_FLAG": "${COMFYUI_VRAM_FLAG:-}",
                 "COMFYUI_DISABLE_DYNAMIC_VRAM": (
                     "${COMFYUI_DISABLE_DYNAMIC_VRAM:-"
@@ -195,6 +199,7 @@ def render_topology(
         workers.append(
             {
                 "worker_id": worker_id,
+                "logical_index": logical_index,
                 "device_uuid": device["uuid"],
                 "server_url": f"http://{service}:8188",
                 "public_url": f"http://localhost:{host_port}",
