@@ -166,39 +166,6 @@ export default function ChatComposer({
     })
   }
 
-  async function selectReferenceImage(file: File | undefined) {
-    setReferenceError(null)
-    if (!file) return
-    if (!REFERENCE_IMAGE_TYPES.has(file.type)) {
-      setReferenceError('参考图仅支持 PNG、JPEG 或 WebP。')
-      return
-    }
-    if (file.size > MAX_REFERENCE_IMAGE_BYTES) {
-      setReferenceError('参考图不能超过 10MB。')
-      return
-    }
-    const dataUrl = await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader()
-      reader.onload = () => (
-        typeof reader.result === 'string'
-          ? resolve(reader.result)
-          : reject(new Error('图片读取失败'))
-      )
-      reader.onerror = () => reject(reader.error ?? new Error('图片读取失败'))
-      reader.readAsDataURL(file)
-    }).catch((error: unknown) => {
-      setReferenceError(error instanceof Error ? error.message : '图片读取失败')
-      return null
-    })
-    if (!dataUrl) return
-    setReferenceImage({
-      dataUrl,
-      name: file.name,
-      mimeType: file.type,
-      size: file.size,
-    })
-  }
-
   function onKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
     if (e.nativeEvent.isComposing) return
     if (e.key === 'Enter' && !e.shiftKey) {
