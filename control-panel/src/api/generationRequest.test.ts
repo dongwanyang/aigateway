@@ -5,6 +5,7 @@ import {
   getGenerationRequest,
   newGenerationRequestId,
   waitForGenerationRequestDraft,
+  waitForGenerationRequestState,
 } from './generationRequest'
 
 afterEach(() => {
@@ -143,7 +144,7 @@ describe('generation request lifecycle client', () => {
     expect(fetchMock).toHaveBeenCalledTimes(3)
   })
 
-  it('stops recovery when the server confirms the request is not a draft', async () => {
+  it('returns non-draft from the generic state waiter', async () => {
     vi.useFakeTimers()
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(Response.json({
@@ -157,11 +158,27 @@ describe('generation request lifecycle client', () => {
       }))
     vi.stubGlobal('fetch', fetchMock)
 
-    const recovery = waitForGenerationRequestDraft('request-text', 'session-1')
+    const recovery = waitForGenerationRequestState('request-text', 'session-1')
     await vi.advanceTimersByTimeAsync(100)
 
     await expect(recovery).resolves.toMatchObject({ status: 'non_draft' })
     expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('fails draft-only recovery for a non-draft terminal state', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(Response.json({
+      request_id: 'request-text',
+      status: 'non_draft',
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      waitForGenerationRequestDraft('request-text', 'session-1'),
+    ).rejects.toMatchObject({
+      message: '该请求是普通文本响应，断开的响应内容无法恢复',
+      code: 'generation_request_not_draft',
+      status: 409,
+    })
   })
 
   it('generates request IDs within the server validation contract', () => {
