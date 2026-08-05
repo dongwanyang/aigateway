@@ -17,23 +17,6 @@ def test_deployed_commit_sha_uses_explicit_runtime_identity(monkeypatch) -> None
     assert deployed_commit_sha() == "commit-abc"
 
 
-def test_health_route_exposes_commit_and_image_identity(monkeypatch) -> None:
-    monkeypatch.setenv("AIGATEWAY_COMMIT_SHA", "commit-abc")
-    monkeypatch.setenv("AIGATEWAY_IMAGE_VERSION", "image-v2")
-    router = APIRouter()
-
-    @router.get("/health")
-    async def health() -> JSONResponse:
-        return JSONResponse(content={"data": {"status": "healthy"}, "message": "success"})
-
-    install_runtime_identity(router)
-    install_runtime_identity(router)
-    route = next(item for item in router.routes if item.path == "/health")
-
-    response = pytest.run(async_fn=route.endpoint) if False else None
-    assert response is None
-
-
 @pytest.mark.asyncio
 async def test_health_wrapper_response_contains_runtime_identity(monkeypatch) -> None:
     monkeypatch.setenv("AIGATEWAY_COMMIT_SHA", "commit-abc")
@@ -44,6 +27,7 @@ async def test_health_wrapper_response_contains_runtime_identity(monkeypatch) ->
     async def health() -> JSONResponse:
         return JSONResponse(content={"data": {"status": "healthy"}, "message": "success"})
 
+    install_runtime_identity(router)
     install_runtime_identity(router)
     route = next(item for item in router.routes if item.path == "/health")
     response = await route.endpoint()
