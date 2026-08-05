@@ -12,6 +12,10 @@ from aigateway_api.draft_request_routes import (
     cancel_generation_request,
     get_generation_request,
 )
+from aigateway_api.generation_request_state import (
+    REQUEST_RECORD_FAILED,
+    REQUEST_RECORD_NON_DRAFT,
+)
 from aigateway_core.pipelines.generation._common.exceptions import DraftWorkflowError
 
 
@@ -41,6 +45,15 @@ def _draft(**overrides):
     return SimpleNamespace(**values)
 
 
+def _record(draft_id: str) -> dict[str, object | None]:
+    return {
+        "draft_id": draft_id,
+        "user_id": "user-1",
+        "group_id": None,
+        "session_id": "session-1",
+    }
+
+
 @pytest.mark.asyncio
 async def test_get_request_returns_202_until_draft_index_exists() -> None:
     strategy = SimpleNamespace(
@@ -62,14 +75,8 @@ async def test_get_request_returns_202_until_draft_index_exists() -> None:
 @pytest.mark.asyncio
 async def test_get_request_returns_owned_draft_payload() -> None:
     draft = _draft()
-    record = {
-        "draft_id": draft.draft_id,
-        "user_id": "user-1",
-        "group_id": None,
-        "session_id": "session-1",
-    }
     strategy = SimpleNamespace(
-        resolve_request=AsyncMock(return_value=(draft, record))
+        resolve_request=AsyncMock(return_value=(draft, _record(draft.draft_id)))
     )
 
     result = await get_generation_request(
@@ -85,16 +92,54 @@ async def test_get_request_returns_owned_draft_payload() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_request_returns_non_draft_terminal_state() -> None:
+    strategy = SimpleNamespace(
+        resolve_request=AsyncMock(
+            return_value=(None, _record(REQUEST_RECORD_NON_DRAFT))
+        )
+    )
+
+    result = await get_generation_request(
+        "request-text",
+        _request(strategy),
+        chat_session_id="session-1",
+        auth={"user_id": "user-1", "group_id": None},
+    )
+
+    assert result == {
+        "request_id": "request-text",
+        "status": "non_draft",
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_request_returns_failed_terminal_state() -> None:
+    strategy = SimpleNamespace(
+        resolve_request=AsyncMock(
+            return_value=(None, _record(REQUEST_RECORD_FAILED))
+        )
+    )
+
+    result = await get_generation_request(
+        "request-failed",
+        _request(strategy),
+        chat_session_id="session-1",
+        auth={"user_id": "user-1", "group_id": None},
+    )
+
+    assert result == {
+        "request_id": "request-failed",
+        "status": "failed",
+        "error": "generation_request_failed",
+    }
+
+
+@pytest.mark.asyncio
 async def test_get_request_rejects_wrong_session_before_disclosing_draft() -> None:
     strategy = SimpleNamespace(
         resolve_request=AsyncMock(return_value=(
             _draft(),
-            {
-                "draft_id": "draft-1",
-                "user_id": "user-1",
-                "group_id": None,
-                "session_id": "session-1",
-            },
+            _record("draft-1"),
         ))
     )
 
@@ -132,6 +177,30 @@ async def test_cancel_request_returns_202_for_pre_registration_tombstone() -> No
         group_id=None,
         session_id="session-1",
     )
+
+
+@pytest.mark.asyncio
+async def test_cancel_non_draft_request_completes_transport_stop() -> None:
+    strategy = SimpleNamespace(
+        resolve_request=AsyncMock(
+            return_value=(None, _record(REQUEST_RECORD_NON_DRAFT))
+        ),
+        cancel_request=AsyncMock(),
+    )
+
+    result = await cancel_generation_request(
+        "request-text",
+        _request(strategy),
+        chat_session_id="session-1",
+        auth={"user_id": "user-1", "group_id": None},
+    )
+
+    assert result == {
+        "request_id": "request-text",
+        "status": "cancelled",
+        "stage": "transport_cancelled",
+    }
+    strategy.cancel_request.assert_not_awaited()
 
 
 @pytest.mark.asyncio
