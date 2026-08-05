@@ -88,6 +88,30 @@ describe('generation request lifecycle client', () => {
     expect(fetchMock).toHaveBeenCalledTimes(3)
   })
 
+  it('treats a non-draft terminal record as a completed transport Stop', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(Response.json({
+        request_id: 'request-text',
+        status: 'cancellation_requested',
+        retry_after_ms: 100,
+      }, { status: 202 }))
+      .mockResolvedValueOnce(Response.json({
+        request_id: 'request-text',
+        status: 'non_draft',
+      }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const cancellation = cancelGenerationRequestAndWait('request-text', 'session-1')
+    await vi.advanceTimersByTimeAsync(100)
+
+    await expect(cancellation).resolves.toMatchObject({
+      status: 'cancelled',
+      stage: 'transport_cancelled',
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
   it('keeps recovering through transient gateway failures until a draft exists', async () => {
     vi.useFakeTimers()
     const fetchMock = vi.fn()
@@ -117,6 +141,27 @@ describe('generation request lifecycle client', () => {
       status: 'running',
     })
     expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('stops recovery when the server confirms the request is not a draft', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(Response.json({
+        request_id: 'request-text',
+        status: 'resolving',
+        retry_after_ms: 100,
+      }, { status: 202 }))
+      .mockResolvedValueOnce(Response.json({
+        request_id: 'request-text',
+        status: 'non_draft',
+      }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const recovery = waitForGenerationRequestDraft('request-text', 'session-1')
+    await vi.advanceTimersByTimeAsync(100)
+
+    await expect(recovery).resolves.toMatchObject({ status: 'non_draft' })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
   it('generates request IDs within the server validation contract', () => {
