@@ -23,9 +23,9 @@ services:
       AI_GATEWAY_EMBEDDING_API_BASE: ${EMBEDDING_API_BASE:-}
       AI_GATEWAY_EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
       AI_GATEWAY_CUDA_MEMORY_FRACTION: ${GATEWAY_CUDA_MEMORY_FRACTION:-}
-      # Do not consume a persisted physical GPU UUID here. CUDA deployments
-      # either receive logical indices from the generated topology override or
-      # see every GPU exposed by the NVIDIA container runtime.
+      # The generated topology overlay replaces this with logical indices. Keep
+      # the base variable for manual Compose users and explicit GPU isolation.
+      CUDA_VISIBLE_DEVICES: ${GATEWAY_CUDA_VISIBLE_DEVICES:-0}
       PYTORCH_CUDA_ALLOC_CONF: ${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
     volumes:
       - ${AIGATEWAY_RUNTIME_CONFIG:-./config.yaml}:/app/config.yaml
@@ -68,26 +68,22 @@ services:
   redis:
     image: redis/redis-stack:7.2.0-v18
     ports:
-      - "127.0.0.1:6379:6379"
-      - "127.0.0.1:8001:8001"
+      - "${AIGATEWAY_REDIS_BIND:-127.0.0.1}:${AIGATEWAY_REDIS_PORT:-6379}:6379"
     volumes:
       - redis-data:/data
-    command: redis-stack-server --appendonly yes --maxmemory 512mb --maxmemory-policy volatile-lru --save 60 1
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
-      retries: 5
-    restart: unless-stopped
+      retries: 10
     networks:
       - gateway-net
 
   qdrant:
-    profiles: ["knowledge"]
-    image: qdrant/qdrant:v1.13.4
+    image: qdrant/qdrant:v1.12.6
     ports:
-      - "127.0.0.1:6333:6333"
-      - "127.0.0.1:6334:6334"
+      - "${AIGATEWAY_QDRANT_BIND:-127.0.0.1}:${AIGATEWAY_QDRANT_PORT:-6333}:6333"
     volumes:
       - qdrant-data:/qdrant/storage
     restart: unless-stopped
@@ -105,27 +101,17 @@ services:
       args:
         COMFYUI_VERSION: ${COMFYUI_VERSION:-v0.28.0}
         COMFYUI_MANAGER_VERSION: ${COMFYUI_MANAGER_VERSION:-4.2.1}
-      cache_from:
-        - ${COMFYUI_BUILD_CACHE_FROM:-type=registry,ref=ghcr.io/dongwanyang/aigateway-comfyui:latest-cuda}
-      cache_to:
-        - type=inline
-    gpus: ${COMFYUI_GPUS:-all}
+    gpus: all
     ports:
-      # ComfyUI does not use Gateway authentication; keep the UI loopback-only.
-      - "${COMFYUI_HOST_BIND:-127.0.0.1}:${COMFYUI_HOST_PORT:-8188}:8188"
+      - "${COMFYUI_HOST_BIND:-127.0.0.1}:${COMFYUI_PORT:-8188}:8188"
     environment:
-      CUDA_VISIBLE_DEVICES: ${COMFYUI_CUDA_VISIBLE_DEVICES:-0}
       COMFYUI_VRAM_FLAG: ${COMFYUI_VRAM_FLAG:-}
-      # Dynamic VRAM can falsely OOM on T4/cudaMallocAsync with nearly all VRAM free.
       COMFYUI_DISABLE_DYNAMIC_VRAM: ${COMFYUI_DISABLE_DYNAMIC_VRAM:-true}
-      # CORS for the control-panel "打开 ComfyUI" link (cross-port = cross-site).
-      # Default "*" is safe because the port above is loopback-only. Set
-      # COMFYUI_CORS_ORIGIN=http://host:3000 if you expose ComfyUI beyond loopback.
       COMFYUI_CORS_ENABLED: ${COMFYUI_CORS_ENABLED:-true}
       COMFYUI_CORS_ORIGIN: ${COMFYUI_CORS_ORIGIN:-}
       PYTORCH_CUDA_ALLOC_CONF: ${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
     volumes:
-      - ${AIGATEWAY_COMFY_DATA_DIR:-./comfyui}/models:/opt/ComfyUI/models
+      - ${AIGATEWAY_COMFY_DATA_DIR:-./comfyui}/models:/opt/ComfyUI/models:ro
       - ${AIGATEWAY_COMFY_DATA_DIR:-./comfyui}/custom_nodes:/opt/ComfyUI/custom_nodes
       - ${AIGATEWAY_COMFY_DATA_DIR:-./comfyui}/input:/opt/ComfyUI/input
       - ${AIGATEWAY_COMFY_DATA_DIR:-./comfyui}/output:/opt/ComfyUI/output
@@ -136,37 +122,29 @@ services:
       - gateway-net
 
   prometheus:
-    profiles: ["monitoring"]
-    image: prom/prometheus:v3.3.0
+    image: prom/prometheus:v2.55.1
+    profiles: ["observability"]
     ports:
-      - "127.0.0.1:9090:9090"
+      - "${AIGATEWAY_PROMETHEUS_BIND:-127.0.0.1}:${AIGATEWAY_PROMETHEUS_PORT:-9090}:9090"
     volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
-    command:
-      - --config.file=/etc/prometheus/prometheus.yml
-      - --storage.tsdb.path=/prometheus
-      - --storage.tsdb.retention.time=30d
     restart: unless-stopped
     networks:
       - gateway-net
 
   grafana:
-    profiles: ["monitoring"]
-    image: grafana/grafana:11.5.0
+    image: grafana/grafana:11.3.1
+    profiles: ["observability"]
     ports:
-      - "127.0.0.1:3001:3000"
+      - "${AIGATEWAY_GRAFANA_BIND:-127.0.0.1}:${AIGATEWAY_GRAFANA_PORT:-3001}:3000"
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
-      # Installer writes a random value whenever monitoring is enabled. A
-      # harmless inactive-profile default keeps Lite/Knowledge/Studio config
-      # validation from requiring a Grafana-only setting.
-      # GRAFANA_ADMIN_PASSWORD must be set by the installer before monitoring starts.
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-monitoring-profile-disabled}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
       GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
       - grafana-data:/var/lib/grafana
-      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
     depends_on:
       - prometheus
     restart: unless-stopped
