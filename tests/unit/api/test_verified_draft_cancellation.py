@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -57,6 +59,8 @@ def _running_draft() -> DraftResult:
         stage="waiting_for_comfyui",
         workflow_version="wan22-v1",
         comfy_prompt_id="prompt-1",
+        worker_id="worker-1",
+        device_uuid="gpu-1",
     )
 
 
@@ -102,7 +106,7 @@ async def test_cancelled_is_returned_only_after_prompt_release(
 
 
 @pytest.mark.asyncio
-async def test_unconfirmed_release_restores_prompt_binding_and_running_state(
+async def test_unconfirmed_release_restores_prompt_and_fences_worker(
     strategy: DraftGeneratorStrategy,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -114,6 +118,21 @@ async def test_unconfirmed_release_restores_prompt_binding_and_running_state(
         group_id=None,
         session_id="session-1",
         ttl_seconds=3600,
+    )
+    worker = SimpleNamespace(
+        worker_id="worker-1",
+        device_uuid="gpu-1",
+        server_url="http://comfyui:8188",
+        queue_running=0,
+        queue_pending=0,
+    )
+    events: list[tuple[str, str, str]] = []
+    strategy._gpu_coordinator = SimpleNamespace(
+        get_worker=lambda worker_id: worker if worker_id == "worker-1" else None,
+        _condition=asyncio.Condition(),
+        record_event=lambda event, *, worker_id="", device_uuid="": events.append(
+            (event, worker_id, device_uuid)
+        ),
     )
 
     async def not_released(*_args, **_kwargs) -> bool:
@@ -141,6 +160,8 @@ async def test_unconfirmed_release_restores_prompt_binding_and_running_state(
         "comfyui_cancellation_unconfirmed"
     )
     assert await strategy._cancel_record("request-1") is None
+    assert worker.queue_running == 1
+    assert events == [("cancellation_unconfirmed", "worker-1", "gpu-1")]
 
 
 @pytest.mark.asyncio
