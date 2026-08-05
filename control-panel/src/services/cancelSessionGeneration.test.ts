@@ -97,6 +97,30 @@ describe('post-response generation cancellation', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
+  it('keeps unconfirmed ComfyUI cancellation as a running warning', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(Response.json({
+      detail: {
+        error: {
+          code: 'comfyui_cancellation_unconfirmed',
+          message: 'ComfyUI 未确认任务已停止，任务状态已恢复并将继续跟踪。',
+        },
+      },
+    }, { status: 503 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(cancelLatestSessionGeneration('session-1')).resolves.toBe(false)
+
+    expect(message().content).toBe('停止未确认，任务继续运行')
+    expect(message().error).toBe(false)
+    expect(message().awaitingDraft).toBe(true)
+    expect(message().draft).toMatchObject({
+      status: 'running',
+      stage: 'cancellation_unconfirmed',
+      errorMessage: '停止未确认，任务继续运行',
+    })
+    expect(useChatStore.getState().error).toContain('任务将继续运行')
+  })
+
   it('does not fabricate cancelled when the server rejects cancellation', async () => {
     const fetchMock = vi.fn().mockResolvedValue(Response.json({
       detail: {
