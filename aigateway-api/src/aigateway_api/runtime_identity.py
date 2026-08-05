@@ -1,11 +1,11 @@
 """Expose deployed source identity through the public health response."""
 from __future__ import annotations
 
+import functools
 import json
 import os
-from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 
@@ -24,6 +24,7 @@ def deployed_commit_sha() -> str:
 
 
 def install_runtime_identity(router: APIRouter) -> None:
+    """Wrap the existing health endpoint without changing its FastAPI signature."""
     marker = "_aigateway_runtime_identity_installed"
     if getattr(router, marker, False):
         return
@@ -34,8 +35,9 @@ def install_runtime_identity(router: APIRouter) -> None:
         if original is None:
             continue
 
-        async def health_with_identity(*args: Any, __original=original, **kwargs: Any):
-            response = await __original(*args, **kwargs)
+        @functools.wraps(original)
+        async def health_with_identity(request: Request) -> JSONResponse:
+            response = await original(request)
             if not isinstance(response, JSONResponse):
                 return response
             try:
