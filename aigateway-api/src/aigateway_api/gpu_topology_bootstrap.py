@@ -130,10 +130,11 @@ def _previous_index_by_uuid(scheduler: dict[str, Any]) -> dict[str, int]:
     for item in raw_devices:
         if not isinstance(item, dict) or not item.get("uuid"):
             continue
+        raw_index = item.get("index", item.get("logical_index"))
+        if raw_index is None:
+            continue
         try:
-            result[str(item["uuid"])] = int(
-                item.get("index", item.get("logical_index", 0))
-            )
+            result[str(item["uuid"])] = int(raw_index)
         except (TypeError, ValueError):
             continue
     return result
@@ -149,7 +150,7 @@ def _remap_selector(
     if value in (None, "auto"):
         return "auto"
     if not isinstance(value, list):
-        return value
+        raise RuntimeError("GPU topology selector must be 'auto' or a UUID list")
 
     remapped: list[str] = []
     unresolved: list[str] = []
@@ -179,8 +180,10 @@ def _remap_overrides(
     current_by_index: dict[int, dict[str, Any]],
     previous_index_by_uuid: dict[str, int],
 ) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
+    if value is None:
         return []
+    if not isinstance(value, list):
+        raise RuntimeError("GPU device_overrides must be a list")
 
     result: list[dict[str, Any]] = []
     unresolved: list[str] = []
@@ -236,11 +239,18 @@ def _remap_workers(
     current_by_index: dict[int, dict[str, Any]],
     previous_index_by_uuid: dict[str, int],
 ) -> list[dict[str, Any]]:
-    raw_workers = (
-        [item for item in value if isinstance(item, dict)]
-        if isinstance(value, list)
-        else []
-    )
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise RuntimeError("GPU scheduler workers must be a list")
+    raw_workers: list[dict[str, Any]] = []
+    for position, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise RuntimeError(
+                "GPU scheduler worker is malformed at index " + str(position)
+            )
+        raw_workers.append(item)
+
     workers: list[dict[str, Any]] = []
     failures: list[str] = []
     for position, raw in enumerate(raw_workers):
