@@ -76,8 +76,6 @@ def _normalize_frames(
         raise DraftWorkflowError("video_duration_unsupported")
 
     requested = round(duration * fps)
-    # Do not silently stretch or truncate the requested duration when the
-    # deployment frame range is inconsistent with an advertised duration.
     if requested < min_frames or requested > max_frames:
         raise DraftWorkflowError("video_duration_unsupported")
     frame_count = ((requested - 1 + 3) // 4) * 4 + 1
@@ -112,6 +110,7 @@ async def create_video_draft_from_source(
     user_id: str | None,
     group_id: str | None,
     trace_id: str | None = None,
+    request_id: str | None = None,
 ) -> DraftResult:
     """Copy a completed image result into a new immutable video draft."""
     source_prompt = str(motion_prompt or "").strip()
@@ -169,8 +168,8 @@ async def create_video_draft_from_source(
     keyframe_language = str(
         source_params.get("keyframe_language") or language
     )
-    request_id = uuid.uuid4().hex
-    resolved_trace_id = trace_id or request_id
+    resolved_request_id = str(request_id or "").strip() or uuid.uuid4().hex
+    resolved_trace_id = trace_id or resolved_request_id
 
     dependency_request = GenerationRequest(
         prompt=keyframe_prompt,
@@ -196,7 +195,7 @@ async def create_video_draft_from_source(
         motion_language=language,
         target_resolution=config.default_target_resolution,
         preset_id="wan2.2-ti2v-5b",
-        request_id=request_id,
+        request_id=resolved_request_id,
         trace_id=resolved_trace_id,
     )
     await strategy.check_local_dependencies(dependency_request)
@@ -238,7 +237,7 @@ async def create_video_draft_from_source(
         "preset_id": "wan2.2-ti2v-5b",
         "checkpoint": "source-draft",
         "seed": secrets.randbelow(2**31),
-        "request_id": request_id,
+        "request_id": resolved_request_id,
         "trace_id": resolved_trace_id,
         "required_vram_gb": required_vram,
         "required_vram_explicit": False,
@@ -264,4 +263,22 @@ async def create_video_draft_from_source(
         workflow_version=video_workflow_version,
     )
     await strategy._store_draft(draft, ttl_seconds)
+    register = getattr(strategy, "register_request_draft", None)
+    if callable(register):
+        await register(
+            resolved_request_id,
+            draft_id,
+            user_id=user_id,
+            group_id=group_id,
+            session_id=session_id,
+            ttl_seconds=ttl_seconds,
+        )
+        cancel_record = await strategy._cancel_record(resolved_request_id)
+        if cancel_record and strategy._record_matches_owner(
+            cancel_record,
+            user_id=user_id,
+            group_id=group_id,
+            session_id=session_id,
+        ):
+            return await strategy.cancel_draft(draft_id)
     return draft
