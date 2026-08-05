@@ -182,6 +182,7 @@ def render(
         scheduler.pop("devices", None)
         scheduler.pop("workers", None)
         scheduler.pop("inventory_source", None)
+        scheduler.pop("inventory_fingerprint", None)
 
     config["deployment"] = {
         "edition": edition,
