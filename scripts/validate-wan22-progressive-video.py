@@ -10,7 +10,6 @@ import argparse
 import asyncio
 import base64
 import hashlib
-import json
 import shutil
 import subprocess
 import tempfile
@@ -95,7 +94,8 @@ async def _poll_request(
         )
         if response.status_code == 202:
             last = response.json()
-            await asyncio.sleep(max(0.1, float(last.get("retry_after_ms", 250)) / 1000))
+            retry_ms = float(last.get("retry_after_ms", 250))
+            await asyncio.sleep(max(0.1, retry_ms / 1000))
             continue
         _require_status(response, 200, "poll generation request")
         last = response.json()
@@ -189,16 +189,19 @@ async def _check_missing_reference(
     client: httpx.AsyncClient,
     session_id: str,
 ) -> None:
-    request_id = _request_id("missing-ref")
     response = await client.post(
         "/admin/console/chat/completions",
-        headers={"X-Request-ID": request_id},
+        headers={"X-Request-ID": _request_id("missing-ref")},
         json={
             "model": "auto",
             "stream": False,
             "chat_session_id": session_id,
             "messages": [{"role": "user", "content": "以此图片生成5秒视频"}],
-            "generation_options": {"backend": "local", "duration_seconds": 5, "fps": 8},
+            "generation_options": {
+                "backend": "local",
+                "duration_seconds": 5,
+                "fps": 8,
+            },
         },
     )
     _require_status(response, 400, "missing image reference")
@@ -215,15 +218,8 @@ async def _check_response_loss_and_cancel(
     disconnect_after: float,
 ) -> None:
     request_id = _request_id("disconnect")
-    request_client = httpx.AsyncClient(
-        base_url=str(client.base_url),
-        headers=dict(client.headers),
-        timeout=None,
-        follow_redirects=True,
-        verify=client._transport._pool._ssl_context,  # type: ignore[attr-defined]
-    )
-    task = asyncio.create_task(
-        request_client.post(
+    request_task = asyncio.create_task(
+        client.post(
             "/admin/console/chat/completions",
             headers={"X-Request-ID": request_id},
             json={
@@ -238,12 +234,12 @@ async def _check_response_loss_and_cancel(
                 ],
                 "generation_options": {"backend": "local"},
             },
-        )
+        ),
+        name=f"response-loss-{request_id}",
     )
     await asyncio.sleep(disconnect_after)
-    await request_client.aclose()
-    task.cancel()
-    await asyncio.gather(task, return_exceptions=True)
+    request_task.cancel()
+    await asyncio.gather(request_task, return_exceptions=True)
 
     state = await _poll_request(
         client,
@@ -284,7 +280,12 @@ async def _create_source_video_draft(
             "model": "auto",
             "stream": False,
             "chat_session_id": session_id,
-            "messages": [{"role": "user", "content": "主体缓慢向镜头移动，保持场景一致"}],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "主体缓慢向镜头移动，保持场景一致",
+                }
+            ],
             "generation_options": {
                 "backend": "local",
                 "source_draft_id": source_draft_id,
@@ -339,9 +340,7 @@ async def _check_source_durations(
             video = await _result_bytes(client, draft_id)
             actual = _video_duration_seconds(video)
             if actual is not None and abs(actual - duration) > 1.25:
-                raise AcceptanceError(
-                    f"{duration}s video duration is {actual:.2f}s"
-                )
+                raise AcceptanceError(f"{duration}s video duration is {actual:.2f}s")
             print(
                 f"[PASS] source image {duration}s confirmed; "
                 f"frames={EXPECTED_FRAMES[duration]}, actual={actual}"
@@ -361,7 +360,10 @@ async def _check_source_durations(
 async def _run(args: argparse.Namespace) -> None:
     if not args.execute:
         print("No requests sent. Re-run with --execute after reviewing the target URL.")
-        print("Checks: health identity, missing-reference fail-closed, response-loss recovery/cancel")
+        print(
+            "Checks: health identity, missing-reference fail-closed, "
+            "response-loss recovery/cancel"
+        )
         if args.source_draft_id:
             print("Additional checks: source image SHA and 3/5/8-second frame snapshots")
         if args.confirm_videos:
@@ -370,14 +372,13 @@ async def _run(args: argparse.Namespace) -> None:
     if not args.cookie:
         raise AcceptanceError("--cookie is required for authenticated admin endpoints")
 
-    headers = {
-        "Cookie": args.cookie,
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-    }
     async with httpx.AsyncClient(
         base_url=args.base_url.rstrip("/"),
-        headers=headers,
+        headers={
+            "Cookie": args.cookie,
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
         timeout=args.timeout,
         follow_redirects=True,
         verify=not args.insecure,
@@ -405,8 +406,14 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--cookie", help="Raw authenticated Cookie header; never logged")
-    parser.add_argument("--session-id", default=f"wan22-acceptance-{uuid.uuid4().hex[:12]}")
-    parser.add_argument("--source-draft-id", help="Confirmed/completed image draft owned by this session")
+    parser.add_argument(
+        "--session-id",
+        default=f"wan22-acceptance-{uuid.uuid4().hex[:12]}",
+    )
+    parser.add_argument(
+        "--source-draft-id",
+        help="Confirmed/completed image draft owned by this session",
+    )
     parser.add_argument("--expected-commit")
     parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument("--disconnect-after", type=float, default=1.0)
