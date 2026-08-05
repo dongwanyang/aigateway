@@ -25,6 +25,8 @@ services:
       AI_GATEWAY_CUDA_MEMORY_FRACTION: ${GATEWAY_CUDA_MEMORY_FRACTION:-}
       AIGATEWAY_COMMIT_SHA: ${AIGATEWAY_COMMIT_SHA:-unknown}
       AIGATEWAY_IMAGE_VERSION: ${GATEWAY_IMAGE:-aigateway-gateway:local}
+      # The generated topology overlay replaces this with logical indices. Keep
+      # the base variable for manual Compose users and explicit GPU isolation.
       CUDA_VISIBLE_DEVICES: ${GATEWAY_CUDA_VISIBLE_DEVICES:-0}
       PYTORCH_CUDA_ALLOC_CONF: ${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
     volumes:

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useChatSessions } from '@/hooks/useChatSessions'
+import { useSourceDraftVideo } from '@/hooks/useSourceDraftVideo'
 import { useAuth } from '@/contexts/AuthContext'
 import { useQuery } from '@tanstack/react-query'
 import { getGenerationPresets } from '@/api/client'

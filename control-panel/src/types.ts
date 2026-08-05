@@ -101,6 +101,13 @@ export interface ChatReferenceImage {
   size: number
 }
 
+export interface ChatReferenceImage {
+  dataUrl: string
+  name: string
+  mimeType: string
+  size: number
+}
+
 export interface ChatChoice {
   index: number
   finish_reason: 'stop' | 'length' | 'tool_calls' | 'content_filter' | null

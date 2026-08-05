@@ -20,6 +20,14 @@ def _module(path: Path, name: str):
     return module
 
 
+def _complete_initial_topology(controller, renderer, scheduler, inventory) -> None:
+    scheduler["inventory_source"] = "host_generated"
+    scheduler["devices"] = renderer._runtime_inventory(inventory)
+    scheduler["inventory_fingerprint"] = controller._fingerprint(
+        scheduler, inventory
+    )
+
+
 def test_controller_records_initial_topology_then_auto_applies_uuid_change(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -63,6 +71,9 @@ def test_controller_records_initial_topology_then_auto_applies_uuid_change(
             "workers": initial_workers,
         }
     }
+    _complete_initial_topology(
+        controller, renderer, config["gpu_scheduler"], inventory
+    )
     renderer._atomic_yaml(runtime / "config.yaml", config)
     renderer._atomic_yaml(
         runtime / "docker-compose.gpu.generated.yml", initial_compose
@@ -86,6 +97,10 @@ def test_controller_records_initial_topology_then_auto_applies_uuid_change(
     updated = yaml.safe_load((runtime / "config.yaml").read_text())
     assert [item["device_uuid"] for item in updated["gpu_scheduler"]["workers"]] == [
         "GPU-b"
+    ]
+    assert [item["uuid"] for item in updated["gpu_scheduler"]["devices"]] == [
+        "GPU-a",
+        "GPU-b",
     ]
     assert any("up" in command and "--force-recreate" in command for command in calls)
     assert json.loads(state_path.read_text())["fingerprint"] != first_fingerprint
@@ -182,6 +197,9 @@ def test_dynamic_vram_config_change_recreates_worker(
         inventory, config["gpu_scheduler"]
     )
     config["gpu_scheduler"]["workers"] = workers
+    _complete_initial_topology(
+        controller, renderer, config["gpu_scheduler"], inventory
+    )
     renderer._atomic_yaml(runtime / "config.yaml", config)
     renderer._atomic_yaml(
         runtime / "docker-compose.gpu.generated.yml", initial_compose
@@ -260,6 +278,7 @@ def test_controller_preserves_concurrent_non_gpu_config_update(
     updated = yaml.safe_load((runtime / "config.yaml").read_text())
     assert updated["providers"] == {"concurrent": {"enabled": True}}
     assert updated["gpu_scheduler"]["workers"][0]["device_uuid"] == "GPU-a"
+    assert updated["gpu_scheduler"]["devices"][0]["uuid"] == "GPU-a"
 
 
 def test_compose_command_uses_project_env_before_install_state(tmp_path: Path) -> None:
@@ -372,3 +391,85 @@ def test_controller_detects_topology_change_during_compose_apply(
         (runtime / ".gpu-topology-controller.json").read_text(encoding="utf-8")
     )
     assert set(state) == {"pending_fingerprint"}
+
+
+def test_controller_replaces_devices_and_workers_from_same_uuid_inventory(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runtime = tmp_path / ".aigateway" / "runtime"
+    runtime.mkdir(parents=True)
+    renderer = _module(
+        REPO_ROOT / "scripts" / "render-gpu-topology.py", "uuid_renderer"
+    )
+    controller = _module(
+        REPO_ROOT / "scripts" / "gpu-topology-controller.py", "uuid_controller"
+    )
+    inventory = [
+        {
+            "index": 0,
+            "uuid": "GPU-old",
+            "name": "Old GPU",
+            "memory_total_mb": 16384,
+        }
+    ]
+    monkeypatch.setattr(renderer, "discover_devices", lambda: inventory)
+    monkeypatch.setattr(controller, "_load_renderer", lambda _root: renderer)
+    monkeypatch.setattr(
+        controller.subprocess,
+        "run",
+        lambda command, **_kwargs: SimpleNamespace(
+            returncode=0, stdout="", stderr=""
+        ),
+    )
+    (tmp_path / ".env").write_text("\n", encoding="utf-8")
+    (tmp_path / ".aigateway-install.env").write_text(
+        "AIGATEWAY_ACCELERATOR=cuda\nAIGATEWAY_PRODUCTION=false\n",
+        encoding="utf-8",
+    )
+    compose, workers = renderer.render_topology(inventory)
+    scheduler = {
+        "gateway_devices": "auto",
+        "comfyui_devices": "auto",
+        "device_overrides": [],
+        "topology_auto_apply": True,
+        "workers": workers,
+    }
+    _complete_initial_topology(controller, renderer, scheduler, inventory)
+    renderer._atomic_yaml(
+        runtime / "config.yaml", {"gpu_scheduler": scheduler}
+    )
+    renderer._atomic_yaml(
+        runtime / "docker-compose.gpu.generated.yml", compose
+    )
+    assert controller.reconcile(tmp_path, apply=True) is False
+
+    inventory[:] = [
+        {
+            "index": 0,
+            "uuid": "GPU-new",
+            "name": "New GPU",
+            "memory_total_mb": 24576,
+        }
+    ]
+    assert controller.reconcile(tmp_path, apply=True) is True
+
+    updated = yaml.safe_load((runtime / "config.yaml").read_text())[
+        "gpu_scheduler"
+    ]
+    assert [item["uuid"] for item in updated["devices"]] == ["GPU-new"]
+    assert [item["device_uuid"] for item in updated["workers"]] == [
+        "GPU-new"
+    ]
+    assert [item["logical_index"] for item in updated["workers"]] == [0]
+    assert {
+        item["device_uuid"] for item in updated["workers"]
+    }.issubset({item["uuid"] for item in updated["devices"]})
+    generated = yaml.safe_load(
+        (runtime / "docker-compose.gpu.generated.yml").read_text()
+    )
+    assert (
+        generated["services"]["comfyui"]["environment"][
+            "CUDA_VISIBLE_DEVICES"
+        ]
+        == "0"
+    )
