@@ -92,12 +92,13 @@ def test_bootstrap_remaps_stale_uuid_topology_and_cuda_visibility(
     assert scheduler["devices"][0]["uuid"] == "GPU-new"
     assert scheduler["workers"][0]["device_uuid"] == "GPU-new"
     assert scheduler["workers"][0]["logical_index"] == 0
-    assert scheduler["inventory_source"] == "gateway_startup_discovery"
+    assert scheduler["inventory_source"] == "host_generated"
     assert scheduler["inventory_fingerprint"]
     assert {
         item["device_uuid"] for item in scheduler["workers"]
     }.issubset({item["uuid"] for item in scheduler["devices"]})
     assert module.os.environ["CUDA_VISIBLE_DEVICES"] == "0"
+    assert module.bootstrap_gpu_topology() is False
 
 
 def test_bootstrap_migrates_legacy_worker_using_previous_device_index(
