@@ -313,7 +313,7 @@ def test_bootstrap_is_noop_without_inventory_or_local_topology(
     assert config_path.read_text(encoding="utf-8") == before
 
 
-def test_bootstrap_atomic_replace_failure_preserves_original_config(
+def test_bootstrap_locked_write_failure_restores_original_config(
     tmp_path: Path, monkeypatch
 ) -> None:
     module = _module()
@@ -336,11 +336,18 @@ def test_bootstrap_atomic_replace_failure_preserves_original_config(
     )
     monkeypatch.setenv("AI_GATEWAY_CONFIG_PATH", str(config_path))
 
-    def _replace_failure(_source, _target):
-        raise OSError("replace failed")
+    real_fsync = module.os.fsync
+    calls = 0
 
-    monkeypatch.setattr(module.os, "replace", _replace_failure)
-    with pytest.raises(OSError, match="replace failed"):
+    def _fail_first_fsync(descriptor):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("fsync failed")
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr(module.os, "fsync", _fail_first_fsync)
+    with pytest.raises(OSError, match="fsync failed"):
         module.bootstrap_gpu_topology()
 
     assert config_path.read_text(encoding="utf-8") == original_text
