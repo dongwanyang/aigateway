@@ -51,11 +51,14 @@ def _discover_devices() -> list[dict[str, Any]]:
     if result.returncode != 0:
         return []
 
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    if not lines:
+        return []
     devices: list[dict[str, Any]] = []
-    for line in result.stdout.splitlines():
+    for line in lines:
         parts = [part.strip() for part in line.split(",", 4)]
-        if len(parts) != 5:
-            continue
+        if len(parts) != 5 or not parts[1]:
+            return []
         try:
             memory_total_mb = int(float(parts[3]))
             devices.append(
@@ -69,7 +72,11 @@ def _discover_devices() -> list[dict[str, Any]]:
                 }
             )
         except ValueError:
-            continue
+            return []
+    indices = [int(item["index"]) for item in devices]
+    uuids = [str(item["uuid"]) for item in devices]
+    if len(indices) != len(set(indices)) or len(uuids) != len(set(uuids)):
+        return []
     return sorted(devices, key=lambda item: int(item["index"]))
 
 
