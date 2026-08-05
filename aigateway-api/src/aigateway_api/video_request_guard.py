@@ -13,9 +13,6 @@ from aigateway_core.dispatch.dispatcher import RequestDispatcher
 _ORIGINAL_ATTR = "_aigateway_original_video_request_guard_dispatch"
 _GUARD_ATTR = "_aigateway_video_request_guard"
 
-# Explicit anaphoric references to an image/result that must already exist in the
-# request. Keep this separate from the generation-intent regex so ordinary
-# questions mentioning images and videos are not rejected.
 _ZH_REFERENCE_RE = re.compile(
     r"(?:根据|基于|使用|用|把|让|以|拿)?\s*"
     r"(?:这|该|此|当前|上面|刚才|刚刚|之前|上一|刚生成(?:的)?|刚刚生成(?:的)?)"
@@ -85,11 +82,14 @@ def _latest_user_turn(body: Any) -> tuple[str, bool]:
     return "", False
 
 
+def _source_draft_id(body: Any) -> str:
+    value = _generation_options(body).get("source_draft_id")
+    return value.strip() if isinstance(value, str) else ""
+
+
 def reference_image_required(body: Any) -> bool:
     """Return whether an explicit existing-image reference is missing."""
-    options = _generation_options(body)
-    source_draft_id = options.get("source_draft_id") or _value(body, "source_draft_id", None)
-    if isinstance(source_draft_id, str) and source_draft_id.strip():
+    if _source_draft_id(body):
         return False
 
     text, has_image = _latest_user_turn(body)
@@ -115,6 +115,74 @@ def _reference_image_error() -> JSONResponse:
     )
 
 
+async def _create_source_draft_response(
+    body: Any,
+    request: Any,
+    source_draft_id: str,
+) -> JSONResponse:
+    from aigateway_core.pipelines.generation._common.exceptions import (
+        DraftWorkflowError,
+    )
+    from aigateway_core.pipelines.generation.draft.source_draft_video import (
+        create_video_draft_from_source,
+    )
+
+    from .source_draft_video_routes import _domain_http_exception
+
+    strategy = getattr(request.app.state, "draft_strategy", None)
+    if strategy is None:
+        strategy = getattr(request.app.state, "draft_generator_strategy", None)
+    if strategy is None:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": {
+                    "code": "draft_unavailable",
+                    "message": "Draft workflow service is not available.",
+                }
+            },
+        )
+
+    motion_prompt, _ = _latest_user_turn(body)
+    options = _generation_options(body)
+    session_id = str(_value(body, "chat_session_id", "") or "")
+    owner = getattr(request.state, "draft_owner", None)
+    owner = owner if isinstance(owner, Mapping) else {}
+    request_id = str(getattr(request.state, "request_id", "") or "")
+    trace_id = str(getattr(request.state, "trace_id", "") or request_id)
+    try:
+        draft = await create_video_draft_from_source(
+            strategy,
+            source_draft_id=source_draft_id,
+            motion_prompt=motion_prompt,
+            duration_seconds=options.get("duration_seconds", 5),
+            fps=options.get("fps", 8),
+            chat_session_id=session_id,
+            user_id=str(owner.get("user_id") or "") or None,
+            group_id=str(owner.get("group_id") or "") or None,
+            trace_id=trace_id,
+            request_id=request_id or None,
+        )
+    except DraftWorkflowError as exc:
+        raise _domain_http_exception(
+            exc,
+            source_draft_id=source_draft_id,
+            chat_session_id=session_id,
+        ) from exc
+
+    return JSONResponse(
+        content={
+            "data": {
+                "draft_id": draft.draft_id,
+                "preview_url": f"/admin/draft/{draft.draft_id}/preview",
+                "status": draft.status,
+                "generation_params": draft.generation_params,
+            },
+            "_meta": {"draft_pending_confirmation": True},
+        }
+    )
+
+
 def install_video_request_guard() -> None:
     """Install one idempotent dispatcher wrapper before pipeline execution."""
     current = RequestDispatcher.dispatch
@@ -126,6 +194,13 @@ def install_video_request_guard() -> None:
 
     @functools.wraps(original)
     async def guarded_dispatch(self: Any, body: Any, request: Any) -> Any:
+        source_draft_id = _source_draft_id(body)
+        if source_draft_id:
+            return await _create_source_draft_response(
+                body,
+                request,
+                source_draft_id,
+            )
         if reference_image_required(body):
             return _reference_image_error()
         return await original(self, body, request)
