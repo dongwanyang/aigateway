@@ -170,6 +170,8 @@ export function useChatSessions(): UseChatSessions {
     return () => {
       const rs = resumeSessionRef.current
       if (rs) resumedSessionIds.delete(rs)
+      // Unmount/page refresh must not cancel the server-side generation. The
+      // persisted request ID is used to recover the draft after remount.
       abortRef.current?.abort()
       abortRef.current = null
       activeGenerationRef.current = null
@@ -323,6 +325,8 @@ export function useChatSessions(): UseChatSessions {
   }, [detachTransport, flushToStorage, patchSessionMessage])
 
   const newSession = useCallback(() => {
+    // Switching context detaches the HTTP transport but leaves the server task
+    // running. Its request ID remains in the original session for recovery.
     if (streaming) detachTransport()
     const now = Date.now()
     const s: ChatSession = { id: newSessionId(), title: '新对话', messages: [], createdAt: now, updatedAt: now }
@@ -451,6 +455,18 @@ export function useChatSessions(): UseChatSessions {
     try {
       for (let attempt = 0; attempt < 120; attempt += 1) {
         const state = await getGenerationRequest(requestId, sessionId, controller.signal)
+        if (state.status === 'cancelled') {
+          patchSessionMessage(sessionId, assistantId, message => ({
+            ...message,
+            content: message.content || '已停止',
+            intent: null,
+            model: undefined,
+            awaitingDraft: false,
+            awaitingDraftSince: undefined,
+            incomplete: false,
+          }))
+          return
+        }
         if (state.draft_id && state.preview_url && state.media_type) {
           attachDraft(sessionId, assistantId, {
             draftId: state.draft_id,
@@ -462,18 +478,6 @@ export function useChatSessions(): UseChatSessions {
             workflowVersion: state.workflow_version,
             errorMessage: state.error ?? undefined,
           })
-          return
-        }
-        if (state.status === 'cancelled') {
-          patchSessionMessage(sessionId, assistantId, message => ({
-            ...message,
-            content: message.content || '已停止',
-            intent: null,
-            model: undefined,
-            awaitingDraft: false,
-            awaitingDraftSince: undefined,
-            incomplete: false,
-          }))
           return
         }
         await delay(state.retry_after_ms ?? 250, controller.signal)
@@ -592,6 +596,8 @@ export function useChatSessions(): UseChatSessions {
           progress: 1,
           progressSource: 'complete',
         })
+        setPendingAssistantId(null)
+        setStreaming(false)
         return
       }
 
@@ -619,6 +625,8 @@ export function useChatSessions(): UseChatSessions {
           mediaType: resp.mediaType,
           status: 'generating',
         })
+        setPendingAssistantId(null)
+        setStreaming(false)
         return
       }
 
@@ -670,6 +678,8 @@ export function useChatSessions(): UseChatSessions {
             awaitingDraftSince: undefined,
           }))
         } else {
+          // Transport detached during navigation/refresh. Preserve the request
+          // identity so the session can resolve the server-created draft.
           patchSessionMessage(sessionId, assistantId, message => ({
             ...message,
             awaitingDraft: true,
