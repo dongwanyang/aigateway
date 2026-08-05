@@ -16,6 +16,11 @@ export interface GenerationRequestState {
 
 const MIN_POLL_DELAY_MS = 100
 const MAX_POLL_DELAY_MS = 5_000
+const REQUEST_RECOVERY_TERMINAL_STATUSES = new Set([
+  'cancelled',
+  'non_draft',
+  'failed',
+])
 const CANCELLATION_TERMINAL_STATUSES = new Set([
   'completed',
   'confirmed',
@@ -132,9 +137,10 @@ export async function cancelGenerationRequest(
 }
 
 /**
- * Resolve a response-lost generation until the server exposes a draft or a
- * terminal request state. Transient transport/5xx failures are retried until
- * the caller aborts; there is deliberately no short client-side timeout.
+ * Resolve a response-lost generation until the server exposes a draft or an
+ * explicit terminal request state. Transient transport/5xx failures are
+ * retried until the caller aborts; there is deliberately no short client-side
+ * timeout.
  */
 export async function waitForGenerationRequestDraft(
   requestId: string,
@@ -146,7 +152,10 @@ export async function waitForGenerationRequestDraft(
   while (true) {
     try {
       lastState = await getGenerationRequest(requestId, chatSessionId, signal)
-      if (lastState.draft_id || lastState.status === 'cancelled') return lastState
+      if (
+        lastState.draft_id
+        || REQUEST_RECOVERY_TERMINAL_STATUSES.has(lastState.status)
+      ) return lastState
       await delay(pollDelay(lastState, attempt), signal)
       attempt += 1
     } catch (error) {
@@ -159,8 +168,8 @@ export async function waitForGenerationRequestDraft(
 
 /**
  * Request cancellation and do not report success until the persisted server
- * state is actually `cancelled`. A different terminal state is a cancellation
- * failure rather than a successful Stop operation.
+ * state is actually cancelled. A non-draft terminal record is also successful:
+ * aborting its response transport leaves no detached GPU/background task.
  */
 export async function cancelGenerationRequestAndWait(
   requestId: string,
@@ -169,6 +178,9 @@ export async function cancelGenerationRequestAndWait(
 ): Promise<GenerationRequestState> {
   let state = await cancelGenerationRequest(requestId, chatSessionId)
   if (state.status === 'cancelled') return state
+  if (state.status === 'non_draft') {
+    return { ...state, status: 'cancelled', stage: state.stage ?? 'transport_cancelled' }
+  }
 
   let attempt = 0
   while (true) {
@@ -179,6 +191,9 @@ export async function cancelGenerationRequestAndWait(
     try {
       state = await getGenerationRequest(requestId, chatSessionId, signal)
       if (state.status === 'cancelled') return state
+      if (state.status === 'non_draft') {
+        return { ...state, status: 'cancelled', stage: state.stage ?? 'transport_cancelled' }
+      }
       attempt += 1
     } catch (error) {
       if (signal?.aborted || !isRetryablePollError(error)) throw error
