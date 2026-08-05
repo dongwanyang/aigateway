@@ -15,72 +15,117 @@ from typing import Any
 import yaml
 
 
-def discover_devices() -> list[dict[str, Any]]:
-    query = subprocess.run(
-        [
-            "nvidia-smi",
-            "--query-gpu=index,uuid,name,memory.total",
-            "--format=csv,noheader,nounits",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
+def _valid_inventory(devices: list[dict[str, Any]]) -> bool:
+    if not devices:
+        return False
+    indices = [int(item["index"]) for item in devices]
+    uuids = [str(item.get("uuid") or "") for item in devices]
+    return (
+        all(uuids)
+        and len(indices) == len(set(indices))
+        and len(uuids) == len(set(uuids))
     )
+
+
+def discover_devices() -> list[dict[str, Any]]:
+    try:
+        query = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,uuid,name,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        query = None
     devices: list[dict[str, Any]] = []
-    if query.returncode == 0:
-        for line in query.stdout.splitlines():
-            parts = [part.strip() for part in line.split(",", 3)]
-            if len(parts) != 4:
-                continue
-            try:
-                devices.append(
-                    {
-                        "index": int(parts[0]),
-                        "uuid": parts[1],
-                        "name": parts[2],
-                        "memory_total_mb": int(parts[3]),
-                    }
-                )
-            except ValueError:
-                continue
-    if devices:
-        return devices
+    lines = (
+        [line for line in query.stdout.splitlines() if line.strip()]
+        if query is not None and query.returncode == 0
+        else []
+    )
+    direct_valid = bool(lines)
+    for line in lines:
+        parts = [part.strip() for part in line.split(",", 3)]
+        if len(parts) != 4 or not parts[1]:
+            direct_valid = False
+            break
+        try:
+            devices.append(
+                {
+                    "index": int(parts[0]),
+                    "uuid": parts[1],
+                    "name": parts[2],
+                    "memory_total_mb": int(parts[3]),
+                }
+            )
+        except ValueError:
+            direct_valid = False
+            break
+    if direct_valid and _valid_inventory(devices):
+        return sorted(devices, key=lambda item: int(item["index"]))
 
     # Compatibility with older/fake nvidia-smi implementations that only
-    # support ``-L`` and the memory.total query independently.
-    listed = subprocess.run(
-        ["nvidia-smi", "-L"], capture_output=True, text=True, check=False
-    )
-    memory = subprocess.run(
-        [
-            "nvidia-smi",
-            "--query-gpu=memory.total",
-            "--format=csv,noheader,nounits",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    memory_values = [
-        int(value.strip())
-        for value in memory.stdout.splitlines()
-        if value.strip().isdigit()
-    ]
+    # support ``-L`` and the memory.total query independently. A partially
+    # parsed direct query is not accepted as a complete inventory.
+    try:
+        listed = subprocess.run(
+            ["nvidia-smi", "-L"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        memory = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if listed.returncode != 0 or memory.returncode != 0:
+        return []
+    try:
+        memory_values = [
+            int(value.strip())
+            for value in memory.stdout.splitlines()
+            if value.strip()
+        ]
+    except ValueError:
+        return []
     pattern = re.compile(r"GPU\s+(\d+):\s*(.*?)\s*\(UUID:\s*([^\)]+)\)")
-    for line in listed.stdout.splitlines():
+    gpu_lines = [
+        line for line in listed.stdout.splitlines() if line.strip().startswith("GPU ")
+    ]
+    devices = []
+    for line in gpu_lines:
         match = pattern.search(line)
         if not match:
-            continue
+            return []
         index = int(match.group(1))
+        if index >= len(memory_values):
+            return []
         devices.append(
             {
                 "index": index,
                 "uuid": match.group(3).strip(),
                 "name": match.group(2).strip(),
-                "memory_total_mb": memory_values[index] if index < len(memory_values) else 0,
+                "memory_total_mb": memory_values[index],
             }
         )
-    return devices
+    if not _valid_inventory(devices):
+        return []
+    return sorted(devices, key=lambda item: int(item["index"]))
 
 
 @contextlib.contextmanager
@@ -435,7 +480,12 @@ def main() -> int:
     if not devices:
         raise SystemExit("no NVIDIA GPU UUIDs discovered")
 
-    inventory = devices
+    try:
+        inventory = sorted(devices, key=lambda item: int(item["index"]))
+    except (KeyError, TypeError, ValueError):
+        raise SystemExit("invalid NVIDIA GPU inventory") from None
+    if not _valid_inventory(inventory):
+        raise SystemExit("invalid NVIDIA GPU inventory")
     runtime_inventory = _runtime_inventory(inventory)
     if not runtime_inventory:
         raise SystemExit("no valid NVIDIA GPU UUIDs discovered")
