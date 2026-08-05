@@ -23,8 +23,10 @@ from aigateway_core.pipelines.generation.draft.draft_generator import (
     DraftGeneratorStrategy,
 )
 
-_ORIGINAL_ATTR = "_aigateway_original_cancel_draft"
-_WRAPPER_ATTR = "_aigateway_verified_cancel_draft"
+_DRAFT_ORIGINAL_ATTR = "_aigateway_original_cancel_draft"
+_DRAFT_WRAPPER_ATTR = "_aigateway_verified_cancel_draft"
+_REQUEST_ORIGINAL_ATTR = "_aigateway_original_cancel_request"
+_REQUEST_WRAPPER_ATTR = "_aigateway_verified_cancel_request"
 _CANCEL_PREFIX = "aigateway:draft:cancel"
 _RESTORABLE_STATUSES = {
     DRAFT_STATUS_GENERATING,
@@ -167,8 +169,8 @@ async def _mark_unconfirmed_cancellation(
     )
     current.generation_params["progress_source"] = "comfyui"
     ttl_remaining = max(1, int(current.expires_at - time.time()))
-    # Bypass the subclass tombstone guard: the tombstone was cleared above and
-    # the prompt binding must remain available for the still-running local task.
+    # Bypass the subclass tombstone guard: the tombstone is absent and the
+    # prompt binding must remain available for the still-running local task.
     await _base_impl.DraftGeneratorStrategy._store_draft(
         strategy,
         current,
@@ -249,24 +251,91 @@ async def cancel_draft_verified(
     return await original(strategy, draft_id)
 
 
+async def cancel_request_verified(
+    strategy: Any,
+    request_id: str,
+    *,
+    user_id: str | None,
+    group_id: str | None,
+    session_id: str | None,
+    original: Callable[..., Awaitable[Any]],
+) -> Any:
+    """Avoid publishing a cancellation tombstone before upstream verification."""
+    normalized = str(request_id or "").strip()
+    if not normalized:
+        return await original(
+            strategy,
+            request_id,
+            user_id=user_id,
+            group_id=group_id,
+            session_id=session_id,
+        )
+    draft, record = await strategy.resolve_request(normalized)
+    if record is not None and not strategy._record_matches_owner(
+        record,
+        user_id=user_id,
+        group_id=group_id,
+        session_id=session_id,
+    ):
+        raise DraftWorkflowError("generation_request_forbidden")
+    if draft is None:
+        # Pre-registration Stop still requires a tombstone so submit_draft can
+        # observe and apply it after the request-to-draft mapping is created.
+        return await original(
+            strategy,
+            normalized,
+            user_id=user_id,
+            group_id=group_id,
+            session_id=session_id,
+        )
+    return await strategy.cancel_draft(draft.draft_id)
+
+
 def install_verified_draft_cancellation() -> None:
-    """Install one idempotent verification wrapper on draft cancellation."""
-    current = DraftGeneratorStrategy.cancel_draft
-    if getattr(current, _WRAPPER_ATTR, False):
-        return
-    if not hasattr(DraftGeneratorStrategy, _ORIGINAL_ATTR):
-        setattr(DraftGeneratorStrategy, _ORIGINAL_ATTR, current)
-    original = getattr(DraftGeneratorStrategy, _ORIGINAL_ATTR)
+    """Install idempotent request and draft cancellation verification wrappers."""
+    current_draft = DraftGeneratorStrategy.cancel_draft
+    if not getattr(current_draft, _DRAFT_WRAPPER_ATTR, False):
+        if not hasattr(DraftGeneratorStrategy, _DRAFT_ORIGINAL_ATTR):
+            setattr(DraftGeneratorStrategy, _DRAFT_ORIGINAL_ATTR, current_draft)
+        original_draft = getattr(DraftGeneratorStrategy, _DRAFT_ORIGINAL_ATTR)
 
-    @functools.wraps(original)
-    async def verified(self: Any, draft_id: str) -> Any:
-        return await cancel_draft_verified(self, draft_id, original)
+        @functools.wraps(original_draft)
+        async def verified_draft(self: Any, draft_id: str) -> Any:
+            return await cancel_draft_verified(self, draft_id, original_draft)
 
-    setattr(verified, _WRAPPER_ATTR, True)
-    DraftGeneratorStrategy.cancel_draft = verified
+        setattr(verified_draft, _DRAFT_WRAPPER_ATTR, True)
+        DraftGeneratorStrategy.cancel_draft = verified_draft
+
+    current_request = DraftGeneratorStrategy.cancel_request
+    if not getattr(current_request, _REQUEST_WRAPPER_ATTR, False):
+        if not hasattr(DraftGeneratorStrategy, _REQUEST_ORIGINAL_ATTR):
+            setattr(DraftGeneratorStrategy, _REQUEST_ORIGINAL_ATTR, current_request)
+        original_request = getattr(DraftGeneratorStrategy, _REQUEST_ORIGINAL_ATTR)
+
+        @functools.wraps(original_request)
+        async def verified_request(
+            self: Any,
+            request_id: str,
+            *,
+            user_id: str | None,
+            group_id: str | None,
+            session_id: str | None,
+        ) -> Any:
+            return await cancel_request_verified(
+                self,
+                request_id,
+                user_id=user_id,
+                group_id=group_id,
+                session_id=session_id,
+                original=original_request,
+            )
+
+        setattr(verified_request, _REQUEST_WRAPPER_ATTR, True)
+        DraftGeneratorStrategy.cancel_request = verified_request
 
 
 __all__ = [
     "cancel_draft_verified",
+    "cancel_request_verified",
     "install_verified_draft_cancellation",
 ]
