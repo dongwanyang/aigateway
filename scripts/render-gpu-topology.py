@@ -274,6 +274,110 @@ def _runtime_inventory(devices: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return result
 
 
+def _previous_index_by_uuid(scheduler: dict[str, Any]) -> dict[str, int]:
+    result: dict[str, int] = {}
+    devices = scheduler.get("devices", [])
+    if not isinstance(devices, list):
+        return result
+    for item in devices:
+        if not isinstance(item, dict) or not item.get("uuid"):
+            continue
+        raw_index = item.get("index", item.get("logical_index"))
+        if raw_index is None:
+            continue
+        try:
+            result[str(item["uuid"])] = int(raw_index)
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
+def _remap_uuid_selector(
+    value: Any,
+    *,
+    current_by_uuid: dict[str, dict[str, Any]],
+    current_by_index: dict[int, dict[str, Any]],
+    previous_index_by_uuid: dict[str, int],
+    field: str,
+) -> Any:
+    if value in (None, "auto"):
+        return "auto"
+    if not isinstance(value, list):
+        return value
+
+    remapped: list[str] = []
+    unresolved: list[str] = []
+    for raw in value:
+        uuid = str(raw)
+        if uuid in current_by_uuid:
+            remapped.append(uuid)
+            continue
+        old_index = previous_index_by_uuid.get(uuid)
+        replacement = current_by_index.get(old_index) if old_index is not None else None
+        if replacement is None:
+            unresolved.append(uuid)
+        else:
+            remapped.append(str(replacement["uuid"]))
+    if unresolved:
+        raise RuntimeError(
+            f"{field} references devices that cannot be remapped: "
+            + ", ".join(sorted(unresolved))
+        )
+    return list(dict.fromkeys(remapped))
+
+
+def reconcile_scheduler_device_references(
+    inventory: list[dict[str, Any]], scheduler: dict[str, Any]
+) -> dict[str, Any]:
+    """Refresh persisted UUID policy using its previous logical GPU slots."""
+    current_by_uuid = {
+        str(item.get("uuid")): item for item in inventory if item.get("uuid")
+    }
+    current_by_index = {
+        int(item["index"]): item for item in inventory if item.get("uuid")
+    }
+    previous_index_by_uuid = _previous_index_by_uuid(scheduler)
+    updated = dict(scheduler)
+    for field in ("gateway_devices", "comfyui_devices"):
+        updated[field] = _remap_uuid_selector(
+            scheduler.get(field, "auto"),
+            current_by_uuid=current_by_uuid,
+            current_by_index=current_by_index,
+            previous_index_by_uuid=previous_index_by_uuid,
+            field=field,
+        )
+
+    overrides = scheduler.get("device_overrides", [])
+    if not isinstance(overrides, list):
+        raise RuntimeError("device_overrides must be a list")
+    remapped_overrides: list[dict[str, Any]] = []
+    unresolved: list[str] = []
+    for position, raw in enumerate(overrides):
+        if not isinstance(raw, dict) or not raw.get("uuid"):
+            raise RuntimeError(
+                "GPU device override is malformed at index " + str(position)
+            )
+        override = dict(raw)
+        uuid = str(override["uuid"])
+        if uuid not in current_by_uuid:
+            old_index = previous_index_by_uuid.get(uuid)
+            replacement = (
+                current_by_index.get(old_index) if old_index is not None else None
+            )
+            if replacement is None:
+                unresolved.append(uuid)
+                continue
+            override["uuid"] = str(replacement["uuid"])
+        remapped_overrides.append(override)
+    if unresolved:
+        raise RuntimeError(
+            "device_overrides references devices that cannot be remapped: "
+            + ", ".join(sorted(unresolved))
+        )
+    updated["device_overrides"] = remapped_overrides
+    return updated
+
+
 def _select_devices(
     devices: list[dict[str, Any]],
     scheduler: dict[str, Any],
@@ -333,7 +437,12 @@ def main() -> int:
 
     with _config_write_lock(args.runtime_config) as config_handle:
         runtime = _read_locked_yaml(config_handle, args.runtime_config)
-        scheduler = runtime.setdefault("gpu_scheduler", {})
+        raw_scheduler = runtime.setdefault("gpu_scheduler", {})
+        if not isinstance(raw_scheduler, dict):
+            raise RuntimeError("gpu_scheduler must be an object")
+        scheduler = reconcile_scheduler_device_references(
+            inventory, raw_scheduler
+        )
         devices = select_comfyui_devices(inventory, scheduler)
         if not devices:
             raise SystemExit(
@@ -355,6 +464,7 @@ def main() -> int:
                 "workers": workers,
             }
         )
+        runtime["gpu_scheduler"] = scheduler
         _atomic_yaml(args.output_compose, compose)
         _write_locked_yaml(config_handle, runtime)
     return 0
