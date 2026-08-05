@@ -41,10 +41,11 @@ afterEach(() => {
 })
 
 describe('rejecting draft cleanup', () => {
-  it('waits for request cancellation instead of deleting the session immediately', async () => {
+  it('waits for request cancellation and binds the terminal successor draft', async () => {
     const fetchMock = vi.fn().mockResolvedValue(Response.json({
       request_id: 'request-1',
       draft_id: 'draft-new',
+      preview_url: '/admin/draft/draft-new/preview',
       status: 'cancelled',
     }))
     vi.stubGlobal('fetch', fetchMock)
@@ -57,6 +58,8 @@ describe('rejecting draft cleanup', () => {
     )
     const draft = useChatStore.getState().sessions[0].messages[0].draft
     expect(draft).toMatchObject({
+      draftId: 'draft-new',
+      previewUrl: '/admin/draft/draft-new/preview',
       status: 'cancelled',
       stage: 'cancelled',
     })
