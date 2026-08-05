@@ -45,7 +45,7 @@ def _allow_config_precondition_header() -> None:
     except ImportError:
         return
     headers = set(getattr(cors, "SAFELISTED_HEADERS", set()))
-    headers.add("If-Match")
+    headers.update({"If-Match", "X-Request-ID"})
     cors.SAFELISTED_HEADERS = headers
 
 
@@ -66,13 +66,7 @@ def _dotenv_bootstrap_values() -> dict[str, Any]:
 
 
 def _preload_cors_origins() -> None:
-    """Expose CORS origins before the FastAPI app factory adds middleware.
-
-    A process or .env value is a real environment override. A YAML value is only
-    copied temporarily because middleware is constructed before the lifespan
-    ConfigManager exists; ConfigManager consumes the marker and removes the
-    synthetic environment value before loading runtime configuration.
-    """
+    """Expose CORS origins before the FastAPI app factory adds middleware."""
     if os.environ.get("AI_GATEWAY_CORS_ORIGINS", "").strip():
         return
 
@@ -113,9 +107,14 @@ def _preload_cors_origins() -> None:
     if normalized:
         bootstrap_origins = ",".join(normalized)
         os.environ["AI_GATEWAY_CORS_ORIGINS"] = bootstrap_origins
-        # Store the synthetic value itself. ConfigManager can then distinguish
-        # it from an operator/test override written after package import.
         os.environ[_CORS_YAML_BOOTSTRAP_MARKER] = bootstrap_origins
+
+
+def _install_unified_source_contract() -> None:
+    """Extend the chat request model with the documented source draft field."""
+    from .unified_source_contract import install_unified_source_contract
+
+    install_unified_source_contract()
 
 
 def _install_admin_security_guards() -> None:
@@ -128,9 +127,6 @@ def _install_admin_security_guards() -> None:
         prune_removed_model_references,
     )
 
-    # Secure route handlers resolve these globals at request time. Replacing the
-    # narrow legacy helpers here preserves their public test/import surface while
-    # installing the complete scalar-reference validation contract.
     security_routes._configured_model_names = configured_model_names
     security_routes._prune_removed_model_references = (
         prune_removed_model_references
@@ -146,6 +142,37 @@ def _install_draft_confirm_routes() -> None:
     from .draft_confirm_routes import install_draft_confirm_routes
 
     install_draft_confirm_routes(admin_routes.router)
+
+
+def _install_draft_request_routes() -> None:
+    """Install request recovery and cancellation routes."""
+    from . import admin_routes
+    from .draft_request_routes import install_draft_request_routes
+
+    install_draft_request_routes(admin_routes.router)
+
+
+def _install_verified_draft_cancellation() -> None:
+    """Require ComfyUI prompt release before persisting cancelled."""
+    from .verified_draft_cancellation import (
+        install_verified_draft_cancellation,
+    )
+
+    install_verified_draft_cancellation()
+
+
+def _install_draft_rejection_lifecycle() -> None:
+    """Move request recovery atomically to regenerated drafts."""
+    from .draft_rejection_lifecycle import install_draft_rejection_lifecycle
+
+    install_draft_rejection_lifecycle()
+
+
+def _install_gpu_queue_handoff() -> None:
+    """Prevent idle reservation from blocking FIFO generation handoff."""
+    from .gpu_queue_handoff import install_gpu_queue_handoff
+
+    install_gpu_queue_handoff()
 
 
 def _install_gpu_routes() -> None:
@@ -182,9 +209,6 @@ def _install_source_draft_video_routes() -> None:
             f"source_draft_video_route_definition_missing:{available}"
         )
 
-    # The package bootstrap already has fully-built APIRoute objects. Appending
-    # those objects avoids FastAPI include_router() cloning during a circular
-    # package import, which can otherwise leave the shared admin router empty.
     admin_routes.router.routes.extend(source_routes)
 
     if not any(
@@ -210,6 +234,14 @@ def _install_video_generation_observability() -> None:
     install_video_generation_observability()
 
 
+def _install_runtime_identity() -> None:
+    """Add commit/image identity to the health response."""
+    from . import routes
+    from .runtime_identity import install_runtime_identity
+
+    install_runtime_identity(routes.router)
+
+
 def _install_config_schema_parser() -> None:
     """Install YAML-aware schema parsing and remove the legacy write route."""
     from . import routes
@@ -230,11 +262,17 @@ _ensure_core_src()
 _reconcile_gpu_topology()
 _allow_config_precondition_header()
 _preload_cors_origins()
+_install_unified_source_contract()
 _install_video_request_guards()
 _install_video_generation_observability()
+_install_verified_draft_cancellation()
+_install_draft_rejection_lifecycle()
 _install_admin_security_guards()
 _install_draft_confirm_routes()
+_install_draft_request_routes()
+_install_gpu_queue_handoff()
 _install_gpu_routes()
+_install_runtime_identity()
 _install_config_schema_parser()
 # Install this route last because package bootstrap imports can mutate routers.
 _install_source_draft_video_routes()

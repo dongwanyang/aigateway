@@ -10,14 +10,24 @@ from fastapi.responses import JSONResponse
 
 from aigateway_core.dispatch.dispatcher import RequestDispatcher
 
+from .generation_request_state import (
+    REQUEST_RECORD_FAILED,
+    REQUEST_RECORD_NON_DRAFT,
+    terminal_request_status,
+)
+
 _ORIGINAL_ATTR = "_aigateway_original_video_request_guard_dispatch"
 _GUARD_ATTR = "_aigateway_video_request_guard"
+_PENDING_REQUEST_TTL_SECONDS = 300
 
 _ZH_REFERENCE_RE = re.compile(
-    r"(?:根据|基于|使用|用|把|让)?\s*(?:这|该|上面|刚才|之前|上一)(?:一)?(?:张|个)?\s*(?:图|图片|照片|画面)"
+    r"(?:根据|基于|使用|用|把|让|以|拿)?\s*"
+    r"(?:这|该|此|当前|上面|刚才|刚刚|之前|上一|刚生成(?:的)?|刚刚生成(?:的)?)"
+    r"(?:一)?(?:张|个)?\s*(?:图|图片|照片|画面|图像|结果)"
 )
 _EN_REFERENCE_RE = re.compile(
-    r"\b(?:this|that|the\s+above|previous|last)\s+(?:image|picture|photo|frame)\b",
+    r"\b(?:this|that|the\s+above|current|previous|last|just[-\s]+generated)\s+"
+    r"(?:image|picture|photo|frame|result)\b",
     re.IGNORECASE,
 )
 _ZH_VIDEO_GENERATION_RE = re.compile(
@@ -79,11 +89,14 @@ def _latest_user_turn(body: Any) -> tuple[str, bool]:
     return "", False
 
 
+def _source_draft_id(body: Any) -> str:
+    value = _generation_options(body).get("source_draft_id")
+    return value.strip() if isinstance(value, str) else ""
+
+
 def reference_image_required(body: Any) -> bool:
-    """Return whether an explicit image reference is missing for a video request."""
-    options = _generation_options(body)
-    source_draft_id = options.get("source_draft_id") or _value(body, "source_draft_id", None)
-    if isinstance(source_draft_id, str) and source_draft_id.strip():
+    """Return whether an explicit existing-image reference is missing."""
+    if _source_draft_id(body):
         return False
 
     text, has_image = _latest_user_turn(body)
@@ -109,6 +122,159 @@ def _reference_image_error() -> JSONResponse:
     )
 
 
+def _request_app(request: Any) -> Any | None:
+    """Return the ASGI app without assuming a fully populated Request scope."""
+    scope = getattr(request, "scope", None)
+    if isinstance(scope, Mapping):
+        app = scope.get("app")
+        if app is not None:
+            return app
+    try:
+        return request.app
+    except (AttributeError, KeyError):
+        return None
+
+
+def _draft_strategy(request: Any) -> Any | None:
+    app = _request_app(request)
+    state = getattr(app, "state", None) if app is not None else None
+    if state is None:
+        return None
+    strategy = getattr(state, "draft_strategy", None)
+    if strategy is None:
+        strategy = getattr(state, "draft_generator_strategy", None)
+    return strategy
+
+
+def _request_identity(body: Any, request: Any) -> tuple[str, str, str | None, str | None]:
+    request_id = str(getattr(request.state, "request_id", "") or "")
+    session_id = str(_value(body, "chat_session_id", "") or "")
+    owner = getattr(request.state, "draft_owner", None)
+    owner = owner if isinstance(owner, Mapping) else {}
+    user_id = str(owner.get("user_id") or "") or None
+    group_id = str(owner.get("group_id") or "") or None
+    return request_id, session_id, user_id, group_id
+
+
+async def _register_request_record(
+    body: Any,
+    request: Any,
+    draft_id: str,
+    *,
+    overwrite_terminal: bool = False,
+) -> None:
+    """Persist one owner-scoped request record without clobbering real drafts."""
+    strategy = _draft_strategy(request)
+    register = getattr(strategy, "register_request_draft", None)
+    if not callable(register):
+        return
+    request_id, session_id, user_id, group_id = _request_identity(body, request)
+    if not request_id or not session_id or (not user_id and not group_id):
+        return
+
+    resolver = getattr(strategy, "resolve_request", None)
+    if callable(resolver):
+        existing_draft, record = await resolver(request_id)
+        if existing_draft is not None:
+            return
+        existing_marker = str(record.get("draft_id") or "") if isinstance(record, Mapping) else ""
+        existing_terminal = terminal_request_status(record)
+        if existing_marker and not existing_terminal:
+            return
+        if existing_terminal and not overwrite_terminal:
+            return
+
+    await register(
+        request_id,
+        draft_id,
+        user_id=user_id,
+        group_id=group_id,
+        session_id=session_id,
+        ttl_seconds=_PENDING_REQUEST_TTL_SECONDS,
+    )
+
+
+async def _register_pending_request(body: Any, request: Any) -> None:
+    """Bind request identity to owner/session before draft creation can race Stop."""
+    await _register_request_record(body, request, "")
+
+
+async def _mark_request_terminal(body: Any, request: Any, marker: str) -> None:
+    """Persist a terminal non-draft/failed result after dispatcher completion."""
+    await _register_request_record(
+        body,
+        request,
+        marker,
+        overwrite_terminal=True,
+    )
+
+
+async def _create_source_draft_response(
+    body: Any,
+    request: Any,
+    source_draft_id: str,
+) -> JSONResponse:
+    from aigateway_core.pipelines.generation._common.exceptions import (
+        DraftWorkflowError,
+    )
+    from aigateway_core.pipelines.generation.draft.source_draft_video import (
+        create_video_draft_from_source,
+    )
+
+    from .source_draft_video_routes import _domain_http_exception
+
+    strategy = _draft_strategy(request)
+    if strategy is None:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": {
+                    "code": "draft_unavailable",
+                    "message": "Draft workflow service is not available.",
+                }
+            },
+        )
+
+    motion_prompt, _ = _latest_user_turn(body)
+    options = _generation_options(body)
+    session_id = str(_value(body, "chat_session_id", "") or "")
+    owner = getattr(request.state, "draft_owner", None)
+    owner = owner if isinstance(owner, Mapping) else {}
+    request_id = str(getattr(request.state, "request_id", "") or "")
+    trace_id = str(getattr(request.state, "trace_id", "") or request_id)
+    try:
+        draft = await create_video_draft_from_source(
+            strategy,
+            source_draft_id=source_draft_id,
+            motion_prompt=motion_prompt,
+            duration_seconds=options.get("duration_seconds", 5),
+            fps=options.get("fps", 8),
+            chat_session_id=session_id,
+            user_id=str(owner.get("user_id") or "") or None,
+            group_id=str(owner.get("group_id") or "") or None,
+            trace_id=trace_id,
+            request_id=request_id or None,
+        )
+    except DraftWorkflowError as exc:
+        raise _domain_http_exception(
+            exc,
+            source_draft_id=source_draft_id,
+            chat_session_id=session_id,
+        ) from exc
+
+    return JSONResponse(
+        content={
+            "data": {
+                "draft_id": draft.draft_id,
+                "preview_url": f"/admin/draft/{draft.draft_id}/preview",
+                "status": draft.status,
+                "generation_params": draft.generation_params,
+            },
+            "_meta": {"draft_pending_confirmation": True},
+        }
+    )
+
+
 def install_video_request_guard() -> None:
     """Install one idempotent dispatcher wrapper before pipeline execution."""
     current = RequestDispatcher.dispatch
@@ -120,12 +286,38 @@ def install_video_request_guard() -> None:
 
     @functools.wraps(original)
     async def guarded_dispatch(self: Any, body: Any, request: Any) -> Any:
-        if reference_image_required(body):
-            return _reference_image_error()
-        return await original(self, body, request)
+        await _register_pending_request(body, request)
+        try:
+            source_draft_id = _source_draft_id(body)
+            if source_draft_id:
+                response = await _create_source_draft_response(
+                    body,
+                    request,
+                    source_draft_id,
+                )
+            elif reference_image_required(body):
+                response = _reference_image_error()
+            else:
+                response = await original(self, body, request)
+        except Exception:
+            await _mark_request_terminal(body, request, REQUEST_RECORD_FAILED)
+            raise
+
+        marker = (
+            REQUEST_RECORD_FAILED
+            if int(getattr(response, "status_code", 200) or 200) >= 400
+            else REQUEST_RECORD_NON_DRAFT
+        )
+        # Real draft submission replaces the pending record before returning;
+        # _mark_request_terminal detects that draft and leaves it untouched.
+        await _mark_request_terminal(body, request, marker)
+        return response
 
     setattr(guarded_dispatch, _GUARD_ATTR, True)
     RequestDispatcher.dispatch = guarded_dispatch
 
 
-__all__ = ["install_video_request_guard", "reference_image_required"]
+__all__ = [
+    "install_video_request_guard",
+    "reference_image_required",
+]

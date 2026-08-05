@@ -4,13 +4,14 @@ from __future__ import annotations
 import functools
 import hashlib
 import logging
-import os
 from collections.abc import Mapping
 from typing import Any
 
 from aigateway_core.pipelines.generation.draft.draft_generator import (
     DraftGeneratorStrategy,
 )
+
+from .runtime_identity import deployed_commit_sha
 
 logger = logging.getLogger(__name__)
 _ORIGINAL_ATTR = "_aigateway_original_record_comfy_job"
@@ -20,19 +21,6 @@ _WRAPPER_ATTR = "_aigateway_video_observability_wrapper"
 def _text_hash(value: Any) -> str:
     text = str(value or "")
     return hashlib.sha256(text.encode("utf-8")).hexdigest() if text else ""
-
-
-def _deployed_commit_sha() -> str:
-    for name in (
-        "AIGATEWAY_COMMIT_SHA",
-        "GIT_COMMIT_SHA",
-        "SOURCE_VERSION",
-        "RENDER_GIT_COMMIT",
-    ):
-        value = os.getenv(name, "").strip()
-        if value:
-            return value
-    return ""
 
 
 def video_submission_fields(
@@ -66,7 +54,7 @@ def video_submission_fields(
         ),
         "input_image_name": input_image_name or f"video-keyframe-{draft_id}.png",
         "comfyui_prompt_id": prompt_id,
-        "deployed_commit_sha": _deployed_commit_sha(),
+        "deployed_commit_sha": deployed_commit_sha(),
     }
 
 
