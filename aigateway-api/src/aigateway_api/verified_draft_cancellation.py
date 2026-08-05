@@ -37,13 +37,24 @@ _RESTORABLE_STATUSES = {
 }
 
 
-def _queue_ids(queue: Any, key: str) -> set[str]:
-    entries = queue.get(key, []) if isinstance(queue, dict) else []
+def _entry_prompt_ids(entries: Any) -> set[str]:
+    if not isinstance(entries, list):
+        raise ValueError("invalid_comfyui_queue_payload")
     return {
         str(item[1])
         for item in entries
         if isinstance(item, (list, tuple)) and len(item) > 1
     }
+
+
+def _active_queue_prompt_ids(queue: Any) -> set[str]:
+    if not isinstance(queue, dict):
+        raise ValueError("invalid_comfyui_queue_payload")
+    if "queue_pending" not in queue or "queue_running" not in queue:
+        raise ValueError("invalid_comfyui_queue_payload")
+    return _entry_prompt_ids(queue["queue_pending"]) | _entry_prompt_ids(
+        queue["queue_running"]
+    )
 
 
 async def _prompt_released(
@@ -53,7 +64,7 @@ async def _prompt_released(
     server_url: str | None,
     timeout_seconds: float,
 ) -> bool:
-    """Return true only after the owned prompt leaves pending/running queues."""
+    """Return true only after the owned prompt leaves valid queue snapshots."""
     base_url = (server_url or strategy._server_url()).rstrip("/")
     deadline = time.monotonic() + max(1.0, timeout_seconds)
     request_timeout = max(
@@ -68,10 +79,7 @@ async def _prompt_released(
             async with httpx.AsyncClient(timeout=request_timeout) as client:
                 response = await client.get(f"{base_url}/queue")
             if response.status_code == 200:
-                queue = response.json()
-                active = _queue_ids(queue, "queue_pending") | _queue_ids(
-                    queue, "queue_running"
-                )
+                active = _active_queue_prompt_ids(response.json())
                 if prompt_id not in active:
                     return True
         except (httpx.HTTPError, ValueError, TypeError) as exc:
