@@ -7,7 +7,7 @@ import { queryKeys } from '@/query/keys'
 import SessionList from '@/components/chat/SessionList'
 import ChatTimeline from '@/components/chat/ChatTimeline'
 import ChatComposer from '@/components/chat/ChatComposer'
-import type { ChatReferenceImage, GenerationOptions } from '@/types'
+import type { ChatPageMessage, ChatReferenceImage, GenerationOptions } from '@/types'
 import {
   DEFAULT_VIDEO_DURATION_SECONDS,
   DEFAULT_VIDEO_FPS,
@@ -21,6 +21,24 @@ interface SelectedVideoSource {
 
 type SourceAwareGenerationOptions = GenerationOptions & {
   source_draft_id?: string
+}
+
+const CANCELLABLE_DRAFT_STATUSES = new Set([
+  'queued',
+  'running',
+  'generating',
+  'pending',
+  'confirming',
+  'refining',
+  'rejecting',
+])
+
+function hasCancellableGeneration(message: ChatPageMessage): boolean {
+  if (!message.generationRequestId) return false
+  return Boolean(
+    message.awaitingDraft
+    || (message.draft && CANCELLABLE_DRAFT_STATUSES.has(message.draft.status)),
+  )
 }
 
 export default function Chat() {
@@ -56,6 +74,7 @@ export default function Chat() {
   }
 
   const messages = active?.messages ?? []
+  const generationBusy = streaming || messages.some(hasCancellableGeneration)
   const lastAssistant = [...messages].reverse().find(
     message => message.role === 'assistant',
   )
@@ -117,7 +136,7 @@ export default function Chat() {
           </h2>
           <button
             onClick={clearActive}
-            disabled={streaming || messages.length === 0}
+            disabled={generationBusy || messages.length === 0}
             className="flex items-center gap-1 px-2 py-1 rounded-md text-sm cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
             style={{ color: 'var(--color-text-secondary)' }}
           >
@@ -163,7 +182,7 @@ export default function Chat() {
                 type="button"
                 aria-label="取消使用此图片"
                 title="取消使用此图片"
-                disabled={streaming}
+                disabled={generationBusy}
                 onClick={() => setSelectedVideoSource(null)}
                 className="inline-flex rounded p-1 cursor-pointer disabled:opacity-50"
               >
@@ -172,7 +191,7 @@ export default function Chat() {
             </div>
           )}
           <ChatComposer
-            streaming={streaming}
+            streaming={generationBusy}
             disabled={false}
             sourceImageMode={Boolean(selectedVideoSource)}
             onSend={handleSend}
