@@ -5,7 +5,7 @@ export interface CreateSourceDraftVideoRequest {
   durationSeconds: 3 | 5 | 8
   fps: number
   chatSessionId: string
-  requestId: string
+  requestId?: string
 }
 
 export interface SourceDraftVideoResponse {
@@ -56,15 +56,16 @@ export async function createVideoDraftFromSource(
   request: CreateSourceDraftVideoRequest,
   signal?: AbortSignal,
 ): Promise<SourceDraftVideoResponse> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  }
+  if (request.requestId) headers['X-Request-ID'] = request.requestId
   const response = await fetch(
     `${API_BASE}/admin/draft/${encodeURIComponent(sourceDraftId)}/video`,
     {
       method: 'POST',
       credentials: 'include',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Request-ID': request.requestId,
-      },
+      headers,
       body: JSON.stringify({
         motion_prompt: request.motionPrompt,
         duration_seconds: request.durationSeconds,
