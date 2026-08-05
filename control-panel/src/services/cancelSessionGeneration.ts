@@ -20,8 +20,12 @@ function isCancellable(message: ChatPageMessage): boolean {
   )
 }
 
+function cancellableMessages(session: ChatSession): ChatPageMessage[] {
+  return session.messages.filter(isCancellable)
+}
+
 function latestCancellableMessage(session: ChatSession): ChatPageMessage | undefined {
-  return [...session.messages].reverse().find(isCancellable)
+  return [...cancellableMessages(session)].reverse()[0]
 }
 
 function patchSessionMessage(
@@ -43,20 +47,16 @@ function patchSessionMessage(
   try { persistSessions(next) } catch { /* UI state remains authoritative */ }
 }
 
-/**
- * Cancel the latest active generation in a session after the original HTTP
- * request has already returned. The message reaches `cancelled` only after the
- * server confirms the persisted terminal state.
- */
-export async function cancelLatestSessionGeneration(sessionId: string): Promise<boolean> {
-  const store = useChatStore.getState()
-  const session = store.sessions.find(item => item.id === sessionId)
-  const message = session ? latestCancellableMessage(session) : undefined
-  const requestId = message?.generationRequestId
-  if (!message || !requestId || cancellingRequestIds.has(requestId)) return false
+async function cancelMessageGeneration(
+  sessionId: string,
+  message: ChatPageMessage,
+): Promise<boolean> {
+  const requestId = message.generationRequestId
+  if (!requestId) return true
+  if (cancellingRequestIds.has(requestId)) return false
 
   cancellingRequestIds.add(requestId)
-  store.setError(null)
+  useChatStore.getState().setError(null)
   patchSessionMessage(sessionId, message.id, current => ({
     ...current,
     content: current.content || '正在停止…',
@@ -116,4 +116,30 @@ export async function cancelLatestSessionGeneration(sessionId: string): Promise<
     latestStore.setPendingAssistantId(null)
     latestStore.setStreaming(false)
   }
+}
+
+/**
+ * Cancel the latest active generation in a session after the original HTTP
+ * request has already returned. The message reaches `cancelled` only after the
+ * server confirms the persisted terminal state.
+ */
+export async function cancelLatestSessionGeneration(sessionId: string): Promise<boolean> {
+  const session = useChatStore.getState().sessions.find(item => item.id === sessionId)
+  const message = session ? latestCancellableMessage(session) : undefined
+  return message ? cancelMessageGeneration(sessionId, message) : false
+}
+
+/**
+ * Destructive session cleanup must not race active backend/ComfyUI work. Every
+ * active request is cancelled and confirmed before the caller deletes draft
+ * files or removes the local session. A single failure blocks cleanup.
+ */
+export async function cancelAllSessionGenerations(sessionId: string): Promise<boolean> {
+  const session = useChatStore.getState().sessions.find(item => item.id === sessionId)
+  if (!session) return true
+  const messages = cancellableMessages(session)
+  for (const message of messages) {
+    if (!await cancelMessageGeneration(sessionId, message)) return false
+  }
+  return true
 }
