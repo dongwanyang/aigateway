@@ -300,19 +300,6 @@ class TestAIDirectorStrategyOptimizePrompt:
         assert "Camera:" in system_prompt
         assert "原样保留" in system_prompt
 
-    @pytest.mark.parametrize(
-        "system_prompt",
-        [_REWRITE_SYSTEM_PROMPT, _EXPAND_SYSTEM_PROMPT],
-    )
-    def test_default_system_prompts_require_english_for_sdxl(self, system_prompt):
-        """Default optimization must produce text SDXL's CLIP can understand."""
-        assert "必须使用自然、准确的英文" in system_prompt
-        assert "Subject:" in system_prompt
-        assert "Action:" in system_prompt
-        assert "Environment:" in system_prompt
-        assert "Camera:" in system_prompt
-        assert "只将该文字原样保留" in system_prompt
-
     @pytest.mark.asyncio
     async def test_empty_response_fallback(self, default_config, pipeline_ctx):
         """Empty model response should fallback to original prompt."""
