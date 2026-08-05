@@ -165,6 +165,27 @@ describe('generation request lifecycle client', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
+  it('fails after the registration grace when the POST never reached the server', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.fn().mockResolvedValue(Response.json({
+      request_id: 'request-missing',
+      status: 'unregistered',
+      retry_after_ms: 5_000,
+    }, { status: 202 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const recovery = waitForGenerationRequestState('request-missing', 'session-1')
+    const assertion = expect(recovery).rejects.toMatchObject({
+      message: '生成请求未到达服务端，请重新提交',
+      code: 'generation_request_not_registered',
+      status: 404,
+    })
+
+    await vi.advanceTimersByTimeAsync(10_000)
+    await assertion
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
   it('fails draft-only recovery for a non-draft terminal state', async () => {
     const fetchMock = vi.fn().mockResolvedValue(Response.json({
       request_id: 'request-text',
