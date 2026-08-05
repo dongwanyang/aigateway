@@ -4,6 +4,7 @@ import importlib.util
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = REPO_ROOT / "scripts/render-gpu-topology.py"
@@ -61,6 +62,16 @@ def test_render_topology_uses_logical_indices_and_records_runtime_uuids(
         assert any(expected_output in value for value in volumes)
 
 
+def test_base_compose_preserves_operator_cuda_visibility_override() -> None:
+    compose = yaml.safe_load(
+        (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    )
+    assert (
+        compose["services"]["gateway"]["environment"]["CUDA_VISIBLE_DEVICES"]
+        == "${GATEWAY_CUDA_VISIBLE_DEVICES:-0}"
+    )
+
+
 def test_select_comfyui_devices_uses_uuid_pool_and_disabled_overrides() -> None:
     devices = [
         {"index": 0, "uuid": "GPU-a"},
@@ -100,8 +111,6 @@ def test_render_topology_can_enable_dynamic_vram_from_config() -> None:
 
 def test_main_preserves_disabled_scheduler(tmp_path, monkeypatch) -> None:
     import sys
-
-    import yaml
 
     inventory = tmp_path / "inventory.yaml"
     runtime = tmp_path / "config.yaml"
