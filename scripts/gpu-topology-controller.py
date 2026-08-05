@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reconcile GPU UUID topology and safely recreate affected local services."""
+"""Reconcile GPU runtime topology and safely recreate affected local services."""
 from __future__ import annotations
 
 import argparse
@@ -85,6 +85,28 @@ def _fingerprint(
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _validate_runtime_topology(
+    devices: list[dict[str, Any]], workers: list[dict[str, Any]]
+) -> None:
+    device_uuids = {
+        str(item.get("uuid")) for item in devices if item.get("uuid")
+    }
+    worker_uuids = {
+        str(item.get("device_uuid"))
+        for item in workers
+        if item.get("device_uuid")
+    }
+    missing = worker_uuids - device_uuids
+    if missing:
+        raise RuntimeError(
+            "generated GPU topology contains workers without local devices: "
+            + ", ".join(sorted(missing))
+        )
+    worker_ids = [str(item.get("worker_id") or "") for item in workers]
+    if not all(worker_ids) or len(worker_ids) != len(set(worker_ids)):
+        raise RuntimeError("generated GPU topology contains duplicate worker IDs")
+
+
 def _atomic_text(path: Path, value: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
@@ -165,6 +187,9 @@ def reconcile(
     inventory = renderer.discover_devices()
     if not inventory:
         raise RuntimeError("no NVIDIA GPU UUIDs discovered; retaining current topology")
+    runtime_inventory = renderer._runtime_inventory(inventory)
+    if not runtime_inventory:
+        raise RuntimeError("no valid NVIDIA GPU inventory discovered")
     selected = renderer.select_comfyui_devices(inventory, scheduler)
     if not selected:
         raise RuntimeError("configured ComfyUI GPU UUID pool has no available devices")
@@ -174,6 +199,7 @@ def reconcile(
         scheduler,
         gateway_devices=inventory,
     )
+    _validate_runtime_topology(runtime_inventory, workers)
     desired_compose = yaml.safe_dump(compose, sort_keys=False, allow_unicode=True)
     current_compose = (
         generated_compose.read_text(encoding="utf-8")
@@ -181,7 +207,16 @@ def reconcile(
         else ""
     )
     current_workers = scheduler.get("workers", [])
-    if current_compose == desired_compose and current_workers == workers:
+    current_devices = scheduler.get("devices", [])
+    current_inventory_source = scheduler.get("inventory_source")
+    current_inventory_fingerprint = scheduler.get("inventory_fingerprint")
+    if (
+        current_compose == desired_compose
+        and current_workers == workers
+        and current_devices == runtime_inventory
+        and current_inventory_source == "host_generated"
+        and current_inventory_fingerprint == fingerprint
+    ):
         if not controller_state.exists():
             # Quickstart already applied this initial topology before it
             # installs the controller; record it without a redundant restart.
@@ -227,7 +262,17 @@ def reconcile(
                 )
             candidate_config = dict(latest)
             candidate_scheduler = dict(latest_scheduler)
-            candidate_scheduler["workers"] = workers
+            candidate_scheduler.update(
+                {
+                    "inventory_source": "host_generated",
+                    "inventory_fingerprint": fingerprint,
+                    "devices": runtime_inventory,
+                    "workers": workers,
+                }
+            )
+            _validate_runtime_topology(
+                candidate_scheduler["devices"], candidate_scheduler["workers"]
+            )
             candidate_config["gpu_scheduler"] = candidate_scheduler
 
             # The API and this controller share the same .lock file. Build the
@@ -267,6 +312,13 @@ def reconcile(
             ) != fingerprint:
                 raise RuntimeError(
                     "GPU topology configuration changed during apply; retrying"
+                )
+            if (
+                applied_scheduler.get("devices") != runtime_inventory
+                or applied_scheduler.get("workers") != workers
+            ):
+                raise RuntimeError(
+                    "GPU topology devices/workers changed during apply; retrying"
                 )
             _atomic_text(
                 controller_state,
