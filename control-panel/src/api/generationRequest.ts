@@ -57,6 +57,17 @@ async function parseError(response: Response, fallback: string): Promise<Error> 
   return error
 }
 
+function terminalStateError(
+  code: string,
+  message: string,
+  status: number,
+): Error {
+  const error = new Error(message)
+  ;(error as Error & { code?: string; status?: number }).code = code
+  ;(error as Error & { code?: string; status?: number }).status = status
+  return error
+}
+
 function errorStatus(error: unknown): number | undefined {
   const status = (error as Error & { status?: unknown })?.status
   return typeof status === 'number' ? status : undefined
@@ -136,13 +147,8 @@ export async function cancelGenerationRequest(
   return response.json() as Promise<GenerationRequestState>
 }
 
-/**
- * Resolve a response-lost generation until the server exposes a draft or an
- * explicit terminal request state. Transient transport/5xx failures are
- * retried until the caller aborts; there is deliberately no short client-side
- * timeout.
- */
-export async function waitForGenerationRequestDraft(
+/** Wait until the server exposes a draft or an explicit terminal request state. */
+export async function waitForGenerationRequestState(
   requestId: string,
   chatSessionId: string,
   signal?: AbortSignal,
@@ -164,6 +170,38 @@ export async function waitForGenerationRequestDraft(
       attempt += 1
     }
   }
+}
+
+/**
+ * Resolve a response-lost generation that is required to produce a draft.
+ * Non-draft and failed terminal records are explicit errors so page-refresh
+ * recovery cannot leave an assistant message permanently awaiting a draft.
+ */
+export async function waitForGenerationRequestDraft(
+  requestId: string,
+  chatSessionId: string,
+  signal?: AbortSignal,
+): Promise<GenerationRequestState> {
+  const state = await waitForGenerationRequestState(
+    requestId,
+    chatSessionId,
+    signal,
+  )
+  if (state.status === 'non_draft') {
+    throw terminalStateError(
+      'generation_request_not_draft',
+      '该请求是普通文本响应，断开的响应内容无法恢复',
+      409,
+    )
+  }
+  if (state.status === 'failed') {
+    throw terminalStateError(
+      state.error || 'generation_request_failed',
+      '生成请求在服务端执行失败',
+      502,
+    )
+  }
+  return state
 }
 
 /**
