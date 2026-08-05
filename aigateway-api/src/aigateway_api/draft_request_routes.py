@@ -63,6 +63,17 @@ def _assert_request_record_owner(
         )
 
 
+def _resolving_response(request_id: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_202_ACCEPTED,
+        content={
+            "request_id": request_id,
+            "status": "resolving",
+            "retry_after_ms": 250,
+        },
+    )
+
+
 def _draft_payload(request_id: str, draft: Any) -> dict[str, Any]:
     return {
         "request_id": request_id,
@@ -88,15 +99,10 @@ async def get_generation_request(
     strategy = _strategy(request)
     draft, record = await strategy.resolve_request(request_id)
     if record is None:
-        return JSONResponse(
-            status_code=status.HTTP_202_ACCEPTED,
-            content={
-                "request_id": request_id,
-                "status": "resolving",
-                "retry_after_ms": 250,
-            },
-        )
+        return _resolving_response(request_id)
     _assert_request_record_owner(record, auth, chat_session_id)
+    if draft is None and not str(record.get("draft_id") or ""):
+        return _resolving_response(request_id)
     if draft is None:
         raise HTTPException(
             status_code=410,
