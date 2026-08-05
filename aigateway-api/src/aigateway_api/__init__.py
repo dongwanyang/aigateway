@@ -25,6 +25,13 @@ def _ensure_core_src() -> None:
         sys.path.insert(0, str(core_src))
 
 
+def _reconcile_gpu_topology() -> None:
+    """Refresh stale GPU UUID state before CUDA-aware modules are imported."""
+    from .gpu_topology_bootstrap import bootstrap_gpu_topology
+
+    bootstrap_gpu_topology()
+
+
 def _allow_config_precondition_header() -> None:
     """Extend Starlette's CORS allow-list before middleware construction."""
     try:
@@ -152,6 +159,7 @@ def _install_config_schema_parser() -> None:
 
 
 _ensure_core_src()
+_reconcile_gpu_topology()
 _allow_config_precondition_header()
 _preload_cors_origins()
 _install_admin_security_guards()
