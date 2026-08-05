@@ -33,6 +33,7 @@ const CANCELLABLE_DRAFT_STATUSES = new Set([
   'generating',
   'confirming',
   'refining',
+  'rejecting',
 ])
 
 function hasCancellableGeneration(message: ChatPageMessage): boolean {
