@@ -1,11 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   cancelGenerationRequest,
+  cancelGenerationRequestAndWait,
   getGenerationRequest,
   newGenerationRequestId,
+  waitForGenerationRequestDraft,
 } from './generationRequest'
 
 afterEach(() => {
+  vi.useRealTimers()
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
 })
@@ -48,6 +51,72 @@ describe('generation request lifecycle client', () => {
       '/admin/generation/requests/request-1?chat_session_id=session-1',
       expect.objectContaining({ method: 'DELETE', credentials: 'include' }),
     )
+  })
+
+  it('does not resolve Stop until the persisted request is cancelled', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(Response.json({
+        request_id: 'request-1',
+        status: 'cancellation_requested',
+        retry_after_ms: 100,
+      }, { status: 202 }))
+      .mockResolvedValueOnce(Response.json({
+        request_id: 'request-1',
+        status: 'resolving',
+        retry_after_ms: 100,
+      }, { status: 202 }))
+      .mockResolvedValueOnce(Response.json({
+        request_id: 'request-1',
+        draft_id: 'draft-1',
+        status: 'cancelled',
+      }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const cancellation = cancelGenerationRequestAndWait('request-1', 'session-1')
+    let settled = false
+    void cancellation.finally(() => { settled = true })
+
+    await vi.advanceTimersByTimeAsync(100)
+    expect(settled).toBe(false)
+    await vi.advanceTimersByTimeAsync(100)
+
+    await expect(cancellation).resolves.toMatchObject({
+      draft_id: 'draft-1',
+      status: 'cancelled',
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('keeps recovering through transient gateway failures until a draft exists', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(Response.json({
+        error: { code: 'upstream_unavailable', message: 'temporary' },
+      }, { status: 503 }))
+      .mockResolvedValueOnce(Response.json({
+        request_id: 'request-2',
+        status: 'resolving',
+        retry_after_ms: 100,
+      }, { status: 202 }))
+      .mockResolvedValueOnce(Response.json({
+        request_id: 'request-2',
+        draft_id: 'draft-2',
+        status: 'running',
+        media_type: 'video',
+        preview_url: '/admin/draft/draft-2/preview',
+      }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const recovery = waitForGenerationRequestDraft('request-2', 'session-2')
+    await vi.advanceTimersByTimeAsync(100)
+    await vi.advanceTimersByTimeAsync(100)
+
+    await expect(recovery).resolves.toMatchObject({
+      draft_id: 'draft-2',
+      status: 'running',
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(3)
   })
 
   it('generates request IDs within the server validation contract', () => {
