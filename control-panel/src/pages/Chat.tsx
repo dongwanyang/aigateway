@@ -4,6 +4,7 @@ import { useAuth } from '@/contexts/AuthContext'
 import { useQuery } from '@tanstack/react-query'
 import { getGenerationPresets } from '@/api/client'
 import { queryKeys } from '@/query/keys'
+import { cancelLatestSessionGeneration } from '@/services/cancelSessionGeneration'
 import SessionList from '@/components/chat/SessionList'
 import ChatTimeline from '@/components/chat/ChatTimeline'
 import ChatComposer from '@/components/chat/ChatComposer'
@@ -120,6 +121,14 @@ export default function Chat() {
     void send(text, opts)
   }
 
+  const handleStop = () => {
+    if (streaming) {
+      stop()
+      return
+    }
+    if (activeId) void cancelLatestSessionGeneration(activeId)
+  }
+
   return (
     <div className="flex" style={{ height: chatHeight }}>
       <SessionList
@@ -195,7 +204,7 @@ export default function Chat() {
             disabled={false}
             sourceImageMode={Boolean(selectedVideoSource)}
             onSend={handleSend}
-            onStop={stop}
+            onStop={handleStop}
             presets={Array.isArray(presetsQuery.data) ? presetsQuery.data : []}
             presetsLoading={presetsQuery.isLoading || presetsQuery.isFetching}
             presetsError={presetsQuery.error instanceof Error ? presetsQuery.error.message : null}
