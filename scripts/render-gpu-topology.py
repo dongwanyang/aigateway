@@ -303,7 +303,7 @@ def _remap_uuid_selector(
     if value in (None, "auto"):
         return "auto"
     if not isinstance(value, list):
-        return value
+        raise RuntimeError(f"{field} must be 'auto' or a UUID list")
 
     remapped: list[str] = []
     unresolved: list[str] = []
@@ -384,14 +384,19 @@ def _select_devices(
     selector_name: str,
 ) -> list[dict[str, Any]]:
     selector = scheduler.get(selector_name, "auto")
+    if selector not in (None, "auto") and not isinstance(selector, list):
+        raise RuntimeError(f"{selector_name} must be 'auto' or a UUID list")
     selected_uuids = (
         {str(item) for item in selector}
         if isinstance(selector, list)
         else None
     )
+    overrides = scheduler.get("device_overrides", [])
+    if not isinstance(overrides, list):
+        raise RuntimeError("device_overrides must be a list")
     disabled = {
         str(item.get("uuid"))
-        for item in scheduler.get("device_overrides", [])
+        for item in overrides
         if isinstance(item, dict) and item.get("enabled") is False
     }
     return [
