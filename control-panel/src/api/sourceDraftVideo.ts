@@ -5,9 +5,11 @@ export interface CreateSourceDraftVideoRequest {
   durationSeconds: 3 | 5 | 8
   fps: number
   chatSessionId: string
+  requestId: string
 }
 
 export interface SourceDraftVideoResponse {
+  request_id: string
   source_draft_id: string
   draft_id: string
   status: string
@@ -59,7 +61,10 @@ export async function createVideoDraftFromSource(
     {
       method: 'POST',
       credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Request-ID': request.requestId,
+      },
       body: JSON.stringify({
         motion_prompt: request.motionPrompt,
         duration_seconds: request.durationSeconds,
