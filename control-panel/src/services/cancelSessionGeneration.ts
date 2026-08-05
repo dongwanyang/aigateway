@@ -47,6 +47,11 @@ function patchSessionMessage(
   try { persistSessions(next) } catch { /* UI state remains authoritative */ }
 }
 
+function cancellationErrorCode(error: unknown): string {
+  const code = (error as Error & { code?: unknown })?.code
+  return typeof code === 'string' ? code : ''
+}
+
 async function cancelMessageGeneration(
   sessionId: string,
   message: ChatPageMessage,
@@ -95,18 +100,35 @@ async function cancelMessageGeneration(
     return true
   } catch (error) {
     const reason = error instanceof Error ? error.message : '取消失败'
-    useChatStore.getState().setError(`停止生成失败: ${reason}`)
+    const unconfirmed = cancellationErrorCode(error) === (
+      'comfyui_cancellation_unconfirmed'
+    )
+    useChatStore.getState().setError(
+      unconfirmed
+        ? 'ComfyUI 未确认任务已停止，任务将继续运行并保持跟踪。'
+        : `停止生成失败: ${reason}`,
+    )
     patchSessionMessage(sessionId, message.id, current => ({
       ...current,
-      content: current.content === '正在停止…' ? '停止失败，任务仍在运行' : current.content,
-      error: true,
+      content: current.content === '正在停止…'
+        ? unconfirmed
+          ? '停止未确认，任务继续运行'
+          : '停止失败，任务仍在运行'
+        : current.content,
+      error: !unconfirmed,
       incomplete: false,
       awaitingDraft: Boolean(current.awaitingDraft || current.draft),
       awaitingDraftSince: current.awaitingDraftSince ?? Date.now(),
       draft: current.draft ? {
         ...current.draft,
-        stage: current.draft.stage === 'cancelling' ? 'running' : current.draft.stage,
-        errorMessage: `停止失败: ${reason}`,
+        stage: unconfirmed
+          ? 'cancellation_unconfirmed'
+          : current.draft.stage === 'cancelling'
+            ? 'running'
+            : current.draft.stage,
+        errorMessage: unconfirmed
+          ? '停止未确认，任务继续运行'
+          : `停止失败: ${reason}`,
       } : current.draft,
     }))
     return false
