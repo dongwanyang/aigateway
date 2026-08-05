@@ -32,6 +32,12 @@ from fastapi.responses import JSONResponse
 
 from aigateway_core.dispatch.classifier import classify_request
 from aigateway_core.dispatch.context import PipelineContext, RequestContext
+from aigateway_core.pipelines.generation._common.image_reference import (
+    REFERENCE_IMAGE_REQUIRED,
+    REFERENCE_IMAGE_REQUIRED_MESSAGE,
+    latest_user_text,
+    missing_required_image_reference,
+)
 from aigateway_core.prefix.cache.cache_keys import _model_family as _cache_model_family
 
 logger = logging.getLogger(__name__)
@@ -322,6 +328,9 @@ class RequestDispatcher:
         # the complete pre-PII user message here would expose unnecessary text
         # to every generation plugin.
         reference_image_urls = _extract_reference_image_urls(body.messages)
+        # Capture the raw user turn before media optimization and PII sanitizing
+        # rewrite it, so anaphora detection sees what the user actually typed.
+        latest_user_prompt = latest_user_text(body.messages)
 
         # ===== 共用前置 1: Media Optimization =====
         # 多模态 content(图片/音频/视频)先转文本,PII 才能扫到图片 OCR 出的敏感文本。
@@ -413,6 +422,56 @@ class RequestDispatcher:
             getattr(body, "model", None),
             getattr(body, "stream", False),
         )
+
+        # ===== 图生视频引用门槛（fail closed，必须在 engine/配额之前）=====
+        # 指代了"这张图"却没有上传图片或 source_draft_id 时拒绝请求。放在这里而不是
+        # 插件里，是为了在 AI Director 花掉一次 LLM 调用和 GPU 排队之前就返回。
+        generation_options = (
+            body.generation_options.model_dump(exclude_none=True)
+            if getattr(body, "generation_options", None) is not None
+            and hasattr(body.generation_options, "model_dump")
+            else (getattr(body, "generation_options", None) or {})
+        )
+        if missing_required_image_reference(
+            pipeline_kind=pipeline_kind,
+            prompt_text=latest_user_prompt,
+            reference_image_urls=reference_image_urls,
+            source_draft_id=(
+                generation_options.get("source_draft_id")
+                if isinstance(generation_options, dict)
+                else None
+            ),
+        ):
+            _emit_stage(
+                request.state.trace_id,
+                "draft",
+                "draft_workflow.reference_image_required",
+                0,
+                "error",
+                payload={"pipeline_kind": pipeline_kind},
+                dimension="bridge",
+            )
+            plugin_trace.append({
+                "plugin_name": "video_reference_guard",
+                "duration_ms": 0,
+                "status": "rejected",
+            })
+            request.state.plugin_trace = plugin_trace
+            await _record_request_log(
+                request=request, method="POST",
+                endpoint="/v1/chat/completions",
+                status_code=400, duration_ms=0, model=body.model,
+                cache_hit=False, cache_tier=None,
+            )
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": {
+                        "code": REFERENCE_IMAGE_REQUIRED,
+                        "message": REFERENCE_IMAGE_REQUIRED_MESSAGE,
+                    }
+                },
+            )
 
         engine = self.understanding_engine if pipeline_kind == "understanding" else self.generation_engine
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import logging
 import math
 import os
 import time
@@ -13,6 +14,8 @@ from typing import Any
 from aigateway_core.pipelines.generation._common.exceptions import DraftWorkflowError
 
 from . import _draft_generator_impl as _impl
+
+logger = logging.getLogger(__name__)
 
 _CONFIGURATION_ERROR = (
     "config_missing:generation_optimization.draft_workflow.store_dir"
@@ -202,10 +205,37 @@ class DraftGeneratorStrategy(_impl.DraftGeneratorStrategy):
             draft.previews[0]
         ).hexdigest()
         params["source_image_frozen_draft_id"] = draft.draft_id
-        params["source_kind"] = cls._source_kind(draft)
+        source_kind = cls._source_kind(draft)
+        params["source_kind"] = source_kind
+        # Freezing happens exactly once per video draft identity, so this is the
+        # single place that can attribute a keyframe to its origin. A spike in
+        # generated_keyframe for image-to-video requests is the signal that
+        # reference images are being dropped again.
+        try:
+            from aigateway_core.pipelines.generation._common.metrics import (
+                get_prometheus_registry,
+            )
+
+            registry = get_prometheus_registry()
+            registry.inc_video_reference_source(source_kind)
+            registry.inc_video_keyframe("success")
+        except Exception:  # observability must not break keyframe freezing
+            logger.debug("video keyframe metric update failed")
 
     @staticmethod
-    def _validate_frozen_video_keyframe(draft: Any) -> None:
+    def _record_integrity_mismatch() -> None:
+        """Count rejected confirmations without letting metrics break the guard."""
+        try:
+            from aigateway_core.pipelines.generation._common.metrics import (
+                get_prometheus_registry,
+            )
+
+            get_prometheus_registry().inc_video_keyframe_integrity_mismatch()
+        except Exception:  # observability must never weaken the integrity guard
+            logger.debug("video keyframe mismatch metric update failed")
+
+    @classmethod
+    def _validate_frozen_video_keyframe(cls, draft: Any) -> None:
         """Validate frozen video input before acquiring a generation worker."""
         if draft.media_type != "video":
             return
@@ -219,10 +249,12 @@ class DraftGeneratorStrategy(_impl.DraftGeneratorStrategy):
 
         frozen_draft_id = str(params.get("source_image_frozen_draft_id") or "")
         if frozen_draft_id and frozen_draft_id != draft.draft_id:
+            cls._record_integrity_mismatch()
             raise DraftWorkflowError("video_keyframe_integrity_mismatch")
 
         actual_hash = hashlib.sha256(draft.previews[0]).hexdigest()
         if not hmac.compare_digest(actual_hash, expected_hash):
+            cls._record_integrity_mismatch()
             raise DraftWorkflowError("video_keyframe_integrity_mismatch")
 
     async def _store_draft(self, draft, ttl_seconds):

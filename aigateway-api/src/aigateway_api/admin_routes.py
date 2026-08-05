@@ -3479,6 +3479,43 @@ async def delete_session_drafts(
     return {"session_id": session_id, "deleted_count": deleted_count}
 
 
+@router.post("/draft/{draft_id}/cancel")
+async def cancel_draft(
+    draft_id: str,
+    _auth: dict[str, Any] = Depends(authenticate_admin),
+):
+    """取消进行中的草稿，停止后台任务与 ComfyUI 作业.
+
+    前端中止请求（停止按钮/关闭页面）时调用。没有这个端点时草稿会变成孤儿任务
+    继续占用 GPU，把前端仍在轮询的草稿挤到 generation_wait_timeout。
+
+    幂等：已处于终态的草稿返回 cancelled=false，不报错。
+    """
+    try:
+        strategy = _get_draft_strategy()
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": {"code": "draft_unavailable", "message": str(exc)}},
+        ) from exc
+
+    draft_data = await strategy.get_draft(draft_id)
+    if draft_data is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": {
+                    "code": "draft_not_found",
+                    "message": f"Draft '{draft_id}' not found",
+                }
+            },
+        )
+    _assert_draft_owner(draft_data, _auth, action="cancel it")
+
+    cancelled = await strategy.cancel_draft(draft_id)
+    return {"draft_id": draft_id, "cancelled": cancelled}
+
+
 @router.post("/draft/{draft_id}/reject")
 async def reject_draft(
     draft_id: str,

@@ -3,6 +3,7 @@ import { requestChatCompletion } from '@/api/consoleChat'
 import type { ChatReferenceImage, GenerationOptions } from '@/types'
 import {
   getDraftResult,
+  cancelDraft,
   confirmDraft,
   rejectDraft,
   deleteSessionDrafts,
@@ -98,6 +99,13 @@ export function useChatSessions(): UseChatSessions {
   const setResumePollingKey = useChatStore(state => state.setResumePollingKey)
 
   const abortRef = useRef<AbortController | null>(null)
+  // Draft currently owned by this client. Stopping must cancel it server-side,
+  // otherwise the backend keeps generating for a client that already gave up.
+  const activeDraftIdRef = useRef<string | null>(null)
+  // Set when stop() lands while the POST is still in flight: the draft id is not
+  // known yet, so cancel it as soon as the response arrives.
+  const cancelOnArrivalRef = useRef(false)
+  const awaitingResponseRef = useRef(false)
   const inflightRef = useRef(false)
   const pendingAssistantIdRef = useRef<string | null>(null)
   const resumeSessionRef = useRef<string | null>(null)
@@ -215,13 +223,33 @@ export function useChatSessions(): UseChatSessions {
     patchActiveMessages(msgs => msgs.map(m => (m.id === msgId ? updater(m) : m)))
   }, [patchActiveMessages])
 
+  const releaseActiveDraft = useCallback(() => {
+    const draftId = activeDraftIdRef.current
+    activeDraftIdRef.current = null
+    if (!draftId) return
+    void cancelDraft(draftId).catch(e => {
+      console.warn('取消草稿失败:', e instanceof Error ? e.message : e)
+    })
+  }, [])
+
   const stop = useCallback(() => {
+    if (awaitingResponseRef.current) {
+      // Aborting now would discard the response that carries the draft id, so
+      // the backend would keep generating with nobody able to cancel it. That
+      // orphan is what starved the drafts the UI was still polling. Let the
+      // response land; send() cancels the draft the moment the id is known.
+      cancelOnArrivalRef.current = true
+      resumeSessionRef.current = null
+      setStreaming(false)
+      return
+    }
+    releaseActiveDraft()
     abortRef.current?.abort()
     abortRef.current = null
     inflightRef.current = false
     resumeSessionRef.current = null
     setStreaming(false)
-  }, [setStreaming])
+  }, [releaseActiveDraft, setStreaming])
 
   const newSession = useCallback(() => {
     if (streaming) stop()
@@ -283,6 +311,7 @@ export function useChatSessions(): UseChatSessions {
       })
     })
     if (result.kind === 'duplicate') return
+    if (activeDraftIdRef.current === draftId) activeDraftIdRef.current = null
     patchMessage(msgId, message => {
       if (message.draft?.draftId !== draftId) return message
       if (result.kind === 'ready') {
@@ -366,6 +395,8 @@ export function useChatSessions(): UseChatSessions {
     setStreaming(true)
     const controller = new AbortController()
     abortRef.current = controller
+    cancelOnArrivalRef.current = false
+    awaitingResponseRef.current = true
     if (isResume) resumeSessionRef.current = activeId
 
     try {
@@ -379,8 +410,28 @@ export function useChatSessions(): UseChatSessions {
         },
         controller.signal,
       )
+      awaitingResponseRef.current = false
 
       if (resp.kind === 'draft') {
+        // The user stopped while the request was still in flight. The draft id
+        // only exists now, so this is the first moment it can be cancelled.
+        if (cancelOnArrivalRef.current) {
+          cancelOnArrivalRef.current = false
+          void cancelDraft(resp.draftId).catch(e => {
+            console.warn('取消草稿失败:', e instanceof Error ? e.message : e)
+          })
+          patchMessage(assistantId, m => ({
+            ...m,
+            content: m.content || '已停止',
+            awaitingDraft: false,
+          }))
+          setPendingAssistantId(null)
+          flushToStorage()
+          setStreaming(false)
+          abortRef.current = null
+          inflightRef.current = false
+          return
+        }
         const draft: ChatDraftState = {
           draftId: resp.draftId,
           previewUrl: resp.previewUrl,
@@ -395,12 +446,24 @@ export function useChatSessions(): UseChatSessions {
           awaitingDraft: true,
           awaitingDraftSince: Date.now(),
         }))
+        activeDraftIdRef.current = resp.draftId
         setPendingAssistantId(null)
         flushToStorage()
         setStreaming(false)
         abortRef.current = null
         inflightRef.current = false
         void pollDraftPreview(resp.draftId, assistantId)
+        return
+      }
+
+      // stop() during the request turned out to hit a text stream, not a draft:
+      // there is no server-side draft to cancel, so drop the stream instead.
+      if (cancelOnArrivalRef.current) {
+        cancelOnArrivalRef.current = false
+        controller.abort()
+        setStreaming(false)
+        setPendingAssistantId(null)
+        flushToStorage()
         return
       }
 
@@ -445,6 +508,8 @@ export function useChatSessions(): UseChatSessions {
       setPendingAssistantId(null)
       flushToStorage()
     } finally {
+      awaitingResponseRef.current = false
+      cancelOnArrivalRef.current = false
       if (abortRef.current === controller) {
         abortRef.current = null
         inflightRef.current = false

@@ -25,6 +25,17 @@ _PRESET_LANGUAGES: dict[str, tuple[str, ...]] = {
     "wan2.2-ti2v-5b": ("zh", "en"),
 }
 
+# Keyframe generation always runs an *image* model. For a video request
+# ``preset_id`` names the video model (Wan), which says nothing about the
+# keyframe stage, so only image presets may raise the keyframe capability.
+# Anything else falls back to the default SDXL keyframe stage, which is
+# English-only; the plan then records an explicit language_fallback_reason.
+_KEYFRAME_PRESET_LANGUAGES: dict[str, tuple[str, ...]] = {
+    "sdxl-draft": ("en",),
+    "sdxl-creative-refine": ("en",),
+    "qwen-image": ("zh", "en"),
+}
+
 
 class AIDirectorPlugin:
     """Route image and video requests through the appropriate Director method."""
@@ -187,10 +198,7 @@ class AIDirectorPlugin:
                 or ctx.request.get("source_image_sha256")
             ),
             source_language=self._optional_language(options.get("language")),
-            # The current keyframe stage uses SDXL. Wan itself supports zh/en.
-            keyframe_languages=self._language_list(
-                options.get("keyframe_languages"), default=("en",)
-            ),
+            keyframe_languages=self._keyframe_target_languages(options),
             motion_languages=self._language_list(
                 options.get("motion_languages"), default=("zh", "en")
             ),
@@ -231,6 +239,27 @@ class AIDirectorPlugin:
         if preset_id.startswith("checkpoint."):
             return ("en",)
         return _PRESET_LANGUAGES.get(preset_id, ("en",))
+
+    @classmethod
+    def _keyframe_target_languages(
+        cls,
+        options: dict[str, Any],
+    ) -> tuple[str, ...]:
+        """Report the languages the keyframe model actually accepts.
+
+        The keyframe stage runs an image model, so its language capability must
+        come from that model rather than a fixed value. Hard-coding ``("en",)``
+        translated Chinese keyframe prompts even when the request explicitly
+        selected Qwen-Image, which accepts Chinese.
+
+        On an SDXL-only keyframe stage Chinese is downgraded to English and the
+        plan records an explicit ``language_fallback_reason`` instead of failing.
+        """
+        explicit = options.get("keyframe_languages")
+        if explicit:
+            return cls._language_list(explicit, default=("en",))
+        preset_id = str(options.get("preset_id") or "")
+        return _KEYFRAME_PRESET_LANGUAGES.get(preset_id, ("en",))
 
     @staticmethod
     def _language_list(

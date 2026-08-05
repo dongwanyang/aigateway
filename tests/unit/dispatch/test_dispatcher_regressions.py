@@ -431,3 +431,137 @@ async def test_stream_unpriced_cost_is_safe_for_numeric_sinks():
     assert key_store.record_request_cost.await_args.kwargs["cost_usd"] == 0.0
     key_store.increment_usage.assert_awaited_once()
     assert key_store.increment_usage.await_args.kwargs["cost"] == 0.0
+
+
+async def _dispatch_video(body, *, classification="generation:video"):
+    """Run dispatch far enough to hit the image-reference guard."""
+    request = SimpleNamespace(
+        headers={},
+        state=SimpleNamespace(trace_id="trace-video-guard", api_key_data={}),
+    )
+    dispatcher = RequestDispatcher({"generation_engine": object()})
+    expected_response = JSONResponse({"ok": True})
+    messages = body.messages
+
+    with (
+        patch(
+            "aigateway_api.openai_compat._apply_media_optimization",
+            new=AsyncMock(return_value={"messages": messages, "meta": {}}),
+        ),
+        patch(
+            "aigateway_api.openai_compat._apply_pii_detection",
+            new=AsyncMock(return_value={"messages": messages, "meta": {}}),
+        ),
+        patch(
+            "aigateway_api.openai_compat._record_request_log",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "aigateway_core.dispatch.dispatcher.classify_request",
+            new=AsyncMock(return_value=ClassificationResult(classification)),
+        ),
+        patch.object(
+            dispatcher,
+            "_dispatch_generation",
+            new=AsyncMock(return_value=expected_response),
+        ) as dispatch_generation,
+    ):
+        response = await dispatcher._dispatch(body, request)
+    return response, dispatch_generation, expected_response
+
+
+@pytest.mark.asyncio
+async def test_video_request_naming_a_missing_image_fails_closed():
+    """An unsupplied "此图片" must be rejected before any generation work.
+
+    Regression: the request reached the pipeline, the Director invented a fresh
+    subject, and ComfyUI rendered an unrelated keyframe while the user waited for
+    a video of their own image.
+    """
+    body = SimpleNamespace(
+        messages=[{"role": "user", "content": "以此图片生成5秒视频"}],
+        model="auto",
+        stream=True,
+        generation_options=None,
+    )
+
+    response, dispatch_generation, _ = await _dispatch_video(body)
+
+    assert response.status_code == 400
+    payload = json.loads(response.body)
+    assert payload["error"]["code"] == "reference_image_required"
+    # Nothing may reach the generation pipeline: no Director spend, no GPU queue.
+    dispatch_generation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_video_request_with_source_draft_id_proceeds():
+    body = SimpleNamespace(
+        messages=[{"role": "user", "content": "以此图片生成5秒视频"}],
+        model="auto",
+        stream=True,
+        generation_options=SimpleNamespace(
+            model_dump=lambda exclude_none=True: {"source_draft_id": "img-1"}
+        ),
+    )
+
+    response, dispatch_generation, expected = await _dispatch_video(body)
+
+    assert response is expected
+    dispatch_generation.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_text_to_video_without_anaphora_proceeds():
+    body = SimpleNamespace(
+        messages=[{"role": "user", "content": "生成一只柯基摇尾巴向镜头跑来，5秒"}],
+        model="auto",
+        stream=True,
+        generation_options=None,
+    )
+
+    response, dispatch_generation, expected = await _dispatch_video(body)
+
+    assert response is expected
+    dispatch_generation.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_image_question_about_a_picture_is_not_guarded():
+    """Only generation:video is guarded; questions are answered, not rejected."""
+    body = SimpleNamespace(
+        messages=[{"role": "user", "content": "请解释这张图片和视频的区别"}],
+        model="auto",
+        stream=True,
+        generation_options=None,
+    )
+    request = SimpleNamespace(
+        headers={},
+        state=SimpleNamespace(trace_id="trace-understanding", api_key_data={}),
+    )
+    dispatcher = RequestDispatcher({"understanding_engine": object()})
+    expected_response = JSONResponse({"ok": True})
+
+    with (
+        patch(
+            "aigateway_api.openai_compat._apply_media_optimization",
+            new=AsyncMock(return_value={"messages": body.messages, "meta": {}}),
+        ),
+        patch(
+            "aigateway_api.openai_compat._apply_pii_detection",
+            new=AsyncMock(return_value={"messages": body.messages, "meta": {}}),
+        ),
+        patch(
+            "aigateway_core.dispatch.dispatcher.classify_request",
+            new=AsyncMock(return_value=ClassificationResult("understanding")),
+        ),
+        patch.object(
+            dispatcher,
+            "_dispatch_understanding",
+            new=AsyncMock(return_value=expected_response),
+        ) as dispatch_understanding,
+    ):
+        response = await dispatcher._dispatch(body, request)
+
+    assert response is expected_response
+    dispatch_understanding.assert_awaited_once()

@@ -37,6 +37,7 @@ from PIL import Image, ImageOps
 from aigateway_core.pipelines.generation._common.config import DraftWorkflowConfig
 from aigateway_core.pipelines.generation._common.exceptions import DraftWorkflowError
 from aigateway_core.pipelines.generation._common.models import (
+    DRAFT_STATUS_CANCELLED,
     DRAFT_STATUS_COMPLETED,
     DRAFT_STATUS_CONFIRMED,
     DRAFT_STATUS_CONFIRMING,
@@ -49,6 +50,9 @@ from aigateway_core.pipelines.generation._common.models import (
     DraftResult,
     GenerationRequest,
     UpscaleResult,
+)
+from aigateway_core.pipelines.generation._common.video_observability import (
+    video_submission_fields,
 )
 from aigateway_core.prefix.media.types import MediaContent, MediaType
 from aigateway_core.shared.comfyui_model_discovery import (
@@ -340,6 +344,99 @@ class DraftGeneratorStrategy:
         )
 
         return draft
+
+    async def cancel_draft(self, draft_id: str) -> bool:
+        """Abandon an in-progress draft and stop the work it owns.
+
+        A draft runs in a detached background task, so a client that goes away
+        (stop button, tab close, navigation) used to leave the generation running
+        to completion. On a single-GPU host those orphans starve the drafts the
+        UI is still polling, so cancellation has to reach the background task and
+        the ComfyUI queue, not just the stored status.
+
+        Returns whether the draft moved to ``cancelled``. Already-terminal drafts
+        report ``False`` so repeated calls stay idempotent.
+        """
+        draft = await self._load_draft(draft_id)
+        if draft is None:
+            return False
+        if draft.status not in {
+            DRAFT_STATUS_QUEUED,
+            DRAFT_STATUS_RUNNING,
+            DRAFT_STATUS_GENERATING,
+            DRAFT_STATUS_REFINING,
+        }:
+            return False
+
+        trace_id = str(draft.generation_params.get("trace_id") or "")
+        prompt_id = str(draft.comfy_prompt_id or "")
+
+        # Mark cancelled first: the preview endpoint then reports a terminal
+        # state even if stopping the worker or ComfyUI takes a moment.
+        draft.status = DRAFT_STATUS_CANCELLED
+        draft.stage = "cancelled"
+        draft.error = "draft_cancelled"
+        await self._store_draft(
+            draft, max(1, int(draft.expires_at - time.time()))
+        )
+
+        owned_task_names = {
+            f"draft-generate-{draft_id}",
+            f"draft-regenerate-{draft_id}",
+            f"draft-confirm-{draft_id}",
+        }
+        for task in tuple(self._bg_tasks):
+            if task.done() or task.get_name() not in owned_task_names:
+                continue
+            task.cancel()
+
+        if prompt_id:
+            bound_worker = (
+                self._gpu_coordinator.get_worker(draft.worker_id)
+                if self._gpu_coordinator is not None and draft.worker_id
+                else None
+            )
+            try:
+                await self._cancel_comfyui_workflow(
+                    prompt_id,
+                    server_url=(
+                        bound_worker.server_url
+                        if bound_worker is not None
+                        else None
+                    ),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # The stored status is already terminal; a stuck ComfyUI job is
+                # reclaimed by the queue probe rather than blocking the caller.
+                logger.warning(
+                    "generation_optimization.draft_generator.cancel_comfyui_failed",
+                    extra={
+                        "draft_id": draft_id,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+
+        if self._task_tracker is not None:
+            try:
+                await self._task_tracker.update_status(
+                    "draft", draft_id, "cancelled"
+                )
+            except Exception as exc:
+                logger.debug("TaskTracker update cancelled failed: %s", exc)
+
+        await self._emit_draft_trace(
+            trace_id,
+            "draft.cancelled",
+            status="error",
+            payload={"draft_id": draft_id, "had_comfy_prompt": bool(prompt_id)},
+        )
+        logger.info(
+            "generation_optimization.draft_generator.draft_cancelled",
+            extra={"draft_id": draft_id, "comfy_prompt_id": prompt_id},
+        )
+        return True
 
     async def _emit_draft_trace(
         self,
@@ -1904,6 +2001,16 @@ return {3, raw}
             },
             stage="comfyui",
         )
+
+        # One structured line per Wan submission, so a wrong subject/length can be
+        # traced back to its input image, prompt languages and frame count without
+        # reconstructing state from Redis. Keyframe drafts are covered by the
+        # draft_generator events above.
+        if stage == "refining" and draft.media_type == "video":
+            logger.info(
+                "video_generation.workflow_submitted",
+                extra=video_submission_fields(draft, prompt_id=prompt_id),
+            )
 
     def _comfy_client_id(self, draft_id: str | None, stage: str) -> str:
         safe_draft = draft_id or uuid.uuid4().hex

@@ -535,7 +535,11 @@ generation_optimization:
       sdxl_required_vram_gb: 8 # SDXL 预设声明的最低可用显存（GB），用于异构 GPU 选卡
       upscale_required_vram_gb: 4 # RealESRGAN 放大预设声明的最低可用显存（GB）
       qwen_image_enabled: true # 是否启用 Qwen-Image 工作流
-      qwen_image_auto_select: false  # T4 默认走 SDXL；仅显式选择 Qwen 或主动开启自动选择
+      # T4 默认走 SDXL；仅显式选择 Qwen 或主动开启自动选择。
+      # 注意语言影响：SDXL 只声明 en，因此关键帧阶段（含图生视频的关键帧）会把中文
+      # 提示词回退翻译成英文，并在草稿快照里记录 language_fallback_reason。需要中文
+      # 关键帧请显式使用 preset_id=qwen-image 或将本项设为 true（Qwen 需 ~12GB 显存）。
+      qwen_image_auto_select: false
       qwen_image_diffusion_model: "qwen_image_fp8_e4m3fn.safetensors" # Qwen-Image 扩散模型
       qwen_image_text_encoder: "qwen_2.5_vl_7b_fp8_scaled.safetensors" # Qwen-Image 文本编码器
       qwen_image_vae: "qwen_image_vae.safetensors" # Qwen-Image VAE

@@ -92,6 +92,12 @@ export interface GenerationOptions {
   height?: number
   duration_seconds?: 3 | 5 | 8
   fps?: number
+  /**
+   * Explicit source image for image-to-video. Referring to an earlier image by
+   * text alone is rejected with `reference_image_required`; the draft id must be
+   * passed here (or via `POST /admin/draft/{id}/video`).
+   */
+  source_draft_id?: string
 }
 
 export interface ChatReferenceImage {

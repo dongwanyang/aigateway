@@ -908,13 +908,22 @@ class GpuResourceCoordinator:
         owned and no live Gateway leases remain, and 2 while existing leases are
         still draining. The drain is installed before checking leases so new
         Gateway claims cannot continuously starve generation.
+
+        A post-generation ``comfyui_idle`` reservation is claimable: it exists to
+        keep model weights warm between bursts, not to delay the next queued
+        generation. Leaving it in place made every queued generation wait out the
+        full ``comfyui_idle_reservation_seconds`` window on single-GPU hosts. An
+        in-flight ``comfyui_release:*`` unload still blocks, so stealing the
+        reservation cannot race a model eviction.
         """
         device = self._devices.get(device_uuid)
         if self._redis is None:
             return 2 if device is not None and device.gateway_leases else 1
         script = """
         local owner = redis.call('get', KEYS[2])
-        if owner and owner ~= ARGV[2] then return 0 end
+        if owner and owner ~= ARGV[2] and owner ~= 'comfyui_idle' then
+          return 0
+        end
         redis.call('set', KEYS[2], ARGV[2], 'EX', ARGV[3])
         local active = 0
         local lease_ids = redis.call('smembers', KEYS[1])
@@ -1269,6 +1278,10 @@ class GpuResourceCoordinator:
             async with self._condition:
                 device.generation_active += 1
                 worker.queue_running += 1
+                # The device is generating again, so any idle reservation left by
+                # the previous generation is over. Clearing it keeps the reported
+                # state and the Gateway eligibility checks consistent.
+                device.reserved_until = 0.0
                 generation_started = True
             logger.info(
                 "GPU generation worker allocated",

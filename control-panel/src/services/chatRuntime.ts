@@ -57,6 +57,12 @@ export function describeDraftFailure(message: string): string {
   if (normalized.includes('comfyui_qwen_image_reference_unsupported')) {
     return '当前 Qwen 图片工作流暂不支持参考图。请将图片模型预设切换为 SDXL 后重试。（comfyui_qwen_image_reference_unsupported）'
   }
+  if (normalized.includes('draft_cancelled')) {
+    return '生成已取消。'
+  }
+  if (normalized.includes('reference_image_required')) {
+    return '未找到参考图片，请上传图片或从图片结果点击“基于此图生成视频”。（reference_image_required）'
+  }
   return message
 }
 
