@@ -1,9 +1,10 @@
 name: PR40 Integration Helper
 
 on:
-  pull_request_target:
+  push:
     branches: [main]
-    types: [opened, reopened, synchronize]
+    paths:
+      - '.github/workflows/pr40-integration-helper.yml'
 
 permissions:
   contents: read
@@ -12,7 +13,6 @@ permissions:
 
 jobs:
   diagnose:
-    if: github.event.pull_request.number == 40
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
