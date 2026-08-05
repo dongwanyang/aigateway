@@ -336,16 +336,16 @@ export function useChatSessions(): UseChatSessions {
     const assistantId = nextMessageId()
     const assistantMsg: ChatPageMessage = { id: assistantId, role: 'assistant', content: '', ts: Date.now() }
 
-    patchActiveMessages(msgs => opts?.resume ? [...msgs, assistantMsg] : [...msgs, userMsg, assistantMsg])
-    setPendingAssistantId(assistantId)
-
+    // Snapshot history before mutating sessionsRef. patchActiveMessages updates the
+    // ref synchronously, so reading it afterwards would include userMsg and then
+    // append the same message again when building the wire payload.
     const cur = sessionsRef.current.find(x => x.id === activeId)
     let baseMsgs = cur?.messages ?? []
     if (isResume && baseMsgs.length > 10) baseMsgs = baseMsgs.slice(-10)
     if (opts?.dropLastAssistant && baseMsgs.length > 0 && baseMsgs[baseMsgs.length - 1].role === 'assistant') {
       baseMsgs = baseMsgs.slice(0, -1)
     }
-    const wireMessages: ChatMessage[] = (opts?.resume ? [...baseMsgs] : [...baseMsgs, userMsg])
+    const wireMessages: ChatMessage[] = (isResume ? [...baseMsgs] : [...baseMsgs, userMsg])
       .filter(m => m.role === 'user' || (m.role === 'assistant' && m.content && !m.draft))
       .map(m => ({
         role: m.role,
@@ -359,6 +359,9 @@ export function useChatSessions(): UseChatSessions {
             ]
           : m.content,
       }))
+
+    patchActiveMessages(msgs => isResume ? [...msgs, assistantMsg] : [...msgs, userMsg, assistantMsg])
+    setPendingAssistantId(assistantId)
 
     setStreaming(true)
     const controller = new AbortController()
