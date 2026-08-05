@@ -7,10 +7,8 @@ const CANCELLABLE_DRAFT_STATUSES = new Set([
   'queued',
   'running',
   'generating',
-  'pending',
   'confirming',
   'refining',
-  'rejecting',
 ])
 const cancellingRequestIds = new Set<string>()
 
