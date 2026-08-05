@@ -10,6 +10,12 @@ from fastapi.responses import JSONResponse
 
 from aigateway_core.dispatch.dispatcher import RequestDispatcher
 
+from .generation_request_state import (
+    REQUEST_RECORD_FAILED,
+    REQUEST_RECORD_NON_DRAFT,
+    terminal_request_status,
+)
+
 _ORIGINAL_ATTR = "_aigateway_original_video_request_guard_dispatch"
 _GUARD_ATTR = "_aigateway_video_request_guard"
 _PENDING_REQUEST_TTL_SECONDS = 300
@@ -140,27 +146,66 @@ def _draft_strategy(request: Any) -> Any | None:
     return strategy
 
 
-async def _register_pending_request(body: Any, request: Any) -> None:
-    """Bind request identity to owner/session before draft creation can race Stop."""
-    strategy = _draft_strategy(request)
-    register = getattr(strategy, "register_request_draft", None)
-    if not callable(register):
-        return
+def _request_identity(body: Any, request: Any) -> tuple[str, str, str | None, str | None]:
     request_id = str(getattr(request.state, "request_id", "") or "")
     session_id = str(_value(body, "chat_session_id", "") or "")
     owner = getattr(request.state, "draft_owner", None)
     owner = owner if isinstance(owner, Mapping) else {}
     user_id = str(owner.get("user_id") or "") or None
     group_id = str(owner.get("group_id") or "") or None
+    return request_id, session_id, user_id, group_id
+
+
+async def _register_request_record(
+    body: Any,
+    request: Any,
+    draft_id: str,
+    *,
+    overwrite_terminal: bool = False,
+) -> None:
+    """Persist one owner-scoped request record without clobbering real drafts."""
+    strategy = _draft_strategy(request)
+    register = getattr(strategy, "register_request_draft", None)
+    if not callable(register):
+        return
+    request_id, session_id, user_id, group_id = _request_identity(body, request)
     if not request_id or not session_id or (not user_id and not group_id):
         return
+
+    resolver = getattr(strategy, "resolve_request", None)
+    if callable(resolver):
+        existing_draft, record = await resolver(request_id)
+        if existing_draft is not None:
+            return
+        existing_marker = str(record.get("draft_id") or "") if isinstance(record, Mapping) else ""
+        existing_terminal = terminal_request_status(record)
+        if existing_marker and not existing_terminal:
+            return
+        if existing_terminal and not overwrite_terminal:
+            return
+
     await register(
         request_id,
-        "",
+        draft_id,
         user_id=user_id,
         group_id=group_id,
         session_id=session_id,
         ttl_seconds=_PENDING_REQUEST_TTL_SECONDS,
+    )
+
+
+async def _register_pending_request(body: Any, request: Any) -> None:
+    """Bind request identity to owner/session before draft creation can race Stop."""
+    await _register_request_record(body, request, "")
+
+
+async def _mark_request_terminal(body: Any, request: Any, marker: str) -> None:
+    """Persist a terminal non-draft/failed result after dispatcher completion."""
+    await _register_request_record(
+        body,
+        request,
+        marker,
+        overwrite_terminal=True,
     )
 
 
@@ -242,19 +287,37 @@ def install_video_request_guard() -> None:
     @functools.wraps(original)
     async def guarded_dispatch(self: Any, body: Any, request: Any) -> Any:
         await _register_pending_request(body, request)
-        source_draft_id = _source_draft_id(body)
-        if source_draft_id:
-            return await _create_source_draft_response(
-                body,
-                request,
-                source_draft_id,
-            )
-        if reference_image_required(body):
-            return _reference_image_error()
-        return await original(self, body, request)
+        try:
+            source_draft_id = _source_draft_id(body)
+            if source_draft_id:
+                response = await _create_source_draft_response(
+                    body,
+                    request,
+                    source_draft_id,
+                )
+            elif reference_image_required(body):
+                response = _reference_image_error()
+            else:
+                response = await original(self, body, request)
+        except Exception:
+            await _mark_request_terminal(body, request, REQUEST_RECORD_FAILED)
+            raise
+
+        marker = (
+            REQUEST_RECORD_FAILED
+            if int(getattr(response, "status_code", 200) or 200) >= 400
+            else REQUEST_RECORD_NON_DRAFT
+        )
+        # Real draft submission replaces the pending record before returning;
+        # _mark_request_terminal detects that draft and leaves it untouched.
+        await _mark_request_terminal(body, request, marker)
+        return response
 
     setattr(guarded_dispatch, _GUARD_ATTR, True)
     RequestDispatcher.dispatch = guarded_dispatch
 
 
-__all__ = ["install_video_request_guard", "reference_image_required"]
+__all__ = [
+    "install_video_request_guard",
+    "reference_image_required",
+]
