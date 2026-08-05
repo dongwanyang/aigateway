@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -80,24 +81,32 @@ async def _fake_original_cancel(
 
 
 @pytest.mark.asyncio
-async def test_cancelled_is_returned_only_after_prompt_release(
+async def test_local_task_is_cancelled_only_after_prompt_release(
     strategy: DraftGeneratorStrategy,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     draft = _running_draft()
     await base_impl.DraftGeneratorStrategy._store_draft(strategy, draft, 3600)
+    cancel_upstream = AsyncMock()
+    monkeypatch.setattr(strategy, "_cancel_comfy_prompt", cancel_upstream)
 
     async def released(*_args, **_kwargs) -> bool:
         return True
 
     monkeypatch.setattr(cancellation, "_prompt_released", released)
+    original = AsyncMock(side_effect=_fake_original_cancel)
 
     result = await cancellation.cancel_draft_verified(
         strategy,
         draft.draft_id,
-        _fake_original_cancel,
+        original,
     )
 
+    cancel_upstream.assert_awaited_once_with(
+        "prompt-1",
+        server_url=None,
+    )
+    original.assert_awaited_once_with(strategy, draft.draft_id)
     assert result.status == DRAFT_STATUS_CANCELLED
     stored = await strategy.get_draft(draft.draft_id)
     assert stored is not None
@@ -106,7 +115,7 @@ async def test_cancelled_is_returned_only_after_prompt_release(
 
 
 @pytest.mark.asyncio
-async def test_unconfirmed_release_restores_prompt_and_fences_worker(
+async def test_unconfirmed_release_keeps_local_task_and_fences_worker(
     strategy: DraftGeneratorStrategy,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -134,11 +143,14 @@ async def test_unconfirmed_release_restores_prompt_and_fences_worker(
             (event, worker_id, device_uuid)
         ),
     )
+    cancel_upstream = AsyncMock()
+    monkeypatch.setattr(strategy, "_cancel_comfy_prompt", cancel_upstream)
 
     async def not_released(*_args, **_kwargs) -> bool:
         return False
 
     monkeypatch.setattr(cancellation, "_prompt_released", not_released)
+    original = AsyncMock(side_effect=_fake_original_cancel)
 
     with pytest.raises(
         DraftWorkflowError,
@@ -147,9 +159,14 @@ async def test_unconfirmed_release_restores_prompt_and_fences_worker(
         await cancellation.cancel_draft_verified(
             strategy,
             draft.draft_id,
-            _fake_original_cancel,
+            original,
         )
 
+    cancel_upstream.assert_awaited_once_with(
+        "prompt-1",
+        server_url="http://comfyui:8188",
+    )
+    original.assert_not_awaited()
     stored = await strategy.get_draft(draft.draft_id)
     assert stored is not None
     assert stored.status == DRAFT_STATUS_RUNNING
@@ -177,11 +194,16 @@ async def test_no_prompt_requires_no_external_verification(
         raise AssertionError("prompt verification must not run without a prompt")
 
     monkeypatch.setattr(cancellation, "_prompt_released", unexpected)
+    cancel_upstream = AsyncMock()
+    monkeypatch.setattr(strategy, "_cancel_comfy_prompt", cancel_upstream)
+    original = AsyncMock(side_effect=_fake_original_cancel)
 
     result = await cancellation.cancel_draft_verified(
         strategy,
         draft.draft_id,
-        _fake_original_cancel,
+        original,
     )
 
+    cancel_upstream.assert_not_awaited()
+    original.assert_awaited_once_with(strategy, draft.draft_id)
     assert result.status == DRAFT_STATUS_CANCELLED
