@@ -25,15 +25,45 @@ def _plugin(config: dict[str, Any], name: str) -> dict[str, Any]:
 
 @contextlib.contextmanager
 def _config_write_lock(path: Path):
-    """Share the runtime config lock used by control-panel transactions."""
+    """Coordinate host refreshes with API writes to a bind-mounted config."""
     lock_path = Path(str(path) + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    with lock_path.open("a+", encoding="utf-8") as sibling_lock:
+        fcntl.flock(sibling_lock.fileno(), fcntl.LOCK_EX)
         try:
-            yield
+            if not path.exists():
+                yield None
+                return
+            with path.open("r+", encoding="utf-8") as config_handle:
+                fcntl.flock(config_handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield config_handle
+                finally:
+                    fcntl.flock(config_handle.fileno(), fcntl.LOCK_UN)
         finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            fcntl.flock(sibling_lock.fileno(), fcntl.LOCK_UN)
+
+
+def _write_locked_yaml(handle: Any, config: dict[str, Any]) -> None:
+    rendered = yaml.safe_dump(config, sort_keys=False, allow_unicode=True)
+    handle.seek(0)
+    original = handle.read()
+    try:
+        handle.seek(0)
+        handle.write(rendered)
+        handle.truncate()
+        handle.flush()
+        os.fsync(handle.fileno())
+    except BaseException:
+        try:
+            handle.seek(0)
+            handle.write(original)
+            handle.truncate()
+            handle.flush()
+            os.fsync(handle.fileno())
+        except BaseException:
+            pass
+        raise
 
 
 def render(
@@ -145,7 +175,7 @@ def render(
     scheduler.setdefault("comfyui_dynamic_vram_enabled", False)
 
     # ``devices`` and ``workers`` are generated from the current host inventory
-    # by render-gpu-topology.py.  They must not survive a switch to CPU, MPS,
+    # by render-gpu-topology.py. They must not survive a switch to CPU, MPS,
     # native ComfyUI, or a remote endpoint, otherwise a stale local UUID could be
     # advertised as runnable after an edition/topology change.
     if not local_comfyui_pool:
@@ -207,10 +237,11 @@ def main() -> int:
     parser.add_argument("--monitoring", action="store_true")
     parser.add_argument("--shared-gpu", action="store_true")
     args = parser.parse_args()
-    # Keep the lock across source read, deployment mutation and atomic replace.
-    # When source == output this prevents a control-panel save from landing
-    # between our read and write and being silently overwritten.
-    with _config_write_lock(args.output):
+    # Keep both the host sibling lock and the bind-mounted config inode lock
+    # across source read, deployment mutation and persistence. When source ==
+    # output this prevents an online control-panel save from being lost and
+    # preserves the inode already mounted in the running Gateway container.
+    with _config_write_lock(args.output) as config_handle:
         config = render(
             args.source,
             edition=args.edition,
@@ -222,7 +253,10 @@ def main() -> int:
             monitoring=args.monitoring,
             shared_gpu=args.shared_gpu,
         )
-        _atomic_dump(args.output, config)
+        if config_handle is None:
+            _atomic_dump(args.output, config)
+        else:
+            _write_locked_yaml(config_handle, config)
     return 0
 
 
