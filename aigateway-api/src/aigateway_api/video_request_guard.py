@@ -116,10 +116,27 @@ def _reference_image_error() -> JSONResponse:
     )
 
 
+def _request_app(request: Any) -> Any | None:
+    """Return the ASGI app without assuming a fully populated Request scope."""
+    scope = getattr(request, "scope", None)
+    if isinstance(scope, Mapping):
+        app = scope.get("app")
+        if app is not None:
+            return app
+    try:
+        return request.app
+    except (AttributeError, KeyError):
+        return None
+
+
 def _draft_strategy(request: Any) -> Any | None:
-    strategy = getattr(request.app.state, "draft_strategy", None)
+    app = _request_app(request)
+    state = getattr(app, "state", None) if app is not None else None
+    if state is None:
+        return None
+    strategy = getattr(state, "draft_strategy", None)
     if strategy is None:
-        strategy = getattr(request.app.state, "draft_generator_strategy", None)
+        strategy = getattr(state, "draft_generator_strategy", None)
     return strategy
 
 
