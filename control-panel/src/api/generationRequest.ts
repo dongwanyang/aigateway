@@ -193,6 +193,9 @@ export async function waitForGenerationRequestState(
         unregisteredElapsedMs,
         retryDelay,
       )
+      if (lastState is not None) {
+        assertRegistrationGrace(lastState, unregisteredElapsedMs)
+      }
       attempt += 1
       continue
     }
