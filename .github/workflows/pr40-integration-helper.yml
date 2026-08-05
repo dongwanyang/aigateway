@@ -3,9 +3,12 @@ name: PR40 Integration Helper
 on:
   pull_request_target:
     branches: [main]
+    types: [opened, reopened, synchronize]
 
 permissions:
   contents: read
+  issues: write
+  pull-requests: write
 
 jobs:
   diagnose:
@@ -16,19 +19,16 @@ jobs:
         with:
           ref: agent/fix-wan22-design-compliance
           fetch-depth: 0
-      - name: Diagnose merge against main
+      - name: Diagnose merge and publish report
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git fetch origin main
           git merge --no-commit --no-ff origin/main || true
-          echo '=== CONFLICT FILES ==='
-          git diff --name-only --diff-filter=U
-          echo '=== CONFLICT STAGES ==='
-          git ls-files -u
-          echo '=== CONFLICT HUNKS ==='
           python3 - <<'PY'
           from pathlib import Path
           import subprocess
@@ -36,21 +36,44 @@ jobs:
           files = subprocess.check_output(
               ['git', 'diff', '--name-only', '--diff-filter=U'], text=True
           ).splitlines()
-          for name in files:
-              print(f'\n##### {name} #####')
-              path = Path(name)
-              if not path.exists():
-                  print('[path absent in worktree]')
-                  continue
-              lines = path.read_text(encoding='utf-8', errors='replace').splitlines()
-              starts = [i for i, line in enumerate(lines) if line.startswith('<<<<<<< ')]
-              for index in starts:
-                  start = max(0, index - 10)
-                  end = min(len(lines), index + 160)
-                  for lineno in range(start, end):
-                      print(f'{lineno + 1:05d}: {lines[lineno]}')
-                      if lines[lineno].startswith('>>>>>>> '):
-                          break
-          if files:
-              raise SystemExit(1)
+          out = [
+              '<!-- pr40-integration-helper -->',
+              '## PR #40 conflict diagnosis',
+              '',
+              f'Base main: `{subprocess.check_output(["git", "rev-parse", "origin/main"], text=True).strip()}`',
+              f'Head: `{subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()}`',
+              '',
+          ]
+          if not files:
+              out.extend(['No merge conflicts detected.', ''])
+          else:
+              out.extend([
+                  f'Conflict files: **{len(files)}**',
+                  '',
+                  '```text',
+                  *files,
+                  '```',
+                  '',
+              ])
+              for name in files:
+                  out.extend([f'### `{name}`', '', '```diff'])
+                  path = Path(name)
+                  if not path.exists():
+                      out.append('[path absent in worktree]')
+                  else:
+                      lines = path.read_text(encoding='utf-8', errors='replace').splitlines()
+                      for index, line in enumerate(lines):
+                          if not line.startswith('<<<<<<< '):
+                              continue
+                          start = max(0, index - 8)
+                          end = min(len(lines), index + 180)
+                          for lineno in range(start, end):
+                              out.append(f'{lineno + 1:05d}: {lines[lineno]}')
+                              if lines[lineno].startswith('>>>>>>> '):
+                                  break
+                  out.extend(['```', ''])
+          Path('/tmp/pr40-conflicts.md').write_text('\n'.join(out), encoding='utf-8')
+          Path('/tmp/pr40-has-conflicts').write_text('1' if files else '0', encoding='utf-8')
           PY
+          gh pr comment 40 --repo dongwanyang/aigateway --body-file /tmp/pr40-conflicts.md
+          test "$(cat /tmp/pr40-has-conflicts)" = 0
