@@ -28,24 +28,27 @@ jobs:
           from pathlib import Path
 
           path = Path('tests/unit/pipeline/test_ai_director_strategy.py')
-          text = path.read_text(encoding='utf-8')
-          obsolete = '''    @pytest.mark.parametrize(
-              "system_prompt",
-              [_REWRITE_SYSTEM_PROMPT, _EXPAND_SYSTEM_PROMPT],
-          )
-          def test_default_system_prompts_require_english_for_sdxl(self, system_prompt):
-              """Default optimization must produce text SDXL's CLIP can understand."""
-              assert "必须使用自然、准确的英文" in system_prompt
-              assert "Subject:" in system_prompt
-              assert "Action:" in system_prompt
-              assert "Environment:" in system_prompt
-              assert "Camera:" in system_prompt
-              assert "只将该文字原样保留" in system_prompt
+          lines = path.read_text(encoding='utf-8').splitlines(keepends=True)
+          target = 'def test_default_system_prompts_require_english_for_sdxl'
+          matches = [index for index, line in enumerate(lines) if target in line]
+          if len(matches) != 1:
+              raise SystemExit(f'expected one obsolete test, found {len(matches)}')
 
-          '''
-          if text.count(obsolete) != 1:
-              raise SystemExit('obsolete English-only test block was not found exactly once')
-          path.write_text(text.replace(obsolete, ''), encoding='utf-8')
+          function_index = matches[0]
+          start = function_index
+          while start >= 0 and not lines[start].startswith('    @pytest.mark.parametrize'):
+              start -= 1
+          if start < 0:
+              raise SystemExit('obsolete test decorator was not found')
+
+          end = function_index + 1
+          while end < len(lines) and not lines[end].startswith('    @pytest.mark.'):
+              end += 1
+          if end >= len(lines):
+              raise SystemExit('next test decorator was not found')
+
+          del lines[start:end]
+          path.write_text(''.join(lines), encoding='utf-8')
           PY
           git rm .github/workflows/fix-wan22-obsolete-test.yml
           git diff --check
