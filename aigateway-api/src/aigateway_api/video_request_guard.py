@@ -12,6 +12,7 @@ from aigateway_core.dispatch.dispatcher import RequestDispatcher
 
 _ORIGINAL_ATTR = "_aigateway_original_video_request_guard_dispatch"
 _GUARD_ATTR = "_aigateway_video_request_guard"
+_PENDING_REQUEST_TTL_SECONDS = 300
 
 _ZH_REFERENCE_RE = re.compile(
     r"(?:根据|基于|使用|用|把|让|以|拿)?\s*"
@@ -115,6 +116,37 @@ def _reference_image_error() -> JSONResponse:
     )
 
 
+def _draft_strategy(request: Any) -> Any | None:
+    strategy = getattr(request.app.state, "draft_strategy", None)
+    if strategy is None:
+        strategy = getattr(request.app.state, "draft_generator_strategy", None)
+    return strategy
+
+
+async def _register_pending_request(body: Any, request: Any) -> None:
+    """Bind request identity to owner/session before draft creation can race Stop."""
+    strategy = _draft_strategy(request)
+    register = getattr(strategy, "register_request_draft", None)
+    if not callable(register):
+        return
+    request_id = str(getattr(request.state, "request_id", "") or "")
+    session_id = str(_value(body, "chat_session_id", "") or "")
+    owner = getattr(request.state, "draft_owner", None)
+    owner = owner if isinstance(owner, Mapping) else {}
+    user_id = str(owner.get("user_id") or "") or None
+    group_id = str(owner.get("group_id") or "") or None
+    if not request_id or not session_id or (not user_id and not group_id):
+        return
+    await register(
+        request_id,
+        "",
+        user_id=user_id,
+        group_id=group_id,
+        session_id=session_id,
+        ttl_seconds=_PENDING_REQUEST_TTL_SECONDS,
+    )
+
+
 async def _create_source_draft_response(
     body: Any,
     request: Any,
@@ -129,9 +161,7 @@ async def _create_source_draft_response(
 
     from .source_draft_video_routes import _domain_http_exception
 
-    strategy = getattr(request.app.state, "draft_strategy", None)
-    if strategy is None:
-        strategy = getattr(request.app.state, "draft_generator_strategy", None)
+    strategy = _draft_strategy(request)
     if strategy is None:
         return JSONResponse(
             status_code=503,
@@ -194,6 +224,7 @@ def install_video_request_guard() -> None:
 
     @functools.wraps(original)
     async def guarded_dispatch(self: Any, body: Any, request: Any) -> Any:
+        await _register_pending_request(body, request)
         source_draft_id = _source_draft_id(body)
         if source_draft_id:
             return await _create_source_draft_response(
