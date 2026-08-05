@@ -1,9 +1,9 @@
 """Reconcile persisted GPU topology before CUDA or the scheduler initializes.
 
 Physical NVIDIA UUIDs change when an installation moves to a different GPU or
-cloud instance.  The persisted scheduler topology therefore treats logical GPU
+cloud instance. The persisted scheduler topology therefore treats logical GPU
 indices as the stable intent and refreshes UUID telemetry from ``nvidia-smi`` at
-process start.  This module runs before ``aigateway_api.main`` imports PyTorch.
+process start. This module runs before ``aigateway_api.main`` imports PyTorch.
 """
 from __future__ import annotations
 
@@ -19,6 +19,18 @@ from typing import Any
 import yaml
 
 logger = logging.getLogger(__name__)
+TOPOLOGY_FIELDS = (
+    "gateway_devices",
+    "comfyui_devices",
+    "device_overrides",
+    "comfyui_dynamic_vram_enabled",
+)
+TOPOLOGY_DEFAULTS: dict[str, Any] = {
+    "gateway_devices": "auto",
+    "comfyui_devices": "auto",
+    "device_overrides": [],
+    "comfyui_dynamic_vram_enabled": False,
+}
 
 
 def _discover_devices() -> list[dict[str, Any]]:
@@ -45,13 +57,15 @@ def _discover_devices() -> list[dict[str, Any]]:
         if len(parts) != 5:
             continue
         try:
+            memory_total_mb = int(float(parts[3]))
             devices.append(
                 {
                     "index": int(parts[0]),
                     "uuid": parts[1],
                     "name": parts[2],
-                    "total_memory_gb": round(float(parts[3]) / 1024, 3),
-                    "free_memory_gb": round(float(parts[4]) / 1024, 3),
+                    "memory_total_mb": memory_total_mb,
+                    "memory_free_mb": int(float(parts[4])),
+                    "total_memory_gb": round(memory_total_mb / 1024, 3),
                 }
             )
         except ValueError:
@@ -59,16 +73,51 @@ def _discover_devices() -> list[dict[str, Any]]:
     return sorted(devices, key=lambda item: int(item["index"]))
 
 
-def _inventory_fingerprint(devices: list[dict[str, Any]]) -> str:
-    value = [
-        {
-            "index": item["index"],
-            "uuid": item["uuid"],
-            "name": item["name"],
-            "total_memory_gb": item["total_memory_gb"],
-        }
-        for item in devices
-    ]
+def _memory_total_mb(device: dict[str, Any]) -> int:
+    raw = device.get("memory_total_mb")
+    if raw is not None:
+        return max(0, int(raw))
+    return max(0, int(round(float(device.get("total_memory_gb", 0)) * 1024)))
+
+
+def _runtime_inventory(devices: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for item in devices:
+        total_memory_gb = round(_memory_total_mb(item) / 1024, 3)
+        result.append(
+            {
+                "index": int(item["index"]),
+                "uuid": str(item["uuid"]),
+                "name": str(item.get("name") or "NVIDIA GPU"),
+                "total_memory_gb": total_memory_gb,
+                # Match render-gpu-topology.py. Worker probes replace this
+                # optimistic bootstrap value after the coordinator starts.
+                "free_memory_gb": total_memory_gb,
+            }
+        )
+    return result
+
+
+def _inventory_fingerprint(
+    scheduler: dict[str, Any], devices: list[dict[str, Any]]
+) -> str:
+    # Keep this byte-for-byte compatible with gpu-topology-controller.py so a
+    # successful startup repair does not trigger an endless recreate loop.
+    value = {
+        "config": {
+            field: scheduler.get(field, TOPOLOGY_DEFAULTS[field])
+            for field in TOPOLOGY_FIELDS
+        },
+        "inventory": [
+            {
+                "index": item.get("index"),
+                "uuid": item.get("uuid"),
+                "name": item.get("name"),
+                "memory_total_mb": _memory_total_mb(item),
+            }
+            for item in devices
+        ],
+    }
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
 
@@ -181,7 +230,11 @@ def _remap_workers(
     current_by_index: dict[int, dict[str, Any]],
     previous_index_by_uuid: dict[str, int],
 ) -> list[dict[str, Any]]:
-    raw_workers = [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+    raw_workers = (
+        [item for item in value if isinstance(item, dict)]
+        if isinstance(value, list)
+        else []
+    )
     workers: list[dict[str, Any]] = []
     failures: list[str] = []
     for position, raw in enumerate(raw_workers):
@@ -212,11 +265,15 @@ def _validate_topology(
 ) -> None:
     device_uuids = {str(item["uuid"]) for item in devices}
     workers = scheduler.get("workers", [])
-    worker_uuids = {
-        str(item.get("device_uuid"))
-        for item in workers
-        if isinstance(item, dict) and item.get("device_uuid")
-    } if isinstance(workers, list) else set()
+    worker_uuids = (
+        {
+            str(item.get("device_uuid"))
+            for item in workers
+            if isinstance(item, dict) and item.get("device_uuid")
+        }
+        if isinstance(workers, list)
+        else set()
+    )
     missing = worker_uuids - device_uuids
     if missing:
         raise RuntimeError(
@@ -236,9 +293,7 @@ def _normalize_cuda_visible_devices(devices: list[dict[str, Any]]) -> None:
         not token.isdigit() or token not in current_indices for token in tokens
     )
     if uses_uuid or invalid_index:
-        normalized = ",".join(
-            str(int(item["index"])) for item in devices
-        )
+        normalized = ",".join(str(int(item["index"])) for item in devices)
         os.environ["CUDA_VISIBLE_DEVICES"] = normalized
         logger.warning(
             "Replaced stale CUDA_VISIBLE_DEVICES with current logical indices",
@@ -298,17 +353,18 @@ def bootstrap_gpu_topology() -> bool:
                 current_by_index=current_by_index,
                 previous_index_by_uuid=previous_index_by_uuid,
             )
-            updated["devices"] = devices
-            updated["inventory_source"] = "gateway_startup_discovery"
-            updated["inventory_fingerprint"] = _inventory_fingerprint(devices)
-            _validate_topology(updated, devices)
+            runtime_inventory = _runtime_inventory(devices)
+            updated["devices"] = runtime_inventory
+            updated["inventory_source"] = "host_generated"
+            updated["inventory_fingerprint"] = _inventory_fingerprint(
+                updated, devices
+            )
+            _validate_topology(updated, runtime_inventory)
 
             if updated == scheduler:
                 return False
             runtime["gpu_scheduler"] = updated
-            rendered = yaml.safe_dump(
-                runtime, sort_keys=False, allow_unicode=True
-            )
+            rendered = yaml.safe_dump(runtime, sort_keys=False, allow_unicode=True)
             with config_path.open("w", encoding="utf-8") as handle:
                 handle.write(rendered)
                 handle.flush()
