@@ -113,20 +113,28 @@ function cancellationNotConfirmed(state: GenerationRequestState): Error {
   return error
 }
 
-function updateUnregisteredSince(
+function assertRegistrationGrace(
   state: GenerationRequestState,
-  current: number | null,
-): number | null {
-  if (state.status !== 'unregistered') return null
-  const since = current ?? Date.now()
-  if (Date.now() - since >= REQUEST_REGISTRATION_GRACE_MS) {
+  unregisteredElapsedMs: number,
+): void {
+  if (
+    state.status === 'unregistered'
+    && unregisteredElapsedMs >= REQUEST_REGISTRATION_GRACE_MS
+  ) {
     throw terminalStateError(
       'generation_request_not_registered',
       '生成请求未到达服务端，请重新提交',
       404,
     )
   }
-  return since
+}
+
+function elapsedAfterDelay(
+  state: GenerationRequestState | null,
+  current: number,
+  delayMs: number,
+): number {
+  return state?.status === 'unregistered' ? current + delayMs : 0
 }
 
 export async function getGenerationRequest(
@@ -172,22 +180,38 @@ export async function waitForGenerationRequestState(
 ): Promise<GenerationRequestState> {
   let attempt = 0
   let lastState: GenerationRequestState | null = null
-  let unregisteredSince: number | null = null
+  let unregisteredElapsedMs = 0
   while (true) {
     try {
       lastState = await getGenerationRequest(requestId, chatSessionId, signal)
-      unregisteredSince = updateUnregisteredSince(lastState, unregisteredSince)
-      if (
-        lastState.draft_id
-        || REQUEST_RECOVERY_TERMINAL_STATUSES.has(lastState.status)
-      ) return lastState
-      await delay(pollDelay(lastState, attempt), signal)
-      attempt += 1
     } catch (error) {
       if (signal?.aborted || !isRetryablePollError(error)) throw error
-      await delay(pollDelay(lastState, attempt), signal)
+      const retryDelay = pollDelay(lastState, attempt)
+      await delay(retryDelay, signal)
+      unregisteredElapsedMs = elapsedAfterDelay(
+        lastState,
+        unregisteredElapsedMs,
+        retryDelay,
+      )
       attempt += 1
+      continue
     }
+
+    if (lastState.status !== 'unregistered') unregisteredElapsedMs = 0
+    assertRegistrationGrace(lastState, unregisteredElapsedMs)
+    if (
+      lastState.draft_id
+      || REQUEST_RECOVERY_TERMINAL_STATUSES.has(lastState.status)
+    ) return lastState
+
+    const retryDelay = pollDelay(lastState, attempt)
+    await delay(retryDelay, signal)
+    unregisteredElapsedMs = elapsedAfterDelay(
+      lastState,
+      unregisteredElapsedMs,
+      retryDelay,
+    )
+    attempt += 1
   }
 }
 
@@ -234,29 +258,32 @@ export async function cancelGenerationRequestAndWait(
   signal?: AbortSignal,
 ): Promise<GenerationRequestState> {
   let state = await cancelGenerationRequest(requestId, chatSessionId)
-  if (state.status === 'cancelled') return state
-  if (state.status === 'non_draft') {
-    return { ...state, status: 'cancelled', stage: state.stage ?? 'transport_cancelled' }
-  }
-
   let attempt = 0
-  let unregisteredSince: number | null = null
+  let unregisteredElapsedMs = 0
+
   while (true) {
+    if (state.status !== 'unregistered') unregisteredElapsedMs = 0
+    assertRegistrationGrace(state, unregisteredElapsedMs)
+    if (state.status === 'cancelled') return state
+    if (state.status === 'non_draft') {
+      return { ...state, status: 'cancelled', stage: state.stage ?? 'transport_cancelled' }
+    }
     if (CANCELLATION_TERMINAL_STATUSES.has(state.status)) {
       throw cancellationNotConfirmed(state)
     }
-    await delay(pollDelay(state, attempt), signal)
+
+    const retryDelay = pollDelay(state, attempt)
+    await delay(retryDelay, signal)
+    unregisteredElapsedMs = elapsedAfterDelay(
+      state,
+      unregisteredElapsedMs,
+      retryDelay,
+    )
     try {
       state = await getGenerationRequest(requestId, chatSessionId, signal)
-      unregisteredSince = updateUnregisteredSince(state, unregisteredSince)
-      if (state.status === 'cancelled') return state
-      if (state.status === 'non_draft') {
-        return { ...state, status: 'cancelled', stage: state.stage ?? 'transport_cancelled' }
-      }
-      attempt += 1
     } catch (error) {
       if (signal?.aborted || !isRetryablePollError(error)) throw error
-      attempt += 1
     }
+    attempt += 1
   }
 }
