@@ -10,7 +10,6 @@ import httpx
 
 from aigateway_core.pipelines.generation._common.exceptions import DraftWorkflowError
 from aigateway_core.pipelines.generation._common.models import (
-    DRAFT_STATUS_CANCELLED,
     DRAFT_STATUS_CONFIRMING,
     DRAFT_STATUS_GENERATING,
     DRAFT_STATUS_QUEUED,
@@ -20,7 +19,6 @@ from aigateway_core.pipelines.generation._common.models import (
 from aigateway_core.pipelines.generation.draft import (
     _draft_generator_impl as _base_impl,
 )
-from aigateway_core.pipelines.generation.draft import draft_generator as _draft_module
 from aigateway_core.pipelines.generation.draft.draft_generator import (
     DraftGeneratorStrategy,
 )
@@ -86,15 +84,47 @@ async def _prompt_released(
     return False
 
 
-def _worker_url(strategy: Any, draft: Any) -> str | None:
+def _worker(strategy: Any, draft: Any) -> Any | None:
     coordinator = getattr(strategy, "_gpu_coordinator", None)
     get_worker = getattr(coordinator, "get_worker", None)
-    worker = (
+    return (
         get_worker(draft.worker_id)
         if callable(get_worker) and getattr(draft, "worker_id", None)
         else None
     )
+
+
+def _worker_url(strategy: Any, draft: Any) -> str | None:
+    worker = _worker(strategy, draft)
     return str(worker.server_url) if worker is not None else None
+
+
+async def _fence_busy_worker(strategy: Any, draft: Any) -> None:
+    """Prevent a still-running prompt's worker from accepting another job."""
+    coordinator = getattr(strategy, "_gpu_coordinator", None)
+    worker = _worker(strategy, draft)
+    if coordinator is None or worker is None:
+        return
+    condition = getattr(coordinator, "_condition", None)
+    if condition is not None:
+        async with condition:
+            worker.queue_running = max(
+                1,
+                int(getattr(worker, "queue_running", 0) or 0),
+            )
+            condition.notify_all()
+    else:
+        worker.queue_running = max(
+            1,
+            int(getattr(worker, "queue_running", 0) or 0),
+        )
+    record_event = getattr(coordinator, "record_event", None)
+    if callable(record_event):
+        record_event(
+            "cancellation_unconfirmed",
+            worker_id=str(getattr(worker, "worker_id", "") or ""),
+            device_uuid=str(getattr(worker, "device_uuid", "") or ""),
+        )
 
 
 async def _clear_cancel_tombstone(strategy: Any, request_id: str) -> None:
@@ -124,6 +154,7 @@ async def _restore_unconfirmed_cancellation(
 ) -> Any:
     """Restore a recoverable in-progress record after upstream ambiguity."""
     await _clear_cancel_tombstone(strategy, request_id)
+    await _fence_busy_worker(strategy, draft)
     current = await strategy.get_draft(draft.draft_id) or draft
     current.status = _restore_status(draft)
     current.stage = "cancellation_unconfirmed"
