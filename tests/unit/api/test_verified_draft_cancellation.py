@@ -182,6 +182,101 @@ async def test_unconfirmed_release_keeps_local_task_and_fences_worker(
 
 
 @pytest.mark.asyncio
+async def test_registered_request_skips_early_tombstone(
+    strategy: DraftGeneratorStrategy,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    draft = _running_draft()
+    record = {
+        "draft_id": draft.draft_id,
+        "user_id": "user-1",
+        "group_id": None,
+        "session_id": "session-1",
+    }
+    resolve = AsyncMock(return_value=(draft, record))
+    monkeypatch.setattr(strategy, "resolve_request", resolve)
+    cancel_draft = AsyncMock(return_value=draft)
+    monkeypatch.setattr(strategy, "cancel_draft", cancel_draft)
+    original_request = AsyncMock()
+
+    result = await cancellation.cancel_request_verified(
+        strategy,
+        "request-1",
+        user_id="user-1",
+        group_id=None,
+        session_id="session-1",
+        original=original_request,
+    )
+
+    assert result is draft
+    cancel_draft.assert_awaited_once_with(draft.draft_id)
+    original_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_pre_registration_request_keeps_tombstone_path(
+    strategy: DraftGeneratorStrategy,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolve = AsyncMock(return_value=(None, None))
+    monkeypatch.setattr(strategy, "resolve_request", resolve)
+    original_request = AsyncMock(return_value=None)
+
+    result = await cancellation.cancel_request_verified(
+        strategy,
+        "request-before-submit",
+        user_id="user-1",
+        group_id=None,
+        session_id="session-1",
+        original=original_request,
+    )
+
+    assert result is None
+    original_request.assert_awaited_once_with(
+        strategy,
+        "request-before-submit",
+        user_id="user-1",
+        group_id=None,
+        session_id="session-1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_registered_request_rejects_wrong_owner_without_tombstone(
+    strategy: DraftGeneratorStrategy,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    draft = _running_draft()
+    record = {
+        "draft_id": draft.draft_id,
+        "user_id": "user-1",
+        "group_id": None,
+        "session_id": "session-1",
+    }
+    monkeypatch.setattr(
+        strategy,
+        "resolve_request",
+        AsyncMock(return_value=(draft, record)),
+    )
+    original_request = AsyncMock()
+
+    with pytest.raises(
+        DraftWorkflowError,
+        match="generation_request_forbidden",
+    ):
+        await cancellation.cancel_request_verified(
+            strategy,
+            "request-1",
+            user_id="user-2",
+            group_id=None,
+            session_id="session-1",
+            original=original_request,
+        )
+
+    original_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_no_prompt_requires_no_external_verification(
     strategy: DraftGeneratorStrategy,
     monkeypatch: pytest.MonkeyPatch,
