@@ -7,73 +7,142 @@ on:
       - '.github/workflows/pr40-integration-helper.yml'
 
 permissions:
-  contents: read
+  contents: write
   issues: write
   pull-requests: write
 
 jobs:
-  diagnose:
+  resolve:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: agent/fix-wan22-design-compliance
           fetch-depth: 0
-      - name: Diagnose merge and publish report
+      - name: Merge main with reviewed conflict policy
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -uo pipefail
+          set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git fetch origin main
           git merge --no-commit --no-ff origin/main || true
+
           python3 - <<'PY'
           from pathlib import Path
           import subprocess
 
-          files = subprocess.check_output(
+          expected = {
+              'aigateway-api/src/aigateway_api/__init__.py',
+              'aigateway-api/src/aigateway_api/source_draft_video_routes.py',
+              'aigateway-api/src/aigateway_api/video_generation_observability.py',
+              'aigateway-api/src/aigateway_api/video_request_guard.py',
+              'aigateway-core/src/aigateway_core/pipelines/generation/draft/draft_generator.py',
+              'aigateway-core/src/aigateway_core/pipelines/generation/draft/draft_generator_plugin.py',
+              'aigateway-core/src/aigateway_core/pipelines/generation/draft/source_draft_video.py',
+              'control-panel/src/api/consoleChat.test.ts',
+              'control-panel/src/api/consoleChat.ts',
+              'control-panel/src/api/sourceDraftVideo.test.ts',
+              'control-panel/src/api/sourceDraftVideo.ts',
+              'control-panel/src/hooks/useChatSessions.ts',
+              'control-panel/src/pages/Chat.tsx',
+              'control-panel/src/types.ts',
+              'docker-compose.yml',
+              'scripts/render-deployment-config.py',
+              'scripts/render-gpu-topology.py',
+              'tests/unit/admin/test_source_draft_video_routes.py',
+              'tests/unit/pipeline/test_draft_confirmation_recovery_state.py',
+          }
+          conflicts = set(subprocess.check_output(
               ['git', 'diff', '--name-only', '--diff-filter=U'], text=True
-          ).splitlines()
-          out = [
-              '<!-- pr40-integration-helper -->',
-              '## PR #40 conflict diagnosis',
-              '',
-              f'Base main: `{subprocess.check_output(["git", "rev-parse", "origin/main"], text=True).strip()}`',
-              f'Head: `{subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()}`',
-              '',
-          ]
-          if not files:
-              out.extend(['No merge conflicts detected.', ''])
-          else:
-              out.extend([
-                  f'Conflict files: **{len(files)}**',
-                  '',
-                  '```text',
-                  *files,
-                  '```',
-                  '',
-              ])
-              for name in files:
-                  out.extend([f'### `{name}`', '', '```diff'])
-                  path = Path(name)
-                  if not path.exists():
-                      out.append('[path absent in worktree]')
+          ).splitlines())
+          if conflicts != expected:
+              missing = sorted(expected - conflicts)
+              extra = sorted(conflicts - expected)
+              raise SystemExit(f'unexpected conflict set; missing={missing}; extra={extra}')
+
+          prefer_theirs = {
+              'aigateway-core/src/aigateway_core/pipelines/generation/draft/draft_generator_plugin.py',
+              'control-panel/src/types.ts',
+              'scripts/render-deployment-config.py',
+              'scripts/render-gpu-topology.py',
+          }
+          combine_both = {'docker-compose.yml'}
+
+          def resolve(text: str, mode: str) -> str:
+              lines = text.splitlines(keepends=True)
+              output: list[str] = []
+              i = 0
+              while i < len(lines):
+                  if not lines[i].startswith('<<<<<<< '):
+                      output.append(lines[i])
+                      i += 1
+                      continue
+                  i += 1
+                  ours: list[str] = []
+                  while i < len(lines) and not lines[i].startswith('======='):
+                      ours.append(lines[i])
+                      i += 1
+                  if i >= len(lines):
+                      raise ValueError('unterminated ours block')
+                  i += 1
+                  theirs: list[str] = []
+                  while i < len(lines) and not lines[i].startswith('>>>>>>> '):
+                      theirs.append(lines[i])
+                      i += 1
+                  if i >= len(lines):
+                      raise ValueError('unterminated theirs block')
+                  i += 1
+                  if mode == 'ours':
+                      output.extend(ours)
+                  elif mode == 'theirs':
+                      output.extend(theirs)
+                  elif mode == 'both':
+                      output.extend(ours)
+                      output.extend(theirs)
                   else:
-                      lines = path.read_text(encoding='utf-8', errors='replace').splitlines()
-                      for index, line in enumerate(lines):
-                          if not line.startswith('<<<<<<< '):
-                              continue
-                          start = max(0, index - 8)
-                          end = min(len(lines), index + 180)
-                          for lineno in range(start, end):
-                              out.append(f'{lineno + 1:05d}: {lines[lineno]}')
-                              if lines[lineno].startswith('>>>>>>> '):
-                                  break
-                  out.extend(['```', ''])
-          Path('/tmp/pr40-conflicts.md').write_text('\n'.join(out), encoding='utf-8')
-          Path('/tmp/pr40-has-conflicts').write_text('1' if files else '0', encoding='utf-8')
+                      raise ValueError(mode)
+              return ''.join(output)
+
+          for name in sorted(conflicts):
+              mode = 'theirs' if name in prefer_theirs else 'both' if name in combine_both else 'ours'
+              path = Path(name)
+              merged = resolve(path.read_text(encoding='utf-8'), mode)
+              if any(marker in merged for marker in ('<<<<<<< ', '=======', '>>>>>>> ')):
+                  raise SystemExit(f'conflict marker remains in {name}')
+              path.write_text(merged, encoding='utf-8')
+              subprocess.run(['git', 'add', '--', name], check=True)
+
+          diagnostic = Path('.github/workflows/diagnose-pr40-main-conflicts.yml')
+          if diagnostic.exists():
+              diagnostic.unlink()
+              subprocess.run(['git', 'add', '-u', '--', str(diagnostic)], check=True)
+
+          remaining = subprocess.check_output(
+              ['git', 'diff', '--name-only', '--diff-filter=U'], text=True
+          ).strip()
+          if remaining:
+              raise SystemExit(f'unresolved files remain: {remaining}')
           PY
-          gh pr comment 40 --repo dongwanyang/aigateway --body-file /tmp/pr40-conflicts.md
-          test "$(cat /tmp/pr40-has-conflicts)" = 0
+
+          git diff --check
+          git commit -m 'merge: integrate PR40 lifecycle fixes with main'
+          new_sha="$(git rev-parse HEAD)"
+          git push origin HEAD:agent/fix-wan22-design-compliance
+          cat > /tmp/pr40-resolution.md <<EOF
+          <!-- pr40-integration-resolution -->
+          ## PR #40 conflicts resolved
+
+          Integrated current \`main\` into the PR branch with conflict-block-granular resolution.
+
+          - PR #40 lifecycle and request-recovery behavior retained in its intentional files.
+          - Current \`main\` retained for \`draft_generator_plugin.py\`, \`types.ts\`, and both GPU/deployment renderers.
+          - \`docker-compose.yml\` retains both runtime identity variables and GPU isolation configuration.
+          - Non-conflicting Git hunks from both branches were preserved.
+          - Temporary branch diagnostic workflow removed.
+
+          New head: \`$new_sha\`
+          EOF
+          gh pr comment 40 --repo dongwanyang/aigateway --body-file /tmp/pr40-resolution.md
