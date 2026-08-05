@@ -8,7 +8,7 @@ def install_unified_source_contract() -> None:
     """Add the documented source_draft_id field before request validation.
 
     ``ChatCompletionRequest`` is already referenced by the route module, so the
-    existing class object is rebuilt in place rather than replaced.
+    existing class object and its existing ``FieldInfo`` are rebuilt in place.
     """
     from . import openai_compat
 
@@ -26,10 +26,14 @@ def install_unified_source_contract() -> None:
 
     GenerationOptionsWithSource.__name__ = "GenerationOptions"
     openai_compat.GenerationOptions = GenerationOptionsWithSource
+
     request_model = openai_compat.ChatCompletionRequest
-    request_model.__annotations__["generation_options"] = (
-        GenerationOptionsWithSource | None
-    )
+    annotation = GenerationOptionsWithSource | None
+    request_model.__annotations__["generation_options"] = annotation
+    field = request_model.model_fields.get("generation_options")
+    if field is None:
+        raise RuntimeError("chat_generation_options_field_missing")
+    field.annotation = annotation
     request_model.model_rebuild(force=True)
 
 
