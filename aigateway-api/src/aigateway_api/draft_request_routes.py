@@ -195,6 +195,18 @@ async def cancel_generation_request(
                     }
                 },
             ) from exc
+        if code == "comfyui_cancellation_unconfirmed":
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": {
+                        "code": code,
+                        "message": (
+                            "ComfyUI 未确认任务已停止，任务状态已恢复并将继续跟踪。"
+                        ),
+                    }
+                },
+            ) from exc
         raise HTTPException(
             status_code=404,
             detail={
