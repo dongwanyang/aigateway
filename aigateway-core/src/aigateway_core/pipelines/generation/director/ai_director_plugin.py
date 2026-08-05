@@ -157,15 +157,19 @@ class AIDirectorPlugin:
         modality: str,
         started_at: float,
     ) -> dict[str, Any]:
+        timing = self._config.draft_workflow
         duration_seconds = self._number_option(
             options,
             "duration_seconds",
-            ctx.request.get("duration_seconds", 5.0),
+            ctx.request.get(
+                "duration_seconds",
+                timing.video_default_duration_seconds,
+            ),
         )
         fps = self._integer_option(
             options,
             "fps",
-            ctx.request.get("target_fps", 8),
+            ctx.request.get("target_fps", timing.video_default_fps),
         )
         plan = await self._strategy.build_video_generation_plan(
             prompt=prompt,

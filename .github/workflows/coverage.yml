@@ -2,7 +2,7 @@ name: Test Coverage
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, agent/fix-qa-report-2026-08-02]
   push:
     branches: [main]
 
