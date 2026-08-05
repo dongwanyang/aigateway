@@ -10,6 +10,7 @@ from aigateway_core.pipelines.generation._common.exceptions import DraftWorkflow
 
 from .auth_middleware import authenticate_admin
 from .draft_security import assert_draft_owner
+from .generation_request_state import terminal_request_status
 
 router = APIRouter()
 
@@ -74,6 +75,16 @@ def _resolving_response(request_id: str) -> JSONResponse:
     )
 
 
+def _terminal_payload(request_id: str, terminal: str) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "request_id": request_id,
+        "status": terminal,
+    }
+    if terminal == "failed":
+        payload["error"] = "generation_request_failed"
+    return payload
+
+
 def _draft_payload(request_id: str, draft: Any) -> dict[str, Any]:
     return {
         "request_id": request_id,
@@ -89,6 +100,14 @@ def _draft_payload(request_id: str, draft: Any) -> dict[str, Any]:
     }
 
 
+async def _resolved_record(strategy: Any, request_id: str) -> tuple[Any | None, dict[str, Any] | None]:
+    resolver = getattr(strategy, "resolve_request", None)
+    if not callable(resolver):
+        return None, None
+    draft, record = await resolver(request_id)
+    return draft, record if isinstance(record, dict) else None
+
+
 @router.get("/generation/requests/{request_id}")
 async def get_generation_request(
     request_id: str,
@@ -97,10 +116,14 @@ async def get_generation_request(
     auth: dict[str, Any] = Depends(authenticate_admin),
 ) -> Any:
     strategy = _strategy(request)
-    draft, record = await strategy.resolve_request(request_id)
+    draft, record = await _resolved_record(strategy, request_id)
     if record is None:
         return _resolving_response(request_id)
     _assert_request_record_owner(record, auth, chat_session_id)
+
+    terminal = terminal_request_status(record)
+    if terminal is not None:
+        return _terminal_payload(request_id, terminal)
     if draft is None and not str(record.get("draft_id") or ""):
         return _resolving_response(request_id)
     if draft is None:
@@ -135,6 +158,21 @@ async def cancel_generation_request(
     auth: dict[str, Any] = Depends(authenticate_admin),
 ) -> Any:
     strategy = _strategy(request)
+    _existing_draft, record = await _resolved_record(strategy, request_id)
+    if record is not None:
+        _assert_request_record_owner(record, auth, chat_session_id)
+        terminal = terminal_request_status(record)
+        if terminal == "non_draft":
+            # Ordinary text streams have no detached GPU/background task. The
+            # client-side transport abort is therefore the complete Stop action.
+            return {
+                "request_id": request_id,
+                "status": "cancelled",
+                "stage": "transport_cancelled",
+            }
+        if terminal == "failed":
+            return _terminal_payload(request_id, terminal)
+
     try:
         draft = await strategy.cancel_request(
             request_id,
