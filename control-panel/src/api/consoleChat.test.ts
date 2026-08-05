@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ChatCompletionRequest } from '@/types'
 
 const generationRequest = vi.hoisted(() => ({
-  waitForGenerationRequestDraft: vi.fn(),
+  waitForGenerationRequestState: vi.fn(),
 }))
 
 vi.mock('./generationRequest', () => generationRequest)
@@ -12,7 +12,7 @@ import { normalizeChatMessages, requestChatCompletion } from './consoleChat'
 type Messages = ChatCompletionRequest['messages']
 
 afterEach(() => {
-  generationRequest.waitForGenerationRequestDraft.mockReset()
+  generationRequest.waitForGenerationRequestState.mockReset()
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
 })
@@ -70,7 +70,7 @@ describe('normalizeChatMessages', () => {
 describe('requestChatCompletion response-loss recovery', () => {
   it('recovers the server-created draft after a non-abort transport failure', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')))
-    generationRequest.waitForGenerationRequestDraft.mockResolvedValue({
+    generationRequest.waitForGenerationRequestState.mockResolvedValue({
       request_id: 'request-1',
       draft_id: 'draft-1',
       status: 'running',
@@ -102,7 +102,7 @@ describe('requestChatCompletion response-loss recovery', () => {
       },
     })
 
-    expect(generationRequest.waitForGenerationRequestDraft).toHaveBeenCalledWith(
+    expect(generationRequest.waitForGenerationRequestState).toHaveBeenCalledWith(
       'request-1',
       'session-1',
       undefined,
@@ -112,7 +112,7 @@ describe('requestChatCompletion response-loss recovery', () => {
   it('stops draft recovery immediately for an ordinary text stream', async () => {
     const transportError = new TypeError('Failed to fetch')
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(transportError))
-    generationRequest.waitForGenerationRequestDraft.mockResolvedValue({
+    generationRequest.waitForGenerationRequestState.mockResolvedValue({
       request_id: 'request-text',
       status: 'non_draft',
     })
@@ -128,12 +128,12 @@ describe('requestChatCompletion response-loss recovery', () => {
       'request-text',
     )).rejects.toBe(transportError)
 
-    expect(generationRequest.waitForGenerationRequestDraft).toHaveBeenCalledTimes(1)
+    expect(generationRequest.waitForGenerationRequestState).toHaveBeenCalledTimes(1)
   })
 
   it('surfaces a persisted server failure instead of polling indefinitely', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')))
-    generationRequest.waitForGenerationRequestDraft.mockResolvedValue({
+    generationRequest.waitForGenerationRequestState.mockResolvedValue({
       request_id: 'request-failed',
       status: 'failed',
       error: 'generation_request_failed',
@@ -172,6 +172,6 @@ describe('requestChatCompletion response-loss recovery', () => {
       'request-1',
     )).rejects.toBe(abortError)
 
-    expect(generationRequest.waitForGenerationRequestDraft).not.toHaveBeenCalled()
+    expect(generationRequest.waitForGenerationRequestState).not.toHaveBeenCalled()
   })
 })
