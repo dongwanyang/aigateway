@@ -66,3 +66,43 @@ def test_locked_deployment_write_preserves_config_inode(tmp_path: Path) -> None:
     assert yaml.safe_load(config_path.read_text(encoding="utf-8")) == {
         "gpu_scheduler": {"enabled": True}
     }
+
+
+def test_remote_deployment_clears_local_gpu_inventory_metadata(
+    tmp_path: Path,
+) -> None:
+    module = _module()
+    config = yaml.safe_load(
+        (REPO_ROOT / "config.yaml.template").read_text(encoding="utf-8")
+    )
+    scheduler = config.setdefault("gpu_scheduler", {})
+    scheduler.update(
+        {
+            "devices": [{"index": 0, "uuid": "GPU-old"}],
+            "workers": [{"worker_id": "comfyui-gpu-0"}],
+            "inventory_source": "host_generated",
+            "inventory_fingerprint": "stale-fingerprint",
+        }
+    )
+    source = tmp_path / "source.yaml"
+    source.write_text(
+        yaml.safe_dump(config, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    rendered = module.render(
+        source,
+        edition="full",
+        accelerator="cuda",
+        embedding_mode="container",
+        comfyui_mode="remote",
+        comfyui_url="https://comfy.example",
+        embedding_url="",
+        monitoring=False,
+    )
+
+    scheduler = rendered["gpu_scheduler"]
+    assert "devices" not in scheduler
+    assert "workers" not in scheduler
+    assert "inventory_source" not in scheduler
+    assert "inventory_fingerprint" not in scheduler
