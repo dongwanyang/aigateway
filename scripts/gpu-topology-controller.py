@@ -53,6 +53,36 @@ def _read_yaml(path: Path) -> dict[str, Any]:
     return loaded
 
 
+def _read_locked_yaml(handle: Any, path: Path) -> dict[str, Any]:
+    handle.seek(0)
+    loaded = yaml.safe_load(handle.read()) or {}
+    if not isinstance(loaded, dict):
+        raise RuntimeError(f"expected YAML object: {path}")
+    return loaded
+
+
+def _write_locked_yaml(handle: Any, value: dict[str, Any]) -> None:
+    rendered = yaml.safe_dump(value, sort_keys=False, allow_unicode=True)
+    handle.seek(0)
+    original = handle.read()
+    try:
+        handle.seek(0)
+        handle.write(rendered)
+        handle.truncate()
+        handle.flush()
+        os.fsync(handle.fileno())
+    except BaseException:
+        try:
+            handle.seek(0)
+            handle.write(original)
+            handle.truncate()
+            handle.flush()
+            os.fsync(handle.fileno())
+        except BaseException:
+            logger.exception("failed to restore runtime configuration")
+        raise
+
+
 def _read_state(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -152,12 +182,17 @@ def _compose_command(
 def _config_write_lock(path: Path):
     lock_path = Path(str(path) + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    with lock_path.open("a+", encoding="utf-8") as sibling_lock:
+        fcntl.flock(sibling_lock.fileno(), fcntl.LOCK_EX)
         try:
-            yield
+            with path.open("r+", encoding="utf-8") as config_handle:
+                fcntl.flock(config_handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield config_handle
+                finally:
+                    fcntl.flock(config_handle.fileno(), fcntl.LOCK_UN)
         finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            fcntl.flock(sibling_lock.fileno(), fcntl.LOCK_UN)
 
 
 def reconcile(
@@ -241,7 +276,11 @@ def reconcile(
         candidate_path.write_text(desired_compose, encoding="utf-8")
         state = _read_state(install_state)
         validation = subprocess.run(
-            [*_compose_command(repo_root, install_state, candidate_path, state), "config", "--quiet"],
+            [
+                *_compose_command(repo_root, install_state, candidate_path, state),
+                "config",
+                "--quiet",
+            ],
             cwd=repo_root,
             capture_output=True,
             text=True,
@@ -251,8 +290,8 @@ def reconcile(
             detail = (validation.stderr or validation.stdout).strip()
             raise RuntimeError(f"generated Compose topology is invalid: {detail}")
 
-        with _config_write_lock(runtime_config):
-            latest = _read_yaml(runtime_config)
+        with _config_write_lock(runtime_config) as config_handle:
+            latest = _read_locked_yaml(config_handle, runtime_config)
             latest_scheduler = latest.get("gpu_scheduler", {})
             if not isinstance(latest_scheduler, dict) or _fingerprint(
                 latest_scheduler, inventory
@@ -275,15 +314,15 @@ def reconcile(
             )
             candidate_config["gpu_scheduler"] = candidate_scheduler
 
-            # The API and this controller share the same .lock file. Build the
-            # candidate from the latest full document while holding that lock,
-            # so unrelated provider/auth edits cannot be overwritten.
+            # The controller and container API coordinate through an exclusive
+            # flock on the mounted config inode. The sibling lock still
+            # serializes multiple host-side controller processes.
             _atomic_text(
                 controller_state,
                 json.dumps({"pending_fingerprint": fingerprint}) + "\n",
             )
             renderer._atomic_yaml(generated_compose, compose)
-            renderer._atomic_yaml(runtime_config, candidate_config)
+            _write_locked_yaml(config_handle, candidate_config)
         if apply:
             services = ["gateway", *compose["services"].keys()]
             services = list(dict.fromkeys(services))
@@ -304,8 +343,8 @@ def reconcile(
             )
             if completed.returncode != 0:
                 raise RuntimeError("docker compose topology apply failed")
-        with _config_write_lock(runtime_config):
-            applied = _read_yaml(runtime_config)
+        with _config_write_lock(runtime_config) as config_handle:
+            applied = _read_locked_yaml(config_handle, runtime_config)
             applied_scheduler = applied.get("gpu_scheduler", {})
             if not isinstance(applied_scheduler, dict) or _fingerprint(
                 applied_scheduler, inventory
