@@ -16,6 +16,7 @@ export interface GenerationRequestState {
 
 const MIN_POLL_DELAY_MS = 100
 const MAX_POLL_DELAY_MS = 5_000
+const REQUEST_REGISTRATION_GRACE_MS = 10_000
 const REQUEST_RECOVERY_TERMINAL_STATUSES = new Set([
   'cancelled',
   'non_draft',
@@ -112,6 +113,22 @@ function cancellationNotConfirmed(state: GenerationRequestState): Error {
   return error
 }
 
+function updateUnregisteredSince(
+  state: GenerationRequestState,
+  current: number | null,
+): number | null {
+  if (state.status !== 'unregistered') return null
+  const since = current ?? Date.now()
+  if (Date.now() - since >= REQUEST_REGISTRATION_GRACE_MS) {
+    throw terminalStateError(
+      'generation_request_not_registered',
+      '生成请求未到达服务端，请重新提交',
+      404,
+    )
+  }
+  return since
+}
+
 export async function getGenerationRequest(
   requestId: string,
   chatSessionId: string,
@@ -155,9 +172,11 @@ export async function waitForGenerationRequestState(
 ): Promise<GenerationRequestState> {
   let attempt = 0
   let lastState: GenerationRequestState | null = null
+  let unregisteredSince: number | null = null
   while (true) {
     try {
       lastState = await getGenerationRequest(requestId, chatSessionId, signal)
+      unregisteredSince = updateUnregisteredSince(lastState, unregisteredSince)
       if (
         lastState.draft_id
         || REQUEST_RECOVERY_TERMINAL_STATUSES.has(lastState.status)
@@ -221,6 +240,7 @@ export async function cancelGenerationRequestAndWait(
   }
 
   let attempt = 0
+  let unregisteredSince: number | null = null
   while (true) {
     if (CANCELLATION_TERMINAL_STATUSES.has(state.status)) {
       throw cancellationNotConfirmed(state)
@@ -228,6 +248,7 @@ export async function cancelGenerationRequestAndWait(
     await delay(pollDelay(state, attempt), signal)
     try {
       state = await getGenerationRequest(requestId, chatSessionId, signal)
+      unregisteredSince = updateUnregisteredSince(state, unregisteredSince)
       if (state.status === 'cancelled') return state
       if (state.status === 'non_draft') {
         return { ...state, status: 'cancelled', stage: state.stage ?? 'transport_cancelled' }
