@@ -90,6 +90,15 @@ export interface GenerationOptions {
   quality?: 'standard' | 'creative_refine' | 'faithful_4k'
   width?: number
   height?: number
+  duration_seconds?: 3 | 5 | 8
+  fps?: number
+}
+
+export interface ChatReferenceImage {
+  dataUrl: string
+  name: string
+  mimeType: string
+  size: number
 }
 
 export interface ChatReferenceImage {

@@ -1,7 +1,8 @@
 import type { ApiError, ApiResponse } from '@/types'
+import type { ConfirmDraftResult } from './_clientCore'
 
-// Public API entry point. Configuration writes are defined here so every
-// caller receives the same strong-revision and error-mapping behavior.
+// Public API entry point. Configuration writes and draft confirmation are
+// defined here so every caller receives the same strong-revision/error mapping.
 export * from './_clientCore'
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? ''
@@ -24,6 +25,22 @@ class ConfigApiError extends Error {
     this.name = 'ConfigApiError'
     this.code = code
     this.status = status
+  }
+}
+
+export class DraftApiError extends Error {
+  readonly code: string
+  readonly status: number
+  readonly userMessage: string
+
+  constructor(message: string, code: string, status: number) {
+    // Existing chat handlers inspect Error.message. Preserve the machine code
+    // there while retaining the human-readable text for direct display.
+    super(code && code !== 'unknown_error' ? `${code}: ${message}` : message)
+    this.name = 'DraftApiError'
+    this.code = code
+    this.status = status
+    this.userMessage = message
   }
 }
 
@@ -99,6 +116,65 @@ async function configError(response: Response): Promise<ConfigApiError> {
   }
 
   return new ConfigApiError(message, code, response.status)
+}
+
+async function draftError(response: Response): Promise<DraftApiError> {
+  let code = 'unknown_error'
+  let message = `HTTP ${response.status}`
+
+  try {
+    const body = await response.json() as ApiErrorEnvelope
+    const nested = typeof body.detail === 'object' ? body.detail?.error : undefined
+    code = body.error?.code ?? nested?.code ?? code
+    message = body.error?.message
+      ?? nested?.message
+      ?? (typeof body.detail === 'string' ? body.detail : message)
+  } catch {
+    message = `Server error: ${response.status} ${response.statusText}`
+  }
+
+  return new DraftApiError(message, code, response.status)
+}
+
+export async function confirmDraft(draftId: string): Promise<ConfirmDraftResult> {
+  const response = await fetch(
+    `${API_BASE}/admin/draft/${encodeURIComponent(draftId)}/confirm`,
+    {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+    },
+  )
+  if (!response.ok) throw await draftError(response)
+
+  const json = await response.json() as {
+    media_type?: 'image' | 'video'
+    video_id?: string
+    status?: string
+    upscaled_url?: string
+    target_resolution?: [number, number]
+    algorithm?: string
+  }
+  if (json.media_type === 'video' && json.video_id) {
+    return {
+      videoId: json.video_id,
+      status: json.status ?? 'generating',
+      mediaType: 'video',
+    }
+  }
+  if (!json.upscaled_url) {
+    throw new DraftApiError(
+      'confirm 响应缺少 upscaled_url',
+      'invalid_confirm_response',
+      502,
+    )
+  }
+  return {
+    upscaledUrl: json.upscaled_url,
+    targetResolution: json.target_resolution ?? [0, 0],
+    algorithm: json.algorithm ?? 'comfyui',
+    mediaType: json.media_type ?? 'image',
+  }
 }
 
 export async function getFullConfig(): Promise<VersionedApiResponse<Record<string, unknown>>> {

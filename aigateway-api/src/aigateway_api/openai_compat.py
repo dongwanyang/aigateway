@@ -62,6 +62,8 @@ class GenerationOptions(BaseModel):
     quality: Literal["standard", "creative_refine", "faithful_4k"] = "standard"
     width: int | None = Field(default=None, ge=64, le=8192)
     height: int | None = Field(default=None, ge=64, le=8192)
+    duration_seconds: Literal[3, 5, 8] | None = None
+    fps: int | None = Field(default=None, ge=1, le=60, strict=True)
 
 
 class ChatCompletionRequest(BaseModel):

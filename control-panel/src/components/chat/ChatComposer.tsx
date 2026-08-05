@@ -2,6 +2,12 @@ import { useEffect, useState, useRef, type KeyboardEvent } from 'react'
 import { ImagePlus, RefreshCw, Send, Square, X } from 'lucide-react'
 import type { GenerationPreset } from '@/api/client'
 import type { ChatReferenceImage, GenerationOptions } from '@/types'
+import {
+  DEFAULT_VIDEO_DURATION_SECONDS,
+  DEFAULT_VIDEO_FPS,
+  VIDEO_DURATION_OPTIONS,
+  type VideoDurationSeconds,
+} from '@/types/videoGeneration'
 
 const MAX_REFERENCE_IMAGE_BYTES = 10 * 1024 * 1024
 const REFERENCE_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp'])
@@ -9,6 +15,7 @@ const REFERENCE_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp'])
 interface ChatComposerProps {
   streaming: boolean
   disabled: boolean
+  sourceImageMode?: boolean
   onSend: (
     text: string,
     opts?: {
@@ -33,6 +40,7 @@ function presetIsAvailable(preset: GenerationPreset): boolean {
 export default function ChatComposer({
   streaming,
   disabled,
+  sourceImageMode = false,
   onSend,
   onStop,
   presets = [],
@@ -45,6 +53,9 @@ export default function ChatComposer({
   const [presetId, setPresetId] = useState('')
   const [quality, setQuality] = useState<NonNullable<GenerationOptions['quality']>>('standard')
   const [size, setSize] = useState('')
+  const [videoDurationSeconds, setVideoDurationSeconds] = useState<VideoDurationSeconds>(
+    DEFAULT_VIDEO_DURATION_SECONDS,
+  )
   const [referenceImage, setReferenceImage] = useState<ChatReferenceImage | null>(null)
   const [referenceError, setReferenceError] = useState<string | null>(null)
   const taRef = useRef<HTMLTextAreaElement>(null)
@@ -59,33 +70,100 @@ export default function ChatComposer({
     if (!selected || !presetIsAvailable(selected)) setPresetId('')
   }, [imagePresets, presetId])
 
+  useEffect(() => {
+    if (!sourceImageMode) return
+    setReferenceImage(null)
+    setReferenceError(null)
+    setPresetId('')
+    if (imageInputRef.current) imageInputRef.current.value = ''
+  }, [sourceImageMode])
+
+  function resetAfterSubmit() {
+    setText('')
+    setVideoDurationSeconds(DEFAULT_VIDEO_DURATION_SECONDS)
+    setReferenceImage(null)
+    setReferenceError(null)
+    if (imageInputRef.current) imageInputRef.current.value = ''
+    if (taRef.current) taRef.current.style.height = 'auto'
+  }
+
   function submit() {
     const t = text.trim()
     if (!t || streaming || disabled) return
-    if (backend === 'auto' && !presetId && quality === 'standard' && !size) {
+
+    if (sourceImageMode) {
+      onSend(t, {
+        generationOptions: {
+          backend: 'local',
+          prompt_mode: 'raw',
+          quality: 'standard',
+          duration_seconds: videoDurationSeconds,
+          fps: DEFAULT_VIDEO_FPS,
+        },
+      })
+      resetAfterSubmit()
+      return
+    }
+
+    const hasCustomVideoTiming = videoDurationSeconds !== DEFAULT_VIDEO_DURATION_SECONDS
+    if (backend === 'auto' && !presetId && quality === 'standard' && !size && !hasCustomVideoTiming) {
       if (referenceImage) onSend(t, { referenceImage })
       else onSend(t)
     } else {
       const [width, height] = size
         ? size.split('x').map(value => Number(value))
         : [undefined, undefined]
+      const generationOptions: GenerationOptions = {
+        backend,
+        preset_id: presetId || undefined,
+        quality,
+        prompt_mode: 'auto',
+        width,
+        height,
+      }
+      if (hasCustomVideoTiming) {
+        generationOptions.duration_seconds = videoDurationSeconds
+        generationOptions.fps = DEFAULT_VIDEO_FPS
+      }
       onSend(t, {
-        generationOptions: {
-          backend,
-          preset_id: presetId || undefined,
-          quality,
-          prompt_mode: 'auto',
-          width,
-          height,
-        },
+        generationOptions,
         referenceImage: referenceImage ?? undefined,
       })
     }
-    setText('')
-    setReferenceImage(null)
+    resetAfterSubmit()
+  }
+
+  async function selectReferenceImage(file: File | undefined) {
     setReferenceError(null)
-    if (imageInputRef.current) imageInputRef.current.value = ''
-    if (taRef.current) taRef.current.style.height = 'auto'
+    if (!file) return
+    if (!REFERENCE_IMAGE_TYPES.has(file.type)) {
+      setReferenceError('参考图仅支持 PNG、JPEG 或 WebP。')
+      return
+    }
+    if (file.size > MAX_REFERENCE_IMAGE_BYTES) {
+      setReferenceError('参考图不能超过 10MB。')
+      return
+    }
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => (
+        typeof reader.result === 'string'
+          ? resolve(reader.result)
+          : reject(new Error('图片读取失败'))
+      )
+      reader.onerror = () => reject(reader.error ?? new Error('图片读取失败'))
+      reader.readAsDataURL(file)
+    }).catch((error: unknown) => {
+      setReferenceError(error instanceof Error ? error.message : '图片读取失败')
+      return null
+    })
+    if (!dataUrl) return
+    setReferenceImage({
+      dataUrl,
+      name: file.name,
+      mimeType: file.type,
+      size: file.size,
+    })
   }
 
   async function selectReferenceImage(file: File | undefined) {
@@ -139,91 +217,122 @@ export default function ChatComposer({
   return (
     <div className="p-3" style={{ borderTop: '1px solid var(--color-border)' }}>
       <div className="flex flex-wrap gap-2 mb-2">
-        <label className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
-          后端{' '}
-          <select
-            value={backend}
-            disabled={streaming || disabled}
-            onChange={event => {
-              const next = event.target.value as GenerationOptions['backend']
-              setBackend(next)
-              if (next === 'cloud') setPresetId('')
-            }}
-          >
-            <option value="auto">自动</option>
-            <option value="local">本地</option>
-            <option value="cloud">云端</option>
-          </select>
-        </label>
-        <label className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
-          图片模型/预设{' '}
-          <select
-            aria-label="图片模型/预设"
-            value={presetId}
-            disabled={streaming || disabled || backend === 'cloud'}
-            onChange={event => {
-              setPresetId(event.target.value)
-              if (event.target.value) setBackend('local')
-            }}
-          >
-            <option value="">自动选择</option>
-            {imagePresets.map(preset => {
-              const available = presetIsAvailable(preset)
-              const suffix = preset.source === 'discovered' ? ' · 已安装' : ''
-              return (
-                <option key={preset.id} value={preset.id} disabled={!available}>
-                  {preset.name}{suffix}{available ? '' : ' · 不可用'}
-                </option>
-              )
-            })}
-          </select>
-        </label>
-        {onRefreshPresets && (
-          <button
-            type="button"
-            aria-label="刷新图片模型"
-            title="重新扫描本地图片模型"
-            disabled={presetsLoading || streaming || disabled}
-            onClick={onRefreshPresets}
-            className="inline-flex items-center p-1 rounded cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-            style={{ color: 'var(--color-text-secondary)' }}
-          >
-            <RefreshCw size={14} className={presetsLoading ? 'animate-spin' : ''} />
-          </button>
+        {!sourceImageMode && (
+          <>
+            <label className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
+              后端{' '}
+              <select
+                value={backend}
+                disabled={streaming || disabled}
+                onChange={event => {
+                  const next = event.target.value as GenerationOptions['backend']
+                  setBackend(next)
+                  if (next === 'cloud') setPresetId('')
+                }}
+              >
+                <option value="auto">自动</option>
+                <option value="local">本地</option>
+                <option value="cloud">云端</option>
+              </select>
+            </label>
+            <label className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
+              图片模型/预设{' '}
+              <select
+                aria-label="图片模型/预设"
+                value={presetId}
+                disabled={streaming || disabled || backend === 'cloud'}
+                onChange={event => {
+                  setPresetId(event.target.value)
+                  if (event.target.value) setBackend('local')
+                }}
+              >
+                <option value="">自动选择</option>
+                {imagePresets.map(preset => {
+                  const available = presetIsAvailable(preset)
+                  const suffix = preset.source === 'discovered' ? ' · 已安装' : ''
+                  return (
+                    <option key={preset.id} value={preset.id} disabled={!available}>
+                      {preset.name}{suffix}{available ? '' : ' · 不可用'}
+                    </option>
+                  )
+                })}
+              </select>
+            </label>
+            {onRefreshPresets && (
+              <button
+                type="button"
+                aria-label="刷新图片模型"
+                title="重新扫描本地图片模型"
+                disabled={presetsLoading || streaming || disabled}
+                onClick={onRefreshPresets}
+                className="inline-flex items-center p-1 rounded cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                style={{ color: 'var(--color-text-secondary)' }}
+              >
+                <RefreshCw size={14} className={presetsLoading ? 'animate-spin' : ''} />
+              </button>
+            )}
+            <label className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
+              图片质量{' '}
+              <select
+                disabled={streaming || disabled}
+                value={quality}
+                onChange={event => setQuality(event.target.value as NonNullable<GenerationOptions['quality']>)}
+              >
+                <option value="standard">标准</option>
+                <option value="creative_refine">创意精修</option>
+                <option value="faithful_4k">4K 保真</option>
+              </select>
+            </label>
+            <label className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
+              尺寸{' '}
+              <select
+                disabled={streaming || disabled}
+                value={size}
+                onChange={event => setSize(event.target.value)}
+              >
+                <option value="">自动</option>
+                <option value="1024x1024">1024 × 1024</option>
+                <option value="1344x768">1344 × 768</option>
+                <option value="768x1344">768 × 1344</option>
+              </select>
+            </label>
+          </>
         )}
-        <label className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
-          图片质量{' '}
-          <select disabled={streaming || disabled} value={quality} onChange={event => setQuality(event.target.value as NonNullable<GenerationOptions['quality']>)}>
-            <option value="standard">标准</option>
-            <option value="creative_refine">创意精修</option>
-            <option value="faithful_4k">4K 保真</option>
-          </select>
-        </label>
-        <label className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
-          尺寸{' '}
-          <select disabled={streaming || disabled} value={size} onChange={event => setSize(event.target.value)}>
-            <option value="">自动</option>
-            <option value="1024x1024">1024 × 1024</option>
-            <option value="1344x768">1344 × 768</option>
-            <option value="768x1344">768 × 1344</option>
+        <label
+          className="text-xs"
+          style={{ color: 'var(--color-text-secondary)' }}
+          title={`仅对视频生成生效，按 ${DEFAULT_VIDEO_FPS} FPS 归一化为 Wan2.2 支持的帧数`}
+        >
+          视频时长{' '}
+          <select
+            aria-label="视频时长"
+            disabled={streaming || disabled}
+            value={videoDurationSeconds}
+            onChange={event => setVideoDurationSeconds(Number(event.target.value) as VideoDurationSeconds)}
+          >
+            {VIDEO_DURATION_OPTIONS.map(duration => (
+              <option key={duration} value={duration}>{duration} 秒</option>
+            ))}
           </select>
         </label>
       </div>
-      {presetsError && (
+      {!sourceImageMode && presetsError && (
         <div role="status" className="text-xs mb-2" style={{ color: 'var(--color-warning)' }}>
           图片模型列表加载失败，仍可使用自动选择：{presetsError}
         </div>
       )}
-      <input
-        ref={imageInputRef}
-        type="file"
-        accept="image/png,image/jpeg,image/webp"
-        aria-label="上传参考图"
-        className="hidden"
-        disabled={streaming || disabled}
-        onChange={event => { void selectReferenceImage(event.target.files?.[0]) }}
-      />
-      {referenceImage && (
+      {!sourceImageMode && (
+        <input
+          ref={imageInputRef}
+          type="file"
+          accept="image/png,image/jpeg,image/webp"
+          aria-label="上传参考图"
+          className="hidden"
+          disabled={streaming || disabled}
+          onChange={event => { void selectReferenceImage(event.target.files?.[0]) }}
+        />
+      )}
+      {!sourceImageMode && referenceImage && (
         <div className="mb-2 flex items-center gap-2 text-xs" style={{ color: 'var(--color-text-secondary)' }}>
           <img
             src={referenceImage.dataUrl}
@@ -247,58 +356,64 @@ export default function ChatComposer({
           </button>
         </div>
       )}
-      {referenceError && (
+      {!sourceImageMode && referenceError && (
         <div role="alert" className="mb-2 text-xs" style={{ color: 'var(--color-danger)' }}>
           {referenceError}
         </div>
       )}
       <div className="flex items-end gap-2">
-      <button
-        type="button"
-        aria-label="选择参考图"
-        title="上传参考图，用于图生图或图生视频"
-        disabled={streaming || disabled}
-        onClick={() => imageInputRef.current?.click()}
-        className="inline-flex items-center justify-center px-2 py-2 rounded-md cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-        style={{ color: 'var(--color-text-secondary)', border: '1px solid var(--color-border)' }}
-      >
-        <ImagePlus size={17} />
-      </button>
-      <textarea
-        ref={taRef}
-        value={text}
-        disabled={disabled}
-        onChange={e => setText(e.target.value)}
-        onInput={onInput}
-        onKeyDown={onKeyDown}
-        rows={1}
-        placeholder={disabled ? '请先在任一页面设置 API Key' : '输入消息,Enter 发送 / Shift+Enter 换行'}
-        className="flex-1 resize-none px-3 py-2 rounded-md outline-none"
-        style={{
-          backgroundColor: 'var(--color-bg-overlay)',
-          color: 'var(--color-text-primary)',
-          border: '1px solid var(--color-border)',
-          maxHeight: '160px',
-        }}
-      />
-      {streaming ? (
-        <button
-          onClick={onStop}
-          className="flex items-center gap-1 px-3 py-2 rounded-md cursor-pointer"
-          style={{ backgroundColor: 'var(--color-danger)', color: '#fff' }}
-        >
-          <Square size={16} /> 停止
-        </button>
-      ) : (
-        <button
-          onClick={submit}
-          disabled={disabled || !text.trim()}
-          className="flex items-center gap-1 px-3 py-2 rounded-md cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-          style={{ backgroundColor: 'var(--color-primary)', color: 'var(--color-text-inverse)' }}
-        >
-          <Send size={16} /> 发送
-        </button>
-      )}
+        {!sourceImageMode && (
+          <button
+            type="button"
+            aria-label="选择参考图"
+            title="上传参考图，用于图生图或图生视频"
+            disabled={streaming || disabled}
+            onClick={() => imageInputRef.current?.click()}
+            className="inline-flex items-center justify-center px-2 py-2 rounded-md cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+            style={{ color: 'var(--color-text-secondary)', border: '1px solid var(--color-border)' }}
+          >
+            <ImagePlus size={17} />
+          </button>
+        )}
+        <textarea
+          ref={taRef}
+          value={text}
+          disabled={disabled}
+          onChange={event => setText(event.target.value)}
+          onInput={onInput}
+          onKeyDown={onKeyDown}
+          rows={1}
+          placeholder={disabled
+            ? '请先在任一页面设置 API Key'
+            : sourceImageMode
+              ? '描述主体动作或镜头运动'
+              : '输入消息,Enter 发送 / Shift+Enter 换行'}
+          className="flex-1 resize-none px-3 py-2 rounded-md outline-none"
+          style={{
+            backgroundColor: 'var(--color-bg-overlay)',
+            color: 'var(--color-text-primary)',
+            border: '1px solid var(--color-border)',
+            maxHeight: '160px',
+          }}
+        />
+        {streaming ? (
+          <button
+            onClick={onStop}
+            className="flex items-center gap-1 px-3 py-2 rounded-md cursor-pointer"
+            style={{ backgroundColor: 'var(--color-danger)', color: '#fff' }}
+          >
+            <Square size={16} /> 停止
+          </button>
+        ) : (
+          <button
+            onClick={submit}
+            disabled={disabled || !text.trim()}
+            className="flex items-center gap-1 px-3 py-2 rounded-md cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+            style={{ backgroundColor: 'var(--color-primary)', color: 'var(--color-text-inverse)' }}
+          >
+            <Send size={16} /> 发送
+          </button>
+        )}
       </div>
     </div>
   )

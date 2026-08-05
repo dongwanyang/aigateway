@@ -1,4 +1,6 @@
+import { useEffect, useState } from 'react'
 import { useChatSessions } from '@/hooks/useChatSessions'
+import { useSourceDraftVideo } from '@/hooks/useSourceDraftVideo'
 import { useAuth } from '@/contexts/AuthContext'
 import { useQuery } from '@tanstack/react-query'
 import { getGenerationPresets } from '@/api/client'
@@ -6,7 +8,17 @@ import { queryKeys } from '@/query/keys'
 import SessionList from '@/components/chat/SessionList'
 import ChatTimeline from '@/components/chat/ChatTimeline'
 import ChatComposer from '@/components/chat/ChatComposer'
-import { Trash2 } from 'lucide-react'
+import type { ChatReferenceImage, GenerationOptions } from '@/types'
+import {
+  DEFAULT_VIDEO_DURATION_SECONDS,
+  DEFAULT_VIDEO_FPS,
+} from '@/types/videoGeneration'
+import { Trash2, Video, X } from 'lucide-react'
+
+interface SelectedVideoSource {
+  draftId: string
+  previewDataUrl?: string
+}
 
 export default function Chat() {
   const { isAuthenticated } = useAuth()
@@ -22,8 +34,16 @@ export default function Chat() {
     send, stop, clearActive,
     confirmDraftMsg, rejectDraftMsg,
   } = useChatSessions()
-  // 聊天区高度:视口 - 56px 顶栏 - 48px(上下 padding,Layout main padding 24*2)
+  const {
+    create: createSourceDraftVideo,
+    cancel: cancelSourceDraftVideo,
+  } = useSourceDraftVideo()
+  const [selectedVideoSource, setSelectedVideoSource] = useState<SelectedVideoSource | null>(null)
   const chatHeight = 'calc(100vh - 56px - 48px)'
+
+  useEffect(() => {
+    setSelectedVideoSource(null)
+  }, [activeId])
 
   if (!isAuthenticated) {
     return (
@@ -37,27 +57,90 @@ export default function Chat() {
   }
 
   const messages = active?.messages ?? []
-  const lastAssistant = [...messages].reverse().find(m => m.role === 'assistant')
+  const lastAssistant = [...messages].reverse().find(
+    message => message.role === 'assistant',
+  )
   const streamingId = streaming ? (lastAssistant?.id ?? null) : null
+
+  const selectImageDraftForVideo = (messageId: string) => {
+    const message = messages.find(item => item.id === messageId)
+    if (
+      !message?.draft
+      || message.draft.mediaType !== 'image'
+      || !['confirmed', 'completed'].includes(message.draft.status)
+      || message.draft.resultLost
+    ) return
+    setSelectedVideoSource({
+      draftId: message.draft.draftId,
+      previewDataUrl: message.draft.previewDataUrl ?? message.draft.resultDataUrl,
+    })
+  }
+
+  const stopAll = () => {
+    cancelSourceDraftVideo()
+    stop()
+  }
+
+  const handleNewSession = () => {
+    cancelSourceDraftVideo()
+    newSession()
+  }
+
+  const handleSelectSession = (sessionId: string) => {
+    cancelSourceDraftVideo()
+    selectSession(sessionId)
+  }
+
+  const handleDeleteSession = (sessionId: string) => {
+    cancelSourceDraftVideo()
+    deleteSession(sessionId)
+  }
+
+  const handleClearActive = () => {
+    cancelSourceDraftVideo()
+    clearActive()
+  }
+
+  const handleSend = (
+    text: string,
+    opts?: {
+      generationOptions?: GenerationOptions
+      referenceImage?: ChatReferenceImage
+    },
+  ) => {
+    if (selectedVideoSource && activeId) {
+      const source = selectedVideoSource
+      setSelectedVideoSource(null)
+      void createSourceDraftVideo({
+        sourceDraftId: source.draftId,
+        sourcePreviewDataUrl: source.previewDataUrl,
+        motionPrompt: text,
+        durationSeconds: opts?.generationOptions?.duration_seconds
+          ?? DEFAULT_VIDEO_DURATION_SECONDS,
+        fps: opts?.generationOptions?.fps ?? DEFAULT_VIDEO_FPS,
+        chatSessionId: activeId,
+      })
+      return
+    }
+    void send(text, opts)
+  }
 
   return (
     <div className="flex" style={{ height: chatHeight }}>
-      {/* 会话列表(二级侧栏) */}
       <SessionList
         sessions={sessions}
         activeId={activeId}
-        onNew={newSession}
-        onSelect={selectSession}
-        onDelete={deleteSession}
+        onNew={handleNewSession}
+        onSelect={handleSelectSession}
+        onDelete={handleDeleteSession}
       />
-      {/* 聊天主区 */}
       <div className="flex flex-col flex-1 min-w-0 pl-3">
         <div className="flex items-center justify-between px-1 py-2">
           <h2 className="text-md font-semibold" style={{ color: 'var(--color-text-primary)' }}>
             {active?.title || '聊天'}
           </h2>
           <button
-            onClick={clearActive}
+            onClick={handleClearActive}
             disabled={streaming || messages.length === 0}
             className="flex items-center gap-1 px-2 py-1 rounded-md text-sm cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
             style={{ color: 'var(--color-text-secondary)' }}
@@ -78,14 +161,46 @@ export default function Chat() {
             pendingAssistantId={pendingAssistantId}
             onConfirmDraft={confirmDraftMsg}
             onRejectDraft={rejectDraftMsg}
+            onCreateVideoFromDraft={selectImageDraftForVideo}
           />
         </div>
         <div className="mx-1 mt-2 rounded-md" style={{ backgroundColor: 'var(--color-bg-elevated)' }}>
+          {selectedVideoSource && (
+            <div
+              className="mx-3 mt-3 flex items-center gap-2 rounded-md px-3 py-2 text-xs"
+              style={{ border: '1px solid var(--color-primary)', color: 'var(--color-text-secondary)' }}
+            >
+              {selectedVideoSource.previewDataUrl ? (
+                <img
+                  src={selectedVideoSource.previewDataUrl}
+                  alt="视频来源图片"
+                  className="h-12 w-12 rounded object-cover"
+                />
+              ) : (
+                <Video size={18} style={{ color: 'var(--color-primary)' }} />
+              )}
+              <div className="flex-1">
+                <div style={{ color: 'var(--color-text-primary)' }}>基于此图生成视频</div>
+                <div>输入主体动作或镜头运动；当前仅“视频时长”选项生效。</div>
+              </div>
+              <button
+                type="button"
+                aria-label="取消使用此图片"
+                title="取消使用此图片"
+                disabled={streaming}
+                onClick={() => setSelectedVideoSource(null)}
+                className="inline-flex rounded p-1 cursor-pointer disabled:opacity-50"
+              >
+                <X size={14} />
+              </button>
+            </div>
+          )}
           <ChatComposer
             streaming={streaming}
             disabled={false}
-            onSend={send}
-            onStop={stop}
+            sourceImageMode={Boolean(selectedVideoSource)}
+            onSend={handleSend}
+            onStop={stopAll}
             presets={Array.isArray(presetsQuery.data) ? presetsQuery.data : []}
             presetsLoading={presetsQuery.isLoading || presetsQuery.isFetching}
             presetsError={presetsQuery.error instanceof Error ? presetsQuery.error.message : null}

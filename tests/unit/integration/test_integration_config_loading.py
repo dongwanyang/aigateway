@@ -86,7 +86,8 @@ class TestParseIntegrationConfigsDefaults:
         assert c.video_workflow_version == ""
         assert c.video_width == 512
         assert c.video_height == 288
-        assert c.video_frames == 17
+        assert c.video_frames == 41
+        assert c.video_fps == 8.0
         assert c.video_execution_timeout == 1200
 
     def test_default_rag_retriever_values(self):

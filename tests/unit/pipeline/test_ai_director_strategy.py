@@ -113,20 +113,16 @@ class TestAIDirectorStrategyOptimizePrompt:
         assert result.duration_ms > 0
 
     @pytest.mark.asyncio
-    async def test_uses_model_selector_when_provided(self, default_config, pipeline_ctx, mock_bridge):
-        """When model_selector is provided, use it to select the model instead of config.rewrite_model."""
-        from aigateway_core.pipelines.generation.director.ai_director import (
-            AIDirectorStrategy,
-        )
-
+    async def test_uses_model_selector_when_provided(
+        self, default_config, pipeline_ctx, mock_bridge
+    ):
+        """When model_selector is provided, use it instead of rewrite_model."""
         selector = MagicMock()
         selector.select_text_model = AsyncMock(return_value="deepseek-v4-flash")
         strat = AIDirectorStrategy(
             config=default_config, litellm_bridge=mock_bridge, model_selector=selector
         )
-        await strat.optimize_prompt(
-            "a cat", [], default_config, pipeline_ctx
-        )
+        await strat.optimize_prompt("a cat", [], default_config, pipeline_ctx)
         call_kwargs = mock_bridge.completion.call_args.kwargs
         assert call_kwargs["model"] == "deepseek-v4-flash"
         assert call_kwargs["intent"] == "understanding"
@@ -134,7 +130,6 @@ class TestAIDirectorStrategyOptimizePrompt:
     @pytest.mark.asyncio
     async def test_output_truncated_to_max_length(self, default_config, pipeline_ctx):
         """Output exceeding max_prompt_length should be truncated."""
-        # Configure a very short max_prompt_length
         config = AIDirectorConfig(
             max_prompt_length=50,
             timeout_seconds=10.0,
@@ -145,9 +140,7 @@ class TestAIDirectorStrategyOptimizePrompt:
         bridge = AsyncMock()
         bridge.completion = AsyncMock(
             return_value={
-                "data": {
-                    "choices": [{"message": {"content": long_response}}]
-                },
+                "data": {"choices": [{"message": {"content": long_response}}]},
                 "_meta": {"cost": 0.0001},
             }
         )
@@ -165,13 +158,10 @@ class TestAIDirectorStrategyOptimizePrompt:
     @pytest.mark.asyncio
     async def test_timeout_fallback_to_original(self, default_config, pipeline_ctx):
         """Timeout should result in fallback to original prompt."""
-        config = AIDirectorConfig(
-            timeout_seconds=0.01,  # Very short timeout
-            min_prompt_length=5,
-        )
+        config = AIDirectorConfig(timeout_seconds=0.01, min_prompt_length=5)
 
         async def slow_completion(*args, **kwargs):
-            await asyncio.sleep(1.0)  # Intentionally slow
+            await asyncio.sleep(1.0)
             return {"data": {"choices": [{"message": {"content": "optimized"}}]}}
 
         bridge = AsyncMock()
@@ -224,10 +214,7 @@ class TestAIDirectorStrategyOptimizePrompt:
     @pytest.mark.asyncio
     async def test_short_prompt_expansion_with_images(self, default_config, pipeline_ctx):
         """Short prompt with reference images should include image hints."""
-        config = AIDirectorConfig(
-            min_prompt_length=20,  # "cat" is shorter than this
-            timeout_seconds=10.0,
-        )
+        config = AIDirectorConfig(min_prompt_length=20, timeout_seconds=10.0)
 
         bridge = AsyncMock()
         bridge.completion = AsyncMock(
@@ -237,10 +224,10 @@ class TestAIDirectorStrategyOptimizePrompt:
                         {
                             "message": {
                                 "content": (
-                                    "【主体】一只橘色猫咪\n"
-                                    "【动作】安静地坐着\n"
-                                    "【环境】温暖的室内\n"
-                                    "【镜头】特写，平视角度"
+                                    "Subject: an orange tabby cat\n"
+                                    "Action: sitting quietly\n"
+                                    "Environment: a warm interior\n"
+                                    "Camera: close-up at eye level"
                                 )
                             }
                         }
@@ -265,22 +252,21 @@ class TestAIDirectorStrategyOptimizePrompt:
             ctx=pipeline_ctx,
         )
 
-        # Verify the bridge was called with a message containing image hints
         call_args = bridge.completion.call_args
         messages = call_args.kwargs.get("messages") or call_args[1].get("messages", [])
         user_msg = messages[-1]["content"]
         assert "参考图片信息" in user_msg
         assert "orange tabby cat" in user_msg
 
-        # The system prompt should be the expand one for short prompts
         system_msg = messages[0]["content"]
-        assert system_msg == _EXPAND_SYSTEM_PROMPT
+        assert system_msg.startswith(_EXPAND_SYSTEM_PROMPT)
+        assert "目标模型支持的输出语言已选择为 en" in system_msg
 
     @pytest.mark.asyncio
     async def test_normal_prompt_uses_rewrite_system_prompt(
         self, default_config, pipeline_ctx, mock_bridge
     ):
-        """Normal (non-short) prompt should use the standard rewrite system prompt."""
+        """Normal prompt should use rewrite prompt plus target language policy."""
         strategy = AIDirectorStrategy(
             config=default_config, litellm_bridge=mock_bridge
         )
@@ -294,7 +280,25 @@ class TestAIDirectorStrategyOptimizePrompt:
         call_args = mock_bridge.completion.call_args
         messages = call_args.kwargs.get("messages") or call_args[1].get("messages", [])
         system_msg = messages[0]["content"]
-        assert system_msg == _REWRITE_SYSTEM_PROMPT
+        assert system_msg.startswith(_REWRITE_SYSTEM_PROMPT)
+        assert "用户主要语言为 en" in system_msg
+        assert "目标模型支持的输出语言已选择为 en" in system_msg
+
+    @pytest.mark.parametrize(
+        "system_prompt",
+        [_REWRITE_SYSTEM_PROMPT, _EXPAND_SYSTEM_PROMPT],
+    )
+    def test_default_system_prompts_defer_to_model_language_policy(
+        self, system_prompt
+    ):
+        """Base prompts must not impose a global English-only policy."""
+        assert "目标模型语言策略" in system_prompt
+        assert "必须使用自然、准确的英文" not in system_prompt
+        assert "Subject:" in system_prompt
+        assert "Action:" in system_prompt
+        assert "Environment:" in system_prompt
+        assert "Camera:" in system_prompt
+        assert "原样保留" in system_prompt
 
     @pytest.mark.parametrize(
         "system_prompt",

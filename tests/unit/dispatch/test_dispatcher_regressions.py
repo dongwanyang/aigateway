@@ -150,7 +150,7 @@ async def test_generation_preflight_error_releases_reserved_quota(
         model="auto",
         stream=False,
         generation_options=SimpleNamespace(
-            model_dump=lambda: {"backend": "local"}
+            model_dump=lambda **_kwargs: {"backend": "local"}
         ),
     )
 
