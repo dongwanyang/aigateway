@@ -1,4 +1,4 @@
-"""Require observable ComfyUI release before persisting draft cancellation."""
+"""Require observable ComfyUI release before cancelling a local draft task."""
 from __future__ import annotations
 
 import asyncio
@@ -145,14 +145,14 @@ def _restore_status(draft: Any) -> str:
     return DRAFT_STATUS_RUNNING
 
 
-async def _restore_unconfirmed_cancellation(
+async def _mark_unconfirmed_cancellation(
     strategy: Any,
     draft: Any,
     *,
     prompt_id: str,
     request_id: str,
 ) -> Any:
-    """Restore a recoverable in-progress record after upstream ambiguity."""
+    """Keep the local task alive and persist an observable ambiguous state."""
     await _clear_cancel_tombstone(strategy, request_id)
     await _fence_busy_worker(strategy, draft)
     current = await strategy.get_draft(draft.draft_id) or draft
@@ -168,7 +168,7 @@ async def _restore_unconfirmed_cancellation(
     current.generation_params["progress_source"] = "comfyui"
     ttl_remaining = max(1, int(current.expires_at - time.time()))
     # Bypass the subclass tombstone guard: the tombstone was cleared above and
-    # the prompt binding must remain available for runtime reconciliation.
+    # the prompt binding must remain available for the still-running local task.
     await _base_impl.DraftGeneratorStrategy._store_draft(
         strategy,
         current,
@@ -209,18 +209,23 @@ async def cancel_draft_verified(
     draft_id: str,
     original: Callable[[Any, str], Awaitable[Any]],
 ) -> Any:
-    """Run cancellation and fail closed if ComfyUI release is unobservable."""
+    """Cancel upstream first; cancel the owning local Task only after release."""
     before = await strategy.get_draft(draft_id)
     if before is None:
         return await original(strategy, draft_id)
     prompt_id = str(getattr(before, "comfy_prompt_id", "") or "")
     request_id = str(before.generation_params.get("request_id") or "")
-    server_url = _worker_url(strategy, before)
-
-    result = await original(strategy, draft_id)
     if not prompt_id:
-        return result
+        return await original(strategy, draft_id)
 
+    server_url = _worker_url(strategy, before)
+    # Do not cancel the local polling/result-persistence Task yet. It remains the
+    # only owner capable of collecting a result if ComfyUI does not acknowledge
+    # the interrupt/delete request.
+    await strategy._cancel_comfy_prompt(
+        prompt_id,
+        server_url=server_url,
+    )
     configured_timeout = float(
         getattr(strategy._comfyui_config, "connect_timeout", 5.0) or 5.0
     )
@@ -230,16 +235,18 @@ async def cancel_draft_verified(
         server_url=server_url,
         timeout_seconds=max(5.0, min(15.0, configured_timeout * 2.0)),
     )
-    if released:
-        return result
+    if not released:
+        await _mark_unconfirmed_cancellation(
+            strategy,
+            before,
+            prompt_id=prompt_id,
+            request_id=request_id,
+        )
+        raise DraftWorkflowError("comfyui_cancellation_unconfirmed")
 
-    await _restore_unconfirmed_cancellation(
-        strategy,
-        before,
-        prompt_id=prompt_id,
-        request_id=request_id,
-    )
-    raise DraftWorkflowError("comfyui_cancellation_unconfirmed")
+    # Upstream is observably gone. The existing implementation can now cancel
+    # and await the local Task, persist cancelled, and release the GPU lease.
+    return await original(strategy, draft_id)
 
 
 def install_verified_draft_cancellation() -> None:
