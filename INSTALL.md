@@ -116,6 +116,70 @@ bash scripts/quickstart.sh --non-interactive
 修改 `.env` 后也应重新运行上述安装器命令，使容器按新环境变量重新创建；单纯执行
 `docker compose restart gateway` 不会重新读取容器环境变量。
 
+## 正确关闭方式
+
+### 推荐：由安装器关闭完整服务栈
+
+在仓库根目录执行：
+
+```bash
+bash scripts/quickstart.sh --down
+```
+
+安装器会读取现有 `.aigateway-install.env`，使用与启动时相同的 Edition、profiles、
+CUDA overlay 和生产覆盖文件执行 `docker compose down`。该命令会删除当前项目的
+容器和网络，但会保留：
+
+- Redis、Qdrant、Prometheus、Grafana 等 Docker named volumes；
+- `.aigateway/runtime/config.yaml` 和 `.aigateway-install.env`；
+- `data/`、`models/`、`comfyui/` 等宿主机目录；
+- 已构建或已拉取的 Docker 镜像与 BuildKit 缓存。
+
+再次启动时执行：
+
+```bash
+bash scripts/quickstart.sh --non-interactive
+```
+
+源码分发需要重新构建当前 checkout 时执行：
+
+```bash
+BUILDKIT_PROGRESS=plain \
+  bash scripts/quickstart.sh \
+    --non-interactive \
+    --distribution source \
+    --build
+```
+
+> 不要把 `docker compose down -v` 用作日常关闭命令。`-v` 会删除项目的 named
+> volumes，可能丢失 Redis、Qdrant、监控和其他持久化数据。除非明确执行数据重置，
+> 也不要删除 `.aigateway/runtime`、`data`、`models` 或 `comfyui`。
+
+### 高级：手动 Compose 关闭
+
+手动关闭必须加载与启动时完全相同的 env 文件和 Compose 文件。CUDA
+Studio/Full 示例：
+
+```bash
+docker compose \
+  --env-file .env \
+  --env-file .aigateway-install.env \
+  -f docker-compose.yml \
+  -f docker-compose.cuda.yml \
+  -f .aigateway/runtime/docker-compose.gpu.generated.yml \
+  down --remove-orphans
+```
+
+生产模式还必须追加：
+
+```text
+-f docker-compose.prod.yml
+```
+
+如果只需要临时停止进程并保留容器，可把 `down --remove-orphans` 改为 `stop`；
+恢复时使用相同文件集合执行 `start`。日常运维仍优先使用
+`bash scripts/quickstart.sh --down`，避免遗漏 profile、GPU worker 或生产覆盖文件。
+
 ## 安装器生成的文件
 
 首次安装时，安装器从仓库 `config.yaml` 原子生成运行配置，不修改仓库基础配置：
