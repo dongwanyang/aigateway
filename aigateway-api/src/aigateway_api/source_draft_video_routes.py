@@ -215,6 +215,7 @@ async def create_video_from_source_draft(
 ) -> SourceDraftVideoResponse:
     """Create a frozen video draft from an authorized completed image result."""
     strategy = _strategy(request)
+    stable_request_id = _request_id(request)
     started_at = time.monotonic()
     try:
         draft = await create_video_draft_from_source(
