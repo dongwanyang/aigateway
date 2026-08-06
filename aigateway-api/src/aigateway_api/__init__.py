@@ -243,7 +243,6 @@ _install_draft_confirm_routes()
 _install_draft_request_routes()
 _install_gpu_queue_handoff()
 _install_gpu_routes()
-_install_runtime_identity()
 _install_config_schema_parser()
 # Install this route last because package bootstrap imports can mutate routers.
 _install_source_draft_video_routes()
