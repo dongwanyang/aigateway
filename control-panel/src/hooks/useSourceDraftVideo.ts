@@ -102,6 +102,7 @@ export function useSourceDraftVideo(): SourceDraftVideoActions {
       content: motionPrompt,
       referenceImageDataUrl: input.sourcePreviewDataUrl,
       referenceImageName: '已生成图片',
+      referenceImageEphemeral: true,
       ts: now,
     }
     const assistantMessage: ChatPageMessage = {

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -147,6 +148,47 @@ def _domain_http_exception(
     )
 
 
+async def _record_video_draft_log(
+    request: Request,
+    *,
+    source_draft_id: str,
+    status_code: int,
+    started_at: float,
+    model: str,
+) -> None:
+    """记录图生视频草稿创建的请求日志。
+
+    这条路由会触发本地 ComfyUI 关键帧作业，但之前完全不写请求日志，
+    图生视频的这段消耗在 Logs 页不可见。日志失败不影响主流程。
+    """
+    try:
+        from .openai_compat import _record_request_log
+        await _record_request_log(
+            request=request,
+            method="POST",
+            endpoint=f"/admin/draft/{source_draft_id}/video",
+            status_code=status_code,
+            duration_ms=round((time.monotonic() - started_at) * 1000, 1),
+            model=model,
+            cache_hit=False,
+            cache_tier=None,
+        )
+    except Exception as exc:
+        logger.warning("图生视频草稿请求日志写入失败: %s", exc)
+
+
+def _video_draft_model(draft: Any) -> str:
+    """从草稿记录推导真实的视频工作流标识，避免写死模型名。"""
+    params = getattr(draft, "generation_params", None) or {}
+    if isinstance(params, dict):
+        for key in ("routed_model", "video_model", "model"):
+            value = params.get(key)
+            if value:
+                return str(value)
+    workflow_version = getattr(draft, "workflow_version", "") or ""
+    return f"comfyui:video:{workflow_version}" if workflow_version else "comfyui:video"
+
+
 def _is_reloaded_draft_workflow_error(exc: BaseException) -> bool:
     """Recognize the same domain exception after plugin/test module reloads.
 
@@ -170,6 +212,7 @@ async def create_video_from_source_draft(
 ) -> SourceDraftVideoResponse:
     """Create a frozen video draft from an authorized completed image result."""
     strategy = _strategy(request)
+    started_at = time.monotonic()
     try:
         draft = await create_video_draft_from_source(
             strategy,
@@ -185,18 +228,34 @@ async def create_video_from_source_draft(
     except HTTPException:
         raise
     except DraftWorkflowError as exc:
-        raise _domain_http_exception(
+        failure = _domain_http_exception(
             exc,
             source_draft_id=source_draft_id,
             chat_session_id=body.chat_session_id,
-        ) from exc
+        )
+        await _record_video_draft_log(
+            request,
+            source_draft_id=source_draft_id,
+            status_code=failure.status_code,
+            started_at=started_at,
+            model="comfyui:video",
+        )
+        raise failure from exc
     except Exception as exc:
         if _is_reloaded_draft_workflow_error(exc):
-            raise _domain_http_exception(
+            failure = _domain_http_exception(
                 exc,
                 source_draft_id=source_draft_id,
                 chat_session_id=body.chat_session_id,
-            ) from exc
+            )
+            await _record_video_draft_log(
+                request,
+                source_draft_id=source_draft_id,
+                status_code=failure.status_code,
+                started_at=started_at,
+                model="comfyui:video",
+            )
+            raise failure from exc
         logger.exception(
             "source_draft_video.create_unhandled",
             extra={
@@ -213,6 +272,14 @@ async def create_video_from_source_draft(
                 }
             },
         ) from exc
+
+    await _record_video_draft_log(
+        request,
+        source_draft_id=source_draft_id,
+        status_code=200,
+        started_at=started_at,
+        model=_video_draft_model(draft),
+    )
 
     params = draft.generation_params
     return SourceDraftVideoResponse(

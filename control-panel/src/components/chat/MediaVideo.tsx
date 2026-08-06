@@ -1,17 +1,24 @@
 import { useEffect, useRef, useState } from 'react'
-import { getVideoStatus } from '@/api/client'
+import {
+  VIDEO_POLL_TIMEOUT_MS,
+  extractVideoUrl,
+  isPlayableVideoUrl,
+  isVideoSucceeded,
+  watchVideoUntilTerminal,
+} from '@/services/chatRuntime'
 
-type Phase = 'idle' | 'polling' | 'succeeded' | 'failed' | 'timeout'
+type Phase = 'polling' | 'succeeded' | 'failed' | 'timeout'
 
 interface MediaVideoProps {
   content: string
   videoId?: string
   videoUrl?: string
+  /** 消息状态层已确定的终态，用于挂载时直接落到终态而不重新轮询。 */
+  videoPhase?: Phase
   done: boolean
 }
 
-const POLL_INTERVAL_MS = 3000
-const TIMEOUT_MS = 120000
+const ELAPSED_TICK_MS = 1000
 
 /**
  * 解析视频任务 id。要求内容包含 "id=<vid>" 且后续出现 "poll /v1/videos/"，
@@ -22,104 +29,73 @@ export function parseVideoId(content: string): string | null {
   return m ? m[1] : null
 }
 
-/**
- * 从视频状态响应中提取可播放 URL。
- *
- * Agnes /v1/videos/{id} 响应把成品 URL 放在 metadata.url（顶层无 url/video.url），
- * 因此三种位置都要尝试，否则 completed 状态下 resolvedUrl 为 null，
- * MediaVideo 会卡在 polling phase 永不渲染 <video>。
- */
-export function extractVideoUrl(status: {
-  url?: string
-  video?: { url?: string }
-  metadata?: { url?: string }
-}): string | null {
-  return status.video?.url || status.url || status.metadata?.url || null
-}
+export { extractVideoUrl }
 
-export default function MediaVideo({ content, videoId: initialVideoId, videoUrl: initialVideoUrl, done }: MediaVideoProps) {
-  const [phase, setPhase] = useState<Phase>('idle')
+export default function MediaVideo({
+  content,
+  videoId: initialVideoId,
+  videoUrl: initialVideoUrl,
+  videoPhase: initialPhase,
+  done,
+}: MediaVideoProps) {
+  const videoId = done ? (initialVideoId ?? parseVideoId(content)) : null
+  // 已知 URL 必须直接渲染。之前只把 URL 写进 state 而不推进 phase，
+  // 于是外层轮询拿到结果、或刷新后恢复已完成的消息时，phase 仍停在 polling，
+  // 渲染条件 phase === 'succeeded' 永远不成立，视频始终显示为"生成中"。
+  const resolvedPhase: Phase | null = initialVideoUrl
+    ? 'succeeded'
+    : (initialPhase && initialPhase !== 'polling' ? initialPhase : null)
+
+  const [phase, setPhase] = useState<Phase>(resolvedPhase ?? 'polling')
   const [videoUrl, setVideoUrl] = useState<string | null>(initialVideoUrl ?? null)
   const [elapsed, setElapsed] = useState(0)
-  // 用 setTimeout 递归替代 setInterval，防止 poll() 耗时 >3s 时多个 HTTP 请求并发。
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const isPollingRef = useRef(false)
-  // mounted ref: cancelled 只阻止 poll() 继续执行,但不防止已 resolve 的 setState
-  // 在 cancelled→unmount 之间的窗口期调用。用 ref 确保 unmount 后 setState 被丢弃。
   const mountedRef = useRef(true)
   useEffect(() => () => { mountedRef.current = false }, [])
 
-  const videoId = done ? (initialVideoId ?? parseVideoId(content)) : null
-
   useEffect(() => {
-    setVideoUrl(initialVideoUrl ?? null)
+    if (!initialVideoUrl) return
+    setVideoUrl(initialVideoUrl)
+    setPhase('succeeded')
   }, [initialVideoUrl])
 
   useEffect(() => {
-    if (!done || !videoId) return
+    if (resolvedPhase) setPhase(resolvedPhase)
+  }, [resolvedPhase])
+
+  useEffect(() => {
+    if (!done || !videoId || resolvedPhase) return
     setPhase('polling')
     setElapsed(0)
-    let cancelled = false
-    const start = Date.now()
 
-    async function poll() {
-      if (cancelled || !mountedRef.current) return
-      if (isPollingRef.current) {
-        // 上一次 poll 还在进行中（网络慢/服务端响应慢），跳过本轮，
-        // 等上一次 poll 完成后再重新调度。
+    // 共享轮询：同一个 videoId 全局只有一条循环，与消息状态层复用同一结果，
+    // 不再出现两个轮询器各自超时/各自解析的分叉。
+    const watch = watchVideoUntilTerminal(videoId)
+    const start = Date.now()
+    const ticker = setInterval(() => {
+      if (mountedRef.current) setElapsed(Date.now() - start)
+    }, ELAPSED_TICK_MS)
+
+    void watch.result.then(outcome => {
+      if (!mountedRef.current) return
+      if (outcome.kind === 'cancelled') return
+      if (outcome.kind === 'timeout') {
+        setPhase('timeout')
         return
       }
-      isPollingRef.current = true
-
-      try {
-        const e = Date.now() - start
-        if (mountedRef.current) setElapsed(e)
-        if (e > TIMEOUT_MS) {
-          if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null }
-          if (mountedRef.current) setPhase('timeout')
-          return
-        }
-        const st = await getVideoStatus(videoId!)
-        if (cancelled) return
-        const resolvedUrl = extractVideoUrl(st)
-        if ((st.status === 'succeeded' || st.status === 'completed') && resolvedUrl) {
-          if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null }
-          if (mountedRef.current) {
-            setVideoUrl(resolvedUrl)
-            setPhase('succeeded')
-          }
-          return
-        }
-        if (st.status === 'failed' || st.status === 'error' || st.error) {
-          if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null }
-          if (mountedRef.current) setPhase('failed')
-          return
-        }
-        // queued / in_progress → 继续轮询
-      } catch {
-        if (cancelled) return
-        // 单次查询失败,不立即终止,下一轮重试(直到超时)
-      } finally {
-        isPollingRef.current = false
+      const url = extractVideoUrl(outcome.status)
+      if (isVideoSucceeded(outcome.status) && url) {
+        setVideoUrl(url)
+        setPhase('succeeded')
+        return
       }
+      setPhase('failed')
+    })
 
-      // 轮询继续：只在 timer 还存在时调度下一轮
-      if (!cancelled && timerRef.current !== null) {
-        scheduleNext()
-      }
-    }
-
-    function scheduleNext() {
-      if (timerRef.current) clearTimeout(timerRef.current)
-      timerRef.current = setTimeout(poll, POLL_INTERVAL_MS)
-    }
-
-    scheduleNext()
     return () => {
-      cancelled = true
-      if (timerRef.current) clearTimeout(timerRef.current)
+      clearInterval(ticker)
+      watch.release()
     }
-  }, [done, videoId])
+  }, [done, videoId, resolvedPhase])
 
   if (!done) {
     return (
@@ -134,10 +110,7 @@ export default function MediaVideo({ content, videoId: initialVideoId, videoUrl:
   }
 
   if (phase === 'succeeded' && videoUrl) {
-    // 防御纵深：只接受 data: 或 http(s):// URL，防止恶意上游返回 javascript: 等危险协议。
-    // <video> 标签本身会阻止 javascript: 执行，但验证是好的安全习惯。
-    const isValid = videoUrl.startsWith('data:') || /^https?:\/\//i.test(videoUrl)
-    if (isValid) {
+    if (isPlayableVideoUrl(videoUrl)) {
       return (
         <video
           src={videoUrl}
@@ -165,12 +138,11 @@ export default function MediaVideo({ content, videoId: initialVideoId, videoUrl:
   if (phase === 'timeout') {
     return (
       <div className="text-sm" style={{ color: 'var(--color-danger)' }}>
-        视频生成超时({Math.round(TIMEOUT_MS / 1000)}s)
+        视频生成超时({Math.round(VIDEO_POLL_TIMEOUT_MS / 1000)}s)
       </div>
     )
   }
 
-  // polling
   return (
     <div className="text-sm" style={{ color: 'var(--color-text-secondary)' }}>
       <span className="animate-pulse">🎬 生成视频中…</span>

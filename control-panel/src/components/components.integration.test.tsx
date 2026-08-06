@@ -447,19 +447,22 @@ describe('shared UI components', () => {
   it('polls a completed video task and rejects unsafe result URLs', async () => {
     getVideoStatus.mockResolvedValueOnce({ status: 'completed', metadata: { url: 'https://cdn.test/movie.mp4' } })
     vi.useFakeTimers()
-    const { rerender } = render(<MediaVideo content="id=vid-1 poll /v1/videos/vid-1" done />)
-    await act(async () => { await vi.advanceTimersByTimeAsync(3000) })
+    const completed = render(<MediaVideo content="id=vid-1 poll /v1/videos/vid-1" done />)
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
     expect(document.querySelector('video')).toHaveAttribute('src', 'https://cdn.test/movie.mp4')
+    completed.unmount()
 
     getVideoStatus.mockResolvedValueOnce({ status: 'completed', url: 'javascript:alert(1)' })
-    rerender(<MediaVideo content="id=vid-2 poll /v1/videos/vid-2" done />)
-    await act(async () => { await vi.advanceTimersByTimeAsync(3000) })
+    const unsafe = render(<MediaVideo content="id=vid-2 poll /v1/videos/vid-2" done />)
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
     expect(screen.getByText('视频 URL 无效')).toBeInTheDocument()
+    unsafe.unmount()
 
     getVideoStatus.mockResolvedValueOnce({ status: 'failed', error: { message: 'encoder failed' } })
-    rerender(<MediaVideo content="id=vid-3 poll /v1/videos/vid-3" done />)
-    await act(async () => { await vi.advanceTimersByTimeAsync(3000) })
+    const failed = render(<MediaVideo content="id=vid-3 poll /v1/videos/vid-3" done />)
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
     expect(screen.getByText('视频生成失败')).toBeInTheDocument()
+    failed.unmount()
     vi.useRealTimers()
   })
 
@@ -469,6 +472,77 @@ describe('shared UI components', () => {
     rerender(<MediaVideo content="ordinary text" done />)
     expect(screen.getByText('无法解析视频任务 id')).toBeInTheDocument()
     expect(getVideoStatus).not.toHaveBeenCalled()
+  })
+
+  it('renders a known video URL immediately without polling', () => {
+    // 回归:之前只把 URL 写进 state 而不推进 phase,已完成的视频会一直显示
+    // "生成视频中",并且还会为一个已有结果的任务重新发起轮询。
+    render(<MediaVideo
+      content=""
+      videoId="vid-known"
+      videoUrl="https://cdn.test/done.mp4"
+      done
+    />)
+    expect(document.querySelector('video')).toHaveAttribute('src', 'https://cdn.test/done.mp4')
+    expect(screen.queryByText(/生成视频中/)).not.toBeInTheDocument()
+    expect(getVideoStatus).not.toHaveBeenCalled()
+  })
+
+  it('restores a persisted terminal video phase without polling', () => {
+    render(<MediaVideo content="" videoId="vid-failed" videoPhase="failed" done />)
+    expect(screen.getByText('视频生成失败')).toBeInTheDocument()
+    expect(getVideoStatus).not.toHaveBeenCalled()
+  })
+
+  it('reports the shared polling budget rather than a shorter private timeout', async () => {
+    // 回归:组件曾用 120s 私有超时,远小于 30 分钟的轮询预算,
+    // 后端仍在生成的任务会被前端提前判成超时。
+    getVideoStatus.mockResolvedValue({ status: 'in_progress' })
+    vi.useFakeTimers()
+    render(<MediaVideo content="id=vid-slow poll /v1/videos/vid-slow" done />)
+    await act(async () => { await vi.advanceTimersByTimeAsync(130_000) })
+    expect(screen.getByText(/生成视频中/)).toBeInTheDocument()
+    expect(screen.queryByText(/视频生成超时/)).not.toBeInTheDocument()
+    vi.useRealTimers()
+  })
+
+  it('shows an errored video message as text instead of the video renderer', () => {
+    expect(classifyContent('generation:video', '视频生成失败：encoder failed', true)).toBe('text')
+    render(<MessageBubble
+      msg={{
+        id: 'm-video-error',
+        ts: 1,
+        role: 'assistant',
+        content: '视频生成失败：encoder failed',
+        intent: 'generation:video',
+        error: true,
+        videoId: 'vid-err',
+        videoPhase: 'failed',
+      }}
+      isStreaming={false}
+      pendingAssistantId={null}
+    />)
+    expect(screen.getByText(/视频生成失败：encoder failed/)).toBeInTheDocument()
+  })
+
+  it('shows indeterminate progress for stage-sourced generating drafts', () => {
+    // 回归:后端把 generating 阶段的 progress 固定写成 0.1,按真实百分比渲染
+    // 会让进度条整段生成期间静止在 10%。
+    render(<DraftCard
+      draft={{
+        draftId: 'd-generating',
+        previewUrl: '/preview',
+        mediaType: 'image',
+        status: 'generating',
+        stage: 'running',
+        progress: 0.1,
+        progressSource: 'stage',
+      }}
+      onConfirm={vi.fn()}
+      onReject={vi.fn()}
+    />)
+    expect(screen.queryByText(/10%/)).not.toBeInTheDocument()
+    expect(screen.getByRole('progressbar', { name: /草稿生成进度/ })).not.toHaveAttribute('aria-valuenow')
   })
 
   it('selects, deletes and creates chat sessions through distinct controls', async () => {

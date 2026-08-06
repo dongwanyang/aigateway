@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createVideoDraftFromSource } from './sourceDraftVideo'
 
+// 请求 URL 带上配置的 API base（部署在 /aigateway 子路径下时非空）。
+// 断言写死成 '/admin/...' 会在配置了 VITE_API_BASE 的环境里失败，
+// 而被测代码的行为其实是正确的。
+const API_BASE = import.meta.env.VITE_API_BASE ?? ''
+
 afterEach(() => {
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
@@ -37,7 +42,7 @@ describe('source draft video API', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
     const [url, options] = fetchMock.mock.calls[0] as [string, RequestInit]
-    expect(url).toBe('/admin/draft/source-image/video')
+    expect(url).toBe(`${API_BASE}/admin/draft/source-image/video`)
     expect(options.method).toBe('POST')
     expect(options.credentials).toBe('include')
     expect(options.signal).toBe(controller.signal)

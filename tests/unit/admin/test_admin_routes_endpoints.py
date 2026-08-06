@@ -971,7 +971,7 @@ async def test_draft_image_workflow_exposes_preview_confirm_result_reject_and_cl
         )
         result = await routes.get_draft_result("draft-1", _auth=auth)
         cleaned = await routes.delete_session_drafts("grp-team:session", _auth=auth)
-        rejected = await routes.reject_draft("draft-1", _auth=auth)
+        rejected = await routes.reject_draft("draft-1", _request(), _auth=auth)
 
     assert status == {
         "draft_id": "draft-1",
@@ -1005,8 +1005,14 @@ async def test_draft_image_workflow_exposes_preview_confirm_result_reject_and_cl
         group_id="grp-team",
     )
     strategy.reject_draft.assert_awaited_once_with("draft-1")
-    record_log.assert_awaited_once()
-    assert record_log.await_args.kwargs["model"] == "RealESRGAN"
+    # confirm 与 reject 各写一条请求日志。reject 会触发一整个 ComfyUI 重新生成
+    # 作业，之前这条路由完全不写日志，那部分 GPU 消耗在 Logs 页不可见。
+    assert record_log.await_count == 2
+    logged = [call.kwargs for call in record_log.await_args_list]
+    assert logged[0]["model"] == "RealESRGAN"
+    assert logged[0]["endpoint"] == "/admin/draft/draft-1/confirm"
+    assert logged[1]["endpoint"] == "/admin/draft/draft-1/reject"
+    assert logged[1]["status_code"] == 200
 
 
 @pytest.mark.asyncio
@@ -1114,7 +1120,7 @@ async def test_draft_ownership_is_enforced_for_all_draft_reads_and_actions():
             lambda: routes.get_draft_preview("draft-1", _auth=auth),
             lambda: routes.confirm_draft("draft-1", _request(), _auth=auth),
             lambda: routes.get_draft_result("draft-1", _auth=auth),
-            lambda: routes.reject_draft("draft-1", _auth=auth),
+            lambda: routes.reject_draft("draft-1", _request(), _auth=auth),
         ):
             with pytest.raises(HTTPException) as caught:
                 await operation()

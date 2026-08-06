@@ -16,19 +16,26 @@ import {
   titleFromMessages,
 } from '@/services/chatStorage'
 import {
+  abortDraftPoll,
   clearAllChatPolling,
   consumeChatEventStream,
   describeDraftFailure,
+  extractVideoUrl,
+  isVideoSucceeded,
   newSessionId,
   nextMessageId,
   pollDraftUntilSettled,
   pollDraftProgressUntilStopped,
-  pollVideoUntilTerminal,
+  registerDraftPoll,
   resumedSessionIds,
+  watchVideoUntilTerminal,
 } from '@/services/chatRuntime'
 
 function hasActiveAsyncTask(msg: ChatPageMessage): boolean {
-  if (msg.videoId && !msg.error && !msg.incomplete) return true
+  // videoPhase 是终态判据。只看 error/incomplete 时，一个失败或超时的视频任务
+  // 会被永久当作"进行中"，该会话的续传逻辑从此再也不会触发。
+  const videoSettled = msg.videoPhase !== undefined && msg.videoPhase !== 'polling'
+  if (msg.videoId && !videoSettled && !msg.error && !msg.incomplete) return true
   if (msg.draft && ['queued', 'running', 'generating', 'pending', 'refining', 'confirming', 'rejecting'].includes(msg.draft.status)) return true
   return false
 }
@@ -112,6 +119,8 @@ export function useChatSessions(): UseChatSessions {
   const sessionsRef = useRef<ChatSession[]>(sessions)
   const flushRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const streamingRef = useRef(false)
+  // 每个 videoId 的共享轮询订阅句柄，卸载时释放，避免订阅计数泄漏。
+  const videoWatchesRef = useRef<Map<string, () => void>>(new Map())
 
   useEffect(() => { sessionsRef.current = sessions }, [sessions])
   useEffect(() => { streamingRef.current = streaming }, [streaming])
@@ -143,6 +152,8 @@ export function useChatSessions(): UseChatSessions {
       abortRef.current = null
       inflightRef.current = false
       if (flushRetryTimerRef.current) clearTimeout(flushRetryTimerRef.current)
+      for (const release of videoWatchesRef.current.values()) release()
+      videoWatchesRef.current.clear()
     }
   }, [])
 
@@ -227,6 +238,8 @@ export function useChatSessions(): UseChatSessions {
     const draftId = activeDraftIdRef.current
     activeDraftIdRef.current = null
     if (!draftId) return
+    // 服务端草稿取消之外，前端轮询循环也要停：否则停止后循环继续空转到预算耗尽。
+    abortDraftPoll(draftId)
     void cancelDraft(draftId).catch(e => {
       console.warn('取消草稿失败:', e instanceof Error ? e.message : e)
     })
@@ -293,6 +306,8 @@ export function useChatSessions(): UseChatSessions {
   }, [stop, activeId, patchActiveMessages])
 
   const pollDraftPreview = useCallback(async (draftId: string, msgId: string) => {
+    // 注册可中止的轮询。不传 signal 时停止/卸载都无法结束循环。
+    const signal = registerDraftPoll(draftId)
     const result = await pollDraftUntilSettled(draftId, progress => {
       patchMessage(msgId, message => {
         if (message.draft?.draftId !== draftId) return message
@@ -309,8 +324,9 @@ export function useChatSessions(): UseChatSessions {
           awaitingDraft: true,
         }
       })
-    })
+    }, signal)
     if (result.kind === 'duplicate') return
+    if (result.kind === 'cancelled' && signal.aborted) return
     if (activeDraftIdRef.current === draftId) activeDraftIdRef.current = null
     patchMessage(msgId, message => {
       if (message.draft?.draftId !== draftId) return message
@@ -378,7 +394,7 @@ export function useChatSessions(): UseChatSessions {
       .filter(m => m.role === 'user' || (m.role === 'assistant' && m.content && !m.draft))
       .map(m => ({
         role: m.role,
-        content: m.referenceImageDataUrl
+        content: m.referenceImageDataUrl && !m.referenceImageEphemeral
           ? [
               { type: 'text' as const, text: m.content },
               {
@@ -573,18 +589,68 @@ export function useChatSessions(): UseChatSessions {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId])
 
-  const pollVideoStatus = useCallback(async (videoId: string, msgId: string) => {
-    const status = await pollVideoUntilTerminal(videoId)
-    if (!status) return
-    const resolvedUrl = status.video?.url || status.url
-    if ((status.status === 'succeeded' || status.status === 'completed') && resolvedUrl) {
-      patchMessage(msgId, message => ({ ...message, videoUrl: resolvedUrl, intent: 'generation:video', model: 'video' }))
-      flushToStorage()
-    } else if (status.status === 'failed' || status.status === 'error') {
-      patchMessage(msgId, message => ({ ...message, content: `Video generation failed: ${status.error?.message || '视频生成失败'}`, error: true }))
-      flushToStorage()
-    }
+  const failVideoMessage = useCallback((
+    msgId: string,
+    message: string,
+    phase: 'failed' | 'timeout',
+  ) => {
+    // intent 必须清掉，否则 MessageBubble 仍按视频渲染，这段错误文案永不显示。
+    patchMessage(msgId, current => ({
+      ...current,
+      content: message,
+      error: true,
+      intent: null,
+      videoPhase: phase,
+    }))
+    flushToStorage()
   }, [patchMessage, flushToStorage])
+
+  const pollVideoStatus = useCallback(async (videoId: string, msgId: string) => {
+    const existing = videoWatchesRef.current.get(videoId)
+    if (existing) return
+    const watch = watchVideoUntilTerminal(videoId)
+    videoWatchesRef.current.set(videoId, watch.release)
+    patchMessage(msgId, message => (
+      message.videoPhase ? message : { ...message, videoPhase: 'polling' }
+    ))
+    try {
+      const outcome = await watch.result
+      if (outcome.kind === 'cancelled') return
+      if (outcome.kind === 'timeout') {
+        // 之前耗尽预算后静默 return，消息永久停在"生成视频中"，用户无从判断。
+        failVideoMessage(
+          msgId,
+          `视频生成超时：任务 ${videoId} 在轮询预算内未返回结果，请稍后在日志中确认任务状态。`,
+          'timeout',
+        )
+        return
+      }
+      const status = outcome.status
+      const resolvedUrl = extractVideoUrl(status)
+      if (isVideoSucceeded(status) && resolvedUrl) {
+        patchMessage(msgId, message => ({
+          ...message,
+          videoUrl: resolvedUrl,
+          videoPhase: 'succeeded',
+          intent: 'generation:video',
+          model: message.model ?? 'video',
+        }))
+        flushToStorage()
+        return
+      }
+      failVideoMessage(
+        msgId,
+        `视频生成失败：${status.error?.message || status.status || '上游未返回可播放结果'}`,
+        'failed',
+      )
+    } finally {
+      const release = videoWatchesRef.current.get(videoId)
+      if (release) {
+        videoWatchesRef.current.delete(videoId)
+        release()
+      }
+    }
+  }, [patchMessage, flushToStorage, failVideoMessage])
 
   const confirmDraftMsg = useCallback(async (msgId: string) => {
     const s = sessions.find(x => x.id === activeId)
@@ -613,7 +679,7 @@ export function useChatSessions(): UseChatSessions {
     try {
       const result = await confirmDraft(msg.draft.draftId)
       if ('videoId' in result) {
-        patchMessage(msgId, m => ({ ...m, draft: undefined, videoId: result.videoId, intent: 'generation:video', model: 'video' }))
+        patchMessage(msgId, m => ({ ...m, draft: undefined, videoId: result.videoId, videoPhase: 'polling', intent: 'generation:video', model: 'video' }))
         flushToStorage()
         void pollVideoStatus(result.videoId, msgId)
       } else {
@@ -660,7 +726,14 @@ export function useChatSessions(): UseChatSessions {
     const s = sessionsRef.current.find(x => x.id === activeId)
     if (!s) return
     s.messages
-      .filter(m => m.role === 'assistant' && m.videoId && !m.error && !m.incomplete)
+      .filter(m => (
+        m.role === 'assistant'
+        && m.videoId
+        && !m.videoUrl
+        && (m.videoPhase === undefined || m.videoPhase === 'polling')
+        && !m.error
+        && !m.incomplete
+      ))
       .forEach(msg => { if (msg.videoId) void pollVideoStatus(msg.videoId, msg.id) })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId, resumePollingKey, pollVideoStatus])

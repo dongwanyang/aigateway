@@ -32,6 +32,8 @@ class _FakeDraft:
     user_id = "test-user"
     group_id = None
     media_type = "image"
+    workflow_version = ""
+    generation_params = {"routed_model": "agnes-video-v2.1"}
 
 
 class _FakeLocalVideoDraft(_FakeDraft):
@@ -117,7 +119,36 @@ async def test_confirm_video_record_log_success_path(monkeypatch, monkeypatched_
     call_kwargs = mock_record.call_args.kwargs
     assert "/admin/draft/" in call_kwargs["endpoint"]
     assert call_kwargs["status_code"] == 200
-    assert call_kwargs["model"] == "agnes-video-v2.0"
+    # 模型名必须来自本次实际路由，而不是写死的字符串:否则日志无法用于核对
+    # 真实使用的视频模型与成本。
+    assert call_kwargs["model"] == "agnes-video-v2.1"
+    # 耗时同样必须是真实测量值，之前恒为 0.0。
+    assert call_kwargs["duration_ms"] >= 0.0
+
+
+@pytest.mark.asyncio
+async def test_confirm_video_log_model_falls_back_to_workflow_version(monkeypatch):
+    """无 routed_model 时回退到工作流版本，仍不写死模型名。"""
+    from aigateway_api import admin_routes, openai_compat
+
+    class _NoRoutedModelDraft(_FakeDraft):
+        media_type = "video"
+        workflow_version = "wan2.2-ti2v-5b-v1"
+        generation_params: dict = {}
+
+    strategy = AsyncMock()
+    strategy.get_draft = AsyncMock(return_value=_NoRoutedModelDraft())
+    strategy.confirm_draft = AsyncMock(return_value=VideoSubmitResult(
+        draft_id="d_v", video_id="vid_fallback", status="generating"
+    ))
+    monkeypatch.setattr(admin_routes, "_get_draft_strategy", lambda: strategy)
+
+    mock_record = AsyncMock()
+    with patch.object(openai_compat, "_record_request_log", new=mock_record):
+        resp = await admin_routes.confirm_draft("d_v", _FakeRequest(), _AUTH)
+
+    assert resp["video_id"] == "vid_fallback"
+    assert mock_record.call_args.kwargs["model"] == "comfyui:video:wan2.2-ti2v-5b-v1"
 
 
 @pytest.mark.asyncio
