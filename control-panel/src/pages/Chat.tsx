@@ -1,14 +1,17 @@
 import { useEffect, useState } from 'react'
 import { useChatSessions } from '@/hooks/useChatSessions'
-import { useSourceDraftVideo } from '@/hooks/useSourceDraftVideo'
 import { useAuth } from '@/contexts/AuthContext'
 import { useQuery } from '@tanstack/react-query'
 import { getGenerationPresets } from '@/api/client'
 import { queryKeys } from '@/query/keys'
+import {
+  cancelAllSessionGenerations,
+  cancelLatestSessionGeneration,
+} from '@/services/cancelSessionGeneration'
 import SessionList from '@/components/chat/SessionList'
 import ChatTimeline from '@/components/chat/ChatTimeline'
 import ChatComposer from '@/components/chat/ChatComposer'
-import type { ChatReferenceImage, GenerationOptions } from '@/types'
+import type { ChatPageMessage, ChatReferenceImage, GenerationOptions } from '@/types'
 import {
   DEFAULT_VIDEO_DURATION_SECONDS,
   DEFAULT_VIDEO_FPS,
@@ -18,6 +21,27 @@ import { Trash2, Video, X } from 'lucide-react'
 interface SelectedVideoSource {
   draftId: string
   previewDataUrl?: string
+}
+
+type SourceAwareGenerationOptions = GenerationOptions & {
+  source_draft_id?: string
+}
+
+const CANCELLABLE_DRAFT_STATUSES = new Set([
+  'queued',
+  'running',
+  'generating',
+  'confirming',
+  'refining',
+  'rejecting',
+])
+
+function hasCancellableGeneration(message: ChatPageMessage): boolean {
+  if (!message.generationRequestId) return false
+  return Boolean(
+    message.awaitingDraft
+    || (message.draft && CANCELLABLE_DRAFT_STATUSES.has(message.draft.status)),
+  )
 }
 
 export default function Chat() {
@@ -34,10 +58,6 @@ export default function Chat() {
     send, stop, clearActive,
     confirmDraftMsg, rejectDraftMsg,
   } = useChatSessions()
-  const {
-    create: createSourceDraftVideo,
-    cancel: cancelSourceDraftVideo,
-  } = useSourceDraftVideo()
   const [selectedVideoSource, setSelectedVideoSource] = useState<SelectedVideoSource | null>(null)
   const chatHeight = 'calc(100vh - 56px - 48px)'
 
@@ -57,6 +77,7 @@ export default function Chat() {
   }
 
   const messages = active?.messages ?? []
+  const generationBusy = streaming || messages.some(hasCancellableGeneration)
   const lastAssistant = [...messages].reverse().find(
     message => message.role === 'assistant',
   )
@@ -76,31 +97,6 @@ export default function Chat() {
     })
   }
 
-  const stopAll = () => {
-    cancelSourceDraftVideo()
-    stop()
-  }
-
-  const handleNewSession = () => {
-    cancelSourceDraftVideo()
-    newSession()
-  }
-
-  const handleSelectSession = (sessionId: string) => {
-    cancelSourceDraftVideo()
-    selectSession(sessionId)
-  }
-
-  const handleDeleteSession = (sessionId: string) => {
-    cancelSourceDraftVideo()
-    deleteSession(sessionId)
-  }
-
-  const handleClearActive = () => {
-    cancelSourceDraftVideo()
-    clearActive()
-  }
-
   const handleSend = (
     text: string,
     opts?: {
@@ -111,18 +107,38 @@ export default function Chat() {
     if (selectedVideoSource && activeId) {
       const source = selectedVideoSource
       setSelectedVideoSource(null)
-      void createSourceDraftVideo({
-        sourceDraftId: source.draftId,
-        sourcePreviewDataUrl: source.previewDataUrl,
-        motionPrompt: text,
-        durationSeconds: opts?.generationOptions?.duration_seconds
+      const sourceOptions: SourceAwareGenerationOptions = {
+        backend: opts?.generationOptions?.backend ?? 'local',
+        ...opts?.generationOptions,
+        source_draft_id: source.draftId,
+        duration_seconds: opts?.generationOptions?.duration_seconds
           ?? DEFAULT_VIDEO_DURATION_SECONDS,
         fps: opts?.generationOptions?.fps ?? DEFAULT_VIDEO_FPS,
-        chatSessionId: activeId,
+      }
+      void send(text, {
+        generationOptions: sourceOptions,
       })
       return
     }
     void send(text, opts)
+  }
+
+  const handleStop = () => {
+    if (streaming) {
+      stop()
+      return
+    }
+    if (activeId) void cancelLatestSessionGeneration(activeId)
+  }
+
+  const handleDeleteSession = async (sessionId: string) => {
+    if (!await cancelAllSessionGenerations(sessionId)) return
+    await deleteSession(sessionId)
+  }
+
+  const handleClearActive = async () => {
+    if (!activeId || !await cancelAllSessionGenerations(activeId)) return
+    clearActive()
   }
 
   return (
@@ -130,9 +146,9 @@ export default function Chat() {
       <SessionList
         sessions={sessions}
         activeId={activeId}
-        onNew={handleNewSession}
-        onSelect={handleSelectSession}
-        onDelete={handleDeleteSession}
+        onNew={newSession}
+        onSelect={selectSession}
+        onDelete={sessionId => { void handleDeleteSession(sessionId) }}
       />
       <div className="flex flex-col flex-1 min-w-0 pl-3">
         <div className="flex items-center justify-between px-1 py-2">
@@ -140,8 +156,8 @@ export default function Chat() {
             {active?.title || '聊天'}
           </h2>
           <button
-            onClick={handleClearActive}
-            disabled={streaming || messages.length === 0}
+            onClick={() => { void handleClearActive() }}
+            disabled={generationBusy || messages.length === 0}
             className="flex items-center gap-1 px-2 py-1 rounded-md text-sm cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
             style={{ color: 'var(--color-text-secondary)' }}
           >
@@ -187,7 +203,7 @@ export default function Chat() {
                 type="button"
                 aria-label="取消使用此图片"
                 title="取消使用此图片"
-                disabled={streaming}
+                disabled={generationBusy}
                 onClick={() => setSelectedVideoSource(null)}
                 className="inline-flex rounded p-1 cursor-pointer disabled:opacity-50"
               >
@@ -196,11 +212,11 @@ export default function Chat() {
             </div>
           )}
           <ChatComposer
-            streaming={streaming}
+            streaming={generationBusy}
             disabled={false}
             sourceImageMode={Boolean(selectedVideoSource)}
             onSend={handleSend}
-            onStop={stopAll}
+            onStop={handleStop}
             presets={Array.isArray(presetsQuery.data) ? presetsQuery.data : []}
             presetsLoading={presetsQuery.isLoading || presetsQuery.isFetching}
             presetsError={presetsQuery.error instanceof Error ? presetsQuery.error.message : null}

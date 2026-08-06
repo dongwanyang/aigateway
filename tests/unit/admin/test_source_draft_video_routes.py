@@ -22,6 +22,7 @@ def _draft_response():
         status="pending",
         expires_at=1234.0,
         generation_params={
+            "request_id": "request-1",
             "source_image_sha256": "abc123",
             "duration_seconds": 5.0,
             "fps": 8,
@@ -90,6 +91,7 @@ async def test_source_video_route_forwards_authenticated_owner(monkeypatch):
     ) as client:
         response = await client.post(
             "/admin/draft/source-image/video",
+            headers={"X-Request-ID": "request-1"},
             json={
                 "motion_prompt": "柯基跑向镜头",
                 "duration_seconds": 5,
@@ -100,6 +102,7 @@ async def test_source_video_route_forwards_authenticated_owner(monkeypatch):
 
     assert response.status_code == 200
     assert response.json() == {
+        "request_id": "request-1",
         "source_draft_id": "source-image",
         "draft_id": "video-draft",
         "status": "pending",
@@ -120,7 +123,8 @@ async def test_source_video_route_forwards_authenticated_owner(monkeypatch):
         chat_session_id="session-1",
         user_id="user-1",
         group_id="group-1",
-        trace_id="",
+        trace_id="request-1",
+        request_id="request-1",
     )
 
 

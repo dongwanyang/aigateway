@@ -1,12 +1,10 @@
 """Authenticated route for creating a video draft from an image draft result."""
+
 from __future__ import annotations
 
 import logging
 import time
 from typing import Any, Literal
-
-from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
 
 from aigateway_core.pipelines.generation._common.exceptions import (
     DraftWorkflowError,
@@ -14,6 +12,8 @@ from aigateway_core.pipelines.generation._common.exceptions import (
 from aigateway_core.pipelines.generation.draft.source_draft_video import (
     create_video_draft_from_source,
 )
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, Field
 
 from .auth_middleware import authenticate_admin
 
@@ -33,6 +33,7 @@ class SourceDraftVideoRequest(BaseModel):
 
 
 class SourceDraftVideoResponse(BaseModel):
+    request_id: str
     source_draft_id: str
     draft_id: str
     status: str
@@ -60,6 +61,15 @@ def _strategy(request: Request) -> Any:
             },
         )
     return strategy
+
+
+def _request_id(request: Request) -> str:
+    return str(
+        request.headers.get("X-Request-ID")
+        or getattr(request.state, "request_id", "")
+        or getattr(request.state, "trace_id", "")
+        or ""
+    ).strip()
 
 
 def _error_response(error: str) -> tuple[int, str, str]:
@@ -190,13 +200,6 @@ def _video_draft_model(draft: Any) -> str:
 
 
 def _is_reloaded_draft_workflow_error(exc: BaseException) -> bool:
-    """Recognize the same domain exception after plugin/test module reloads.
-
-    Reloading the exceptions module creates a distinct Python class object, so
-    an exception raised by the reloaded helper is not ``isinstance`` of the
-    route module's original import. Restrict the fallback to the exact domain
-    class name; arbitrary exceptions still fail closed as internal errors.
-    """
     return type(exc).__name__ == "DraftWorkflowError"
 
 
@@ -223,7 +226,8 @@ async def create_video_from_source_draft(
             chat_session_id=body.chat_session_id,
             user_id=str(auth.get("user_id") or "") or None,
             group_id=str(auth.get("group_id") or "") or None,
-            trace_id=str(getattr(request.state, "trace_id", "") or ""),
+            trace_id=str(getattr(request.state, "trace_id", "") or stable_request_id),
+            request_id=stable_request_id or None,
         )
     except HTTPException:
         raise
@@ -283,6 +287,7 @@ async def create_video_from_source_draft(
 
     params = draft.generation_params
     return SourceDraftVideoResponse(
+        request_id=str(params.get("request_id") or stable_request_id),
         source_draft_id=source_draft_id,
         draft_id=draft.draft_id,
         status=draft.status,

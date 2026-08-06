@@ -1,3 +1,4 @@
+import { waitForGenerationRequestState } from './generationRequest'
 import type { ApiError, ChatCompletionRequest } from '@/types'
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? ''
@@ -36,14 +37,6 @@ function contentFingerprint(content: unknown): string | null {
   }
 }
 
-/**
- * Remove only duplicate terminal user turns.
- *
- * Older useChatSessions code persisted the current user turn before constructing
- * the wire payload, then appended the same object again. This duplicated text
- * and image_url blocks. Restricting normalization to adjacent terminal user
- * turns preserves legitimate repeated prompts separated by an assistant reply.
- */
 export function normalizeChatMessages(
   messages: ChatCompletionRequest['messages'],
 ): ChatCompletionRequest['messages'] {
@@ -80,26 +73,85 @@ function errorDetails(body: unknown, fallback: string): { code: string; message:
   }
 }
 
+async function recoverDraftAfterTransportFailure(
+  requestId: string,
+  chatSessionId: string,
+  signal?: AbortSignal,
+): Promise<ChatResponse | null> {
+  const state = await waitForGenerationRequestState(
+    requestId,
+    chatSessionId,
+    signal,
+  )
+  if (state.draft_id && state.preview_url && state.media_type) {
+    return {
+      kind: 'draft',
+      draftId: state.draft_id,
+      previewUrl: state.preview_url,
+      mediaType: state.media_type,
+      generationParams: {
+        request_id: state.request_id,
+        workflow_version: state.workflow_version,
+      },
+    }
+  }
+  if (state.status === 'cancelled') {
+    throw new ChatRequestError('生成请求已取消', 'generation_cancelled', 409)
+  }
+  if (state.status === 'failed') {
+    throw new ChatRequestError(
+      '生成请求在服务端执行失败',
+      state.error || 'generation_request_failed',
+      502,
+    )
+  }
+  // A non-draft terminal record means this was an ordinary text stream. Its
+  // lost response cannot be reconstructed, but recovery must stop immediately
+  // instead of polling for a draft that will never exist.
+  return null
+}
+
 export async function requestChatCompletion(
   body: ChatCompletionRequest & { chat_session_id?: string },
   signal?: AbortSignal,
+  requestId?: string,
 ): Promise<ChatResponse> {
   const headers = await ensureAuthHeaders()
   const messages = normalizeChatMessages(body.messages)
-  const res = await fetch(`${API_BASE}/admin/console/chat/completions`, {
-    method: 'POST',
-    credentials: 'include',
-    headers: { ...headers, 'Accept': 'text/event-stream' },
-    body: JSON.stringify({ ...body, messages, stream: true }),
-    signal,
-  })
+  const requestHeaders: Record<string, string> = {
+    ...headers,
+    'Accept': 'text/event-stream',
+  }
+  if (requestId) requestHeaders['X-Request-ID'] = requestId
+
+  let res: Response
+  try {
+    res = await fetch(`${API_BASE}/admin/console/chat/completions`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: requestHeaders,
+      body: JSON.stringify({ ...body, messages, stream: true }),
+      signal,
+    })
+  } catch (error) {
+    if (signal?.aborted) throw error
+    if (requestId && body.chat_session_id) {
+      const recovered = await recoverDraftAfterTransportFailure(
+        requestId,
+        body.chat_session_id,
+        signal,
+      )
+      if (recovered) return recovered
+    }
+    throw error
+  }
 
   if (!res.ok) {
     let details = { code: 'unknown_error', message: `HTTP ${res.status}` }
     try {
       details = errorDetails(await res.json(), details.message)
     } catch {
-      // Non-JSON error response (for example an nginx page); retain status text.
+      // Non-JSON error response; retain status text.
     }
     throw new ChatRequestError(details.message, details.code, res.status)
   }

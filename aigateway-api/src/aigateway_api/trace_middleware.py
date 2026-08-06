@@ -1,16 +1,25 @@
-"""ASGI 中间件:统一生成/复用 trace_id,启动 TraceCollector,响应回写 X-Trace-Id.
-
-修"一次请求 3+ mint 点"bug 的核心:所有下游代码(ctx 构造、log-recorder、
-插件)都从 request.state.trace_id 或 TraceCollector.current() 取同一个 id,
-不再各自 uuid4()。
-"""
+"""ASGI middleware for stable request and trace identities."""
 from __future__ import annotations
 
+import re
 import uuid
 from typing import Any
 
 from aigateway_core.shared.trace_event import TraceCollector
 from starlette.types import ASGIApp, Receive, Scope, Send
+
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+
+
+def _header_text(headers: dict[bytes, bytes], name: bytes) -> str:
+    try:
+        return headers.get(name, b"").decode("ascii").strip()
+    except UnicodeDecodeError:
+        return ""
+
+
+def _validated_request_id(value: str) -> str:
+    return value if _REQUEST_ID_RE.fullmatch(value) else ""
 
 
 class TraceMiddleware:
@@ -22,34 +31,31 @@ class TraceMiddleware:
             await self.app(scope, receive, send)
             return
 
-        # 从请求头读 trace_id,没有就生成
         headers = dict(scope.get("headers", []))
-        trace_id = (
-            headers.get(b"x-trace-id", b"").decode("ascii")
+        request_id = (
+            _validated_request_id(_header_text(headers, b"x-request-id"))
             or uuid.uuid4().hex
         )
+        trace_id = (
+            _validated_request_id(_header_text(headers, b"x-trace-id"))
+            or request_id
+        )
 
-        # 写 scope["state"](FastAPI request.state 的底层)
         if "state" not in scope:
             scope["state"] = {}
+        scope["state"]["request_id"] = request_id
         scope["state"]["trace_id"] = trace_id
 
-        # 启动 collector(写 ContextVar)
         collector = TraceCollector.start(trace_id)
 
-        # 拿 redis 用于 flush(scope["state"] 在 app.state 之外)
-        # app.state.redis_manager 在 lifespan 里设置
         app_obj = scope.get("app")
         redis_mgr = getattr(app_obj.state, "redis_manager", None) if app_obj else None
         redis_client = getattr(redis_mgr, "redis", None) if redis_mgr else None
 
-        status_holder = {"status": 500}
-
         async def send_wrapper(message: Any) -> None:
             if message["type"] == "http.response.start":
-                status_holder["status"] = message["status"]
-                # 回写 X-Trace-Id 响应头
                 headers_list = list(message.get("headers", []))
+                headers_list.append((b"x-request-id", request_id.encode("ascii")))
                 headers_list.append((b"x-trace-id", trace_id.encode("ascii")))
                 message["headers"] = headers_list
             await send(message)
@@ -60,5 +66,4 @@ class TraceMiddleware:
             try:
                 await collector.flush(redis_client)
             except Exception:
-                # flush 失败不影响请求
                 pass

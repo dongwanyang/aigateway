@@ -1,13 +1,13 @@
 """Security-first replacement for draft confirmation with stable error codes."""
+
 from __future__ import annotations
 
 import base64
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-
 from aigateway_core.pipelines.generation._common.models import VideoSubmitResult
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from .auth_middleware import authenticate_admin
 from .draft_security import assert_draft_owner
