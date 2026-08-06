@@ -92,6 +92,12 @@ export interface GenerationOptions {
   height?: number
   duration_seconds?: 3 | 5 | 8
   fps?: number
+  /**
+   * Explicit source image for image-to-video. Referring to an earlier image by
+   * text alone is rejected with `reference_image_required`; the draft id must be
+   * passed here (or via `POST /admin/draft/{id}/video`).
+   */
+  source_draft_id?: string
 }
 
 export interface ChatReferenceImage {
@@ -485,6 +491,12 @@ export interface ChatPageMessage {
   /** 当前会话内的参考图；序列化时移除 data URL，避免撑爆 localStorage。 */
   referenceImageDataUrl?: string
   referenceImageName?: string
+  /**
+   * 参考图仅用于本条消息的展示，不参与后续请求的对话历史。
+   * 图生视频的来源图属于这一类：它是已生成图片的回显，若混进 wire 历史，
+   * 之后每次普通文字对话都会把这张图重新发给模型，很容易被再次判成图片意图。
+   */
+  referenceImageEphemeral?: boolean
   intent?: 'understanding' | 'generation:image' | 'generation:video' | null
   model?: string
   error?: boolean
@@ -496,6 +508,13 @@ export interface ChatPageMessage {
   videoId?: string
   /** 视频最终可播放 URL（不依赖内容文本解析）。 */
   videoUrl?: string
+  /**
+   * 视频任务的终态标记。持久化后用于两件事：
+   * 1. 渲染时直接进入终态，避免已完成的视频重新进入轮询占位符；
+   * 2. 让 hasActiveAsyncTask 能识别"已结束"的视频，否则失败/超时的任务
+   *    会被永久当作进行中，阻断会话的续传逻辑。
+   */
+  videoPhase?: 'polling' | 'succeeded' | 'failed' | 'timeout'
   /** 等待 draft 响应的标记（防止刷新后误续传）。超 30s 自动过期。 */
   awaitingDraft?: boolean
   awaitingDraftSince?: number // Date.now() when awaitingDraft was set
@@ -537,5 +556,10 @@ export interface VideoStatusResponse {
   status?: string  // 'queued' | 'in_progress' | 'succeeded' | 'completed' | 'failed' | ...
   url?: string
   video?: { url?: string }
+  /**
+   * Agnes 把成品 URL 放在 metadata.url（顶层无 url/video.url）。缺少这个字段时
+   * 调用方会把已完成的任务判成"没有 URL"，从而永远停在轮询占位符上。
+   */
+  metadata?: { url?: string }
   error?: { code?: string; message?: string }
 }

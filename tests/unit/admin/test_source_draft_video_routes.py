@@ -223,3 +223,104 @@ async def test_source_video_route_maps_unexpected_storage_failure_to_500(
         "code": "internal_error",
         "message": "创建视频草稿时发生内部错误。",
     }
+
+
+@pytest.mark.asyncio
+async def test_source_video_creation_is_recorded_in_request_logs(monkeypatch):
+    """图生视频草稿创建必须写请求日志。
+
+    回归:这条路由会触发本地 ComfyUI 关键帧作业,但之前完全不调用
+    _record_request_log,图生视频的这段消耗在 Logs 页不可见。
+    """
+    from aigateway_api import openai_compat
+
+    async def authenticated():
+        return {"user_id": "user-1", "group_id": "group-1"}
+
+    draft = _draft_response()
+    draft.workflow_version = "wan2.2-ti2v-5b-v1"
+    app = _app(authenticated)
+    monkeypatch.setattr(
+        routes_module, "create_video_draft_from_source", AsyncMock(return_value=draft)
+    )
+    record_log = AsyncMock()
+    monkeypatch.setattr(openai_compat, "_record_request_log", record_log)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.post(
+            "/admin/draft/source-image/video", json=_request_body()
+        )
+
+    assert response.status_code == 200
+    record_log.assert_awaited_once()
+    logged = record_log.await_args.kwargs
+    assert logged["endpoint"] == "/admin/draft/source-image/video"
+    assert logged["status_code"] == 200
+    assert logged["method"] == "POST"
+    # 模型标识来自草稿的真实工作流,不写死。
+    assert logged["model"] == "comfyui:video:wan2.2-ti2v-5b-v1"
+
+
+@pytest.mark.asyncio
+async def test_source_video_domain_failure_is_recorded_in_request_logs(monkeypatch):
+    """被拒绝的图生视频请求也要留下日志，否则失败原因在 Logs 页无迹可寻。"""
+    from aigateway_api import openai_compat
+
+    async def authenticated():
+        return {"user_id": "user-1", "group_id": "group-1"}
+
+    app = _app(authenticated)
+    monkeypatch.setattr(
+        routes_module,
+        "create_video_draft_from_source",
+        AsyncMock(side_effect=DraftWorkflowError("source_draft_forbidden")),
+    )
+    record_log = AsyncMock()
+    monkeypatch.setattr(openai_compat, "_record_request_log", record_log)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.post(
+            "/admin/draft/source-image/video", json=_request_body()
+        )
+
+    assert response.status_code == 403
+    record_log.assert_awaited_once()
+    assert record_log.await_args.kwargs["status_code"] == 403
+
+
+@pytest.mark.asyncio
+async def test_source_video_request_log_failure_does_not_break_creation(monkeypatch):
+    """日志后端故障不能影响草稿创建结果。"""
+    from aigateway_api import openai_compat
+
+    async def authenticated():
+        return {"user_id": "user-1", "group_id": "group-1"}
+
+    app = _app(authenticated)
+    monkeypatch.setattr(
+        routes_module,
+        "create_video_draft_from_source",
+        AsyncMock(return_value=_draft_response()),
+    )
+    monkeypatch.setattr(
+        openai_compat,
+        "_record_request_log",
+        AsyncMock(side_effect=RuntimeError("log store down")),
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.post(
+            "/admin/draft/source-image/video", json=_request_body()
+        )
+
+    assert response.status_code == 200
+    assert response.json()["draft_id"] == "video-draft"

@@ -1,15 +1,9 @@
 import { useCallback, useEffect, useRef } from 'react'
 import { requestChatCompletion } from '@/api/consoleChat'
-import { createVideoDraftFromSource } from '@/api/sourceDraftVideo'
-import {
-  cancelGenerationRequest,
-  cancelGenerationRequestAndWait,
-  newGenerationRequestId,
-  waitForGenerationRequestDraft,
-} from '@/api/generationRequest'
 import type { ChatReferenceImage, GenerationOptions } from '@/types'
 import {
   getDraftResult,
+  cancelDraft,
   confirmDraft,
   rejectDraft,
   deleteSessionDrafts,
@@ -22,31 +16,26 @@ import {
   titleFromMessages,
 } from '@/services/chatStorage'
 import {
+  abortDraftPoll,
   clearAllChatPolling,
   consumeChatEventStream,
   describeDraftFailure,
+  extractVideoUrl,
+  isVideoSucceeded,
   newSessionId,
   nextMessageId,
   pollDraftUntilSettled,
   pollDraftProgressUntilStopped,
-  pollVideoUntilTerminal,
+  registerDraftPoll,
   resumedSessionIds,
+  watchVideoUntilTerminal,
 } from '@/services/chatRuntime'
 
-interface SourceAwareGenerationOptions extends GenerationOptions {
-  source_draft_id?: string
-}
-
-interface ActiveGeneration {
-  requestId: string
-  sessionId: string
-  assistantId: string
-  controller: AbortController
-}
-
 function hasActiveAsyncTask(msg: ChatPageMessage): boolean {
-  if (msg.videoId && !msg.error && !msg.incomplete) return true
-  if (msg.awaitingDraft && msg.generationRequestId) return true
+  // videoPhase 是终态判据。只看 error/incomplete 时，一个失败或超时的视频任务
+  // 会被永久当作"进行中"，该会话的续传逻辑从此再也不会触发。
+  const videoSettled = msg.videoPhase !== undefined && msg.videoPhase !== 'polling'
+  if (msg.videoId && !videoSettled && !msg.error && !msg.incomplete) return true
   if (msg.draft && ['queued', 'running', 'generating', 'pending', 'refining', 'confirming', 'rejecting'].includes(msg.draft.status)) return true
   return false
 }
@@ -71,7 +60,6 @@ function normalizeDraftStatus(status: string | undefined): ChatDraftState['statu
   if (status && CHAT_DRAFT_STATUSES.has(status as ChatDraftState['status'])) {
     return status as ChatDraftState['status']
   }
-  if (status === 'failed') return 'error'
   return 'running'
 }
 
@@ -93,7 +81,7 @@ export interface UseChatSessions {
   send: (
     text: string,
     opts?: {
-      generationOptions?: SourceAwareGenerationOptions
+      generationOptions?: GenerationOptions
       referenceImage?: ChatReferenceImage
     },
   ) => Promise<void>
@@ -118,16 +106,21 @@ export function useChatSessions(): UseChatSessions {
   const setResumePollingKey = useChatStore(state => state.setResumePollingKey)
 
   const abortRef = useRef<AbortController | null>(null)
-  const activeGenerationRef = useRef<ActiveGeneration | null>(null)
-  const cancelledRequestIdsRef = useRef(new Set<string>())
+  // Draft currently owned by this client. Stopping must cancel it server-side,
+  // otherwise the backend keeps generating for a client that already gave up.
+  const activeDraftIdRef = useRef<string | null>(null)
+  // Set when stop() lands while the POST is still in flight: the draft id is not
+  // known yet, so cancel it as soon as the response arrives.
+  const cancelOnArrivalRef = useRef(false)
+  const awaitingResponseRef = useRef(false)
   const inflightRef = useRef(false)
   const pendingAssistantIdRef = useRef<string | null>(null)
   const resumeSessionRef = useRef<string | null>(null)
   const sessionsRef = useRef<ChatSession[]>(sessions)
   const flushRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const streamingRef = useRef(false)
-  const recoveryControllersRef = useRef(new Map<string, AbortController>())
-  const cancellationControllersRef = useRef(new Map<string, AbortController>())
+  // 每个 videoId 的共享轮询订阅句柄，卸载时释放，避免订阅计数泄漏。
+  const videoWatchesRef = useRef<Map<string, () => void>>(new Map())
 
   useEffect(() => { sessionsRef.current = sessions }, [sessions])
   useEffect(() => { streamingRef.current = streaming }, [streaming])
@@ -148,33 +141,19 @@ export function useChatSessions(): UseChatSessions {
     }
   }, [sessions, activeId, setSessions, setActiveId])
 
-  const detachTransport = useCallback((preserveBusyState = false) => {
-    abortRef.current?.abort()
-    abortRef.current = null
-    activeGenerationRef.current = null
-    inflightRef.current = false
-    resumeSessionRef.current = null
-    if (!preserveBusyState) {
-      setPendingAssistantId(null)
-      setStreaming(false)
-    }
-  }, [setPendingAssistantId, setStreaming])
-
   useEffect(() => {
     return () => {
       const rs = resumeSessionRef.current
-      if (rs) resumedSessionIds.delete(rs)
-      // Unmount/page refresh must not cancel the server-side generation. The
-      // persisted request ID is used to recover the draft after remount.
+      if (rs) {
+        resumedSessionIds.delete(rs)
+        resumeSessionRef.current = null
+      }
       abortRef.current?.abort()
       abortRef.current = null
-      activeGenerationRef.current = null
       inflightRef.current = false
-      recoveryControllersRef.current.forEach(controller => controller.abort())
-      recoveryControllersRef.current.clear()
-      cancellationControllersRef.current.forEach(controller => controller.abort())
-      cancellationControllersRef.current.clear()
       if (flushRetryTimerRef.current) clearTimeout(flushRetryTimerRef.current)
+      for (const release of videoWatchesRef.current.values()) release()
+      videoWatchesRef.current.clear()
     }
   }, [])
 
@@ -240,72 +219,68 @@ export function useChatSessions(): UseChatSessions {
     setSessions(next)
   }, [setSessions])
 
-  const patchSessionMessages = useCallback((
-    sessionId: string,
-    updater: (msgs: ChatPageMessage[]) => ChatPageMessage[],
-  ) => {
+  const patchActiveMessages = useCallback((updater: (msgs: ChatPageMessage[]) => ChatPageMessage[]) => {
     patchSessions(base => base.map(s => {
-      if (s.id !== sessionId) return s
+      if (s.id !== activeId) return s
       const messages = updater(s.messages)
       const title = s.title === '新对话' && messages.some(m => m.role === 'user')
         ? titleFromMessages(messages)
         : s.title
       return { ...s, messages, title, updatedAt: Date.now() }
     }))
-  }, [patchSessions])
-
-  const patchActiveMessages = useCallback((updater: (msgs: ChatPageMessage[]) => ChatPageMessage[]) => {
-    if (!activeId) return
-    patchSessionMessages(activeId, updater)
-  }, [activeId, patchSessionMessages])
-
-  const patchSessionMessage = useCallback((
-    sessionId: string,
-    msgId: string,
-    updater: (m: ChatPageMessage) => ChatPageMessage,
-  ) => {
-    patchSessionMessages(sessionId, msgs => msgs.map(m => (m.id === msgId ? updater(m) : m)))
-  }, [patchSessionMessages])
+  }, [activeId, patchSessions])
 
   const patchMessage = useCallback((msgId: string, updater: (m: ChatPageMessage) => ChatPageMessage) => {
-    if (!activeId) return
-    patchSessionMessage(activeId, msgId, updater)
-  }, [activeId, patchSessionMessage])
+    patchActiveMessages(msgs => msgs.map(m => (m.id === msgId ? updater(m) : m)))
+  }, [patchActiveMessages])
 
-  const cancelSessionRequests = useCallback((sessionId: string) => {
-    const session = sessionsRef.current.find(item => item.id === sessionId)
-    if (!session) return
-    const requestIds = new Set(
-      session.messages
-        .map(message => message.generationRequestId)
-        .filter((value): value is string => Boolean(value)),
-    )
-    requestIds.forEach(requestId => {
-      cancelledRequestIdsRef.current.add(requestId)
-      void cancelGenerationRequest(requestId, sessionId).catch(() => undefined)
+  const releaseActiveDraft = useCallback(() => {
+    const draftId = activeDraftIdRef.current
+    activeDraftIdRef.current = null
+    if (!draftId) return
+    // 服务端草稿取消之外，前端轮询循环也要停：否则停止后循环继续空转到预算耗尽。
+    abortDraftPoll(draftId)
+    void cancelDraft(draftId).catch(e => {
+      console.warn('取消草稿失败:', e instanceof Error ? e.message : e)
     })
   }, [])
 
+  const stop = useCallback(() => {
+    if (awaitingResponseRef.current) {
+      // Aborting now would discard the response that carries the draft id, so
+      // the backend would keep generating with nobody able to cancel it. That
+      // orphan is what starved the drafts the UI was still polling. Let the
+      // response land; send() cancels the draft the moment the id is known.
+      cancelOnArrivalRef.current = true
+      resumeSessionRef.current = null
+      setStreaming(false)
+      return
+    }
+    releaseActiveDraft()
+    abortRef.current?.abort()
+    abortRef.current = null
+    inflightRef.current = false
+    resumeSessionRef.current = null
+    setStreaming(false)
+  }, [releaseActiveDraft, setStreaming])
+
   const newSession = useCallback(() => {
-    // Switching context detaches the HTTP transport but leaves the server task
-    // running. Its request ID remains in the original session for recovery.
-    if (streaming) detachTransport()
+    if (streaming) stop()
     const now = Date.now()
     const s: ChatSession = { id: newSessionId(), title: '新对话', messages: [], createdAt: now, updatedAt: now }
     patchSessions(prev => [s, ...prev])
     setActiveId(s.id)
     setError(null)
-  }, [streaming, detachTransport, patchSessions, setActiveId, setError])
+  }, [streaming, stop, patchSessions, setActiveId, setError])
 
   const selectSession = useCallback((id: string) => {
-    if (streaming) detachTransport()
+    if (streaming) stop()
     setActiveId(id)
     setError(null)
-  }, [streaming, detachTransport, setActiveId, setError])
+  }, [streaming, stop, setActiveId, setError])
 
   const deleteSession = useCallback(async (id: string) => {
-    if (id === activeId && streaming) detachTransport()
-    cancelSessionRequests(id)
+    if (id === activeId) stop()
     void deleteSessionDrafts(id).catch((e) => {
       console.warn('删除会话草稿失败:', e instanceof Error ? e.message : e)
     })
@@ -322,23 +297,19 @@ export function useChatSessions(): UseChatSessions {
       }
       return next
     })
-  }, [activeId, streaming, detachTransport, cancelSessionRequests, patchSessions, setActiveId])
+  }, [activeId, stop, patchSessions, setActiveId])
 
   const clearActive = useCallback(() => {
-    if (!activeId) return
-    if (streaming) detachTransport()
-    cancelSessionRequests(activeId)
-    resumedSessionIds.delete(activeId)
+    stop()
+    if (activeId) resumedSessionIds.delete(activeId)
     patchActiveMessages(() => [])
-  }, [streaming, detachTransport, activeId, cancelSessionRequests, patchActiveMessages])
+  }, [stop, activeId, patchActiveMessages])
 
-  const pollDraftPreview = useCallback(async (
-    draftId: string,
-    msgId: string,
-    sessionId: string,
-  ) => {
+  const pollDraftPreview = useCallback(async (draftId: string, msgId: string) => {
+    // 注册可中止的轮询。不传 signal 时停止/卸载都无法结束循环。
+    const signal = registerDraftPoll(draftId)
     const result = await pollDraftUntilSettled(draftId, progress => {
-      patchSessionMessage(sessionId, msgId, message => {
+      patchMessage(msgId, message => {
         if (message.draft?.draftId !== draftId) return message
         return {
           ...message,
@@ -353,9 +324,11 @@ export function useChatSessions(): UseChatSessions {
           awaitingDraft: true,
         }
       })
-    })
+    }, signal)
     if (result.kind === 'duplicate') return
-    patchSessionMessage(sessionId, msgId, message => {
+    if (result.kind === 'cancelled' && signal.aborted) return
+    if (activeDraftIdRef.current === draftId) activeDraftIdRef.current = null
+    patchMessage(msgId, message => {
       if (message.draft?.draftId !== draftId) return message
       if (result.kind === 'ready') {
         return {
@@ -370,244 +343,32 @@ export function useChatSessions(): UseChatSessions {
             errorMessage: undefined,
           },
           awaitingDraft: false,
-          awaitingDraftSince: undefined,
         }
       }
       return {
         ...message,
-        draft: {
-          ...message.draft,
-          status: result.kind,
-          stage: result.kind,
-          errorMessage: result.message,
-        },
+        draft: { ...message.draft, status: result.kind, errorMessage: result.message },
         awaitingDraft: false,
-        awaitingDraftSince: undefined,
       }
     })
     flushToStorage()
-  }, [patchSessionMessage, flushToStorage])
-
-  const attachDraft = useCallback((
-    sessionId: string,
-    assistantId: string,
-    draft: ChatDraftState,
-  ) => {
-    patchSessionMessage(sessionId, assistantId, message => ({
-      ...message,
-      error: false,
-      intent: draft.mediaType === 'image' ? 'generation:image' : 'generation:video',
-      model: 'draft',
-      draft,
-      awaitingDraft: true,
-      awaitingDraftSince: Date.now(),
-      incomplete: false,
-    }))
-    flushToStorage()
-    void pollDraftPreview(draft.draftId, assistantId, sessionId)
-  }, [flushToStorage, patchSessionMessage, pollDraftPreview])
-
-  const recoverGenerationRequest = useCallback(async (
-    requestId: string,
-    assistantId: string,
-    sessionId: string,
-  ) => {
-    if (recoveryControllersRef.current.has(requestId)) return
-    const controller = new AbortController()
-    recoveryControllersRef.current.set(requestId, controller)
-    try {
-      const state = await waitForGenerationRequestDraft(
-        requestId,
-        sessionId,
-        controller.signal,
-      )
-      if (state.status === 'cancelled') {
-        patchSessionMessage(sessionId, assistantId, message => ({
-          ...message,
-          content: message.content && message.content !== '正在停止…'
-            ? message.content
-            : '已停止',
-          intent: null,
-          model: undefined,
-          error: false,
-          awaitingDraft: false,
-          awaitingDraftSince: undefined,
-          incomplete: false,
-          draft: message.draft ? {
-            ...message.draft,
-            status: 'cancelled',
-            stage: 'cancelled',
-            progress: 0,
-            errorMessage: '已停止',
-          } : message.draft,
-        }))
-        return
-      }
-      if (state.draft_id && state.preview_url && state.media_type) {
-        attachDraft(sessionId, assistantId, {
-          draftId: state.draft_id,
-          previewUrl: state.preview_url,
-          mediaType: state.media_type,
-          status: normalizeDraftStatus(state.status),
-          stage: state.stage,
-          progress: normalizeDraftProgress(state.progress),
-          workflowVersion: state.workflow_version,
-          errorMessage: state.error ?? undefined,
-        })
-      }
-    } catch (e) {
-      if (controller.signal.aborted) {
-        // Module-level recovery markers survive React remounts. Remove the
-        // marker so a refreshed component can resume this request again.
-        resumedSessionIds.delete(sessionId)
-        return
-      }
-      const code = (e as Error & { code?: string }).code ?? (e instanceof Error ? e.message : '恢复失败')
-      const terminal = [
-        'generation_request_expired',
-        'generation_request_forbidden',
-        'unauthorized',
-      ].includes(code)
-      patchSessionMessage(sessionId, assistantId, message => ({
-        ...message,
-        content: code === 'generation_request_expired'
-          ? '生成请求已过期'
-          : `生成请求恢复失败: ${e instanceof Error ? e.message : code}`,
-        error: true,
-        intent: null,
-        model: undefined,
-        awaitingDraft: false,
-        awaitingDraftSince: undefined,
-        incomplete: false,
-      }))
-      if (!terminal) resumedSessionIds.delete(sessionId)
-    } finally {
-      recoveryControllersRef.current.delete(requestId)
-      flushToStorage()
-    }
-  }, [attachDraft, flushToStorage, patchSessionMessage])
-
-  const stop = useCallback(() => {
-    const activeGeneration = activeGenerationRef.current
-    if (!activeGeneration) {
-      detachTransport()
-      flushToStorage()
-      return
-    }
-
-    const { requestId, sessionId, assistantId } = activeGeneration
-    if (cancellationControllersRef.current.has(requestId)) return
-    cancelledRequestIdsRef.current.add(requestId)
-    patchSessionMessage(sessionId, assistantId, message => ({
-      ...message,
-      content: message.content || '正在停止…',
-      error: false,
-      incomplete: false,
-      awaitingDraft: true,
-      awaitingDraftSince: message.awaitingDraftSince ?? Date.now(),
-      draft: message.draft ? {
-        ...message.draft,
-        stage: 'cancelling',
-        errorMessage: undefined,
-      } : message.draft,
-    }))
-    // Abort only the response transport. Keep the UI busy until the server has
-    // persisted the terminal cancellation state.
-    detachTransport(true)
-
-    const controller = new AbortController()
-    cancellationControllersRef.current.set(requestId, controller)
-    void cancelGenerationRequestAndWait(
-      requestId,
-      sessionId,
-      controller.signal,
-    ).then(() => {
-      patchSessionMessage(sessionId, assistantId, message => ({
-        ...message,
-        content: message.content && message.content !== '正在停止…'
-          ? message.content
-          : '已停止',
-        intent: null,
-        model: undefined,
-        error: false,
-        incomplete: false,
-        awaitingDraft: false,
-        awaitingDraftSince: undefined,
-        draft: message.draft ? {
-          ...message.draft,
-          status: 'cancelled',
-          stage: 'cancelled',
-          progress: 0,
-          errorMessage: '已停止',
-        } : message.draft,
-      }))
-    }).catch(error => {
-      if (controller.signal.aborted) return
-      const reason = error instanceof Error ? error.message : '取消失败'
-      const errorCode = (error as Error & { code?: string }).code ?? ''
-      const unconfirmed = errorCode === 'comfyui_cancellation_unconfirmed'
-      setError(
-        unconfirmed
-          ? 'ComfyUI 未确认任务已停止，任务将继续运行并保持跟踪。'
-          : `停止生成失败: ${reason}`,
-      )
-      patchSessionMessage(sessionId, assistantId, current => ({
-        ...current,
-        content: unconfirmed
-          ? '停止未确认，正在恢复任务状态'
-          : '停止失败，正在恢复任务状态',
-        error: !unconfirmed,
-        incomplete: false,
-        awaitingDraft: true,
-        awaitingDraftSince: current.awaitingDraftSince ?? Date.now(),
-        draft: current.draft ? {
-          ...current.draft,
-          stage: unconfirmed
-            ? 'cancellation_unconfirmed'
-            : current.draft.stage === 'cancelling'
-              ? 'running'
-              : current.draft.stage,
-          errorMessage: unconfirmed
-            ? '停止未确认，任务继续运行'
-            : `停止失败: ${reason}`,
-        } : current.draft,
-      }))
-      resumedSessionIds.delete(sessionId)
-      void recoverGenerationRequest(requestId, assistantId, sessionId)
-    }).finally(() => {
-      cancellationControllersRef.current.delete(requestId)
-      cancelledRequestIdsRef.current.delete(requestId)
-      setPendingAssistantId(null)
-      setStreaming(false)
-      flushToStorage()
-    })
-  }, [
-    detachTransport,
-    flushToStorage,
-    patchSessionMessage,
-    recoverGenerationRequest,
-    setError,
-    setPendingAssistantId,
-    setStreaming,
-  ])
+  }, [patchMessage, flushToStorage])
 
   const send = useCallback(async (
     text: string,
     opts?: {
       resume?: boolean
       dropLastAssistant?: boolean
-      generationOptions?: SourceAwareGenerationOptions
+      generationOptions?: GenerationOptions
       referenceImage?: ChatReferenceImage
     },
   ) => {
     const trimmed = text.trim()
-    if (!trimmed || streaming || inflightRef.current || !activeId) return
+    if (!trimmed || streaming || inflightRef.current) return
     inflightRef.current = true
-    const sessionId = activeId
     const isResume = Boolean(opts?.resume)
-    const requestId = newGenerationRequestId()
     setError(null)
-    if (!isResume) resumedSessionIds.delete(sessionId)
+    if (!isResume && activeId) resumedSessionIds.delete(activeId)
 
     const userMsg: ChatPageMessage = {
       id: nextMessageId(),
@@ -618,20 +379,12 @@ export function useChatSessions(): UseChatSessions {
       ts: Date.now(),
     }
     const assistantId = nextMessageId()
-    const sourceDraftId = opts?.generationOptions?.source_draft_id
-    const assistantMsg: ChatPageMessage = {
-      id: assistantId,
-      role: 'assistant',
-      content: '',
-      intent: sourceDraftId ? 'generation:video' : undefined,
-      model: sourceDraftId ? 'source-draft' : undefined,
-      generationRequestId: requestId,
-      awaitingDraft: true,
-      awaitingDraftSince: Date.now(),
-      ts: Date.now(),
-    }
+    const assistantMsg: ChatPageMessage = { id: assistantId, role: 'assistant', content: '', ts: Date.now() }
 
-    const cur = sessionsRef.current.find(x => x.id === sessionId)
+    // Snapshot history before mutating sessionsRef. patchActiveMessages updates the
+    // ref synchronously, so reading it afterwards would include userMsg and then
+    // append the same message again when building the wire payload.
+    const cur = sessionsRef.current.find(x => x.id === activeId)
     let baseMsgs = cur?.messages ?? []
     if (isResume && baseMsgs.length > 10) baseMsgs = baseMsgs.slice(-10)
     if (opts?.dropLastAssistant && baseMsgs.length > 0 && baseMsgs[baseMsgs.length - 1].role === 'assistant') {
@@ -641,7 +394,7 @@ export function useChatSessions(): UseChatSessions {
       .filter(m => m.role === 'user' || (m.role === 'assistant' && m.content && !m.draft))
       .map(m => ({
         role: m.role,
-        content: m.referenceImageDataUrl
+        content: m.referenceImageDataUrl && !m.referenceImageEphemeral
           ? [
               { type: 'text' as const, text: m.content },
               {
@@ -652,83 +405,90 @@ export function useChatSessions(): UseChatSessions {
           : m.content,
       }))
 
-    patchSessionMessages(sessionId, msgs => isResume ? [...msgs, assistantMsg] : [...msgs, userMsg, assistantMsg])
+    patchActiveMessages(msgs => isResume ? [...msgs, assistantMsg] : [...msgs, userMsg, assistantMsg])
     setPendingAssistantId(assistantId)
-    flushToStorage()
 
     setStreaming(true)
     const controller = new AbortController()
     abortRef.current = controller
-    activeGenerationRef.current = { requestId, sessionId, assistantId, controller }
-    if (isResume) resumeSessionRef.current = sessionId
+    cancelOnArrivalRef.current = false
+    awaitingResponseRef.current = true
+    if (isResume) resumeSessionRef.current = activeId
 
     try {
-      if (sourceDraftId) {
-        const created = await createVideoDraftFromSource(
-          sourceDraftId,
-          {
-            requestId,
-            motionPrompt: trimmed,
-            durationSeconds: opts?.generationOptions?.duration_seconds ?? 5,
-            fps: opts?.generationOptions?.fps ?? 8,
-            chatSessionId: sessionId,
-          },
-          controller.signal,
-        )
-        attachDraft(sessionId, assistantId, {
-          draftId: created.draft_id,
-          previewUrl: created.preview_url,
-          mediaType: 'video',
-          status: normalizeDraftStatus(created.status),
-          stage: 'preview_ready',
-          progress: 1,
-          progressSource: 'complete',
-        })
-        setPendingAssistantId(null)
-        setStreaming(false)
-        return
-      }
-
-      const generationOptions = opts?.generationOptions
-        ? Object.fromEntries(
-            Object.entries(opts.generationOptions).filter(([key]) => key !== 'source_draft_id'),
-          ) as GenerationOptions
-        : undefined
       const resp = await requestChatCompletion(
         {
           model: 'auto',
           messages: wireMessages,
           stream: true,
-          chat_session_id: sessionId,
-          generation_options: generationOptions,
+          chat_session_id: activeId ?? undefined,
+          generation_options: opts?.generationOptions,
         },
         controller.signal,
-        requestId,
       )
+      awaitingResponseRef.current = false
 
       if (resp.kind === 'draft') {
-        attachDraft(sessionId, assistantId, {
+        // The user stopped while the request was still in flight. The draft id
+        // only exists now, so this is the first moment it can be cancelled.
+        if (cancelOnArrivalRef.current) {
+          cancelOnArrivalRef.current = false
+          void cancelDraft(resp.draftId).catch(e => {
+            console.warn('取消草稿失败:', e instanceof Error ? e.message : e)
+          })
+          patchMessage(assistantId, m => ({
+            ...m,
+            content: m.content || '已停止',
+            awaitingDraft: false,
+          }))
+          setPendingAssistantId(null)
+          flushToStorage()
+          setStreaming(false)
+          abortRef.current = null
+          inflightRef.current = false
+          return
+        }
+        const draft: ChatDraftState = {
           draftId: resp.draftId,
           previewUrl: resp.previewUrl,
           mediaType: resp.mediaType,
           status: 'generating',
-        })
+        }
+        patchMessage(assistantId, m => ({
+          ...m,
+          intent: resp.mediaType === 'image' ? 'generation:image' : 'generation:video',
+          model: 'draft',
+          draft,
+          awaitingDraft: true,
+          awaitingDraftSince: Date.now(),
+        }))
+        activeDraftIdRef.current = resp.draftId
         setPendingAssistantId(null)
+        flushToStorage()
         setStreaming(false)
+        abortRef.current = null
+        inflightRef.current = false
+        void pollDraftPreview(resp.draftId, assistantId)
         return
       }
 
-      patchSessionMessage(sessionId, assistantId, message => ({
-        ...message,
-        awaitingDraft: false,
-        awaitingDraftSince: undefined,
-      }))
+      // stop() during the request turned out to hit a text stream, not a draft:
+      // there is no server-side draft to cancel, so drop the stream instead.
+      if (cancelOnArrivalRef.current) {
+        cancelOnArrivalRef.current = false
+        controller.abort()
+        setStreaming(false)
+        setPendingAssistantId(null)
+        flushToStorage()
+        return
+      }
+
       await consumeChatEventStream(resp.body, chunk => {
         const delta = chunk.choices?.[0]?.delta
         const meta = chunk._meta?.routed_to
         const streamError = chunk.error
         const errorMessage = streamError?.message ?? streamError?.code ?? '请求失败'
-        patchSessionMessage(sessionId, assistantId, message => {
+        patchMessage(assistantId, message => {
           const next: ChatPageMessage = { ...message }
           if (delta?.content) {
             next.content += delta.content
@@ -753,69 +513,26 @@ export function useChatSessions(): UseChatSessions {
       setPendingAssistantId(null)
       flushToStorage()
     } catch (e) {
-      const explicitlyCancelled = controller.signal.aborted
-        && cancelledRequestIdsRef.current.has(requestId)
       if (controller.signal.aborted) {
-        if (explicitlyCancelled) {
-          patchSessionMessage(sessionId, assistantId, message => ({
-            ...message,
-            content: message.content || '正在停止…',
-            error: false,
-            incomplete: false,
-            awaitingDraft: true,
-            awaitingDraftSince: message.awaitingDraftSince ?? Date.now(),
-          }))
-        } else {
-          // Transport detached during navigation/refresh. Preserve the request
-          // identity so the session can resolve the server-created draft.
-          patchSessionMessage(sessionId, assistantId, message => ({
-            ...message,
-            awaitingDraft: true,
-            awaitingDraftSince: message.awaitingDraftSince ?? Date.now(),
-          }))
-        }
+        patchMessage(assistantId, m => (m.content ? { ...m, incomplete: true } : m))
       } else {
-        const code = (e as Error & { code?: string }).code
         const msg = e instanceof Error ? e.message : '请求失败'
         setError(msg)
-        patchSessionMessage(sessionId, assistantId, message => ({
-          ...message,
-          content: msg,
-          error: true,
-          intent: null,
-          model: undefined,
-          awaitingDraft: false,
-          awaitingDraftSince: undefined,
-          incomplete: false,
-          generationRequestId: code === 'reference_image_required'
-            ? undefined
-            : message.generationRequestId,
-        }))
+        patchActiveMessages(msgs => msgs.filter(m => !(m.id === assistantId && m.content === '' && !m.draft)))
       }
-      if (!explicitlyCancelled) {
-        setStreaming(false)
-        setPendingAssistantId(null)
-      }
+      setStreaming(false)
+      setPendingAssistantId(null)
       flushToStorage()
     } finally {
-      if (abortRef.current === controller) abortRef.current = null
-      if (activeGenerationRef.current?.requestId === requestId) {
-        activeGenerationRef.current = null
+      awaitingResponseRef.current = false
+      cancelOnArrivalRef.current = false
+      if (abortRef.current === controller) {
+        abortRef.current = null
+        inflightRef.current = false
+        if (isResume) resumeSessionRef.current = null
       }
-      inflightRef.current = false
-      if (isResume) resumeSessionRef.current = null
     }
-  }, [
-    activeId,
-    attachDraft,
-    flushToStorage,
-    patchSessionMessage,
-    patchSessionMessages,
-    setError,
-    setPendingAssistantId,
-    setStreaming,
-    streaming,
-  ])
+  }, [streaming, activeId, patchActiveMessages, patchMessage, pollDraftPreview, setError, setPendingAssistantId, setStreaming, flushToStorage])
 
   const sendRef = useRef(send)
   useEffect(() => { sendRef.current = send }, [send])
@@ -827,32 +544,24 @@ export function useChatSessions(): UseChatSessions {
     resumedSessionIds.add(activeId)
 
     for (const m of s.messages) {
-      if (m.role !== 'assistant') continue
-      if (m.generationRequestId && m.awaitingDraft && !m.draft) {
-        void recoverGenerationRequest(m.generationRequestId, m.id, s.id)
-        continue
+      if (m.role !== 'assistant' || !m.draft) continue
+      if (m.awaitingDraft && m.awaitingDraftSince && (Date.now() - m.awaitingDraftSince > 30000)) {
+        patchMessage(m.id, mm => ({ ...mm, awaitingDraft: false }))
       }
-      if (!m.draft) continue
       const st = m.draft.status
       if (st === 'generating' || m.awaitingDraft || st === 'pending' || st === 'confirming' || st === 'rejecting') {
         if (st !== 'generating') {
-          patchSessionMessage(s.id, m.id, message => message.draft
-            ? { ...message, draft: { ...message.draft, status: 'pending', errorMessage: undefined } }
-            : message)
+          patchMessage(m.id, mm => mm.draft ? { ...mm, draft: { ...mm.draft, status: 'pending', errorMessage: undefined } } : mm)
         }
-        if (!m.draft.previewDataUrl) void pollDraftPreview(m.draft.draftId, m.id, s.id)
+        if (!m.draft.previewDataUrl) void pollDraftPreview(m.draft.draftId, m.id)
       } else if (st === 'confirmed') {
         if (!m.draft.resultDataUrl) {
           void getDraftResult(m.draft.draftId).then(
-            ({ resultDataUrl }) => patchSessionMessage(s.id, m.id, message => message.draft
-              ? { ...message, draft: { ...message.draft, resultDataUrl } }
-              : message),
-            (e: unknown) => patchSessionMessage(s.id, m.id, message => message.draft
-              ? { ...message, draft: { ...message.draft, resultLost: true, errorMessage: e instanceof Error ? e.message : '结果加载失败' } }
-              : message),
+            ({ resultDataUrl }) => patchMessage(m.id, mm => mm.draft ? { ...mm, draft: { ...mm.draft, resultDataUrl } } : mm),
+            (e: unknown) => patchMessage(m.id, mm => mm.draft ? { ...mm, draft: { ...mm.draft, resultLost: true, errorMessage: e instanceof Error ? e.message : '结果加载失败' } } : mm),
           )
         }
-        if (!m.draft.previewDataUrl) void pollDraftPreview(m.draft.draftId, m.id, s.id)
+        if (!m.draft.previewDataUrl) void pollDraftPreview(m.draft.draftId, m.id)
       }
     }
 
@@ -862,13 +571,13 @@ export function useChatSessions(): UseChatSessions {
     let resumeText: string | null = null
     let dropLastAssistant = false
     if (last.role === 'user') {
-      patchSessionMessages(s.id, msgs => msgs.filter(m => !(m.role === 'assistant' && !m.content && !m.draft)))
+      patchActiveMessages(msgs => msgs.filter(m => !(m.role === 'assistant' && !m.content && !m.draft)))
       needResumeSend = true
       resumeText = last.content
     } else if (last.role === 'assistant' && (last.incomplete || (!last.content && !last.draft))) {
-      if (last.generationRequestId || last.awaitingDraft || last.draft?.status === 'generating') return
+      if (last.awaitingDraft || last.draft?.status === 'generating') return
       if (!last.content && !last.draft && pendingAssistantIdRef.current === last.id) return
-      patchSessionMessages(s.id, msgs => msgs.slice(0, -1))
+      patchActiveMessages(msgs => msgs.slice(0, -1))
       const prevUser = s.messages[s.messages.length - 2]
       if (prevUser?.role === 'user') {
         needResumeSend = true
@@ -880,18 +589,68 @@ export function useChatSessions(): UseChatSessions {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId])
 
-  const pollVideoStatus = useCallback(async (videoId: string, msgId: string) => {
-    const status = await pollVideoUntilTerminal(videoId)
-    if (!status) return
-    const resolvedUrl = status.video?.url || status.url
-    if ((status.status === 'succeeded' || status.status === 'completed') && resolvedUrl) {
-      patchMessage(msgId, message => ({ ...message, videoUrl: resolvedUrl, intent: 'generation:video', model: 'video' }))
-      flushToStorage()
-    } else if (status.status === 'failed' || status.status === 'error') {
-      patchMessage(msgId, message => ({ ...message, content: `Video generation failed: ${status.error?.message || '视频生成失败'}`, error: true }))
-      flushToStorage()
-    }
+  const failVideoMessage = useCallback((
+    msgId: string,
+    message: string,
+    phase: 'failed' | 'timeout',
+  ) => {
+    // intent 必须清掉，否则 MessageBubble 仍按视频渲染，这段错误文案永不显示。
+    patchMessage(msgId, current => ({
+      ...current,
+      content: message,
+      error: true,
+      intent: null,
+      videoPhase: phase,
+    }))
+    flushToStorage()
   }, [patchMessage, flushToStorage])
+
+  const pollVideoStatus = useCallback(async (videoId: string, msgId: string) => {
+    const existing = videoWatchesRef.current.get(videoId)
+    if (existing) return
+    const watch = watchVideoUntilTerminal(videoId)
+    videoWatchesRef.current.set(videoId, watch.release)
+    patchMessage(msgId, message => (
+      message.videoPhase ? message : { ...message, videoPhase: 'polling' }
+    ))
+    try {
+      const outcome = await watch.result
+      if (outcome.kind === 'cancelled') return
+      if (outcome.kind === 'timeout') {
+        // 之前耗尽预算后静默 return，消息永久停在"生成视频中"，用户无从判断。
+        failVideoMessage(
+          msgId,
+          `视频生成超时：任务 ${videoId} 在轮询预算内未返回结果，请稍后在日志中确认任务状态。`,
+          'timeout',
+        )
+        return
+      }
+      const status = outcome.status
+      const resolvedUrl = extractVideoUrl(status)
+      if (isVideoSucceeded(status) && resolvedUrl) {
+        patchMessage(msgId, message => ({
+          ...message,
+          videoUrl: resolvedUrl,
+          videoPhase: 'succeeded',
+          intent: 'generation:video',
+          model: message.model ?? 'video',
+        }))
+        flushToStorage()
+        return
+      }
+      failVideoMessage(
+        msgId,
+        `视频生成失败：${status.error?.message || status.status || '上游未返回可播放结果'}`,
+        'failed',
+      )
+    } finally {
+      const release = videoWatchesRef.current.get(videoId)
+      if (release) {
+        videoWatchesRef.current.delete(videoId)
+        release()
+      }
+    }
+  }, [patchMessage, flushToStorage, failVideoMessage])
 
   const confirmDraftMsg = useCallback(async (msgId: string) => {
     const s = sessions.find(x => x.id === activeId)
@@ -920,7 +679,7 @@ export function useChatSessions(): UseChatSessions {
     try {
       const result = await confirmDraft(msg.draft.draftId)
       if ('videoId' in result) {
-        patchMessage(msgId, m => ({ ...m, draft: undefined, videoId: result.videoId, intent: 'generation:video', model: 'video' }))
+        patchMessage(msgId, m => ({ ...m, draft: undefined, videoId: result.videoId, videoPhase: 'polling', intent: 'generation:video', model: 'video' }))
         flushToStorage()
         void pollVideoStatus(result.videoId, msgId)
       } else {
@@ -953,7 +712,7 @@ export function useChatSessions(): UseChatSessions {
       const { newDraftId, previewUrl } = await rejectDraft(msg.draft.draftId)
       patchMessage(msgId, m => m.draft ? { ...m, draft: { ...m.draft, draftId: newDraftId, previewUrl, status: 'generating', previewDataUrl: undefined, resultDataUrl: undefined, errorMessage: undefined }, awaitingDraft: true, awaitingDraftSince: Date.now() } : m)
       flushToStorage()
-      if (activeId) void pollDraftPreview(newDraftId, msgId, activeId)
+      void pollDraftPreview(newDraftId, msgId)
     } catch (e) {
       const code = e instanceof Error ? e.message : '重新生成失败'
       const expired = code.includes('expired') || code.includes('not_found')
@@ -967,8 +726,16 @@ export function useChatSessions(): UseChatSessions {
     const s = sessionsRef.current.find(x => x.id === activeId)
     if (!s) return
     s.messages
-      .filter(m => m.role === 'assistant' && m.videoId && !m.error && !m.incomplete)
+      .filter(m => (
+        m.role === 'assistant'
+        && m.videoId
+        && !m.videoUrl
+        && (m.videoPhase === undefined || m.videoPhase === 'polling')
+        && !m.error
+        && !m.incomplete
+      ))
       .forEach(msg => { if (msg.videoId) void pollVideoStatus(msg.videoId, msg.id) })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId, resumePollingKey, pollVideoStatus])
 
   useEffect(() => () => clearAllChatPolling(), [])

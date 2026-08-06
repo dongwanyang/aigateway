@@ -23,10 +23,11 @@ export default function DraftCard({ draft, onConfirm, onReject, onCreateVideo }:
     ? Math.round(Math.min(1, Math.max(0, draft.progress)) * 100)
     : null
   const hasRealComfyProgress = draft.progressSource === 'comfyui'
-  const indeterminateProgress = busy
-    && progressPercent !== null
-    && ['running', 'refining', 'confirming'].includes(draft.status)
-    && !hasRealComfyProgress
+  // 只有 ComfyUI 上报的进度才是真实百分比。stage 来源的 progress 是阶段占位值
+  // (例如后端把 running 固定写成 0.1)，按真实百分比渲染会让进度条整段生成期间
+  // 静止在 10%，看起来像卡住。此处不再按 status 白名单区分：任何非 comfyui
+  // 来源的忙碌状态都渲染为不确定进度。
+  const indeterminateProgress = busy && !hasRealComfyProgress
   const progressText = (!indeterminateProgress && progressPercent !== null && hasRealComfyProgress)
     ? ` ${progressPercent}%`
     : ''
@@ -95,20 +96,20 @@ export default function DraftCard({ draft, onConfirm, onReject, onCreateVideo }:
           {draft.errorMessage ? `:${draft.errorMessage}` : ''}
         </span>
       )}
-      {busy && progressPercent !== null && (
+      {busy && (progressPercent !== null || indeterminateProgress) && (
         <div
           aria-label="草稿生成进度"
           role="progressbar"
           aria-valuemin={0}
           aria-valuemax={100}
-          aria-valuenow={indeterminateProgress ? undefined : progressPercent}
+          aria-valuenow={indeterminateProgress ? undefined : (progressPercent ?? undefined)}
           style={{ height: 4, borderRadius: 999, overflow: 'hidden', backgroundColor: 'var(--color-bg-overlay)' }}
         >
           <div
             className={indeterminateProgress ? 'animate-pulse' : undefined}
             style={{
               height: '100%',
-              width: indeterminateProgress ? '36%' : `${progressPercent}%`,
+              width: indeterminateProgress ? '36%' : `${progressPercent ?? 0}%`,
               backgroundColor: 'var(--color-primary)',
               transition: 'width 180ms ease',
             }}

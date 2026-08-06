@@ -17,6 +17,7 @@ import asyncio
 import base64
 import json
 import logging
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -3120,6 +3121,50 @@ def _assert_draft_owner(
         )
 
 
+def _draft_workflow_model(draft: Any, default: str = "comfyui") -> str:
+    """推导用于请求日志的模型标识。
+
+    优先使用草稿记录里的真实工作流/模型信息，避免把静态字符串写进日志：
+    日志里看不出真实用的是哪个模型，就无法核对成本与路由。
+    """
+    params = getattr(draft, "generation_params", None) or {}
+    for key in ("routed_model", "model", "video_model", "preset_id"):
+        value = params.get(key) if isinstance(params, dict) else None
+        if value:
+            return str(value)
+    workflow_version = getattr(draft, "workflow_version", "") or ""
+    media_type = getattr(draft, "media_type", "image") or "image"
+    if workflow_version:
+        return f"comfyui:{media_type}:{workflow_version}"
+    return default
+
+
+async def _record_draft_request_log(
+    request: Request,
+    *,
+    endpoint: str,
+    status_code: int,
+    started_at: float,
+    model: str,
+    description: str,
+) -> None:
+    """写入草稿相关的请求日志，失败只告警不影响主流程。"""
+    try:
+        from .openai_compat import _record_request_log
+        await _record_request_log(
+            request=request,
+            method="POST",
+            endpoint=endpoint,
+            status_code=status_code,
+            duration_ms=round((time.monotonic() - started_at) * 1000, 1),
+            model=model,
+            cache_hit=False,
+            cache_tier=None,
+        )
+    except Exception as exc:
+        logger.warning("%s请求日志写入失败: %s", description, exc)
+
+
 @router.get("/draft/{draft_id}")
 async def get_draft_status(
     draft_id: str,
@@ -3248,6 +3293,7 @@ async def confirm_draft(
     验证草图状态为 pending，执行 upscale 算法放大到目标分辨率。
     仅允许草稿所有者确认（通过 DraftResult.user_id/group_id 直接属性校验）。
     """
+    confirm_started_at = time.monotonic()
     try:
         strategy = _get_draft_strategy()
     except RuntimeError as exc:
@@ -3332,15 +3378,16 @@ async def confirm_draft(
     # 视频草稿:返回 video_id,前端轮询 /v1/videos/{id}
     from aigateway_core.pipelines.generation._common.models import VideoSubmitResult
     if isinstance(result, VideoSubmitResult):
-        try:
-            from .openai_compat import _record_request_log
-            await _record_request_log(
-                request=request, method="POST", endpoint=f"/admin/draft/{draft_id}/confirm",
-                status_code=200, duration_ms=0.0,
-                model="agnes-video-v2.0", cache_hit=False, cache_tier=None,
-            )
-        except Exception as exc:
-            logger.warning("视频草稿确认请求日志写入失败: %s", exc)
+        # 模型名与耗时都必须来自本次实际执行，之前写死 "agnes-video-v2.0"
+        # 且 duration_ms 恒为 0，日志无法用于核对真实路由与成本。
+        await _record_draft_request_log(
+            request,
+            endpoint=f"/admin/draft/{draft_id}/confirm",
+            status_code=200,
+            started_at=confirm_started_at,
+            model=_draft_workflow_model(draft_data, default="video"),
+            description="视频草稿确认",
+        )
         return {
             "draft_id": draft_id,
             "video_id": result.video_id,
@@ -3479,9 +3526,47 @@ async def delete_session_drafts(
     return {"session_id": session_id, "deleted_count": deleted_count}
 
 
+@router.post("/draft/{draft_id}/cancel")
+async def cancel_draft(
+    draft_id: str,
+    _auth: dict[str, Any] = Depends(authenticate_admin),
+):
+    """取消进行中的草稿，停止后台任务与 ComfyUI 作业.
+
+    前端中止请求（停止按钮/关闭页面）时调用。没有这个端点时草稿会变成孤儿任务
+    继续占用 GPU，把前端仍在轮询的草稿挤到 generation_wait_timeout。
+
+    幂等：已处于终态的草稿返回 cancelled=false，不报错。
+    """
+    try:
+        strategy = _get_draft_strategy()
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": {"code": "draft_unavailable", "message": str(exc)}},
+        ) from exc
+
+    draft_data = await strategy.get_draft(draft_id)
+    if draft_data is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": {
+                    "code": "draft_not_found",
+                    "message": f"Draft '{draft_id}' not found",
+                }
+            },
+        )
+    _assert_draft_owner(draft_data, _auth, action="cancel it")
+
+    cancelled = await strategy.cancel_draft(draft_id)
+    return {"draft_id": draft_id, "cancelled": cancelled}
+
+
 @router.post("/draft/{draft_id}/reject")
 async def reject_draft(
     draft_id: str,
+    request: Request,
     _auth: dict[str, Any] = Depends(authenticate_admin),
 ):
     """拒绝草稿 → 重新生成低分辨率草图.
@@ -3489,6 +3574,7 @@ async def reject_draft(
     删除被拒绝的草图，生成新的 draft_id 和预览。
     仅允许草稿所有者拒绝（通过 DraftResult.user_id/group_id 直接属性校验）。
     """
+    reject_started_at = time.monotonic()
     try:
         strategy = _get_draft_strategy()
     except RuntimeError as exc:
@@ -3507,7 +3593,26 @@ async def reject_draft(
     try:
         new_draft = await strategy.reject_draft(draft_id)
     except Exception as exc:
+        await _record_draft_request_log(
+            request,
+            endpoint=f"/admin/draft/{draft_id}/reject",
+            status_code=400,
+            started_at=reject_started_at,
+            model=_draft_workflow_model(draft_data),
+            description="草稿拒绝",
+        )
         raise HTTPException(status_code=400, detail={"error": {"code": "draft_reject_failed", "message": str(exc)}})
+
+    # 拒绝会触发一整个 ComfyUI 重新生成作业。之前这条路由连 Request 参数都没有,
+    # 因此这部分 GPU 消耗在 Logs 页完全不可见。
+    await _record_draft_request_log(
+        request,
+        endpoint=f"/admin/draft/{draft_id}/reject",
+        status_code=200,
+        started_at=reject_started_at,
+        model=_draft_workflow_model(new_draft),
+        description="草稿拒绝",
+    )
 
     return {
         "previous_draft_id": draft_id,

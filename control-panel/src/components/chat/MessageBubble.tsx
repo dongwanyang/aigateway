@@ -11,7 +11,11 @@ export type ContentKind = 'image' | 'video' | 'text'
 export function classifyContent(
   intent: ChatPageMessage['intent'],
   content: string,
+  error?: boolean,
 ): ContentKind {
+  // 失败消息必须显示自己的错误文案。否则 generation:video 的 intent 会把消息
+  // 交给视频渲染器，错误文本从不出现，界面继续转圈。
+  if (error && content) return 'text'
   if (intent === 'generation:image') return 'image'
   if (intent === 'generation:video') return 'video'
   if (/^https?:\/\//i.test(content) || /^data:image\//i.test(content)) return 'image'
@@ -86,7 +90,7 @@ export default function MessageBubble({
     )
   }
 
-  const kind = classifyContent(msg.intent, msg.content)
+  const kind = classifyContent(msg.intent, msg.content, msg.error)
   return (
     <div className="flex justify-start mb-4">
       <div
@@ -108,6 +112,7 @@ export default function MessageBubble({
             content={msg.content}
             videoId={msg.videoId}
             videoUrl={msg.videoUrl}
+            videoPhase={msg.videoPhase}
             done={!isStreaming}
           />
         )}

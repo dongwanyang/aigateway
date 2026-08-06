@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import math
 
 import pytest
@@ -413,3 +414,62 @@ async def test_failed_idle_release_restores_only_a_preexisting_idle_reservation(
     assert redis.owner == expected_owner
     assert coordinator._device_file_locks == {}
     await coordinator.close()
+
+
+@pytest.mark.asyncio
+async def test_generation_acquire_clears_stale_idle_reservation() -> None:
+    """Acquiring a generation lease must clear the previous idle reservation.
+
+    ``reserved_until`` gates Gateway eligibility and the reported device state,
+    so a device that is actively generating must not still look
+    ``comfyui_idle_reserved``.
+
+    The matching drain-key ownership rule lives in Lua and is covered by
+    ``tests/e2e/test_gpu_drain_key_ownership.py`` against Redis Stack; it cannot
+    be asserted here without reimplementing the script in the fake.
+    """
+    coordinator = GpuResourceCoordinator(
+        GpuSchedulerConfig.from_mapping(
+            {
+                "device_safety_margin_gb": 0,
+                "comfyui_idle_reservation_seconds": 600,
+            }
+        ),
+        devices=[GpuDevice("GPU-only", 0, "solo", 16, 14)],
+        workers=[
+            ComfyWorker(
+                "worker-solo", "GPU-only", "http://solo", frozenset({"image"})
+            )
+        ],
+    )
+    device = coordinator._devices["GPU-only"]
+
+    async with coordinator.generation_lease("image") as first:
+        assert first.worker_id == "worker-solo"
+    assert device.reserved_until > 0.0
+
+    async with coordinator.generation_lease("image") as second:
+        assert second.worker_id == "worker-solo"
+        assert device.generation_active == 1
+        assert device.reserved_until == 0.0
+
+    await coordinator.close()
+
+
+def test_generation_claim_script_allows_taking_over_idle_reservation() -> None:
+    """The claim script must treat comfyui_idle as claimable, unloads as not.
+
+    Regression guard for the source of truth: when this rule was absent every
+    queued generation on a single-GPU host waited out the full
+    ``comfyui_idle_reservation_seconds`` window and drafts hit
+    ``generation_wait_timeout``.
+    """
+    source = inspect.getsource(GpuResourceCoordinator._redis_claim_generation)
+    claim_guard = "owner ~= ARGV[2] and owner ~= 'comfyui_idle'"
+    assert claim_guard in source
+    # An in-flight unload owns the key under a comfyui_release:* token, which the
+    # guard above still rejects, so generation cannot race a model eviction.
+    release_source = inspect.getsource(
+        GpuResourceCoordinator._redis_claim_idle_release
+    )
+    assert "owner ~= 'comfyui_idle'" in release_source

@@ -224,3 +224,99 @@ async def test_video_submit_b64_json():
     msg = result["choices"][0]["message"]["content"]
     assert "video_123" in msg
     assert "/v1/videos/video_123" in msg
+
+
+def _multi_provider_bridge():
+    """文本 provider 排在前面，视频 provider 在后面。
+
+    复现真实的多 provider 配置：注册顺序里第一个模型属于纯文本 provider。
+    """
+    models_config = {
+        "text-first": {
+            "api_key": "text-key",
+            "base_url": "https://text.example.com/v1",
+            "model_grouper": [
+                {
+                    "models": [{"name": "chat-llm", "capabilities": ["text"]}],
+                    "fallback_models": [],
+                    "pricing": {},
+                }
+            ],
+        },
+        "video-provider": {
+            "api_key": "video-key",
+            "base_url": "https://video.example.com/v1",
+            "model_grouper": [
+                {
+                    "models": [{"name": "agnes-video-v2.0", "capabilities": ["video"]}],
+                    "fallback_models": [],
+                    "pricing": {},
+                }
+            ],
+        },
+    }
+    bridge = LiteLLMBridge(config={"providers": models_config})
+    bridge._build_model_list(models_config)
+    bridge.router = MagicMock()
+    return bridge
+
+
+@pytest.mark.asyncio
+async def test_retrieve_video_queries_the_video_capable_provider():
+    """状态轮询必须打到具备 video capability 的 provider。
+
+    回归:之前用 get_registered_models()[0] 取端点,也就是"第一个注册模型所属
+    provider",与真正处理视频任务的 provider 无关。多 provider 配置下会向错误的
+    provider 查 /videos/{id} 并拿到 404,前端于是永远等不到终态。
+    """
+    bridge = _multi_provider_bridge()
+    assert bridge.get_registered_models()[0] == "chat-llm"
+
+    seen: dict[str, object] = {}
+
+    async def fake_get(url, headers):
+        seen["url"] = url
+        seen["headers"] = headers
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {"id": "vid-1", "status": "completed"}
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    with patch("aigateway_core.route.bridge.litellm_bridge.httpx.AsyncClient") as MC:
+        client = MagicMock()
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=None)
+        client.get = AsyncMock(side_effect=fake_get)
+        MC.return_value = client
+        result = await bridge.retrieve_video("vid-1")
+
+    assert result["status"] == "completed"
+    assert seen["url"] == "https://video.example.com/v1/videos/vid-1"
+    assert seen["headers"]["Authorization"] == "Bearer video-key"
+
+
+def test_video_status_model_prefers_video_capability():
+    bridge = _multi_provider_bridge()
+    assert bridge._video_status_model() == "agnes-video-v2.0"
+
+
+def test_video_status_model_falls_back_when_no_video_model_registered():
+    """没有视频模型时退回第一个已注册模型，保持原有的尽力而为行为。"""
+    models_config = {
+        "text-only": {
+            "api_key": "k",
+            "base_url": "https://text.example.com/v1",
+            "model_grouper": [
+                {
+                    "models": [{"name": "chat-llm", "capabilities": ["text"]}],
+                    "fallback_models": [],
+                    "pricing": {},
+                }
+            ],
+        }
+    }
+    bridge = LiteLLMBridge(config={"providers": models_config})
+    bridge._build_model_list(models_config)
+    bridge.router = MagicMock()
+    assert bridge._video_status_model() == "chat-llm"

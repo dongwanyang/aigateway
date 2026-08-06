@@ -5,11 +5,9 @@ export interface CreateSourceDraftVideoRequest {
   durationSeconds: 3 | 5 | 8
   fps: number
   chatSessionId: string
-  requestId?: string
 }
 
 export interface SourceDraftVideoResponse {
-  request_id: string
   source_draft_id: string
   draft_id: string
   status: string
@@ -56,28 +54,17 @@ export async function createVideoDraftFromSource(
   request: CreateSourceDraftVideoRequest,
   signal?: AbortSignal,
 ): Promise<SourceDraftVideoResponse> {
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    'Accept': 'application/json',
-  }
-  if (request.requestId) headers['X-Request-ID'] = request.requestId
   const response = await fetch(
-    `${API_BASE}/admin/console/chat/completions`,
+    `${API_BASE}/admin/draft/${encodeURIComponent(sourceDraftId)}/video`,
     {
       method: 'POST',
       credentials: 'include',
-      headers,
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: 'auto',
-        stream: false,
+        motion_prompt: request.motionPrompt,
+        duration_seconds: request.durationSeconds,
+        fps: request.fps,
         chat_session_id: request.chatSessionId,
-        messages: [{ role: 'user', content: request.motionPrompt }],
-        generation_options: {
-          backend: 'local',
-          source_draft_id: sourceDraftId,
-          duration_seconds: request.durationSeconds,
-          fps: request.fps,
-        },
       }),
       signal,
     },
@@ -88,35 +75,5 @@ export async function createVideoDraftFromSource(
     const details = errorDetails(body, fallback)
     throw new SourceDraftVideoError(details.message, details.code, response.status)
   }
-  const body = await response.json() as {
-    data?: {
-      draft_id?: string
-      preview_url?: string
-      status?: string
-      generation_params?: Record<string, unknown>
-    }
-  }
-  const draftId = body.data?.draft_id
-  const previewUrl = body.data?.preview_url
-  if (!draftId || !previewUrl) {
-    throw new SourceDraftVideoError(
-      '草稿响应缺少 draft_id / preview_url',
-      'invalid_draft_response',
-      502,
-    )
-  }
-  const params = body.data?.generation_params ?? {}
-  return {
-    request_id: String(params.request_id ?? request.requestId ?? ''),
-    source_draft_id: sourceDraftId,
-    draft_id: draftId,
-    status: body.data?.status ?? 'pending',
-    media_type: 'video',
-    preview_url: previewUrl,
-    source_image_sha256: String(params.source_image_sha256 ?? ''),
-    duration_seconds: Number(params.duration_seconds ?? request.durationSeconds),
-    fps: Number(params.fps ?? request.fps),
-    frame_count: Number(params.frame_count ?? 0),
-    expires_at: Number(params.expires_at ?? 0),
-  }
+  return response.json() as Promise<SourceDraftVideoResponse>
 }

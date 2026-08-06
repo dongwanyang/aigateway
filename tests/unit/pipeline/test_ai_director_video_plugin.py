@@ -138,3 +138,31 @@ async def test_image_pipeline_passes_target_model_languages(
     call = strategy.optimize_prompt.call_args.kwargs
     assert call["target_languages"] == expected_languages
     strategy.build_video_generation_plan.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("preset_id", "expected"),
+    [
+        # A video preset names the Wan model, which says nothing about the
+        # keyframe stage: it must not raise the keyframe language capability.
+        ("wan2.2-ti2v-5b", ("en",)),
+        (None, ("en",)),
+        ("sdxl-draft", ("en",)),
+        ("checkpoint.custom", ("en",)),
+        # Explicitly selecting Qwen-Image means the keyframe model does accept
+        # Chinese, so the prompt must not be translated to English.
+        ("qwen-image", ("zh", "en")),
+    ],
+)
+def test_keyframe_languages_follow_the_keyframe_model(preset_id, expected):
+    options = {"duration_seconds": 5, "fps": 8}
+    if preset_id is not None:
+        options["preset_id"] = preset_id
+
+    assert AIDirectorPlugin._keyframe_target_languages(options) == expected
+
+
+def test_explicit_keyframe_languages_win():
+    assert AIDirectorPlugin._keyframe_target_languages(
+        {"preset_id": "sdxl-draft", "keyframe_languages": ["zh"]}
+    ) == ("zh",)

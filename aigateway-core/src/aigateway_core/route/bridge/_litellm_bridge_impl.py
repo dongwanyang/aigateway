@@ -1156,13 +1156,23 @@ class LiteLLMBridge:
             "_meta": {"video_id": video_id},
         }
 
+    def _video_status_model(self) -> str:
+        """选一个具备 video capability 的已注册模型，用于解析 /videos 端点。
+
+        之前直接取 get_registered_models()[0]，也就是"第一个注册模型所属 provider"，
+        与真正提交视频任务的 provider 无关。多 provider 配置下会向错误的 provider
+        查询 /videos/{id} 并拿到 404，前端于是永远等不到终态。
+        """
+        registered = self.get_registered_models()
+        for model in registered:
+            if "video" in self._model_capabilities.get(model, []):
+                return model
+        return registered[0] if registered else "unknown"
+
     async def retrieve_video(self, video_id: str) -> dict[str, Any]:
         """轮询视频任务状态 (GET /videos/{id}), 对应 OpenAI Retrieve a video."""
 
-        # 使用 _get_model_endpoint 找第一个已注册模型的端点（provider 级 base_url）
-        base_url, api_key = self._get_model_endpoint(
-            self.get_registered_models()[0] if self.get_registered_models() else "unknown"
-        )
+        base_url, api_key = self._get_model_endpoint(self._video_status_model())
         if not base_url:
             return {"error": {"code": "no_provider", "message": "No configured provider found"}}
         endpoint = f"{base_url.rstrip('/')}/videos/{video_id}"

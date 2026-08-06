@@ -64,6 +64,10 @@ class GenerationOptions(BaseModel):
     height: int | None = Field(default=None, ge=64, le=8192)
     duration_seconds: Literal[3, 5, 8] | None = None
     fps: int | None = Field(default=None, ge=1, le=60, strict=True)
+    # Explicit image reference for progressive image-to-video. Callers must name
+    # the source draft instead of relying on conversation history, so a video
+    # request can never silently invent an unrelated keyframe.
+    source_draft_id: str | None = Field(default=None, max_length=128)
 
 
 class ChatCompletionRequest(BaseModel):

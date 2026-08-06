@@ -218,30 +218,6 @@ def _install_source_draft_video_routes() -> None:
         raise RuntimeError("source_draft_video_route_install_failed")
 
 
-def _install_video_request_guards() -> None:
-    """Install request-bound progressive video semantic validation."""
-    from .video_request_guard import install_video_request_guard
-
-    install_video_request_guard()
-
-
-def _install_video_generation_observability() -> None:
-    """Install privacy-preserving Wan workflow submission logging."""
-    from .video_generation_observability import (
-        install_video_generation_observability,
-    )
-
-    install_video_generation_observability()
-
-
-def _install_runtime_identity() -> None:
-    """Add commit/image identity to the health response."""
-    from . import routes
-    from .runtime_identity import install_runtime_identity
-
-    install_runtime_identity(routes.router)
-
-
 def _install_config_schema_parser() -> None:
     """Install YAML-aware schema parsing and remove the legacy write route."""
     from . import routes
@@ -262,17 +238,11 @@ _ensure_core_src()
 _reconcile_gpu_topology()
 _allow_config_precondition_header()
 _preload_cors_origins()
-_install_unified_source_contract()
-_install_video_request_guards()
-_install_video_generation_observability()
-_install_verified_draft_cancellation()
-_install_draft_rejection_lifecycle()
 _install_admin_security_guards()
 _install_draft_confirm_routes()
 _install_draft_request_routes()
 _install_gpu_queue_handoff()
 _install_gpu_routes()
-_install_runtime_identity()
 _install_config_schema_parser()
 # Install this route last because package bootstrap imports can mutate routers.
 _install_source_draft_video_routes()

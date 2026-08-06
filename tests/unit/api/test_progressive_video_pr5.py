@@ -6,22 +6,50 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from aigateway_api.draft_confirm_routes import confirm_draft
+from aigateway_core.pipelines.generation._common.exceptions import DraftWorkflowError
+from aigateway_core.pipelines.generation._common.image_reference import (
+    latest_user_text,
+    missing_required_image_reference,
+)
+from aigateway_core.pipelines.generation._common.models import VideoSubmitResult
+from aigateway_core.pipelines.generation._common.video_observability import (
+    video_submission_fields,
+)
 from fastapi import HTTPException
 
-from aigateway_api.draft_confirm_routes import confirm_draft
-from aigateway_api.video_generation_observability import video_submission_fields
-from aigateway_api.video_request_guard import reference_image_required
-from aigateway_core.pipelines.generation._common.exceptions import DraftWorkflowError
-from aigateway_core.pipelines.generation._common.models import VideoSubmitResult
 
-
-def test_missing_anaphoric_video_reference_is_rejected():
-    body = SimpleNamespace(
-        messages=[{"role": "user", "content": "根据这张图生成一个 5 秒视频"}],
-        generation_options={},
+def _guard(content, *, pipeline_kind="generation:video", source_draft_id=None):
+    """Evaluate the core reference rule the way the dispatcher does."""
+    messages = [{"role": "user", "content": content}]
+    urls = [
+        part["image_url"]["url"]
+        for part in (content if isinstance(content, list) else [])
+        if isinstance(part, dict) and part.get("type") == "image_url"
+    ]
+    return missing_required_image_reference(
+        pipeline_kind=pipeline_kind,
+        prompt_text=latest_user_text(messages),
+        reference_image_urls=urls,
+        source_draft_id=source_draft_id,
     )
 
-    assert reference_image_required(body) is True
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "根据这张图生成一个 5 秒视频",
+        # Phrasings the previous regex-based HTTP guard silently let through.
+        "以此图片生成5秒视频",
+        "此图生成视频",
+        "用上面的图生成视频",
+        "刚才那张图做成视频",
+        "上传的图生成视频",
+        "animate the attached screenshot",
+    ],
+)
+def test_missing_anaphoric_video_reference_is_rejected(content):
+    assert _guard(content) is True
 
 
 @pytest.mark.parametrize(
@@ -33,37 +61,34 @@ def test_missing_anaphoric_video_reference_is_rejected():
     ],
 )
 def test_non_generation_image_video_questions_are_not_rejected(content):
-    body = SimpleNamespace(
-        messages=[{"role": "user", "content": content}],
-        generation_options={},
-    )
+    # Intent comes from the classifier, not from prompt text: these are answered
+    # by the understanding pipeline and must never be rejected.
+    assert _guard(content, pipeline_kind="understanding") is False
 
-    assert reference_image_required(body) is False
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "生成一只柯基摇尾巴向镜头跑来，5秒",
+        "生成视频：画面里有一只猫",
+        "make a 5 second video of a corgi running",
+    ],
+)
+def test_text_to_video_without_anaphora_is_allowed(content):
+    assert _guard(content) is False
 
 
 def test_uploaded_image_or_source_draft_satisfies_reference_requirement():
-    uploaded = SimpleNamespace(
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "让这张图动起来"},
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": "data:image/png;base64,aW1hZ2U="},
-                    },
-                ],
-            }
-        ],
-        generation_options={},
-    )
-    sourced = SimpleNamespace(
-        messages=[{"role": "user", "content": "根据这张图生成视频"}],
-        generation_options={"source_draft_id": "image-draft"},
-    )
+    uploaded = [
+        {"type": "text", "text": "让这张图动起来"},
+        {
+            "type": "image_url",
+            "image_url": {"url": "data:image/png;base64,aW1hZ2U="},
+        },
+    ]
 
-    assert reference_image_required(uploaded) is False
-    assert reference_image_required(sourced) is False
+    assert _guard(uploaded) is False
+    assert _guard("根据这张图生成视频", source_draft_id="image-draft") is False
 
 
 @pytest.mark.asyncio
@@ -169,10 +194,10 @@ def test_video_submission_log_hashes_prompts_and_exposes_runtime_identity(monkey
     serialized = json.dumps(fields, ensure_ascii=False)
 
     assert fields["keyframe_prompt_hash"] == hashlib.sha256(
-        "一只黄白色柯基站在草地中央".encode("utf-8")
+        "一只黄白色柯基站在草地中央".encode()
     ).hexdigest()
     assert fields["motion_prompt_hash"] == hashlib.sha256(
-        "柯基摇尾巴并向镜头跑来".encode("utf-8")
+        "柯基摇尾巴并向镜头跑来".encode()
     ).hexdigest()
     assert fields["comfyui_prompt_id"] == "prompt-123"
     assert fields["deployed_commit_sha"] == "commit-abc"

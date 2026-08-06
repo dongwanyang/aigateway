@@ -4,13 +4,19 @@ import type { ChatPageMessage, VideoStatusResponse } from '@/types'
 let messageIdCounter = 0
 
 export const resumedSessionIds = new Set<string>()
-export const pollingVideoIds = new Set<string>()
 export const pollingDraftIds = new Set<string>()
 
 export const VIDEO_POLL_INTERVAL_MS = 5_000
 export const VIDEO_POLL_MAX_ATTEMPTS = 360
 export const DRAFT_POLL_INTERVAL_MS = 1_000
 export const DRAFT_POLL_MAX_ATTEMPTS = 1_260
+
+/**
+ * 视频轮询的总预算。任何等待视频结果的 UI 都必须使用这个上限，
+ * 不要各自定义超时：组件超时短于轮询预算时，后端仍在生成的任务会被
+ * 前端提前判成超时，成品永远不显示。
+ */
+export const VIDEO_POLL_TIMEOUT_MS = VIDEO_POLL_INTERVAL_MS * VIDEO_POLL_MAX_ATTEMPTS
 
 export function nextMessageId(): string {
   messageIdCounter += 1
@@ -22,8 +28,13 @@ export function newSessionId(): string {
 }
 
 export function clearAllChatPolling(): void {
-  pollingVideoIds.clear()
+  // 只清去重集合不会停止已在运行的循环：那些循环会继续打后端，并且下一次
+  // 挂载时去重记录已消失，同一个 id 会再起一条循环并不断累积。必须真正中止。
+  for (const draftAbort of draftPollAborts.values()) draftAbort.abort()
+  draftPollAborts.clear()
   pollingDraftIds.clear()
+  for (const poll of videoPolls.values()) poll.controller.abort()
+  videoPolls.clear()
 }
 
 export function wait(ms: number): Promise<void> {
@@ -57,6 +68,12 @@ export function describeDraftFailure(message: string): string {
   if (normalized.includes('comfyui_qwen_image_reference_unsupported')) {
     return '当前 Qwen 图片工作流暂不支持参考图。请将图片模型预设切换为 SDXL 后重试。（comfyui_qwen_image_reference_unsupported）'
   }
+  if (normalized.includes('draft_cancelled')) {
+    return '生成已取消。'
+  }
+  if (normalized.includes('reference_image_required')) {
+    return '未找到参考图片，请上传图片或从图片结果点击“基于此图生成视频”。（reference_image_required）'
+  }
   return message
 }
 
@@ -65,6 +82,28 @@ export interface DraftPollProgress {
   stage?: string
   progress?: number
   progressSource?: string
+}
+
+const draftPollAborts = new Map<string, AbortController>()
+
+/**
+ * 注册一个可被 abortDraftPoll / clearAllChatPolling 中止的草稿轮询。
+ *
+ * 调用方不传 signal 时循环会跑满 DRAFT_POLL_MAX_ATTEMPTS(约 21 分钟)，
+ * 停止按钮只能取消服务端草稿，前端仍在空转轮询。
+ */
+export function registerDraftPoll(draftId: string): AbortSignal {
+  draftPollAborts.get(draftId)?.abort()
+  const controller = new AbortController()
+  draftPollAborts.set(draftId, controller)
+  return controller.signal
+}
+
+export function abortDraftPoll(draftId: string): void {
+  const controller = draftPollAborts.get(draftId)
+  if (!controller) return
+  draftPollAborts.delete(draftId)
+  controller.abort()
 }
 
 function waitUntilNextPoll(signal: AbortSignal): Promise<void> {
@@ -137,6 +176,7 @@ export async function pollDraftUntilSettled(
     return { kind: 'expired', message: '草稿生成超时' }
   } finally {
     pollingDraftIds.delete(draftId)
+    draftPollAborts.delete(draftId)
   }
 }
 
@@ -176,22 +216,113 @@ function isVideoTerminal(status: string | undefined): boolean {
   return ['succeeded', 'completed', 'failed', 'error', 'expired'].includes(status ?? '')
 }
 
-export async function pollVideoUntilTerminal(videoId: string): Promise<VideoStatusResponse | null> {
-  if (pollingVideoIds.has(videoId)) return null
-  pollingVideoIds.add(videoId)
-  try {
-    for (let attempt = 0; attempt < VIDEO_POLL_MAX_ATTEMPTS; attempt += 1) {
-      await wait(VIDEO_POLL_INTERVAL_MS)
-      try {
-        const status = await getVideoStatus(videoId)
-        if (isVideoTerminal(status.status)) return status
-      } catch (error) {
-        console.warn(`Failed to poll video status for ${videoId}:`, error)
-      }
+export function isVideoSucceeded(status: VideoStatusResponse): boolean {
+  return status.status === 'succeeded' || status.status === 'completed'
+}
+
+/**
+ * 从视频状态响应中提取可播放 URL。
+ *
+ * 三种位置都要尝试：Agnes 把成品 URL 放在 metadata.url，顶层既没有 url 也没有
+ * video.url。任何只看其中一两个位置的调用方都会把已完成的任务当成"还没出结果"，
+ * 于是既不显示视频也不报错。这是唯一的提取实现，不要在调用方复制。
+ */
+export function extractVideoUrl(status: VideoStatusResponse): string | null {
+  return status.video?.url || status.url || status.metadata?.url || null
+}
+
+/** 只接受 data: 与 http(s):// ，阻断 javascript: 等危险协议。 */
+export function isPlayableVideoUrl(url: string): boolean {
+  return url.startsWith('data:') || /^https?:\/\//i.test(url)
+}
+
+export type VideoPollOutcome =
+  | { kind: 'terminal'; status: VideoStatusResponse }
+  | { kind: 'timeout' }
+  | { kind: 'cancelled' }
+
+interface VideoPollHandle {
+  result: Promise<VideoPollOutcome>
+  controller: AbortController
+  subscribers: number
+}
+
+const videoPolls = new Map<string, VideoPollHandle>()
+
+export interface VideoWatch {
+  result: Promise<VideoPollOutcome>
+  release: () => void
+}
+
+function waitBeforeNextVideoPoll(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve()
+  return new Promise(resolve => {
+    const timer = setTimeout(done, VIDEO_POLL_INTERVAL_MS)
+    function done() {
+      clearTimeout(timer)
+      signal.removeEventListener('abort', done)
+      resolve()
     }
-    return null
-  } finally {
-    pollingVideoIds.delete(videoId)
+    signal.addEventListener('abort', done, { once: true })
+  })
+}
+
+async function runVideoPoll(
+  videoId: string,
+  signal: AbortSignal,
+): Promise<VideoPollOutcome> {
+  for (let attempt = 0; attempt < VIDEO_POLL_MAX_ATTEMPTS; attempt += 1) {
+    if (signal.aborted) return { kind: 'cancelled' }
+    // 先查一次再等待。先等待会在提交后凭空插入一个轮询间隔的空窗，
+    // 对已经完成的任务（例如刷新后恢复）尤其浪费。
+    try {
+      const status = await getVideoStatus(videoId)
+      if (signal.aborted) return { kind: 'cancelled' }
+      if (isVideoTerminal(status.status)) return { kind: 'terminal', status }
+    } catch (error) {
+      if (signal.aborted) return { kind: 'cancelled' }
+      console.warn(`Failed to poll video status for ${videoId}:`, error)
+    }
+    await waitBeforeNextVideoPoll(signal)
+  }
+  return signal.aborted ? { kind: 'cancelled' } : { kind: 'timeout' }
+}
+
+/**
+ * 订阅某个视频任务的终态，同一 id 全局只跑一条轮询循环。
+ *
+ * 之前消息状态层和渲染组件各自独立轮询同一个 id：请求量翻倍，两边的状态还会
+ * 分叉（一边解析出了 URL，另一边超时）。这里用引用计数做扇出，所有订阅者共享
+ * 同一次循环与同一个结果，最后一个订阅者释放时才真正中止。
+ */
+export function watchVideoUntilTerminal(videoId: string): VideoWatch {
+  let handle = videoPolls.get(videoId)
+  if (!handle) {
+    const controller = new AbortController()
+    const created: VideoPollHandle = {
+      controller,
+      subscribers: 0,
+      result: runVideoPoll(videoId, controller.signal).finally(() => {
+        if (videoPolls.get(videoId) === created) videoPolls.delete(videoId)
+      }),
+    }
+    videoPolls.set(videoId, created)
+    handle = created
+  }
+  const active = handle
+  active.subscribers += 1
+  let released = false
+  return {
+    result: active.result,
+    release: () => {
+      if (released) return
+      released = true
+      active.subscribers -= 1
+      if (active.subscribers <= 0) {
+        active.controller.abort()
+        if (videoPolls.get(videoId) === active) videoPolls.delete(videoId)
+      }
+    },
   }
 }
 
