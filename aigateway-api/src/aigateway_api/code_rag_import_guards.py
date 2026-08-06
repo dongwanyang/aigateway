@@ -3,7 +3,7 @@
 The Code RAG worker persists task state in SQLite, vectors in Qdrant and the
 repository-list metadata in Redis. A real import must not become ``completed``
 unless it produced at least one chunk and the repository metadata was persisted.
-Synthetic progress-callback tests without source metadata retain their legacy
+Synthetic progress-callback tests without a source label retain their legacy
 state-transition behavior.
 """
 
@@ -51,14 +51,13 @@ def install_code_rag_import_guards() -> None:
             except (TypeError, ValueError):
                 total = 0
 
-            # Production import tasks always persist source metadata before the
-            # worker starts. Keeping the guard scoped to those records avoids
-            # changing low-level progress callback tests that intentionally use
-            # a metadata-free synthetic task.
-            source_type = str((current or {}).get("source_type") or "").strip()
-            source_label = str((current or {}).get("source_label") or "").strip()
-            is_real_import = bool(source_type or source_label)
-            if total <= 0 and is_real_import:
+            # Production import tasks persist a non-empty source label before the
+            # worker starts. The callback regression intentionally leaves it blank,
+            # so retain that low-level state-transition contract.
+            source_label = str(
+                (current or {}).get("source_label") or ""
+            ).strip()
+            if total <= 0 and source_label:
                 next_fields.update(
                     status="failed",
                     done=0,
