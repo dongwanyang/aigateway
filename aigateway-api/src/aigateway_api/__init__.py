@@ -218,6 +218,13 @@ def _install_source_draft_video_routes() -> None:
         raise RuntimeError("source_draft_video_route_install_failed")
 
 
+def _install_code_rag_import_guards() -> None:
+    """Require visible Code RAG output before an import can complete."""
+    from .code_rag_import_guards import install_code_rag_import_guards
+
+    install_code_rag_import_guards()
+
+
 def _install_config_schema_parser() -> None:
     """Install YAML-aware schema parsing and remove the legacy write route."""
     from . import routes
@@ -243,6 +250,7 @@ _install_draft_confirm_routes()
 _install_draft_request_routes()
 _install_gpu_queue_handoff()
 _install_gpu_routes()
+_install_code_rag_import_guards()
 _install_config_schema_parser()
 # Install this route last because package bootstrap imports can mutate routers.
 _install_source_draft_video_routes()

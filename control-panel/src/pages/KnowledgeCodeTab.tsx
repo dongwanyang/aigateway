@@ -139,6 +139,8 @@ export default function KnowledgeCodeTab() {
   const dismissedTaskIdsRef = useRef<Set<string>>(new Set(loadDismissedTaskIds()))
   // 每任务的轮询 timer 引用 (key = task_id)
   const timersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+  // timer 触发到请求结束之间没有 timer 句柄，用独立集合阻止并发重复轮询。
+  const pollingTaskIdsRef = useRef<Set<string>>(new Set())
 
   const folderInputRef = useRef<HTMLInputElement | null>(null)
   const zipInputRef = useRef<HTMLInputElement | null>(null)
@@ -151,6 +153,7 @@ export default function KnowledgeCodeTab() {
       // 卸载时清所有轮询 timer
       timersRef.current.forEach(t => clearTimeout(t))
       timersRef.current.clear()
+      pollingTaskIdsRef.current.clear()
     }
   }, [])
 
@@ -164,10 +167,18 @@ export default function KnowledgeCodeTab() {
     const activeIds = new Set<string>()
     for (const task of tasks) {
       if (TERMINAL_STATUS.includes(task.status)) continue
-      if (timersRef.current.has(task.task_id)) continue // 已有 timer
-      const timer = setTimeout(() => pollTask(task.task_id), POLL_INTERVAL_MS)
-      timersRef.current.set(task.task_id, timer)
       activeIds.add(task.task_id)
+      if (
+        timersRef.current.has(task.task_id)
+        || pollingTaskIdsRef.current.has(task.task_id)
+      ) continue
+      const timer = setTimeout(() => {
+        // setTimeout 已消费，先删除旧句柄，任务状态更新后才能安排下一轮。
+        timersRef.current.delete(task.task_id)
+        pollingTaskIdsRef.current.add(task.task_id)
+        pollTask(task.task_id)
+      }, POLL_INTERVAL_MS)
+      timersRef.current.set(task.task_id, timer)
     }
     // 清理已变为终态的任务的 timer
     for (const [tid, timer] of timersRef.current) {
@@ -228,6 +239,7 @@ export default function KnowledgeCodeTab() {
   function pollTask(taskId: string) {
     getCodeImportTask(taskId)
       .then(next => {
+        pollingTaskIdsRef.current.delete(taskId)
         setTasks(prev =>
           prev.map(t => (t.task_id === taskId ? next : t)),
         )
@@ -247,6 +259,7 @@ export default function KnowledgeCodeTab() {
         }
       })
       .catch(exc => {
+        pollingTaskIdsRef.current.delete(taskId)
         // 404 → 任务已过期/不存在，直接 dismiss
         if (
           exc instanceof Error &&
@@ -272,6 +285,7 @@ export default function KnowledgeCodeTab() {
   /** 从前端队列移除任务，并记录为已 dismiss，避免再次拉回 */
   function dismissTask(taskId: string) {
     clearTaskTimers(timersRef.current, taskId)
+    pollingTaskIdsRef.current.delete(taskId)
     dismissedTaskIdsRef.current.add(taskId)
     saveDismissedTaskIds(Array.from(dismissedTaskIdsRef.current))
     setTasks(prev => prev.filter(t => t.task_id !== taskId))
@@ -291,6 +305,7 @@ export default function KnowledgeCodeTab() {
         ),
       )
       clearTaskTimers(timersRef.current, task.task_id)
+      pollingTaskIdsRef.current.delete(task.task_id)
     } catch (exc) {
       alert(`取消失败: ${exc instanceof Error ? exc.message : '未知错误'}`)
     }
