@@ -118,7 +118,7 @@ bash scripts/quickstart.sh --non-interactive
 
 ## 正确关闭方式
 
-### 推荐：由安装器关闭完整服务栈
+### Linux / Windows：关闭 Docker Compose 服务栈
 
 在仓库根目录执行：
 
@@ -151,6 +151,26 @@ BUILDKIT_PROGRESS=plain \
     --build
 ```
 
+### Apple Silicon：同时停止 native 服务
+
+Apple Silicon 的 Gateway、控制台、Redis、Qdrant 和监控仍由 Docker 管理，先执行：
+
+```bash
+bash scripts/quickstart.sh --down
+```
+
+如果当前 Edition 使用 native ComfyUI 或 native Embedding，还必须停止对应
+LaunchAgent 服务：
+
+```bash
+scripts/native-macos-services.sh stop
+```
+
+`quickstart.sh --down` 当前只执行 Docker Compose `down`，不会自动停止
+`com.aigateway.comfyui` 和 `com.aigateway.embedding`。重新运行
+`bash scripts/quickstart.sh --non-interactive` 时，安装器会按现有安装状态重新启动
+所需的 native 服务和 Docker 服务。
+
 > 不要把 `docker compose down -v` 用作日常关闭命令。`-v` 会删除项目的 named
 > volumes，可能丢失 Redis、Qdrant、监控和其他持久化数据。除非明确执行数据重置，
 > 也不要删除 `.aigateway/runtime`、`data`、`models` 或 `comfyui`。
@@ -177,8 +197,9 @@ docker compose \
 ```
 
 如果只需要临时停止进程并保留容器，可把 `down --remove-orphans` 改为 `stop`；
-恢复时使用相同文件集合执行 `start`。日常运维仍优先使用
-`bash scripts/quickstart.sh --down`，避免遗漏 profile、GPU worker 或生产覆盖文件。
+恢复时使用相同文件集合执行 `start`。Apple Silicon 的 native 服务仍需单独使用
+`scripts/native-macos-services.sh stop`。日常运维优先使用安装器命令，避免遗漏
+profile、GPU worker、生产覆盖文件或 native LaunchAgent。
 
 ## 安装器生成的文件
 
