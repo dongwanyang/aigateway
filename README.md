@@ -94,12 +94,15 @@ nano .env
 # 4. 让安装器按新环境变量重新创建容器
 bash scripts/quickstart.sh --non-interactive
 
-# 5. 正确关闭完整服务栈（保留数据卷、模型和运行配置）
-bash scripts/quickstart.sh --down
-
-# 6. 访问（监控地址仅在向导中启用监控后存在）
+# 5. 访问（监控地址仅在向导中启用监控后存在）
 # API Gateway:   http://localhost:8000
 # 控制面板:      http://localhost:3000
+
+# 6. 正确关闭 Docker 管理的服务（保留数据卷、模型和运行配置）
+bash scripts/quickstart.sh --down
+
+# Apple Silicon 使用 native ComfyUI/Embedding 时，还要停止 LaunchAgent 服务
+scripts/native-macos-services.sh stop
 ```
 
 > **Studio/Full 不要直接执行**
@@ -108,8 +111,9 @@ bash scripts/quickstart.sh --down
 > `.aigateway/runtime/docker-compose.gpu.generated.yml`，也不会创建本地
 > ComfyUI workers，Gateway 会报
 > `GPU scheduler topology incomplete; local ComfyUI pool has no workers`。
-> 正常安装、重建、更新和关闭都应继续运行 `scripts/quickstart.sh`；确需手动
-> Compose 时，先用安装器 `--no-start` 生成状态和 GPU overlay，再加载完整文件集合。
+> 正常安装、重建、更新和 Docker 服务关闭都应继续运行 `scripts/quickstart.sh`；
+> 确需手动 Compose 时，先用安装器 `--no-start` 生成状态和 GPU overlay，再加载
+> 完整文件集合。
 
 > 💡 **不填 API Key 也能启动**：`config.yaml` 中所有密钥用 `${VAR:-}` 引用，未设时优雅降级为空。Gateway 能正常启动（插件 fail-open），但调用 LLM 会鉴权失败。填好 `.env` 后重新运行 `bash scripts/quickstart.sh --non-interactive`，不要只执行 `docker compose restart gateway`，因为 restart 不会重新读取容器环境变量。
 >
