@@ -12,48 +12,33 @@ afterEach(() => {
 })
 
 describe('source draft video API', () => {
-  it('uses the unified chat contract and forwards the stable request identity', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(Response.json({
-      data: {
-        draft_id: 'video-draft',
-        status: 'pending',
-        preview_url: '/admin/draft/video-draft/preview',
-        generation_params: {
-          request_id: 'request-1',
-          source_draft_id: 'source-image',
-          source_image_sha256: 'abc123',
-          duration_seconds: 5,
-          fps: 8,
-          frame_count: 41,
-        },
-      },
-      _meta: { draft_pending_confirmation: true },
-    }))
+  it('uses the authenticated admin route and forwards the abort signal', async () => {
+    const payload = {
+      source_draft_id: 'source-image',
+      draft_id: 'video-draft',
+      status: 'pending',
+      media_type: 'video' as const,
+      preview_url: '/admin/draft/video-draft/preview',
+      source_image_sha256: 'abc123',
+      duration_seconds: 5,
+      fps: 8,
+      frame_count: 41,
+      expires_at: 1234,
+    }
+    const fetchMock = vi.fn().mockResolvedValue(Response.json(payload))
     vi.stubGlobal('fetch', fetchMock)
     const controller = new AbortController()
 
     await expect(createVideoDraftFromSource(
       'source-image',
       {
-        requestId: 'request-1',
         motionPrompt: '柯基跑向镜头',
         durationSeconds: 5,
         fps: 8,
         chatSessionId: 'session-1',
       },
       controller.signal,
-    )).resolves.toMatchObject({
-      request_id: 'request-1',
-      source_draft_id: 'source-image',
-      draft_id: 'video-draft',
-      status: 'pending',
-      media_type: 'video',
-      preview_url: '/admin/draft/video-draft/preview',
-      source_image_sha256: 'abc123',
-      duration_seconds: 5,
-      fps: 8,
-      frame_count: 41,
-    })
+    )).resolves.toEqual(payload)
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
     const [url, options] = fetchMock.mock.calls[0] as [string, RequestInit]
@@ -61,18 +46,11 @@ describe('source draft video API', () => {
     expect(options.method).toBe('POST')
     expect(options.credentials).toBe('include')
     expect(options.signal).toBe(controller.signal)
-    expect((options.headers as Record<string, string>)['X-Request-ID']).toBe('request-1')
     expect(JSON.parse(String(options.body))).toEqual({
-      model: 'auto',
-      stream: false,
+      motion_prompt: '柯基跑向镜头',
+      duration_seconds: 5,
+      fps: 8,
       chat_session_id: 'session-1',
-      messages: [{ role: 'user', content: '柯基跑向镜头' }],
-      generation_options: {
-        backend: 'local',
-        source_draft_id: 'source-image',
-        duration_seconds: 5,
-        fps: 8,
-      },
     })
   })
 
