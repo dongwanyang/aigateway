@@ -70,7 +70,7 @@
   NVIDIA Container Toolkit
 - Apple Silicon：Docker Desktop、Python 3 与 Xcode Command Line Tools
 
-### 方式一：Docker Compose（推荐）
+### 方式一：安装器编排 Docker Compose（推荐）
 
 ```bash
 # 1. 克隆项目
@@ -78,6 +78,9 @@ git clone <repo-url>
 
 # 2. 默认从 GHCR 安装 Lite
 bash scripts/quickstart.sh --edition lite
+
+# Studio：本地图片/视频生成与独立 ComfyUI
+bash scripts/quickstart.sh --edition studio --install-models
 
 # Full：从 GHCR 安装，启用监控并安装批准模型
 bash scripts/quickstart.sh --edition full --monitoring --install-models
@@ -88,12 +91,24 @@ bash scripts/quickstart.sh --edition full --distribution source --build
 # 3. 在自动创建的 .env 中填入至少一个提供商 API Key
 nano .env
 
-# 4. 访问（监控地址仅在向导中启用监控后存在）
+# 4. 让安装器按新环境变量重新创建容器
+bash scripts/quickstart.sh --non-interactive
+
+# 5. 访问（监控地址仅在向导中启用监控后存在）
 # API Gateway:   http://localhost:8000
 # 控制面板:      http://localhost:3000
 ```
 
-> 💡 **不填 API Key 也能启动**：`config.yaml` 中所有密钥用 `${VAR:-}` 引用，未设时优雅降级为空。Gateway 能正常启动（插件 fail-open），但调用 LLM 会鉴权失败 —— 填好 `.env` 后 `docker compose restart gateway` 即可。
+> **Studio/Full 不要直接执行**
+> `docker compose -f docker-compose.yml -f docker-compose.cuda.yml up -d`。
+> 该命令不会生成 `.aigateway/runtime/config.yaml` 和
+> `.aigateway/runtime/docker-compose.gpu.generated.yml`，也不会创建本地
+> ComfyUI workers，Gateway 会报
+> `GPU scheduler topology incomplete; local ComfyUI pool has no workers`。
+> 正常安装、重建和更新都应继续运行 `scripts/quickstart.sh`；确需手动 Compose
+> 时，先用安装器 `--no-start` 生成状态和 GPU overlay，再加载完整文件集合。
+
+> 💡 **不填 API Key 也能启动**：`config.yaml` 中所有密钥用 `${VAR:-}` 引用，未设时优雅降级为空。Gateway 能正常启动（插件 fail-open），但调用 LLM 会鉴权失败。填好 `.env` 后重新运行 `bash scripts/quickstart.sh --non-interactive`，不要只执行 `docker compose restart gateway`，因为 restart 不会重新读取容器环境变量。
 >
 四档套餐是 Lite（Gateway/控制台/Redis）、Knowledge（加 Qdrant 与 GPU
 Embedding）、Studio（加独立 ComfyUI）和 Full。Linux/Windows 使用独立
@@ -114,7 +129,7 @@ ComfyUI worker，Gateway 可看到动态池中的全部设备。空闲时 Gatewa
 层。为保持这种增量构建速度，不要在每次开发构建后运行
 `docker builder prune`，只在磁盘水位需要回收时清理构建缓存。
 >
-> 📋 完整安装/配置/排查指引见 [INSTALL.md](INSTALL.md)。
+> 📋 完整安装、手动 Compose 文件集合、GPU worker 校验与排查指引见 [INSTALL.md](INSTALL.md)。
 
 ### npm 安装
 
@@ -240,7 +255,8 @@ aigateway/
 ├── aigateway-cli/src/aigateway_cli/     # CLI（chat / run / session / codegraph）
 ├── control-panel/src/                   # React 控制面板（10 个页面）
 ├── tests/                               # 82+ 测试文件
-├── config.yaml                          # 唯一配置文件
+├── config.yaml                          # 仓库基础配置模板
+├── .aigateway/runtime/config.yaml       # 安装器生成的可变运行配置
 └── docker-compose.yml                   # 核心服务与可选 profiles
 ```
 
@@ -332,7 +348,13 @@ docker run --rm --gpus all nvidia/cuda:13.0.1-base-ubuntu24.04 nvidia-smi
 bash scripts/quickstart.sh --edition studio --install-models
 
 # 3. ComfyUI 管理界面仅绑定宿主机回环地址，不直接暴露公网
-docker compose --profile comfy-container ps
+docker compose \
+  --env-file .env \
+  --env-file .aigateway-install.env \
+  -f docker-compose.yml \
+  -f docker-compose.cuda.yml \
+  -f .aigateway/runtime/docker-compose.gpu.generated.yml \
+  ps
 ```
 
 调度参数集中在 `gpu_scheduler`。默认生成等待上限 600 秒、ComfyUI 空闲保留
