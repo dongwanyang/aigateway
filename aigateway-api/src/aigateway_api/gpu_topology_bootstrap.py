@@ -5,6 +5,7 @@ cloud instance. The persisted scheduler topology therefore treats logical GPU
 indices as the stable intent and refreshes UUID telemetry from ``nvidia-smi`` at
 process start. This module runs before ``aigateway_api.main`` imports PyTorch.
 """
+
 from __future__ import annotations
 
 import fcntl

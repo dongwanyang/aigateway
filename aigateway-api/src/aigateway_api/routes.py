@@ -386,10 +386,25 @@ async def get_metrics(request: Request) -> FastAPIResponse:
 
         # 单 worker 模式：使用 MetricsCollector 持有的 registry
         if metrics_collector and metrics_collector._registry is not None:
-            raw = generate_latest(metrics_collector._registry)
+            main_registry = metrics_collector._registry
+            raw = generate_latest(main_registry)
         else:
             from prometheus_client import CollectorRegistry
+            main_registry = None
             raw = generate_latest(CollectorRegistry())
+
+        # Generation observability intentionally uses a dedicated registry to
+        # avoid duplicate registration in unit tests. Export it alongside the
+        # application registry so the production /metrics endpoint contains the
+        # video keyframe, source, duration, and outcome series as well.
+        from aigateway_core.pipelines.generation._common.metrics import (
+            get_prometheus_registry,
+        )
+
+        generation_registry = get_prometheus_registry()._collector_registry
+        if generation_registry is not None and generation_registry is not main_registry:
+            raw += generate_latest(generation_registry)
+
         return StarletteResponse(
             content=raw,
             status_code=200,

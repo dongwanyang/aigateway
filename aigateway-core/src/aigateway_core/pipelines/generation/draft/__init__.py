@@ -3,8 +3,10 @@
 from . import draft_generator as _strategy
 from . import draft_generator_plugin as _plugin
 from .terminal_task_visibility import install_terminal_task_visibility
+from .video_metrics_instrumentation import install_video_metrics_instrumentation
 
 install_terminal_task_visibility()
+install_video_metrics_instrumentation()
 
 _sources = (_strategy, _plugin)
 _names: list[str] = []
