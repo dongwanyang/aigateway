@@ -384,12 +384,36 @@ async def get_metrics(request: Request) -> FastAPIResponse:
                     state=state,
                 )
 
-        # 单 worker 模式：使用 MetricsCollector 持有的 registry
+        from prometheus_client import CollectorRegistry
+
+        # Use the application's registry when available, then attach the
+        # generation-observability collectors before rendering. This preserves
+        # the endpoint contract of one generate_latest() call while exposing all
+        # progressive-video metrics from the production scrape target.
         if metrics_collector and metrics_collector._registry is not None:
-            raw = generate_latest(metrics_collector._registry)
+            main_registry = metrics_collector._registry
         else:
-            from prometheus_client import CollectorRegistry
-            raw = generate_latest(CollectorRegistry())
+            main_registry = CollectorRegistry()
+
+        from aigateway_core.pipelines.generation._common.metrics import (
+            get_prometheus_registry,
+        )
+
+        generation_registry = get_prometheus_registry()._collector_registry
+        if generation_registry is not None and generation_registry is not main_registry:
+            registered_collectors = getattr(main_registry, "_collector_to_names", {})
+            generation_collectors = getattr(generation_registry, "_collector_to_names", {})
+            for collector in generation_collectors:
+                if collector in registered_collectors:
+                    continue
+                try:
+                    main_registry.register(collector)
+                except ValueError:
+                    # Another collector may already expose the same metric name.
+                    continue
+
+        raw = generate_latest(main_registry)
+
         return StarletteResponse(
             content=raw,
             status_code=200,

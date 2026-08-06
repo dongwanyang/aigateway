@@ -1,11 +1,9 @@
 """Authenticated route for creating a video draft from an image draft result."""
+
 from __future__ import annotations
 
 import logging
 from typing import Any, Literal
-
-from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
 
 from aigateway_core.pipelines.generation._common.exceptions import (
     DraftWorkflowError,
@@ -13,6 +11,8 @@ from aigateway_core.pipelines.generation._common.exceptions import (
 from aigateway_core.pipelines.generation.draft.source_draft_video import (
     create_video_draft_from_source,
 )
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, Field
 
 from .auth_middleware import authenticate_admin
 

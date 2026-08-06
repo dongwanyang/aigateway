@@ -32,6 +32,20 @@ METRIC_DIRECTOR_COST_USD_TOTAL = "gen_opt_director_cost_usd_total"
 METRIC_COMFYUI_GPU_SECONDS_TOTAL = "gen_opt_comfyui_gpu_seconds_total"
 METRIC_EXTERNAL_MEDIA_COST_USD_TOTAL = "gen_opt_external_media_cost_usd_total"
 METRIC_DRAFTS_DISCARDED_TOTAL = "gen_opt_drafts_discarded_total"
+# Progressive video observability (implementation plan, section 9.3).
+METRIC_VIDEO_KEYFRAME_TOTAL = "gen_opt_video_keyframe_total"
+METRIC_VIDEO_GENERATION_TOTAL = "gen_opt_video_generation_total"
+METRIC_VIDEO_KEYFRAME_INTEGRITY_MISMATCH_TOTAL = (
+    "gen_opt_video_keyframe_integrity_mismatch_total"
+)
+METRIC_VIDEO_PROMPT_FALLBACK_TOTAL = "gen_opt_video_prompt_fallback_total"
+METRIC_VIDEO_REFERENCE_SOURCE_TOTAL = "gen_opt_video_reference_source_total"
+METRIC_VIDEO_CONFIRM_TO_SUBMIT_SECONDS = (
+    "gen_opt_video_confirm_to_submit_latency_seconds"
+)
+METRIC_VIDEO_GENERATION_DURATION_SECONDS = (
+    "gen_opt_video_generation_duration_seconds"
+)
 
 # 策略标签值
 STRATEGY_MODEL_ROUTING = "model_routing"
@@ -70,10 +84,22 @@ class PrometheusMetricsRegistry:
         self._comfyui_gpu_seconds_counter: Any = None
         self._external_media_cost_counter: Any = None
         self._drafts_discarded_counter: Any = None
+        self._video_keyframe_counter: Any = None
+        self._video_generation_counter: Any = None
+        self._video_keyframe_integrity_mismatch_counter: Any = None
+        self._video_prompt_fallback_counter: Any = None
+        self._video_reference_source_counter: Any = None
+        self._video_confirm_to_submit_histogram: Any = None
+        self._video_generation_duration_histogram: Any = None
         self._collector_registry: Any = None
 
         try:
-            from prometheus_client import CollectorRegistry, Counter, Gauge
+            from prometheus_client import (
+                CollectorRegistry,
+                Counter,
+                Gauge,
+                Histogram,
+            )
 
             # Use a dedicated registry per instance to avoid duplication errors
             # when creating multiple instances (e.g., in tests).
@@ -129,6 +155,46 @@ class PrometheusMetricsRegistry:
                 METRIC_DRAFTS_DISCARDED_TOTAL,
                 "Drafts rejected before final refinement",
                 labelnames=["media_type"],
+                registry=registry,
+            )
+            self._video_keyframe_counter = Counter(
+                METRIC_VIDEO_KEYFRAME_TOTAL,
+                "Video keyframe resolutions by outcome",
+                labelnames=["outcome"],
+                registry=registry,
+            )
+            self._video_generation_counter = Counter(
+                METRIC_VIDEO_GENERATION_TOTAL,
+                "Wan video generations by outcome",
+                labelnames=["outcome"],
+                registry=registry,
+            )
+            self._video_keyframe_integrity_mismatch_counter = Counter(
+                METRIC_VIDEO_KEYFRAME_INTEGRITY_MISMATCH_TOTAL,
+                "Confirmations rejected because the frozen keyframe changed",
+                registry=registry,
+            )
+            self._video_prompt_fallback_counter = Counter(
+                METRIC_VIDEO_PROMPT_FALLBACK_TOTAL,
+                "Video prompt plan fallbacks by reason",
+                labelnames=["reason"],
+                registry=registry,
+            )
+            self._video_reference_source_counter = Counter(
+                METRIC_VIDEO_REFERENCE_SOURCE_TOTAL,
+                "Video keyframe origins (uploaded/generated_keyframe/draft_result)",
+                labelnames=["source_kind"],
+                registry=registry,
+            )
+            self._video_confirm_to_submit_histogram = Histogram(
+                METRIC_VIDEO_CONFIRM_TO_SUBMIT_SECONDS,
+                "Seconds between draft confirmation and Wan workflow submission",
+                registry=registry,
+            )
+            self._video_generation_duration_histogram = Histogram(
+                METRIC_VIDEO_GENERATION_DURATION_SECONDS,
+                "Wan video generation wall-clock seconds by requested length",
+                labelnames=["duration_bucket", "frame_count"],
                 registry=registry,
             )
 
@@ -254,6 +320,52 @@ class PrometheusMetricsRegistry:
         if not self._available:
             return
         self._drafts_discarded_counter.labels(media_type=media_type).inc()
+
+    # ------------------------------------------------------------------
+    # Progressive video metrics (implementation plan, section 9.3)
+    # ------------------------------------------------------------------
+
+    def inc_video_keyframe(self, outcome: str) -> None:
+        """Count keyframe resolutions; ``outcome`` is success or failure."""
+        if not self._available:
+            return
+        self._video_keyframe_counter.labels(outcome=outcome).inc()
+
+    def inc_video_generation(self, outcome: str) -> None:
+        if not self._available:
+            return
+        self._video_generation_counter.labels(outcome=outcome).inc()
+
+    def inc_video_keyframe_integrity_mismatch(self) -> None:
+        if not self._available:
+            return
+        self._video_keyframe_integrity_mismatch_counter.inc()
+
+    def inc_video_prompt_fallback(self, reason: str) -> None:
+        if not self._available or not reason:
+            return
+        self._video_prompt_fallback_counter.labels(reason=reason).inc()
+
+    def inc_video_reference_source(self, source_kind: str) -> None:
+        if not self._available or not source_kind:
+            return
+        self._video_reference_source_counter.labels(
+            source_kind=source_kind
+        ).inc()
+
+    def observe_video_confirm_to_submit(self, seconds: float) -> None:
+        if not self._available or seconds < 0:
+            return
+        self._video_confirm_to_submit_histogram.observe(seconds)
+
+    def observe_video_generation_duration(
+        self, seconds: float, *, duration_bucket: str, frame_count: int
+    ) -> None:
+        if not self._available or seconds < 0:
+            return
+        self._video_generation_duration_histogram.labels(
+            duration_bucket=duration_bucket, frame_count=str(frame_count)
+        ).observe(seconds)
 
 
 # 全局单例（惰性初始化）

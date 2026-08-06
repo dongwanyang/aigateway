@@ -1,4 +1,5 @@
 """Create a frozen video draft from an existing completed image draft."""
+
 from __future__ import annotations
 
 import hashlib
