@@ -1,8 +1,9 @@
-"""Preserve PR #47's boolean cancellation contract.
+"""Preserve PR #47's lightweight boolean cancellation contract.
 
-The fully initialized production strategy keeps the newer cancellation-record,
-confirmation-task and task-tracker flow. Lightweight/legacy strategy instances
-that implement the PR #47 surface use the local fallback below.
+Fully initialized production strategies keep the richer cancellation-record,
+confirmation-task and task-tracker flow, including its ``DraftResult`` return.
+Lightweight/legacy strategy instances that implement the PR #47 surface use the
+local boolean fallback below.
 """
 from __future__ import annotations
 
@@ -88,7 +89,7 @@ async def _cancel_legacy_strategy(strategy: Any, draft_id: str, draft: Any) -> b
 
 
 def install_pr47_cancellation_contract() -> None:
-    """Install one idempotent bool-returning cancellation adapter."""
+    """Install one idempotent capability-sensitive cancellation adapter."""
     strategy_type = _draft_module.DraftGeneratorStrategy
     current = strategy_type.cancel_draft
     if getattr(current, _WRAPPER_ATTR, False):
@@ -99,15 +100,17 @@ def install_pr47_cancellation_contract() -> None:
     terminal_statuses = set(_draft_module._TERMINAL_DRAFT_STATUSES)
 
     @functools.wraps(original)
-    async def cancel_draft(self: Any, draft_id: str) -> bool:
+    async def cancel_draft(self: Any, draft_id: str) -> Any:
         draft = await self.get_draft(draft_id)
         if draft is None:
             return False
+        if _is_full_strategy(self):
+            # Preserve the production contract: the original method performs
+            # idempotent cleanup even for an already-cancelled record and returns
+            # the persisted draft object used by cancel_request/API callers.
+            return await original(self, draft_id)
         if getattr(draft, "status", None) in terminal_statuses:
             return False
-        if _is_full_strategy(self):
-            await original(self, draft_id)
-            return True
         return await _cancel_legacy_strategy(self, draft_id, draft)
 
     setattr(cancel_draft, _WRAPPER_ATTR, True)
