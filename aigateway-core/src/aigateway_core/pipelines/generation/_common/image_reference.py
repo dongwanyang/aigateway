@@ -21,12 +21,14 @@ from typing import Any
 # believes already exists. "上传/附" cover "上传的图" / "附件里的图片".
 _ZH_DEIXIS = (
     "这|那|此|该|上述|上面|下面|前面|后面|之前|先前|刚才|刚刚|刚|"
-    "原|原来|上一|前一|上传|附件|附"
+    "原|原来|上一|前一|上传|附件|附|当前"
 )
 # Nouns deliberately exclude the bare "画面": in Chinese generation prompts it
 # usually describes the scene still to be produced ("画面里有一只猫"), so
-# matching it would reject legitimate text-to-video requests.
-_ZH_IMAGE_NOUN = "图片|图像|照片|截图|影像|图"
+# matching it would reject legitimate text-to-video requests. Explicit result
+# back-references are included because users often say "这个结果" after an image
+# generation turn.
+_ZH_IMAGE_NOUN = "图片|图像|照片|截图|影像|结果|图"
 
 # Optional measure words / particles between the demonstrative and the noun,
 # so "此图", "这张图片", "上面的图" and "刚才那一幅照片" all match.
@@ -40,12 +42,18 @@ _ZH_REFERENCE_RE = re.compile(
     rf"\s*(?:{_ZH_IMAGE_NOUN})"
 )
 
+# Explicitly cover natural post-generation wording where the adjective itself
+# carries the back-reference, for example "刚生成的图".
+_ZH_GENERATED_REFERENCE_RE = re.compile(
+    rf"刚(?:刚)?生成的\s*(?:{_ZH_IMAGE_NOUN})"
+)
+
 _EN_REFERENCE_RE = re.compile(
     r"\b(?:this|that|these|those|the\s+above|the\s+previous|previous|"
     r"the\s+last|last|the\s+attached|attached|the\s+uploaded|uploaded|"
-    r"the\s+first|it)\s+"
+    r"the\s+first|current|existing|latest|just[- ]generated|it)\s+"
     r"(?:\w+\s+){0,2}?"
-    r"(?:images?|pictures?|photos?|photographs?|screenshots?|frames?|stills?)\b",
+    r"(?:images?|pictures?|photos?|photographs?|screenshots?|frames?|stills?|results?)\b",
     re.IGNORECASE,
 )
 
@@ -61,7 +69,11 @@ def references_existing_image(text: str | None) -> bool:
     """Return whether the text points at an image the user expects to exist."""
     if not text:
         return False
-    return bool(_ZH_REFERENCE_RE.search(text) or _EN_REFERENCE_RE.search(text))
+    return bool(
+        _ZH_REFERENCE_RE.search(text)
+        or _ZH_GENERATED_REFERENCE_RE.search(text)
+        or _EN_REFERENCE_RE.search(text)
+    )
 
 
 def _text_from_content(content: Any) -> str:
