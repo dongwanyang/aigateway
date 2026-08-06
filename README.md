@@ -94,7 +94,10 @@ nano .env
 # 4. 让安装器按新环境变量重新创建容器
 bash scripts/quickstart.sh --non-interactive
 
-# 5. 访问（监控地址仅在向导中启用监控后存在）
+# 5. 正确关闭完整服务栈（保留数据卷、模型和运行配置）
+bash scripts/quickstart.sh --down
+
+# 6. 访问（监控地址仅在向导中启用监控后存在）
 # API Gateway:   http://localhost:8000
 # 控制面板:      http://localhost:3000
 ```
@@ -105,8 +108,8 @@ bash scripts/quickstart.sh --non-interactive
 > `.aigateway/runtime/docker-compose.gpu.generated.yml`，也不会创建本地
 > ComfyUI workers，Gateway 会报
 > `GPU scheduler topology incomplete; local ComfyUI pool has no workers`。
-> 正常安装、重建和更新都应继续运行 `scripts/quickstart.sh`；确需手动 Compose
-> 时，先用安装器 `--no-start` 生成状态和 GPU overlay，再加载完整文件集合。
+> 正常安装、重建、更新和关闭都应继续运行 `scripts/quickstart.sh`；确需手动
+> Compose 时，先用安装器 `--no-start` 生成状态和 GPU overlay，再加载完整文件集合。
 
 > 💡 **不填 API Key 也能启动**：`config.yaml` 中所有密钥用 `${VAR:-}` 引用，未设时优雅降级为空。Gateway 能正常启动（插件 fail-open），但调用 LLM 会鉴权失败。填好 `.env` 后重新运行 `bash scripts/quickstart.sh --non-interactive`，不要只执行 `docker compose restart gateway`，因为 restart 不会重新读取容器环境变量。
 >
@@ -129,7 +132,7 @@ ComfyUI worker，Gateway 可看到动态池中的全部设备。空闲时 Gatewa
 层。为保持这种增量构建速度，不要在每次开发构建后运行
 `docker builder prune`，只在磁盘水位需要回收时清理构建缓存。
 >
-> 📋 完整安装、手动 Compose 文件集合、GPU worker 校验与排查指引见 [INSTALL.md](INSTALL.md)。
+> 📋 完整安装、关闭、手动 Compose 文件集合、GPU worker 校验与排查指引见 [INSTALL.md](INSTALL.md)。
 
 ### npm 安装
 
@@ -255,8 +258,7 @@ aigateway/
 ├── aigateway-cli/src/aigateway_cli/     # CLI（chat / run / session / codegraph）
 ├── control-panel/src/                   # React 控制面板（10 个页面）
 ├── tests/                               # 82+ 测试文件
-├── config.yaml                          # 仓库基础配置模板
-├── .aigateway/runtime/config.yaml       # 安装器生成的可变运行配置
+├── config.yaml                          # 唯一配置文件
 └── docker-compose.yml                   # 核心服务与可选 profiles
 ```
 
@@ -354,7 +356,7 @@ docker compose \
   -f docker-compose.yml \
   -f docker-compose.cuda.yml \
   -f .aigateway/runtime/docker-compose.gpu.generated.yml \
-  ps
+  ps comfyui
 ```
 
 调度参数集中在 `gpu_scheduler`。默认生成等待上限 600 秒、ComfyUI 空闲保留
